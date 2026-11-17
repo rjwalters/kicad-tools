@@ -7,10 +7,11 @@ The selected native CLI and Python must both see the scratch paths unchanged.
 import hashlib
 import json
 import os
+import uuid
 from pathlib import Path
 
 import pytest
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, Point, Polygon
 
 from kicad_tools.validate.mask_copper import (
     MaskCopperPolicy,
@@ -932,3 +933,107 @@ def test_resolve_native_python_unavailable_reason_names_the_fix(monkeypatch, tmp
     assert "native_python_command" in reason
     assert "KCT_KICAD_DOCKER" in reason
     assert "Install KiCad" in reason
+
+
+# ---------------------------------------------------------------------------
+# A refilled pour pinch must repair, not drop the zone (Issue #9072)
+# ---------------------------------------------------------------------------
+
+#: Board 05's refilled GND pours hand the reader ring-self-intersecting fills:
+#: the outline walks a zero-width neck out and back over the same segment (the
+#: real F.Cu region traverses y=92.449496 from x=176.035 to x=177.35 twice,
+#: vertices 8469/8470 and 8541/8542), which shapely rejects as
+#: ``Ring Self-intersection`` even though the fill's area is unambiguous.
+#: This is the same topology scaled down: a lower slab and a finger joined
+#: through the doubled corridor, area 4 x 2 + 2 x 2 = 12.
+_POUR_PINCH = [
+    [0, 0],
+    [4, 0],
+    [4, 2],
+    [1, 2],
+    [3, 2],
+    [3, 4],
+    [1, 4],
+    [1, 2],
+    [0, 2],
+    [0, 0],
+]
+
+_ZONE_BODY = """(zone (net 0) (net_name "GND") (layer "F.Cu") (hatch edge .5)
+  (connect_pads (clearance .2)) (min_thickness .1) (filled_areas_thickness no) (fill yes)
+  (polygon (pts (xy 10 10) (xy 14 10) (xy 14 13) (xy 10 13)))
+  (filled_polygon (layer "F.Cu") (pts (xy 10 10) (xy 14 10) (xy 14 13) (xy 10 13))))"""
+
+
+def test_refilled_zone_fill_pinch_repairs_instead_of_dropping(monkeypatch, tmp_path):
+    """A pinched zone fill keeps its layer geometry and the assessment complete.
+
+    The extraction used to drop the whole layer for such a zone
+    (``invalid native object polygon``) and then flag the per-object/full-layer
+    mismatch, capping every board 05 finding at a provisional warning.
+    """
+    from shapely.validation import explain_validity
+
+    from kicad_tools.validate.gerber_geometry import repair_self_touching_polygon
+    from kicad_tools.validate.mask_copper_geometry import inspect_attributed_mask_geometry
+
+    pinched = Polygon(_POUR_PINCH)
+    assert not pinched.is_valid
+    assert "Ring Self-intersection" in explain_validity(pinched)
+    repaired = repair_self_touching_polygon(pinched)
+    assert repaired is not None and repaired.is_valid
+    assert repaired.area == pytest.approx(12.0)
+
+    zone_uuid = str(uuid.UUID(int=1))
+    board = _board(tmp_path / "board.kicad_pcb", _ZONE_BODY)
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.docker_fallback_enabled", lambda: False)
+    digest = "a" * 64
+
+    import subprocess
+
+    from kicad_tools.validate import mask_copper_geometry as mcg
+    from kicad_tools.validate.mask_export_geometry import ExportedMaskGeometry
+
+    monkeypatch.setattr(
+        mcg,
+        "inspect_exported_mask_geometry",
+        lambda *a, **k: ExportedMaskGeometry(
+            source_sha256=digest,
+            project_sha256=None,
+            rules_sha256=None,
+            native_version=_QUALIFIED_VERSION,
+            export_identity={},
+        ),
+    )
+
+    def fake_run(cmd, **kw):
+        Path(cmd[-1]).write_text(
+            json.dumps(
+                {
+                    "schema": "kct.native-mask-objects.v1",
+                    "source_sha256": digest,
+                    "native_version": _QUALIFIED_VERSION,
+                    "errors": [],
+                    "max_error_mm": 0.0,
+                    "objects": {
+                        zone_uuid: {
+                            "kind": "ZONE",
+                            "net": "GND",
+                            "margin_mm": {},
+                            "layers": {"F.Cu": [{"shell": _POUR_PINCH, "holes": []}]},
+                        }
+                    },
+                }
+            )
+        )
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(mcg.subprocess, "run", fake_run)
+    result = inspect_attributed_mask_geometry(
+        board, native_python_command=["/host/python3"], scratch_dir=tmp_path
+    )
+    assert not [e for e in result.errors if "invalid native object polygon" in e], result.errors
+    assert not [e for e in result.errors if "material mismatch" in e], result.errors
+    geometry = result.objects[zone_uuid]["layers_geometry"]["F.Cu"]
+    assert geometry.is_valid
+    assert geometry.area == pytest.approx(12.0)
