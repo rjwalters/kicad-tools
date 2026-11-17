@@ -8,6 +8,7 @@ import pytest
 
 from kicad_tools.analysis import (
     DifferentialPairReport,
+    NetPathMeasurement,
     TraceLengthAnalyzer,
     TraceLengthReport,
 )
@@ -664,3 +665,182 @@ class TestDifferentialPairDetection:
         pair_sets = {frozenset(p) for p in pairs}
 
         assert frozenset(["LVDS_P", "LVDS_N"]) in pair_sets
+
+
+# Pad-to-pad path fixtures (Issue #9117).  A two-pin net between pads at
+# (5,15) and (25,15): the direct run is 20 mm.  Each variant adds copper
+# the signal never travels.
+PATH_BASE_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "LOOP")
+  (net 2 "DUP")
+  (net 3 "STUB")
+  (net 4 "VIAS")
+  (net 5 "BRANCH")
+  (net 6 "OPEN")
+
+  (gr_rect
+    (start 0 0)
+    (end 50 60)
+    (stroke (width 0.1))
+    (layer "Edge.Cuts")
+  )
+
+  (footprint "Test:Pads"
+    (layer "F.Cu")
+    (at 0 0)
+    (property "Reference" "J1")
+    (pad "1" smd rect (at 5 15) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 1 "LOOP"))
+    (pad "2" smd rect (at 25 15) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 1 "LOOP"))
+    (pad "3" smd rect (at 5 30) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 2 "DUP"))
+    (pad "4" smd rect (at 25 30) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 2 "DUP"))
+    (pad "5" smd rect (at 5 45) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 3 "STUB"))
+    (pad "6" smd rect (at 25 45) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 3 "STUB"))
+    (pad "A" smd rect (at 5 5) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 4 "VIAS"))
+    (pad "B" smd rect (at 15 55) (size 1.0 1.0) (layers "B.Cu" "B.Mask") (net 4 "VIAS"))
+    (pad "C" smd rect (at 35 5) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 5 "BRANCH"))
+    (pad "D" smd rect (at 45 5) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 5 "BRANCH"))
+    (pad "E" smd rect (at 40 25) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 5 "BRANCH"))
+    (pad "F" smd rect (at 45 55) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 6 "OPEN"))
+    (pad "G" smd rect (at 45 58) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 6 "OPEN"))
+  )
+
+  # LOOP: direct 20 mm run, then a loop that leaves pad 2 and returns to it.
+  (segment (start 5 15) (end 25 15) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 25 15) (end 35 15) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 35 15) (end 25 15) (width 0.2) (layer "F.Cu") (net 1))
+
+  # DUP: direct 20 mm run plus an identical overlapping duplicate.
+  (segment (start 5 30) (end 25 30) (width 0.2) (layer "F.Cu") (net 2))
+  (segment (start 5 30) (end 25 30) (width 0.2) (layer "F.Cu") (net 2))
+
+  # STUB: direct 20 mm trunk with a 5 mm stub joined mid-segment.
+  (segment (start 5 45) (end 25 45) (width 0.2) (layer "F.Cu") (net 3))
+  (segment (start 15 45) (end 15 50) (width 0.2) (layer "F.Cu") (net 3))
+
+  # VIAS: layer change through a via at a segment junction.
+  (segment (start 5 5) (end 15 5) (width 0.2) (layer "F.Cu") (net 4))
+  (via (at 15 5) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 4))
+  (segment (start 15 5) (end 15 55) (width 0.2) (layer "B.Cu") (net 4))
+
+  # BRANCH: three pads joined by a trunk and an arm off its midpoint.
+  (segment (start 35 5) (end 45 5) (width 0.2) (layer "F.Cu") (net 5))
+  (segment (start 40 5) (end 40 25) (width 0.2) (layer "F.Cu") (net 5))
+)
+"""
+
+
+@pytest.fixture
+def path_base_pcb(tmp_path: Path) -> Path:
+    """PCB with loop / duplicate / stub / via / branch variants of a two-pin net."""
+    pcb_file = tmp_path / "paths.kicad_pcb"
+    pcb_file.write_text(PATH_BASE_PCB)
+    return pcb_file
+
+
+class TestMeasureNetPath:
+    """Pad-to-pad path measurement through the copper-contact graph (#9117)."""
+
+    @pytest.fixture
+    def analyzer(self) -> TraceLengthAnalyzer:
+        return TraceLengthAnalyzer()
+
+    def test_loop_through_own_pad_is_off_path(self, path_base_pcb: Path, analyzer):
+        """The LOOP net's 20 mm out-and-back loop must not count as length."""
+        pcb = PCB.load(str(path_base_pcb))
+
+        measurement = analyzer.measure_net_path(pcb, "LOOP")
+
+        assert measurement.pad_count == 2
+        assert measurement.path_length_mm == pytest.approx(20.0, abs=0.05)
+        assert measurement.off_path_length_mm == pytest.approx(20.0, abs=0.05)
+
+    def test_duplicate_track_does_not_inflate_path(self, path_base_pcb: Path, analyzer):
+        """Two identical overlapping runs measure one path, not two."""
+        pcb = PCB.load(str(path_base_pcb))
+
+        measurement = analyzer.measure_net_path(pcb, "DUP")
+
+        assert measurement.pad_count == 2
+        assert measurement.path_length_mm == pytest.approx(20.0, abs=0.05)
+        assert measurement.off_path_length_mm == pytest.approx(20.0, abs=0.05)
+
+    def test_stub_joined_mid_trunk_is_off_path(self, path_base_pcb: Path, analyzer):
+        """A stub joined mid-segment splits the trunk at the junction."""
+        pcb = PCB.load(str(path_base_pcb))
+
+        measurement = analyzer.measure_net_path(pcb, "STUB")
+
+        assert measurement.pad_count == 2
+        assert measurement.path_length_mm == pytest.approx(20.0, abs=0.05)
+        assert measurement.off_path_length_mm == pytest.approx(5.0, abs=0.05)
+
+    def test_layer_change_through_via_stays_on_path(self, path_base_pcb: Path, analyzer):
+        """A via joining two layers is a zero-cost path node, not off-path."""
+        pcb = PCB.load(str(path_base_pcb))
+
+        measurement = analyzer.measure_net_path(pcb, "VIAS")
+
+        assert measurement.pad_count == 2
+        assert measurement.path_length_mm == pytest.approx(60.0, abs=0.05)
+        assert measurement.off_path_length_mm == pytest.approx(0.0, abs=0.05)
+        assert len(measurement.path_via_indices) == 1
+
+    def test_branched_net_reports_longest_pairwise_path(self, path_base_pcb: Path, analyzer):
+        """Multi-pin nets measure the longest pairwise pad-to-pad path.
+
+        Documented behaviour: pads C (35,5) and D (45,5) join through a
+        10 mm trunk, and a 20 mm arm leaves the trunk midpoint for pad E
+        (40,25).  The longest pair C-E runs 5 mm of trunk plus the arm
+        (25 mm); the other 5 mm of trunk to D is off that path.
+        """
+        pcb = PCB.load(str(path_base_pcb))
+
+        measurement = analyzer.measure_net_path(pcb, "BRANCH")
+
+        assert measurement.pad_count == 3
+        assert measurement.path_length_mm == pytest.approx(25.0, abs=0.05)
+        assert measurement.off_path_length_mm == pytest.approx(5.0, abs=0.05)
+
+    def test_open_net_has_no_path(self, path_base_pcb: Path, analyzer):
+        """An unrouted two-pad net measures no path at all."""
+        pcb = PCB.load(str(path_base_pcb))
+
+        measurement = analyzer.measure_net_path(pcb, "OPEN")
+
+        assert measurement.pad_count == 2
+        assert measurement.path_length_mm is None
+        assert measurement.off_path_length_mm is None
+
+    def test_unknown_net_measures_nothing(self, path_base_pcb: Path, analyzer):
+        pcb = PCB.load(str(path_base_pcb))
+
+        assert analyzer.measure_net_path(pcb, "NOPE") == NetPathMeasurement()
+
+    def test_analyze_net_path_fields_opt_in(self, path_base_pcb: Path, analyzer):
+        """Path fields stay None unless requested; total keeps its meaning."""
+        pcb = PCB.load(str(path_base_pcb))
+
+        plain = analyzer.analyze_net(pcb, "LOOP")
+        assert plain.total_length_mm == pytest.approx(40.0, abs=0.05)
+        assert plain.path_length_mm is None
+        assert plain.off_path_length_mm is None
+        assert plain.to_dict().get("path_length_mm") is None
+
+        with_path = analyzer.analyze_net(pcb, "LOOP", with_path_length=True)
+        assert with_path.total_length_mm == pytest.approx(40.0, abs=0.05)
+        assert with_path.path_length_mm == pytest.approx(20.0, abs=0.05)
+        assert with_path.off_path_length_mm == pytest.approx(20.0, abs=0.05)
+        assert with_path.to_dict()["path_length_mm"] == pytest.approx(20.0, abs=0.05)
+        assert with_path.to_dict()["off_path_length_mm"] == pytest.approx(20.0, abs=0.05)

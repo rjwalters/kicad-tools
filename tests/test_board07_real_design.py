@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import math
 import sys
 from pathlib import Path
 
@@ -408,7 +409,14 @@ def test_external_load_gate_and_report_scope(tmp_path, monkeypatch):
     monkeypatch.setattr(
         validate,
         "TraceLengthAnalyzer",
-        lambda: NS(analyze_net=lambda *a: NS(segment_count=1, total_length_mm=105, via_count=2)),
+        lambda: NS(
+            analyze_net=lambda *a: NS(segment_count=1, total_length_mm=105, via_count=2),
+            measure_net_path=lambda *a: NS(
+                path_length_mm=math.dist(segment.start, segment.end),
+                off_path_length_mm=0.0,
+                path_via_indices=(),
+            ),
+        ),
     )
     stack = NS(
         has_explicit_data=False,
@@ -568,3 +576,79 @@ def test_dq_asymmetric_driver_budgets():
     assert report["passes"] is False
     assert report["external_limit_pf"] == 20
     assert report["margin_pf"] == -1.5
+
+
+def test_off_path_error_names_net_and_amount():
+    validate = load("validate")
+    message = validate.off_path_error("DQ7", 8.138)
+    assert message.startswith("DQ7: 8.138 mm")
+    assert "dead-end loop" in message
+    assert f"limit {validate.OFF_PATH_TOLERANCE_MM:.1f} mm" in message
+
+
+def test_match_lengths_measure_path_not_summed_copper():
+    """#9117: matched length uses the pad-to-pad path, never summed copper.
+
+    The reviewed-routing copper carries dead-end loops (DQ7, LDQM per the
+    issue evidence) and, per the path graph, branch stubs on several byte
+    nets.  The physical path spreads of both bytes exceed the 5 mm budget
+    even though the summed-copper spread does not -- the exact blind spot
+    this validator change closes, tracked for copper repair in #9118.
+    """
+    from kicad_tools.analysis.trace_length import TraceLengthAnalyzer
+    from kicad_tools.schema.pcb import PCB
+
+    board = PCB.load(ROOT / "reviewed-routing/sdram_demo.kicad_pcb")
+    analyzer = TraceLengthAnalyzer()
+
+    paths = {}
+    off_paths = {}
+    for name in (
+        "DQ0",
+        "DQ1",
+        "DQ2",
+        "DQ3",
+        "DQ4",
+        "DQ5",
+        "DQ6",
+        "DQ7",
+        "DQ8",
+        "DQ9",
+        "DQ10",
+        "DQ11",
+        "DQ12",
+        "DQ13",
+        "DQ14",
+        "DQ15",
+        "LDQM",
+        "UDQM",
+    ):
+        measurement = analyzer.measure_net_path(board, name)
+        assert measurement.path_length_mm is not None, name
+        paths[name] = measurement.path_length_mm
+        off_paths[name] = measurement.off_path_length_mm
+
+    # Nets whose copper the issue evidence calls loop-free stay clean;
+    # the measured residual is barrel-overlap copper under pads/vias.
+    for name in ("DQ0", "DQ1", "DQ11"):
+        assert off_paths[name] < 1.0, (name, off_paths[name])
+
+    # The dead-end loops the evidence names measure as off-path copper.
+    assert off_paths["DQ7"] > 5.0
+    assert off_paths["LDQM"] > 5.0
+
+    # Physical path spread exceeds the 5 mm group budget in both bytes,
+    # where the summed-copper spread stays inside it (SDRAM_BYTE1 2.817 mm
+    # on this copper) -- off-path copper hid the real skew.
+    constraints_path = ROOT.parent / "output/sdram_constraints.json"
+    import json
+
+    constraints = json.loads(constraints_path.read_text())
+    limit = constraints["group_skew_mm"]
+    for byte, members in (
+        ("SDRAM_BYTE0", constraints["groups"]["SDRAM_BYTE0"]),
+        ("SDRAM_BYTE1", constraints["groups"]["SDRAM_BYTE1"]),
+    ):
+        values = [paths[name] for name in members if name in paths]
+        spread = max(values) - min(values)
+        assert spread > limit, (byte, spread)
