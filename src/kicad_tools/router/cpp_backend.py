@@ -134,11 +134,15 @@ STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
 # v65 (Issue #7887): the own-pad step gate attributes a refusal decided by the
 # pairwise (HV) floor alone, so an HV pad walled in by LV pads drains as
 # ``FAILURE_PAIRWISE_BLOCKED``.  A v64 .so still reports a bare NO_PATH.
-# v66 (Issue #8999): ``GridCell::airwire_cost`` + the ``clear_airwire_costs``
+# v66 (Issue #8994): ``DesignRules.same_net_pad_gap_band_edge_mm`` + the
+# same-net pad slit-band refusal in both A* via checks.  A v65 .so seats via
+# annuli in the (0, edge) slit band beside their own SMD pads (board 06's
+# d0.25/s0.6 PCIE_RX+/USB2_D- population).
+# v67 (Issue #8999): ``GridCell::airwire_cost`` + the ``clear_airwire_costs``
 # / ``set_airwire_cells`` verbs -- the prospective airwire-separation term
-# summed inside ``Grid3D::get_negotiated_cost``.  A v65 .so prices negotiated
+# summed inside ``Grid3D::get_negotiated_cost``.  A v66 .so prices negotiated
 # cells without the term, silently breaking Python/C++ cost parity.
-_REQUIRED_CPP_BUILD_VERSION = 66
+_REQUIRED_CPP_BUILD_VERSION = 67
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -1487,6 +1491,11 @@ class CppPathfinder:
         cpp_rules.min_hole_to_hole = rules.min_hole_to_hole
         # Issue #7296: the mask-dam floor for the single-ended via check.
         cpp_rules.min_via_pad_edge_gap = float(getattr(rules, "min_via_pad_edge_gap", 0.0) or 0.0)
+        # Issue #8994: the caller-resolved same-net pad slit-band edge for the
+        # single-ended via check (``None`` collapses to 0.0 = guard off).
+        cpp_rules.same_net_pad_gap_band_edge_mm = float(
+            getattr(rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0
+        )
         cpp_rules.grid_resolution = rules.grid_resolution
         cpp_rules.cost_straight = rules.cost_straight
         cpp_rules.cost_turn = rules.cost_turn
@@ -5811,6 +5820,12 @@ class CppCoupledPathfinder:
         # Issue #7296: the mask-dam floor, so the coupled via move refuses a
         # drill edge within the fab's dam of an SMD pad.
         cpp_rules.min_via_pad_edge_gap = float(getattr(rules, "min_via_pad_edge_gap", 0.0) or 0.0)
+        # Issue #8994: the same-net pad slit-band edge, so the coupled via
+        # move keeps each rail's annulus out of the band beside its own SMD
+        # pads (``None`` collapses to 0.0 = guard off).
+        cpp_rules.same_net_pad_gap_band_edge_mm = float(
+            getattr(rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0
+        )
         self._impl = router_cpp.CoupledPathfinder(
             cpp_grid._impl,
             cpp_rules,

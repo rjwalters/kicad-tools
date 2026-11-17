@@ -120,18 +120,21 @@ def _iter_npth_apertures(pcb: PCB, mask_clearance_mm: float):
 
 
 def _iter_drill_obstacles(pcb: PCB):
-    """Yield ``(side, geom, label)`` for every drilled hole, on both sides.
+    """Yield ``(side, geom, label)`` for every drilled hole, per pierced side.
 
     Issue #9054: :func:`_iter_via_apertures` only sees *untented* vias, so a
     reference over a filled/capped via drill was left in place while
     ``silk_hole_overlap`` flagged it.  The holes come from the checker's own
     :func:`iter_drill_holes`, so the placer and the check share one
-    definition; holes pierce the board, so both silk sides get them.
+    definition; through-via and pad drills pierce the board so both silk
+    sides get them, while a blind/micro via reaches only the outer side its
+    layers name and a buried via neither (#9076).
     """
-    for geom, label in iter_drill_holes(pcb.vias, pcb.footprints):
+    for geom, label, sides in iter_drill_holes(pcb.vias, pcb.footprints):
         label = f"drill {label}"
-        yield "F", geom, label
-        yield "B", geom, label
+        for side in ("F", "B"):
+            if side in sides:
+                yield side, geom, label
 
 
 def references_over_holes(pcb: PCB) -> set[str]:

@@ -80,8 +80,18 @@ this is not evidence of accepted upload. The test suite now blocks all default
 Session sends, including that legacy path.
 
 No order, payment, quotation, guessed fabrication enums, BOM/CPL API or automatic
-human approval is implemented. PCBA submission remains an explicit website
-handoff. A real factory acceptance test has not been performed.
+human approval is implemented in the API path. PCBA submission remains an explicit
+website handoff. A real factory acceptance test has not been performed.
+
+The only payment path in kicad-tools is the website's opt-in, attended checkout
+leg (issue #8935, `manufacturers/jlc_payment.py`), never the API. Under the
+operator rulings of 2026-11-16 and 2026-11-17 on #8935 it may request
+`/user-center/` and the cart host **only inside an attended session in which the
+operator approves the exact total for that order**; `/api` and the part-matching
+exports stay disallowed. No monthly budget, unattended, scheduled or batch
+checkout exists, and nothing pays without an approval naming that order's exact
+total. Its selectors and confirmation-page recognition are unverified until an
+attended run (#8478).
 
 ## Website automation: terms finding (#8467, part 2/3 of #8465)
 

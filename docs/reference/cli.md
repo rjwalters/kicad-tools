@@ -638,7 +638,17 @@ kct check <pcb_file> [options]
 
 `kct check --format json` carries top-level `verdict` (`pass`|`fail`|`incomplete`)
 and `exit_code` (the process exit code). `summary.passed` is DRC-only: it can be
-`true` while `verdict` is `incomplete` (#7230).
+`true` while `verdict` is `incomplete` (#7230). `meta_checks.incomplete_categories`
+lists every category whose check did not complete on this run (`mask_to_copper`,
+`dfm_table`, `fab_dfm_parity`), agreeing with `coverage.*.state` — it can be
+non-empty while `verdict` is `fail` (#9062). `mask_to_copper` is keyed on
+`assessment.coverage`, never `assessment.passed`: a mask check that completed and
+found a real violation is a checked row and is not named. One deliberate exception
+to full agreement (#8949): an *explicitly requested* mask check that cannot run is
+FAILED, so `coverage.mask_to_copper` is `unknown` (and in
+`summary.coverage_blocking_unknown`) while the list does not name it — the list is
+exhaustive only for default-applied checks. `fab_dfm_parity.incomplete_categories`
+is table-only (static JLCDFM parity coverage, run-independent).
 
 Exit codes: `0` pass (or `incomplete` with `--allow-incomplete`); `2` the check
 ran and the board fails (DRC errors, warnings with `--strict`, an ERC/LVS/manifest

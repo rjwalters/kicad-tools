@@ -24,7 +24,8 @@ the `_airwire_cost` plane and the read-time term in
 `RoutingGrid.get_negotiated_cost`, and the C++ mirror
 (`GridCell::airwire_cost`, `Grid3D::clear_airwire_costs` /
 `set_airwire_cells`, summed in `Grid3D::get_negotiated_cost`; build version
-65 → 66).
+66 → 67 — 66 was consumed on `main` by Issue #8994 while this branch was
+in review).
 
 ## The mechanism under test
 
@@ -60,7 +61,7 @@ routable nets — the #5787 board where crossing pressure displaces 2 nets),
 (`boards/synthetic-mains-complete/`, the public #8605 fixture distilled from
 the private #8610 dense mains board, which a Builder cannot access). The
 `airwire` arm uses weight 1.0. Same `--seed 42` in every arm; the C++
-backend was built (`kct build-native --check`, build version 66) and
+backend was built (`kct build-native --check`, build version 67) and
 confirmed active before timing anything.
 
 Load-independent columns first; see "Timing" below for why wall-clock is not
@@ -171,7 +172,7 @@ detectable stage cost at either weight.
 ## Reproduce
 
 ```bash
-uv run kct build-native --check        # expects build version 66
+uv run kct build-native --check        # expects build version 67
 uv run python scripts/research/net_order_experiment.py route \
     --boards 02,03,mains --variants default,airwire \
     --work-dir /tmp/airwire-ab --seed 42 --nogood --json /tmp/airwire-ab.json

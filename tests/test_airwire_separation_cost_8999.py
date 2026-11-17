@@ -12,8 +12,8 @@ Covers the acceptance criteria of the issue:
   and the negotiated cost is exactly ``present + history``.
 * **#6098 fallback-memo stamp** -- ``_py_grid_state_stamp`` does not
   change when only the airwire plane changes (``_COST_ONLY_GRID_ARRAYS``).
-* **Stale-.so rejection** -- a v65 ``router_cpp`` is rejected by the
-  ``cpp_backend`` import-time guard.
+* **Stale-.so rejection** -- a stale ``router_cpp`` (one version below the
+  required build) is rejected by the ``cpp_backend`` import-time guard.
 * **Same-seed determinism with the flag on** -- two runs of the same
   board at the same seed produce identical copper geometry.
 """
@@ -296,19 +296,19 @@ class TestFallbackMemoStamp:
 
 
 class TestStaleSoRejected:
-    """(e) A v65 .so is rejected by the import-time guard."""
+    """(e) A stale .so (any version below the required one) is rejected by the import-time guard."""
 
-    def test_required_version_is_66(self):
+    def test_required_version_is_67(self):
         from kicad_tools.router import router_cpp
 
-        assert cpp_backend._REQUIRED_CPP_BUILD_VERSION == 66
-        assert router_cpp.BUILD_VERSION == 66
+        assert cpp_backend._REQUIRED_CPP_BUILD_VERSION == 67
+        assert router_cpp.BUILD_VERSION == 67
 
-    def test_stale_v65_module_disables_backend(self):
+    def test_stale_v66_module_disables_backend(self):
         script = (
             "import sys, types\n"
             "fake = types.ModuleType('kicad_tools.router.router_cpp')\n"
-            "fake.BUILD_VERSION = 65\n"
+            "fake.BUILD_VERSION = 66\n"
             "fake.__file__ = '/nonexistent/router_cpp.so'\n"
             "sys.modules['kicad_tools.router.router_cpp'] = fake\n"
             "from kicad_tools.router import cpp_backend\n"
