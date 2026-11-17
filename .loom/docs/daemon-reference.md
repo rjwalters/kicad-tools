@@ -2527,7 +2527,13 @@ blocker is Loom-owned:
   (a repo-local role file under `.loom/roles/` or a repo-local command under
   `.claude/commands/loom/`) does not,
   and a `.agents/skills/` file also needs the generation marker. A path pinned in `.loom/resync-ignore` (also as
-  `agents-skills/<rel>`) is never counted that way. A checkout on a named
+  `agents-skills/<rel>`) is never counted that way. One working-tree
+  exception (#13970): a dirty `opencode.json` — committed by the squad
+  installer, not Loom — whose working file is exactly the committed one plus
+  the single `"$schema": "https://opencode.ai/config.json"` entry OpenCode
+  adds is counted as Loom-owned, so the repair clears it automatically; any
+  other change to that file, and every committed change to it, still holds
+  for the operator. A checkout on a named
   branch other than the default is left alone. Every local commit (and every commit
   of an in-progress rebase, merge or cherry-pick) may change only those paths,
   and so may every dirty tracked path. Dirt counts only on a checkout that is
@@ -3921,6 +3927,27 @@ negation only for a file a human writes and wants committed, never for
 daemon output. `post_init.rs`'s
 `every_daemon_state_path_is_ignored_by_the_managed_block` test checks both
 rules with `git check-ignore`.
+
+## Daily-rolling `daemon.log` (#13917)
+
+The daemon always writes to the fixed name `daemon.log` (`LOOM_DAEMON_LOG`
+overrides the path), so `tail -f` / `grep daemon.log` keep working. Closed UTC
+days are renamed to `daemon.log.YYYY-MM-DD`; each file holds one UTC day
+(line stamps are UTC, `DAEMON_LOG_STAMP_FORMAT`).
+
+- **Roll:** the first write after 00:00 UTC, and at startup for a live file last
+  modified on an earlier UTC day. A name collision (or the 1 GiB size backstop)
+  yields `daemon.log.YYYY-MM-DD.N`; an existing day file is never overwritten.
+  A time-window reader opens only the day files it needs.
+- **Retention:** by days from the filename date, default 14,
+  `LOOM_DAEMON_LOG_RETENTION_DAYS`.
+- **Archive hook:** with `LOOM_DAEMON_LOG_REQUIRE_ARCHIVE=1`, retention deletes a
+  day file only when its sidecar `<day file>.archived` exists (created by the
+  host's archiver), and removes the pair. Unset: plain age-based deletion.
+- **Legacy files:** numbered `daemon.log.N` from the old startup rotation are
+  never touched; an operator removes them once.
+- `loom-daemon health` reads the newest day file when the live file has no
+  `work_finder:` line (right after a roll).
 
 ## Reaper task
 
