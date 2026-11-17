@@ -26,11 +26,10 @@ _BASE = {
 def test_inner_stricter_than_outer_raises_naming_both_values():
     with pytest.raises(ValueError) as exc:
         DesignRules(**{**_BASE, "min_inner_clearance_mm": 0.20})
-    msg = str(exc.value)
-    assert "0.2" in msg
-    assert "0.1" in msg
-    assert "min_inner_clearance_mm" in msg
-    assert "min_clearance_mm" in msg
+    assert str(exc.value) == (
+        "min_inner_clearance_mm (0.2) must not exceed min_clearance_mm (0.1): "
+        "the inner-layer floor is the looser one (lighter inner copper)"
+    )
 
 
 @pytest.mark.parametrize("inner", [None, 0.10, 0.0762])
