@@ -12,7 +12,11 @@
 #   4. pr-worktree.sh catches that collision up front — before any pr-<N>
 #      worktree is created at all — when `gh pr view` resolves the head branch
 #      (#6594).
-#   5. judge.md and `pr-worktree.sh --help` agree on the Judge fallback (#11194).
+#   5. pr-worktree.sh on a non-colliding PR runs `gh pr checkout` inside the new
+#      pr-<N> worktree, never in the orchestrator checkout (#3358): a mock `gh`
+#      does a real `git checkout`, so a mis-directed `cd` visibly moves the
+#      orchestrator's branch/HEAD. The helper (not the test) writes the sentinel.
+#   6. judge.md and `pr-worktree.sh --help` agree on the Judge fallback (#11194).
 #
 # Tests 3-5 run the real pr-worktree.sh against a throwaway git repo with a
 # mocked `gh`, since there is no live forge in CI. Branch-shape classification
@@ -137,7 +141,7 @@ rm -rf "$probe_dir"
 echo ""
 echo "Test 3: pr-worktree.sh surfaces a clear diagnostic on the branch-collision failure (#6264), and cleans up after itself (#6594)"
 
-# Throwaway repo fixture shared by Tests 3 and 4: a tiny origin + clone so the
+# Throwaway repo fixture shared by Tests 3, 4 and 5: a tiny origin + clone so the
 # real pr-worktree.sh runs real git commands without touching the real
 # workspace.
 TMP=$(mktemp -d /tmp/loom-pr-iso-test.XXXXXX)
@@ -303,11 +307,80 @@ else
     pass "'gh pr checkout' was never called — up-front detection short-circuited before it"
 fi
 
+# --- Test 5: success path never moves the orchestrator checkout (#3358) ---
+echo ""
+echo "Test 5: pr-worktree.sh checks the PR branch out in pr-<N>, leaving the orchestrator checkout untouched (#3358)"
+
+# Still inside "$TMP/repo", on main. PR 999 / fix/foo-bar collides with nothing.
+# The PR branch must be a real commit AHEAD of main: with `update-ref ... HEAD`
+# a mis-directed checkout would move the branch name but not the SHA, which
+# would leave the SHA assertion below unable to fail.
+OK_BRANCH="fix/foo-bar"
+git checkout -q -b "$OK_BRANCH"
+git commit --allow-empty -q -m "pr 999 change"
+git checkout -q main
+ORCH_BRANCH_BEFORE="$(git rev-parse --abbrev-ref HEAD)"
+ORCH_SHA_BEFORE="$(git rev-parse HEAD)"
+
+MOCKBIN3=$(mktemp -d /tmp/loom-pr-iso-mockbin3.XXXXXX)
+trap 'rm -rf "$TMP" "$MOCKBIN" "$MOCKBIN2" "$MOCKBIN3"; cd "$REPO_ROOT" 2>/dev/null || true' EXIT
+cat > "$MOCKBIN3/gh" <<'MOCKEOF'
+#!/usr/bin/env bash
+# `gh pr view` resolves the head branch; `gh pr checkout` performs a REAL
+# `git checkout` in its cwd, so wherever pr-worktree.sh runs it is where HEAD
+# moves. (Unlike the Test 3 mock, which only prints a canned failure.)
+if [[ "$1" == "pr" && "$2" == "view" ]]; then
+    echo "$LOOM_TEST_HEAD_BRANCH"
+    exit 0
+fi
+if [[ "$1" == "pr" && "$2" == "checkout" ]]; then
+    git checkout -q "$LOOM_TEST_HEAD_BRANCH"
+    exit $?
+fi
+exit 0
+MOCKEOF
+chmod +x "$MOCKBIN3/gh"
+
+set +e
+PR_OUT3=$(PATH="$MOCKBIN3:$PATH" LOOM_DEFAULT_BRANCH=main LOOM_TEST_HEAD_BRANCH="$OK_BRANCH" \
+    "$PR_WORKTREE_SH" 999 2>&1)
+PR_RC3=$?
+set -e
+
+if [[ "$PR_RC3" -eq 0 ]]; then
+    pass "pr-worktree.sh exits 0 for a non-colliding PR"
+else
+    fail "pr-worktree.sh failed for a non-colliding PR (rc=$PR_RC3): $PR_OUT3"
+fi
+ORCH_BRANCH_AFTER="$(git rev-parse --abbrev-ref HEAD)"
+ORCH_SHA_AFTER="$(git rev-parse HEAD)"
+if [[ "$ORCH_BRANCH_AFTER" == "$ORCH_BRANCH_BEFORE" ]]; then
+    pass "orchestrator checkout stays on '$ORCH_BRANCH_BEFORE' (#3358)"
+else
+    fail "orchestrator checkout moved from '$ORCH_BRANCH_BEFORE' to '$ORCH_BRANCH_AFTER' (#3358 regression)"
+fi
+if [[ "$ORCH_SHA_AFTER" == "$ORCH_SHA_BEFORE" ]]; then
+    pass "orchestrator HEAD SHA is unchanged"
+else
+    fail "orchestrator HEAD moved from $ORCH_SHA_BEFORE to $ORCH_SHA_AFTER (#3358 regression)"
+fi
+PR999_BRANCH="$(git -C ".loom/worktrees/pr-999" rev-parse --abbrev-ref HEAD 2>/dev/null || echo MISSING)"
+if [[ "$PR999_BRANCH" == "$OK_BRANCH" ]]; then
+    pass "pr-999 worktree is on the PR branch ($OK_BRANCH)"
+else
+    fail "pr-999 worktree is on '$PR999_BRANCH', expected '$OK_BRANCH'"
+fi
+if grep -qx "# PR: 999" ".loom/worktrees/pr-999/.loom-managed" 2>/dev/null; then
+    pass "pr-999 worktree has the .loom-managed sentinel written by the helper"
+else
+    fail "pr-999 worktree is missing the helper-written .loom-managed sentinel with '# PR: 999'"
+fi
+
 cd "$REPO_ROOT"
 
-# --- Test 5: Judge guidance and helper --help agree on the fallback (#11194) ---
+# --- Test 6: Judge guidance and helper --help agree on the fallback (#11194) ---
 echo ""
-echo "Test 5: judge.md and pr-worktree.sh --help agree (no fabricated judge-* checkout)"
+echo "Test 6: judge.md and pr-worktree.sh --help agree (no fabricated judge-* checkout)"
 JUDGE_MD="$REPO_ROOT/defaults/.claude/commands/loom/judge.md"
 [[ -f "$REPO_ROOT/.claude/commands/loom/judge.md" ]] && JUDGE_MD="$REPO_ROOT/.claude/commands/loom/judge.md"
 HELP_OUT=$("$PR_WORKTREE_SH" --help 2>&1)
