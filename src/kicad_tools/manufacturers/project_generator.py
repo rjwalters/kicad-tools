@@ -1153,7 +1153,8 @@ def _zone_clearance_floor(rules: DesignRules, layer: str) -> float:
 
     ``min_clearance_mm`` is the *outer*-layer floor; the 2 oz profiles split
     the floors (#8836) and bind inner layers at ``min_inner_clearance_mm``
-    when it is set and lighter.  The zone arm must compare against the floor
+    when it is set and lighter (``DesignRules.__post_init__`` enforces that
+    ordering, Issue #9113).  The zone arm must compare against the floor
     that actually governs the zone's own layer, or a zone authored between
     the two floors is skipped as "redundant" while no rule protects it.
     """

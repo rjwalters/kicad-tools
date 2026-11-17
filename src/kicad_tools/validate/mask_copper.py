@@ -34,8 +34,11 @@ same-net pour) is also declarable through a ``MaskEscapeIntent``.
 - ``different-net`` -- the conductor's identified net differs from the
   opening owner's.
 - ``same-net`` -- same net, but the entry/pass-through distinction does not
-  apply: the conductor is an area (``zone``) or another pad, so it has no
-  terminating endpoint to test.
+  apply, for one of two reasons: the conductor is an area (``zone``) or another
+  pad, so it has no terminating endpoint to test; or the opening has no single
+  owner pad (a ``merged_region``), so there is no pad to test an endpoint
+  against -- a ``segment``/``arc``/``via`` over such an opening has endpoints,
+  but they are not judged.
 - (omitted) -- either net is unidentified or the opening is a merged region
   with no single owner net.
 
