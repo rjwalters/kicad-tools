@@ -186,6 +186,28 @@ is measured, so the closest copper is always reported. It can overstate. A jog
 segment's end cap shares copper with the entry segment, and is reported at that
 cap's distance.
 
+**Decision (2026-11-17, #9107): keep per-object; a jogged exit stays an
+error.** The fab evidence decides against the union view. JLCDFM's five danger
+items on the #8914 board include two jogged pad exits: item 1 (fab 0 mm,
+"track leaves an 0603-size pad, jogs 45° to a via 1.1 mm away; the track body
+lies along the pad's opening edge") and item 5 (fab 0.08 mm, "track leaves a
+pad and jogs to a via 0.9 mm away"). The fab counts the jog, so kct must keep
+a measured distance for the chained segment itself. A union view — copper
+beyond the entry conductor — reports farther: in the pinned fixture (entry
+0.125 mm past the pad edge, 0.2 mm track, board 03 U1/13 RESET's shape) the
+45° jog moves from 0.025 mm to 0.084 mm (the issue's numbers), and a 30° jog
+to 0.098 mm, out of the 0.09 mm danger band for a shape the fab flags as
+danger. Chaining a conductor to a pad-entry conductor is therefore not a
+disposition: `within_own_pad` keeps refusing any segment with no authored end
+inside the pad, and the jog keeps its per-object verdict. The fully enclosed
+collinear duplicates (board 02 R3/2, R4/2) keep their per-object distance too;
+their copper beyond the entry conductor is empty, so a union view would report
+nothing at all. Per shape, `tests/test_mask_copper_own_pad_8858.py` pins every
+#8914 danger item (1-5) and the U1/13 jog at its per-object distance. No
+threshold, disposition or count changes; the parity row note already records
+that jogged exits stay errors.
+
+
 ## Reproduce
 
 ```bash
