@@ -688,7 +688,10 @@ class MLXBackend:
     def __init__(self):
         import mlx.core as mx
 
-        self._mx = mx
+        # Typed as Any so the wrapper is agnostic to the MLX build in use:
+        # Apple's mlx.core exposes argwhere, but the Linux CPU build's
+        # type surface does not (issue #9241).
+        self._mx: Any = mx
 
     def zeros(self, shape: tuple, dtype: Any = None) -> Any:
         """Create a zero-filled array."""

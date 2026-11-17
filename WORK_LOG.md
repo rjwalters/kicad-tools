@@ -16,6 +16,21 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-17
 
+- **PR #9265**: docs: correct within_own_pad index figure, allowance wording and evidence
+- **PR #9258**: test: pin design-source.zip recipe members to the live recipe
+- **PR #9254**: test: pin CoupledPathfinder own-net trace slit-band gate directly
+- **PR #9249**: chore(deps): bump pillow, filelock, soupsieve, dnspython, fast-uri to patched versions
+- **PR #9248**: fix: rewrite absolute host paths in committed evidence to repo-relative
+- **Issue #9260** (closed): docs(mask_to_copper): correct the within_own_pad docs after #9108 (stale index figure, guide overclaims edge overlap)
+- **Issue #9238** (closed): 22 tracked files contain an absolute local home-directory path
+- **Issue #9237** (closed): 62 open Dependabot alerts with no open fix PR (Pillow, filelock, soupsieve, dnspython, fast-uri)
+- **Issue #9231** (closed): design-source.zip recipe sources are unguarded; 3 are drifted from live (boards 05, 07)
+- **Issue #9225** (closed): No direct unit test for CoupledPathfinder::same_net_trace_gap_in_band (#9208's coupled twin)
+- **PR #9230**: test: pin design-source archives byte-for-byte to live board recipes
+- **PR #9229**: fix: warn when same_net_band_edges() hits an unresolved stackup
+- **PR #9108**: fix(check): mask_to_copper stops reporting a pad's own land as exposed trace
+- **Issue #9228** (closed): design-source/ archive can silently drift from the live board recipe (measured: 11 lines stale on main)
+- **Issue #9226** (closed): same_net_band_edges(): a missing DFM entry disables the band with no warning, and copper_oz does not match the package's outer_oz vocabulary
 - **PR #9224**: refactor: use shared band constants in board 06 leg-band predicate
 - **PR #9222**: feat: add --order-method regret net ordering (biggest-loss nets first)
 - **PR #9219**: test: grade board07 byte spreads on the gate's matched length
