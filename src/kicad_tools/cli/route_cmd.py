@@ -8730,6 +8730,8 @@ def _apply_detour_repair(router: "Autorouter", args) -> None:
             )
             return
         router.detour_repair = True
+
+
 def _apply_airwire_separation(router: "Autorouter", args) -> None:
     """Set the ``--airwire-separation-weight`` on the router (Issue #8999).
 
