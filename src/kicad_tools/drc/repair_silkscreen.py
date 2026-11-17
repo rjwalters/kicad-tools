@@ -463,7 +463,9 @@ class SilkscreenRepairer:
         and NPTH pad holes -- and the default clearance is
         :data:`~kicad_tools.silkscreen._silk_defaults.SILK_HOLE_CLEARANCE_MM`,
         the very set and threshold ``silk_hole_overlap`` uses, so a clipped
-        board passes that check.
+        board passes that check.  Each hole clips only the silk side(s) it
+        actually pierces: a blind/micro via reaches one outer side, a
+        buried via neither (Issue #9076).
 
         Only the silk that has to go is removed: each graphic's printed ink
         must stay ``min_clearance_mm`` (plus a 1 um safety margin) from the
@@ -523,7 +525,7 @@ class SilkscreenRepairer:
         vias = [Via.from_sexp(node) for node in self.doc.find_all("via")]
         holes = list(iter_drill_holes(vias, [fp for _n, fp in footprints]))
         if holes:
-            tree = STRtree([g for g, _ in holes])
+            tree = STRtree([g for g, _label, _sides in holes])
 
             for fp_node, fp in footprints:
                 fp_ref = self._footprint_reference(fp_node)
@@ -542,7 +544,8 @@ class SilkscreenRepairer:
                 ]:
                     kind = _FP_GRAPHIC_KINDS[str(node.name)]
                     graphic = FootprintGraphic.from_sexp(node, kind)
-                    if _silk_side(graphic.layer) is None:
+                    silk_side = _silk_side(graphic.layer)
+                    if silk_side is None:
                         continue
                     ink = _stroke_geometry(graphic, fwd)
                     if ink is None or ink.is_empty:
@@ -551,11 +554,12 @@ class SilkscreenRepairer:
                     hit = [
                         holes[int(i)]
                         for i in tree.query(query)
-                        if silk_hits_hole(ink, holes[int(i)][0], clearance)
+                        if silk_side in holes[int(i)][2]
+                        and silk_hits_hole(ink, holes[int(i)][0], clearance)
                     ]
                     if not hit:
                         continue
-                    labels = sorted(label for _g, label in hit)
+                    labels = sorted(label for _g, label, _sides in hit)
                     if kind not in ("line", "poly", "rect"):
                         result.skipped.append(
                             PadClearanceSkip(
@@ -568,7 +572,7 @@ class SilkscreenRepairer:
                         continue
 
                     width = max(graphic.stroke_width, 0.0)
-                    keepout = unary_union([g for g, _ in hit]).buffer(
+                    keepout = unary_union([g for g, _label, _sides in hit]).buffer(
                         clearance + width / 2.0 + _CLIP_EPSILON_MM, quad_segs=16
                     )
                     if kind == "line":
