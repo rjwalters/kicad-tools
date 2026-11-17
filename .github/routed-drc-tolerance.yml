@@ -27,7 +27,15 @@
 # entry: active releases never carry an allowance
 # (tests/test_recipe_artifact_isolation.py), so its strict-0 gate fails
 # visibly on the next PR that touches that PCB until #6396 lands.
-tolerances: {}
+# Board 05 (Issue #9033 regrade, PR #9112): the jlcpcb profiles grade
+# silk_hole_overlap as an error, and the committed artifact's pre-existing
+# geometry (6 reference designators + 7 footprint graphics over routed
+# vias) reports 13. Fresh routes clear them via the recipe's Step 7b
+# (kicad_tools.recipes.silk_clearance), but the committed artifact is
+# manifest-bound: re-issuing its evidence chain is tracked in #9134,
+# which also retires this entry.
+tolerances:
+  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: 13
 
 # Preserve the fabrication processes selected by the reviewed real designs.
 manufacturers:

@@ -66,6 +66,7 @@ from kicad_tools.pcb.center_sheet import (
 )
 from kicad_tools.recipes.gate import evaluate_pipeline_gate
 from kicad_tools.recipes.precondition import require_spec
+from kicad_tools.recipes.silk_clearance import clear_silk_over_holes
 from kicad_tools.router.rules import (
     NET_CLASS_POWER,
     NetClassRouting,
@@ -2912,6 +2913,17 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
             print(f"   WARNING: re-fill after skew tuning failed (rc={refill.returncode})")
         retuned_ok = _audit_pour_report(output_path, skip_nets, "[post-retune]")
         print("   POUR CONNECTIVITY (after skew tuning): " + ("PASS" if retuned_ok else "FAIL"))
+
+    # Step 12 (Issue #9033): clear silk the routed vias landed on.  The
+    # JLCPCB profiles grade ``silk_hole_overlap`` as an error, and the
+    # seed-42 re-route puts a via under U4's reference designator, so the
+    # regenerated bundle would fail the coverage gates on it.  Runs after
+    # the last via-producing step (11) and reads the rule's own findings,
+    # so it tracks whatever via population this run produced.
+    print("\n12. Silkscreen clearance (silk_hole_overlap, Issue #9033)...")
+    graphics_clipped, refs_moved = clear_silk_over_holes(output_path, log=print)
+    if not graphics_clipped and not refs_moved:
+        print("   no silk over holes -- nothing to clear")
 
     return success
 
