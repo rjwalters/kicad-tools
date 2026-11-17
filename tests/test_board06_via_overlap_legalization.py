@@ -266,6 +266,55 @@ def test_leg_band_predicate_grades_slits_but_not_unions_or_bends(recipe):
     assert ok(*leg, [seg(0.2, 0.2, 0.6, 0.2)], [], [(1.0, 0.125, 1.5, 0.6)], 0.0, 0.0)
 
 
+def test_leg_band_predicate_sibling_legs_contract(recipe):
+    """Issue #9196: pin the #9186 ``sibling_legs`` contract on the predicate itself.
+
+    Constructed ``sibling_legs`` rather than the end-to-end dogleg boards, so a
+    refactor of the chain growth cannot silently flip a case to permissive.
+    """
+    from shapely.geometry import LineString
+
+    def seg(x1, y1, x2, y2, w=0.15):
+        return LineString([(x1, y1), (x2, y2)]).buffer(w / 2), w / 2
+
+    def ok(sibling_legs, segments=()):
+        return recipe._same_net_leg_band_ok(
+            (0.0, 0.0),
+            (1.0, 0.0),
+            0.15,
+            list(segments),
+            [],
+            [],
+            0.15,
+            0.1016,
+            sibling_legs=list(sibling_legs),
+        )
+
+    # Touching: a sibling chain the leg grows out of is one copper union, graded
+    # exactly like the same pieces passed as ``segments``.
+    chain = [seg(0.0, 0.0, 0.0, 0.05), seg(0.0, 0.05, 0.0, 0.1), seg(0.0, 0.1, 0.0, 0.15)]
+    assert ok(chain)
+    assert ok([], segments=chain)
+    # A touching sibling that bends back beside the leg is graded as ``segments`` would be.
+    bend = [seg(1.0, 0.0, 1.0, 0.2), seg(1.0, 0.2, 0.7, 0.2)]
+    assert ok(bend) == ok([], segments=bend)
+
+    # Detached: a parallel sibling the leg never touches is a real slit and is
+    # graded; one clear of the edge is fine.
+    assert not ok([seg(0.2, 0.2, 0.6, 0.2)])
+    assert ok([seg(0.2, 0.3, 0.6, 0.3)])
+    assert ok([seg(0.2, 0.2, 0.6, 0.2)]) == ok([], segments=[seg(0.2, 0.2, 0.6, 0.2)])
+
+    # Self: the graded leg must be filtered out of its own sibling list *by the
+    # caller* (``_leg_ok``).  Passing it back in puts (p0, p1) in the initial
+    # chain, both endpoints become joins and the 45-degree notch reach widens
+    # unconditionally -- the slit below flips to permissive.
+    diag_then_up = [seg(0.0, 0.0, 1.0, 0.2), seg(1.0, 0.2, 1.0, 0.4)]
+    leg_as_sibling = seg(0.0, 0.0, 1.0, 0.0)
+    assert not ok([], segments=diag_then_up)
+    assert ok([leg_as_sibling], segments=diag_then_up)
+
+
 def test_fixture_relocation_same_net_slit_residual_is_the_accepted_one(tmp_path, recipe):
     """Issue #9187: the one same-net slit family the leg check lets through.
 
@@ -429,6 +478,10 @@ def test_staple_collapse_skips_annulus_it_deletes(tmp_path, recipe):
     The collapse deletes the victim via, so its annulus is post-repair air;
     grading leg 2 against it rejects a legal repair and the legalizer falls
     through to the slide (which keeps both vias).
+
+    Not a guard on ``skip_uuids`` alone: ablated, dropping only the uuid skip
+    still passes (the sibling union subsumes it); this test and the notch test
+    below pin the pair of changes together (Issue #9196).
     """
     path = tmp_path / "collapse.kicad_pcb"
     _write_staple_collapse_board(path)
@@ -446,6 +499,9 @@ def test_staple_collapse_sibling_leg_notch_is_not_a_slit(tmp_path, recipe):
     bridging the mouth grades clean under ``check_physical_copper_gap_fab_view``
     (the scan skips gaps whose connector crosses a third shape), so the
     per-leg band check must not reject the collapse for it either.
+
+    Not a guard on ``skip_uuids`` alone: ablated, dropping only the uuid skip
+    still passes (the sibling union subsumes it) (Issue #9196).
     """
     path = tmp_path / "collapse.kicad_pcb"
     _write_staple_collapse_board(path, dy=0.27)
