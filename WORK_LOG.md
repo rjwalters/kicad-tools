@@ -16,6 +16,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-17
 
+- **PR #9220**: test: pin sibling_legs contract on _same_net_leg_band_ok directly
+- **PR #9218**: docs: record trim-less detection margin and fix healthy-residual sign in RSS hook test
+- **PR #9207**: refactor: require stackup args on same_net_band_edges()
+- **PR #9177**: fix(board03): land fiducials and board ID past the native_clearance contract
+- **Issue #9214** (closed): Record the trim-less detection margin that `_straddle_slack_mb` trades away on large-page hosts
+- **Issue #9196** (closed): Board 06 leg band check: pin the `sibling_legs` contract at the predicate level (and tidy its signature)
+- **Issue #9188** (closed): same_net_band_edges() hardcodes the jlcpcb 4L/1oz stackup inside a shared library module
+- **Issue #9143** (closed): Board 03: fiducial keepouts collide with the native_clearance contract and the #8838 mask policy
 - **Issue #9206** (closed): Stale module docstring: test_board07_byte0_physical_spread says validate.py 'sums every copper segment'
 - **PR #9213**: docs: reword board07 byte0 spread docstring's stale sum-all-segments claim as history
 - **Issue #9186** (closed): Board 06 legalizer: the new same-net leg band check grades against copper the same repair deletes (staple-collapse site)
