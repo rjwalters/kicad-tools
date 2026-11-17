@@ -3336,7 +3336,19 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         DETERMINISTIC_BUDGET_MAX_SEARCH_ITERATIONS,
         DETERMINISTIC_BUDGET_PER_NET_ITERATIONS,
     )
+
+    # Issue #8994: resolve the same-net pad slit-band edge for this board's
+    # stackup (jlcpcb 4-layer 1oz -> 0.15 mm) and thread it onto the rules.
+    # The recipe builds ``DesignRules`` in-process and never runs
+    # ``kct route``, so ``route_cmd``'s resolution point (#8974) never fires
+    # here -- without this the field stays ``None`` and the C++ pathfinder's
+    # band guard (the drain for this board's via-banded population) is OFF.
+    # Resolved from the profile table via the stitcher's helper, never a
+    # literal, matching ``route_cmd``'s own resolution idiom.
+    from kicad_tools.cli.stitch_cmd import _resolve_mfr_pad_gap_edge
     from kicad_tools.router import DesignRules, DifferentialPairConfig, load_pcb_for_routing
+
+    _same_net_pad_gap_edge_mm = _resolve_mfr_pad_gap_edge("jlcpcb", 4, 1.0)
     from kicad_tools.router.optimizer import (
         GridCollisionChecker,
         OptimizationConfig,
@@ -3391,6 +3403,10 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # Issue #7908: hard-block the inner layers for the classes that
         # declare ``avoid_layers`` (MIPI_CLK).
         strict_layers=True,
+        # Issue #8994: the same-net pad slit-band detection edge for the
+        # jlcpcb 4-layer 1oz stackup, so the C++ pathfinder's via seats stay
+        # out of the band ``kct check`` grades (``physical_copper_gap``).
+        same_net_pad_gap_band_edge_mm=_same_net_pad_gap_edge_mm,
     )
 
     # Power and ground nets are handled via copper pours on the inner planes
