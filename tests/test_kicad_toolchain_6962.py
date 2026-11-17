@@ -146,14 +146,58 @@ def test_docker_fallback_carries_pinned_config_home(monkeypatch):
         (["/explicit/python3", "-I"], ["python3"]),
         (["kicad-cli"], ["kicad-cli"]),
         (["C:\\Program Files\\KiCad\\kicad-cli.exe"], ["kicad-cli.exe"]),
+        # Long forms outside the docker_kicad_cli_prefix vocabulary (#9080):
+        # the argv is not a recognised prefix shape, so its value could be a
+        # flag's value rather than the image -- record nothing else.
+        (
+            [
+                "docker",
+                "run",
+                "--volume",
+                "/home/me/board:/home/me/board",
+                "--entrypoint",
+                "kicad-cli",
+                "img",
+            ],
+            ["docker"],
+        ),
+        (["docker", "run", "--env", "HOME=/home/me", "img"], ["docker"]),
+        (["docker", "run", "--env-file", "/home/me/board/.env", "img"], ["docker"]),
+        (["docker", "run", "--name", "kct", "img"], ["docker"]),
+        (["docker", "run", "--network", "none", "img"], ["docker"]),
+        (
+            ["docker", "run", "--mount", "type=bind,src=/home/me/board,dst=/work", "img"],
+            ["docker"],
+        ),
+        (["docker", "run", "--workdir", "/home/me/board", "img"], ["docker"]),
         # Degenerate shapes stay honest rather than guessing.
         ([], []),
         (["docker", "version"], ["docker"]),
+        (["docker", "run", "--entrypoint"], ["docker"]),
     ],
 )
 def test_portable_native_command_drops_host_state(argv, expected):
     """The recorded form of a native command carries no host state (#9055)."""
     assert toolchain.portable_native_command(argv) == expected
+
+
+def test_portable_native_command_long_forms_leak_no_host_path():
+    """The #6532 scan finds no host path in a reduced unknown-flag argv (#9080)."""
+    from tests.test_board_evidence_portable_paths_6532 import ABSOLUTE_HOST_PATH
+
+    for flag, value in (
+        ("--volume", "/home/me/board:/home/me/board"),
+        ("--env", "HOME=/home/me"),
+        ("--env-file", "/tmp/kct/.env"),
+        ("--name", "kct"),
+        ("--network", "none"),
+        ("--mount", "type=bind,src=/tmp/kct,dst=/work"),
+        ("--workdir", "/tmp/kct"),
+    ):
+        argv = ["docker", "run", flag, value, "--entrypoint", "kicad-cli", "img"]
+        recorded = toolchain.portable_native_command(argv)
+        assert recorded == ["docker"]
+        assert not ABSOLUTE_HOST_PATH.search(json.dumps(recorded))
 
 
 def test_portable_native_command_drops_model_dir_mount_args():
