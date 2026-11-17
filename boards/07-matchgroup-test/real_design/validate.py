@@ -76,10 +76,24 @@ def via_travel_mm(via, segments, elevations: dict[str, float]) -> float:
 # segments form one simple pad-to-pad chain with no dead end and no
 # branch, so its residual is not a defect: it is barrel-overlap and the
 # staircase steps the pad-to-pad path shortcuts diagonally (Issue #9175).
-# Beyond this limit is copper the signal never travels on the path: a
-# dead-end loop, an overlapping duplicate or a stub.  The DQ7/LDQM
-# same-net loops of #9117 measured ~6.3 and ~7.2 mm before the #9118
-# repair (PR #9139), so 2.5 mm keeps ~20% headroom over the worst
+# Measured decomposition of SDCKE1's residual (Issue #9182): the
+# pad-to-pad path covers 48.79 mm of track plus 18.94 mm of contact
+# chords, skipping 21.02 mm of copper -- 20.51 mm of it staircase
+# micro-steps the path cuts diagonally across capsule overlaps (leg
+# minus chord), 0.51 mm near-parallel duplicate escape dashes, 0.00 mm
+# in-pad copper; skipped minus chords equals the 2.0759 mm residual
+# exactly.  At this board's 0.05 mm dash / 0.18 mm width encoding the
+# staircase share grows ~0.0045 mm per step, so a denser or taller
+# staircase can push a defect-free net toward this limit: after
+# re-routing a matched net's staircase, re-run this script and re-check
+# the worst defect-free net's margin.  No per-link weighting removes the
+# staircase share -- the deficit is a property of the route picked
+# (skipped legs minus chords), not of any single link, and surcharging
+# links to zero it inflates matched length by the same copper (Issue
+# #9182).  Beyond this limit is copper the signal never travels on the
+# path: a dead-end loop, an overlapping duplicate or a stub.  The
+# DQ7/LDQM same-net loops of #9117 measured ~6.3 and ~7.2 mm before the
+# #9118 repair (PR #9139), so 2.5 mm keeps ~20% headroom over the worst
 # defect-free net while sitting over 2.5x below the smallest real defect.
 OFF_PATH_TOLERANCE_MM = 2.5
 
