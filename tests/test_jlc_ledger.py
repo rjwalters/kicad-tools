@@ -125,3 +125,111 @@ def test_default_ledger_lives_under_home(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     assert OrderLedger().directory == tmp_path / ".kct" / "orders"
     assert jlc_ledger.default_ledger_dir() == tmp_path / ".kct" / "orders"
+
+
+def test_ledger_and_lock_owner_is_checked(tmp_path, monkeypatch):
+    import os
+
+    ledger = OrderLedger(tmp_path)
+    ledger.append("payment-attempted", A)
+    with ledger.locked():
+        pass  # creates the lock file
+    real = os.getuid()
+    monkeypatch.setattr(os, "getuid", lambda: real + 1)
+    with pytest.raises(LedgerError, match="not owned"):
+        ledger.plan_status(A)
+    with pytest.raises(LedgerError, match="not owned"):
+        with ledger.locked():
+            pass
+
+
+def test_lock_file_must_be_a_private_regular_file(tmp_path):
+    import os
+
+    ledger = OrderLedger(tmp_path / "a")
+    ledger.directory.mkdir()
+    target = tmp_path / "target"
+    target.write_text("")
+    target.chmod(0o600)
+    (ledger.directory / "jlc-orders.lock").symlink_to(target)
+    with pytest.raises(LedgerError, match="not a regular file"):
+        with ledger.locked():
+            pass
+    other = OrderLedger(tmp_path / "b")
+    other.directory.mkdir()
+    lock = other.directory / "jlc-orders.lock"
+    lock.write_text("")
+    os.chmod(lock, 0o644)
+    with pytest.raises(LedgerError, match="mode 644"):
+        with other.locked():
+            pass
+
+
+def test_open_refuses_a_symlink_swapped_in_after_the_check(tmp_path, monkeypatch):
+    """O_NOFOLLOW (or open_nofollow's fallback) is the guard once the lstat check has passed."""
+    target = tmp_path / "target.jsonl"
+    target.write_text("")
+    target.chmod(0o600)
+    ledger = OrderLedger(tmp_path / "orders")
+    ledger.directory.mkdir()
+    ledger.path.symlink_to(target)
+    monkeypatch.setattr(OrderLedger, "_check_file", lambda self, path: None)
+    with pytest.raises(LedgerError, match="cannot open"):
+        ledger.append("payment-attempted", A)
+    assert target.read_text() == ""
+
+
+def test_lock_failure_other_than_busy_is_a_clear_refusal(tmp_path, monkeypatch):
+    import errno
+
+    from kicad_tools.manufacturers import jlc_ledger
+
+    def flock(fd, op):
+        if op & jlc_ledger.fcntl.LOCK_EX:
+            raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(jlc_ledger.fcntl, "flock", flock)
+    with pytest.raises(LedgerError, match="file locking is unavailable"):
+        with OrderLedger(tmp_path).locked():
+            pass
+
+
+def test_no_file_locking_refuses(tmp_path, monkeypatch):
+    from kicad_tools.manufacturers import jlc_ledger
+
+    monkeypatch.setattr(jlc_ledger, "fcntl", None)
+    with pytest.raises(LedgerError, match="no file locking"):
+        with OrderLedger(tmp_path).locked():
+            pass
+
+
+def test_write_error_is_a_ledger_error(tmp_path, monkeypatch):
+    import os
+
+    def boom(fd, data):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(os, "write", boom)
+    with pytest.raises(LedgerError, match="cannot write order ledger"):
+        OrderLedger(tmp_path).append("payment-attempted", A)
+
+
+@pytest.mark.parametrize("answer", ["y", "yes", "Not charged", "not charged!", ""])
+def test_clear_needs_the_exact_phrase(tmp_path, answer):
+    ledger = OrderLedger(tmp_path)
+    ledger.append("payment-attempted", A)
+    assert not clear_unconfirmed(ledger, A, lambda p: answer)
+    assert ledger.plan_status(A).state == "unresolved"
+
+
+def test_open_rechecks_the_file_it_actually_opened(tmp_path, monkeypatch):
+    """A regular file swapped in after the lstat check is caught by the fstat recheck."""
+    import os
+
+    ledger = OrderLedger(tmp_path)
+    ledger.path.write_text("")
+    os.chmod(ledger.path, 0o644)
+    monkeypatch.setattr(OrderLedger, "_check_file", lambda self, path: None)
+    with pytest.raises(LedgerError, match="mode 644"):
+        ledger.append("payment-attempted", A)
+    assert ledger.path.read_text() == ""

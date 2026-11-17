@@ -892,3 +892,167 @@ def test_amount_pattern_matches_ascii_digits_only():
 
     assert pay._AMOUNT.flags & re.ASCII
     assert pay._AMOUNT.findall("١٢.00") == []
+
+
+# --- Judge round 2 (PR #9101): the remaining unpinned guards -------------------
+
+_COMPETING_RUN = r"""
+import sys
+from pathlib import Path
+from kicad_tools.manufacturers.jlc_ledger import OrderLedger
+ledger = OrderLedger(Path(sys.argv[1]))
+with ledger.locked():
+    if ledger.plan_status(sys.argv[2]).state == "not-ordered":
+        ledger.append("payment-attempted", sys.argv[2], approved_total="USD 123.45")
+        print("RECORDED")
+"""
+
+
+class _RacedLedger(OrderLedger):
+    """A real second process completes its whole locked check-and-record just
+    before this run takes the lock: the window a re-check outside the lock misses."""
+
+    def locked(self):
+        import subprocess
+        import sys
+
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
+        out = subprocess.run(
+            [sys.executable, "-c", _COMPETING_RUN, str(self.directory), PLAN],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True,
+        )
+        assert out.stdout.strip() == "RECORDED", out.stderr
+        return super().locked()
+
+
+def test_recheck_inside_the_lock_stops_a_second_process_that_just_recorded(tmp_path):
+    ledger = _RacedLedger(tmp_path / "ledger")
+    page = FakeCheckoutPage(_state())
+    with pytest.raises(pay.CheckoutAbort) as exc:
+        _run(tmp_path, page, ledger=ledger)
+    assert exc.value.step == "ledger" and "never confirmed" in exc.value.reason
+    assert S["pay_button"] not in page.clicks
+    attempts = [e for e in ledger.events() if e["event"] == "payment-attempted"]
+    assert len(attempts) == 1  # only the other process's; this run recorded nothing
+
+
+def test_recheck_and_attempt_record_both_happen_while_the_lock_is_held(tmp_path):
+    held = {"now": False}
+    calls: list[tuple[str, bool]] = []
+
+    class Spy(OrderLedger):
+        def locked(self):
+            from contextlib import contextmanager
+
+            parent = super().locked
+
+            @contextmanager
+            def cm():
+                with parent():
+                    held["now"] = True
+                    try:
+                        yield
+                    finally:
+                        held["now"] = False
+
+            return cm()
+
+        def plan_status(self, plan):
+            calls.append(("status", held["now"]))
+            return super().plan_status(plan)
+
+        def append(self, event, plan, **kw):
+            calls.append((event, held["now"]))
+            return super().append(event, plan, **kw)
+
+    _run(tmp_path, FakeCheckoutPage(_state()), ledger=Spy(tmp_path / "ledger"))
+    i = calls.index(("payment-attempted", True))
+    assert calls[i - 1] == ("status", True)  # the re-check immediately precedes it, locked
+    assert calls[0] == ("status", False)  # the start check is the unlocked early stop
+
+
+def test_confirmation_on_a_foreign_host_is_never_ordered(tmp_path):
+    page = FakeCheckoutPage(_state())
+    original = page.click
+
+    def click(sel):
+        original(sel)
+        if sel == S["pay_button"]:
+            page.url = "https://evil.example/user-center/order/success"
+
+    page.click = click
+    ledger = OrderLedger(tmp_path / "ledger")
+    with pytest.raises(pay.PaymentUnconfirmed, match="not a confirmation page"):
+        _run(tmp_path, page, ledger=ledger)
+    assert ledger.plan_status(PLAN).state == "unresolved"
+
+
+def test_ledger_write_failure_after_a_confirmed_order_names_the_order(tmp_path, monkeypatch):
+    real_write = os.write
+
+    def write(fd, data):
+        if b'"event": "ordered"' in data:
+            raise OSError(28, "No space left on device")
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "write", write)
+    ledger = OrderLedger(tmp_path / "ledger")
+    with pytest.raises(pay.PaymentUnconfirmed) as exc:
+        _run(tmp_path, FakeCheckoutPage(_state()), ledger=ledger)
+    assert exc.value.step == "ledger"
+    assert "Y2-1234567A" in exc.value.reason and "Write that down" in exc.value.reason
+    assert ledger.plan_status(PLAN).state == "unresolved"  # the attempt still blocks a re-run
+
+
+@pytest.mark.parametrize(
+    "text, indicator",
+    [
+        ("‐$5.00", "USD"),
+        ("‑$5.00", "USD"),
+        ("➖$5.00", "USD"),
+        ("˗$5.00", "USD"),
+        ("–$5.00", "USD"),
+        ("HK$5.00", "USD"),
+        ("C$5.00", "USD"),
+        ("A$5.00", "USD"),
+        ("$5.00 CR", "USD"),
+        ("USD 123.45%", ""),
+    ],
+)
+def test_money_residuals_are_refused(text, indicator):
+    with pytest.raises(pay.MoneyError):
+        pay.parse_page_money(text, indicator)
+
+
+def test_us_dollar_prefix_is_still_accepted():
+    assert str(pay.parse_page_money("US$5.00")) == "USD 5.00"
+
+
+def test_lowercase_approval_code_is_refused():
+    with pytest.raises(pay.MoneyError, match="currency code"):
+        pay.parse_approval("usd 1.00")
+
+
+def test_malformed_currency_indicator_is_refused_by_name():
+    with pytest.raises(pay.MoneyError, match="unreadable currency indicator"):
+        pay.parse_page_money("$1.00", "usd!")
+
+
+def test_unconfirmed_reason_stored_in_the_ledger_is_terminal_safe(tmp_path):
+    page = FakeCheckoutPage(_state())
+    original = page.click
+
+    def click(sel):
+        original(sel)
+        if sel == S["pay_button"]:
+            page.url = "https://jlcpcb.com/quote/%1b" + "‮" + "x" * 3000
+
+    page.click = click
+    ledger = OrderLedger(tmp_path / "ledger")
+    with pytest.raises(pay.PaymentUnconfirmed):
+        _run(tmp_path, page, ledger=ledger)
+    (record,) = [e for e in ledger.events() if e["event"] == "payment-unconfirmed"]
+    assert "‮" not in record["reason"] and len(record["reason"]) <= 400

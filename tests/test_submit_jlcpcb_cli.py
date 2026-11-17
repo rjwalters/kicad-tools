@@ -493,3 +493,79 @@ def test_checkout_abort_output_is_terminal_safe(env, monkeypatch, tmp_path, caps
     assert cmd.main(_argv(env, *args, "--checkout", "--auto")) == 2
     cap = capsys.readouterr()
     assert "\x1b" not in cap.err + cap.out and "\x07" not in cap.err + cap.out
+
+
+def test_cli_cart_url_is_terminal_safe(env, monkeypatch, tmp_path, capsys):
+    args = _site_harness(env, monkeypatch, tmp_path)
+    site = drv.SiteResult(
+        drv.DRIVER_VERSION,
+        [],
+        {},
+        {"issues": []},
+        "https://cart.jlcpcb.com/c\x1b[2J‮\nFAKE: ordered",
+        "$1",
+        "5d",
+    )
+    monkeypatch.setattr(drv, "run_driver", lambda *a, **k: site)
+    assert cmd.main(_argv(env, *args)) == 0
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "‮" not in out and "\nFAKE" not in out
+
+
+def test_outcome_is_printed_before_the_receipt_and_survives_its_failure(
+    env, monkeypatch, tmp_path, capsys
+):
+    from kicad_tools.manufacturers import jlc_payment as pay
+
+    args = _site_harness(env, monkeypatch, tmp_path)
+    monkeypatch.setattr(pay, "require_attended_checkout", lambda **k: None)
+    done = pay.CheckoutResult("ordered", "p" * 64, "USD 1.00", "Y2-1234567A", "USD 1.00")
+    monkeypatch.setattr(pay, "run_checkout", lambda *a, **k: done)
+
+    def fail(path, payload):
+        print("RECEIPT-WRITE")
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(cmd, "_write_private", fail)
+    assert cmd.main(_argv(env, *args, "--checkout", "--approve-total", "USD 1.00", "--pay")) == 0
+    cap = capsys.readouterr()
+    assert cap.out.index("ORDERED: order Y2-1234567A") < cap.out.index("RECEIPT-WRITE")
+    assert "could not write the checkout receipt" in cap.err and "write it down" in cap.err
+
+
+def test_existing_run_dir_is_made_private(monkeypatch, tmp_path):
+    import time as _time
+
+    from kicad_tools.manufacturers import jlc_ledger
+
+    monkeypatch.setattr(jlc_ledger, "default_ledger_dir", lambda: tmp_path / "orders")
+    monkeypatch.setattr(_time, "strftime", lambda fmt, t=None: "20261117T000000Z")
+    pre = tmp_path / "orders" / "checkout" / ("a" * 16 + "-20261117T000000Z")
+    pre.mkdir(parents=True)
+    pre.chmod(0o755)
+    assert cmd._checkout_run_dir("a" * 64) == pre
+    assert stat.S_IMODE(pre.stat().st_mode) == 0o700
+
+
+def test_clear_unconfirmed_payment_takes_the_ledger_lock(env, monkeypatch, tmp_path, capsys):
+    import fcntl
+
+    from kicad_tools.manufacturers import jlc_ledger
+    from kicad_tools.manufacturers import jlc_payment as pay
+
+    orders = tmp_path / "orders"
+    monkeypatch.setattr(jlc_ledger, "default_ledger_dir", lambda: orders)
+    monkeypatch.setattr(pay, "require_attended_checkout", lambda **k: None)
+    ledger = jlc_ledger.OrderLedger()
+    ledger.append("payment-attempted", "a" * 64)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "not charged")
+    fd = os.open(orders / "jlc-orders.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        assert cmd.main(_argv(env, "--clear-unconfirmed-payment", "a" * 64)) == 2
+    finally:
+        os.close(fd)
+    assert "another kct checkout" in capsys.readouterr().err
+    assert ledger.plan_status("a" * 64).state == "unresolved"
+    assert cmd.main(_argv(env, "--clear-unconfirmed-payment", "a" * 64)) == 0
+    assert ledger.plan_status("a" * 64).state == "not-ordered"

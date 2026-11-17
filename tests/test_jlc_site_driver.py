@@ -280,3 +280,9 @@ def test_site_driver_aborts_on_a_disallowed_page(state, inputs, tmp_path, url):
 def test_abort_reasons_are_terminal_safe():
     exc = drv.DriverAbort("step\x1b[1m", "page said \x1b[2J\x1b]0;t\x07 hi " + "y" * 1000)
     assert "\x1b" not in str(exc) and "\x07" not in exc.reason and len(exc.reason) <= 400
+
+
+@pytest.mark.parametrize("ch", ["\u202e", "\u2066", "\u200b", "\u200f", "\x1b", "\x85"])
+def test_printable_replaces_bidi_format_and_control_characters(ch):
+    out = drv.printable(f"total{ch}USD 1.00")
+    assert ch not in out and out == "total?USD 1.00"

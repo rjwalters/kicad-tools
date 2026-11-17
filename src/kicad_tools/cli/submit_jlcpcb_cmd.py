@@ -162,7 +162,7 @@ def _website_leg(args: argparse.Namespace, result, out: Path) -> int:
         path = input("Download JLC's part-matching export, then enter its path: ").strip()
         return Path(path).read_bytes()
 
-    checkout_outcome: tuple[str, object, Path] | None = None
+    checkout_outcome: tuple[str, object, Path | None] | None = None
     try:
         drv.require_attended()
         lock_dir = Path(args.lock_dir) if args.lock_dir else None
@@ -225,19 +225,27 @@ def _checkout_run_dir(plan_sha256: str) -> Path:
 
 
 def _write_private(path: Path, payload: dict) -> None:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    from ..export._fsutil import open_nofollow
+
+    fd = open_nofollow(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
-def _checkout_leg(args: argparse.Namespace, plan, page, out: Path) -> tuple[str, object, Path]:
+def _checkout_leg(
+    args: argparse.Namespace, plan, page, out: Path
+) -> tuple[str, object, Path | None]:
     """Run the opt-in checkout leg on the page the driver left at the saved cart."""
     from ..manufacturers import jlc_payment as pay
     from ..manufacturers.jlc_ledger import OrderLedger
 
     approval = pay.Approval(pay.parse_approval(args.approve_total) if args.approve_total else None)
     ledger = OrderLedger()  # always the default ledger under $HOME; no flag moves it
-    run_dir = _checkout_run_dir(plan.sha256)
+    try:
+        run_dir = _checkout_run_dir(plan.sha256)
+    except OSError as exc:
+        reason = f"cannot create the checkout run directory ({exc.strerror})"
+        return ("aborted", pay.CheckoutAbort("run-dir", reason), None)
     try:
         done = pay.run_checkout(
             page,
@@ -257,38 +265,52 @@ def _checkout_leg(args: argparse.Namespace, plan, page, out: Path) -> tuple[str,
     return ("done", done, run_dir)
 
 
-def _report_checkout(outcome: tuple[str, object, Path]) -> int:
+def _report_checkout(outcome: tuple[str, object, Path | None]) -> int:
+    """Print the outcome FIRST (order number, or what to check), then write the receipt.
+
+    A receipt-write failure after a real payment must never hide the outcome.
+    """
     from ..manufacturers import jlc_payment as pay
 
     kind, value, run_dir = outcome
-    receipt = run_dir / "checkout-receipt.json"
     if kind == "done":
         assert isinstance(value, pay.CheckoutResult)
-        _write_private(receipt, value.as_dict())
         if value.state == "ordered":
             print(f"ORDERED: order {value.order_id}, charged {value.charged_total}")
         else:
             print(f"checkout rehearsed to the pay button; approved {value.approved_total}")
-        print(f"checkout receipt: {receipt}")
-        return 0
-    assert isinstance(value, pay.CheckoutAbort | pay.PaymentUnconfirmed)
-    state = "payment-unconfirmed" if kind == "unconfirmed" else "not-ordered"
-    _write_private(
-        receipt,
-        {
+        payload: dict = value.as_dict()
+        rc = 0
+    else:
+        assert isinstance(value, pay.CheckoutAbort | pay.PaymentUnconfirmed)
+        if kind == "unconfirmed":
+            print(f"PAYMENT UNCONFIRMED at {value.step}: {value.reason}", file=sys.stderr)
+            rc = 3
+        else:
+            print(f"CHECKOUT STOPPED at {value.step}: {value.reason}", file=sys.stderr)
+            print("Nothing was paid. The cart is saved; you can pay it yourself.", file=sys.stderr)
+            rc = 2
+        payload = {
             "checkout_version": pay.CHECKOUT_VERSION,
-            "state": state,
+            "state": "payment-unconfirmed" if kind == "unconfirmed" else "not-ordered",
             "step": value.step,
             "reason": value.reason,
-        },
-    )
-    if kind == "unconfirmed":
-        print(f"PAYMENT UNCONFIRMED at {value.step}: {value.reason}", file=sys.stderr)
-        print(f"checkout receipt: {receipt}", file=sys.stderr)
-        return 3
-    print(f"CHECKOUT STOPPED at {value.step}: {value.reason}", file=sys.stderr)
-    print("Nothing was paid. The cart is saved; you can pay it yourself.", file=sys.stderr)
-    return 2
+        }
+    if run_dir is None:
+        return rc
+    receipt = run_dir / "checkout-receipt.json"
+    stream = sys.stdout if rc == 0 else sys.stderr
+    try:
+        _write_private(receipt, payload)
+    except OSError as exc:
+        print(
+            f"warning: could not write the checkout receipt {receipt} ({exc.strerror}); "
+            "the outcome above stands, so write it down",
+            file=sys.stderr,
+        )
+        return rc
+    print(f"checkout receipt: {receipt}", file=stream)
+    return rc
 
 
 def _checkout_preflight(args: argparse.Namespace) -> str | None:

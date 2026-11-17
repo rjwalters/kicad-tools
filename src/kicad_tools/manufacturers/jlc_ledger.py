@@ -20,10 +20,11 @@ no later ``ordered`` / ``cleared-by-operator`` is ``unresolved``. Both block a
 new checkout, so a second order for the same plan cannot be placed by this tool
 (and an ambiguous payment is never retried).
 
-The ledger holds amounts and order identifiers only: never card data, contact
-details or page text beyond the order id. Personal data it does hold: the
+The ledger never holds card data or contact details. What it does hold: the
 plan sha256, event times, approved and charged totals, the JLC order number,
-and the step/reason of a stopped or unconfirmed payment.
+and, for an unconfirmed payment, a short reason that can quote page-derived
+text (the post-click URL path, or a parse error), passed through
+``jlc_site_driver.printable`` (control characters replaced, length capped).
 
 The ledger lives under ``$HOME`` (``~/.kct/orders``). Its protection against a
 second order is exactly as strong as that file: deleting it, or running with a
@@ -44,6 +45,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from ..export._fsutil import open_nofollow
+from .jlc_site_driver import printable
 
 try:  # pragma: no cover - platform dependent
     import fcntl
@@ -101,6 +105,28 @@ class OrderLedger:
             return
         except OSError as exc:
             raise LedgerError(f"cannot stat {path}: {exc.strerror}") from None
+        self._check_info(path, info)
+
+    def _open_checked(self, path: Path, flags: int) -> int:
+        """Open without following a symlink, then re-check what was actually opened.
+
+        ``open_nofollow`` uses ``O_NOFOLLOW`` where it exists and otherwise
+        refuses a link before opening; the ``fstat`` afterwards closes the
+        remaining gap either way (fail closed).
+        """
+        self._check_file(path)
+        try:
+            fd = open_nofollow(path, flags, 0o600)
+        except OSError as exc:
+            raise LedgerError(f"cannot open {path}: {exc.strerror}") from None
+        try:
+            self._check_info(path, os.fstat(fd))
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    def _check_info(self, path: Path, info: os.stat_result) -> None:
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
             raise LedgerError(f"{path} is not a regular file; refusing it")
         getuid = getattr(os, "getuid", None)
@@ -121,11 +147,7 @@ class OrderLedger:
             raise LedgerError("no file locking on this platform; the checkout is refused")
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         lock_path = self.directory / LOCK_NAME
-        self._check_file(lock_path)
-        try:
-            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-        except OSError as exc:
-            raise LedgerError(f"cannot open ledger lock {lock_path}: {exc.strerror}") from None
+        fd = self._open_checked(lock_path, os.O_RDWR | os.O_CREAT)
         try:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -133,6 +155,11 @@ class OrderLedger:
                 raise LedgerError(
                     "another kct checkout is recording a payment right now; nothing was "
                     "paid by this run"
+                ) from None
+            except OSError as exc:  # ENOLCK / ENOTSUP, e.g. on NFS or SMB
+                raise LedgerError(
+                    f"file locking is unavailable on {self.directory} ({exc.strerror}); "
+                    "the checkout is refused and nothing was paid"
                 ) from None
             yield
         finally:
@@ -175,20 +202,25 @@ class OrderLedger:
             "plan_sha256": plan_sha256,
             **fields,
         }
+        for key in ("reason", "step"):
+            if key in record:
+                record[key] = printable(record[key])
         unknown = set(record) - _ALLOWED_KEYS
         if unknown:
             raise LedgerError(f"refusing unknown ledger keys: {sorted(unknown)}")
         line = json.dumps(record, sort_keys=True) + "\n"
-        self._check_file(self.path)
         try:
             self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        except OSError as exc:
+            raise LedgerError(f"cannot create {self.directory}: {exc.strerror}") from None
+        fd = self._open_checked(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+        try:
             try:
                 os.write(fd, line.encode("utf-8"))
                 os.fsync(fd)
             finally:
                 os.close(fd)
-        except OSError as exc:
+        except OSError as exc:  # a write failure must reach callers as LedgerError
             raise LedgerError(f"cannot write order ledger {self.path}: {exc.strerror}") from None
         return record
 

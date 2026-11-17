@@ -265,8 +265,7 @@ _SYMBOLS = {"US$": "USD", "€": "EUR", "£": "GBP"}
 _DOLLAR_CURRENCIES = ("USD", "CAD", "AUD", "NZD", "SGD", "HKD")
 _ISO = re.compile(r"\b([A-Z]{3})\b")
 _AMOUNT = re.compile(r"(?<![\d.,])(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?(?![\d.,])", re.ASCII)
-#: A sign, or an accounting-style bracket before the amount, means "not a plain charge".
-_SIGNS = ("-", "\u2212", "+", "\u2012", "\u2013", "\u2014", "\ufe63", "\uff0d")
+#: An accounting-style bracket before the amount means "not a plain charge".
 _BRACKETED = re.compile(r"\(\s*(?:[A-Z]{3}|US\$|[$\u20ac\u00a3])?\s*\d")
 
 
@@ -283,9 +282,25 @@ class MoneyError(ValueError):
     pass
 
 
+#: Signs are refused by Unicode category: every dash (``Pd``: ``-``, U+2010-2015,
+#: U+FE63, U+FF0D, ...) and math symbol (``Sm``: ``+``, U+2212 minus, ...). These
+#: sign-like characters fall outside both categories and are listed explicitly.
+_EXTRA_SIGNS = ("\u2796", "\u02d7")  # HEAVY MINUS SIGN (So), MODIFIER LETTER MINUS (Sk)
+_PREFIXED_DOLLAR = re.compile(r"([A-Za-z]+)\$")
+_CREDIT_MARK = re.compile(r"\b(?:CR|DR)\b|%")
+
+
 def _amount(text: str) -> Decimal:
-    if any(sign in text for sign in _SIGNS) or _BRACKETED.search(text):
+    if (
+        any(unicodedata.category(ch) in ("Pd", "Sm") for ch in text)
+        or any(sign in text for sign in _EXTRA_SIGNS)
+        or _BRACKETED.search(text)
+    ):
         raise MoneyError(f"refusing a signed or bracketed amount in {text!r}")
+    if any(prefix != "US" for prefix in _PREFIXED_DOLLAR.findall(text)):
+        raise MoneyError(f"refusing a dollar sign other than '$' or 'US$' in {text!r}")
+    if _CREDIT_MARK.search(text):
+        raise MoneyError(f"refusing a credit/percent-marked amount in {text!r}")
     if any(unicodedata.category(ch) == "Nd" and not ch.isascii() for ch in text):
         raise MoneyError(f"refusing non-ASCII digits in {text!r}")
     found = _AMOUNT.findall(text)
