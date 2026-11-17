@@ -2413,27 +2413,6 @@ def _rule_area_blocks_tracks(zone: Any, layer: str) -> bool:
     return False
 
 
-def _segment_enters_polygon(
-    a: tuple[float, float], b: tuple[float, float], polygon: list[tuple[float, float]]
-) -> bool:
-    """True when segment ``a -> b`` touches keepout ``polygon``.
-
-    An endpoint inside (boundary included) or a proper crossing of a
-    polygon edge counts; a segment wholly outside never does.
-    """
-    from kicad_tools.core.geometry import point_in_polygon, segments_intersect
-
-    if point_in_polygon(a[0], a[1], polygon, boundary_inside=True):
-        return True
-    if point_in_polygon(b[0], b[1], polygon, boundary_inside=True):
-        return True
-    closed = polygon if polygon[0] == polygon[-1] else (*polygon, polygon[0])
-    return any(
-        segments_intersect(a[0], a[1], b[0], b[1], px, py, qx, qy)
-        for (px, py), (qx, qy) in zip(closed, closed[1:], strict=False)
-    )
-
-
 def repair_sharp_corners(routed_path: Path) -> bool:
     """Remove every two-segment ``sharp_trace_corner`` fold-back (issue #8840).
 
@@ -2464,10 +2443,19 @@ def repair_sharp_corners(routed_path: Path) -> bool:
     import tempfile
 
     from kicad_tools.manufacturers import get_profile
-    from kicad_tools.router.clearance_kernel import ALL_LAYERS, CLEARANCE_EPSILON_MM, KSegment
+    from kicad_tools.router.clearance_kernel import (
+        ALL_LAYERS,
+        CLEARANCE_EPSILON_MM,
+        KSegment,
+        copper_gap,
+    )
     from kicad_tools.router.quantize import segment_angle_census
     from kicad_tools.schema.pcb import PCB
-    from kicad_tools.validate.clearance_shapes import min_gap_to_outline, outline_shapes
+    from kicad_tools.validate.clearance_shapes import (
+        min_gap_to_outline,
+        outline_shapes,
+        zone_shape,
+    )
     from kicad_tools.validate.rules.clearance import CopperElement, _calculate_clearance
     from kicad_tools.validate.rules.redundant_copper import RedundantCopperRule
     from kicad_tools.validate.rules.sharp_trace_corner import SharpTraceCornerRule
@@ -2531,7 +2519,7 @@ def repair_sharp_corners(routed_path: Path) -> bool:
             return False
         edges = outline_shapes(outline)
         keepouts = [
-            zone.polygon
+            zone_shape([zone.polygon])
             for zone in (*pcb.rule_areas, *pcb.footprint_rule_areas)
             if _rule_area_blocks_tracks(zone, layer) and len(zone.polygon) >= 3
         ]
@@ -2539,8 +2527,16 @@ def repair_sharp_corners(routed_path: Path) -> bool:
             shape = KSegment(x1=a[0], y1=a[1], x2=b[0], y2=b[1], width=width, layer=ALL_LAYERS)
             if min_gap_to_outline(shape, edges) < edge_clearance - CLEARANCE_EPSILON_MM:
                 return False
-            for polygon in keepouts:
-                if _segment_enters_polygon(a, b, polygon):
+            # The keepout test measures the candidate's copper, not its
+            # centerline: the trace's width is in ``shape``, so copper that
+            # reaches into the keepout is refused even when the centerline
+            # stays outside (issue #9239).  Boundary convention: overlap only
+            # is refused -- copper exactly touching the keepout edge (zero
+            # gap) is accepted, with the same CLEARANCE_EPSILON_MM float-noise
+            # tolerance the edge check above grants a trace that exactly
+            # meets its minimum.
+            for shape_ko in keepouts:
+                if copper_gap(shape, shape_ko) < -CLEARANCE_EPSILON_MM:
                     return False
         return True
 

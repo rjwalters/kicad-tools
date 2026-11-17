@@ -8,8 +8,9 @@ but the step is copy-paste bait for other boards' recipes. These tests pin:
 
 - a repair path inside the profile's copper-to-edge minimum is refused;
 - a repair path entering a track-blocking keepout on the corner's layer is
-  refused, while the same keepout on another layer (or with tracks allowed)
-  still repairs;
+  refused -- including copper that overlaps the keepout while its centerline
+  stays outside -- while the same keepout on another layer (or with tracks
+  allowed) still repairs;
 - an unreadable board outline (no Edge.Cuts copper) refuses the repair instead
   of assuming clear;
 - the repaired piece keeps the removed segments' widest width -- a path that
@@ -62,6 +63,7 @@ def _foldback_board(
     *,
     outline: bool = True,
     keepout: tuple[str, str] | None = None,  # (layers spec, tracks allowed|not_allowed)
+    keepout_span: tuple[float, float] = (16.4, 17.6),  # keepout y extent; x is fixed 4..9
     foreign: tuple[float, float, float, float] | None = None,
 ) -> str:
     """A board whose only finding is one fold-back between vias at (5, via_y)/(8, via_y).
@@ -104,11 +106,13 @@ def _foldback_board(
         )
     if keepout:
         layers, tracks = keepout
-        # Covers the chord (y = 17, x in [5, 8]) with margin.
+        lo, hi = keepout_span
+        # Default span covers the chord (y = 17, x in [5, 8]) with margin;
+        # other spans place the keepout edge against the chord deliberately.
         parts.append(
             f'  (zone (net 0) (net_name "") (name "ko") (layers "{layers}") '
             f"(keepout (tracks {tracks}))\n"
-            "    (polygon (pts (xy 4 16.4) (xy 9 16.4) (xy 9 17.6) (xy 4 17.6))))\n"
+            f"    (polygon (pts (xy 4 {lo}) (xy 9 {lo}) (xy 9 {hi}) (xy 4 {hi}))))\n"
         )
     parts.append(")\n")
     return "".join(parts)
@@ -160,6 +164,21 @@ def test_repair_within_edge_clearance_is_refused(step, tmp_path, capsys):
 
 def test_repair_entering_track_keepout_is_refused(step, tmp_path, capsys):
     path = _write_board(tmp_path, "ko", _foldback_board(17.0, keepout=("F.Cu", "not_allowed")))
+    assert step.repair_sharp_corners(path) is False
+    assert "no clear repair" in capsys.readouterr().out
+    assert len(_sig_segments(path)) == 2
+
+
+def test_repair_copper_overlapping_track_keepout_is_refused(step, tmp_path, capsys):
+    # Keepout top edge 0.05 mm below the y = 17 chord: the centerline stays
+    # outside the keepout, but the 0.2 mm chord's copper edge reaches 0.05 mm
+    # inside it (copper_gap -0.05). The pre-fix centerline-only keepout test
+    # accepted this repair; the copper-width-aware test refuses it (#9239).
+    path = _write_board(
+        tmp_path,
+        "ko-copper",
+        _foldback_board(17.0, keepout=("F.Cu", "not_allowed"), keepout_span=(15.0, 16.95)),
+    )
     assert step.repair_sharp_corners(path) is False
     assert "no clear repair" in capsys.readouterr().out
     assert len(_sig_segments(path)) == 2
