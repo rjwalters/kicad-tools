@@ -146,6 +146,65 @@ def test_track_lying_wholly_on_its_pad_is_within_own_pad():
     assert m.disposition == "within_own_pad"
 
 
+# --- end-cap poke past the edge (issue #9261) --------------------------------------------
+
+OVAL = LineString([(0.25, 0.25), (0.75, 0.25)]).buffer(0.25, quad_segs=64)  # 1 x 0.5 mm
+
+
+def _poke_segment(pad, poke, width=0.2, y=None, owner_kind="pad:rect"):
+    """Both authored ends inside *pad*; the far end cap pokes *poke* past x = 1."""
+    y = 0.5 if y is None else y
+    end_x = 1.0 + poke - width / 2  # authored end stays inside the pad for poke < width/2
+    return _segment((0.3, y), (end_x, y), width, pad=pad, owner_kind=owner_kind)
+
+
+@pytest.mark.parametrize("poke", [0.01, 0.02, 0.05])
+@pytest.mark.parametrize(
+    "pad,y,owner_kind",
+    [(PAD, 0.5, "pad:rect"), (PAD, 0.5, "pad:roundrect"), (OVAL, 0.25, "pad:oval")],
+)
+def test_end_cap_poking_past_the_pad_edge_is_info(pad, y, owner_kind, poke):
+    """Both authored ends on the pad; only the round cap pokes out (issue #9261)."""
+    result, m = _only(_poke_segment(pad, poke, y=y, owner_kind=owner_kind))
+    assert m.disposition == "within_own_pad"
+    assert _severity(result) == "info"
+    assert result.passed
+
+
+@pytest.mark.parametrize(
+    "pad,y,owner_kind",
+    [(PAD, 0.5, "pad:rect"), (OVAL, 0.25, "pad:oval")],
+)
+def test_poke_sweep_never_scores_below_a_full_exit(pad, y, owner_kind):
+    """Severity is non-decreasing in under-mask copper across the A0/A1 boundary.
+
+    The track's far end moves from wholly on the pad, through a cap poking out,
+    to an end on the edge and a full exit. A smaller poke must never be worse
+    than a longer exit that the rule excuses.
+    """
+    ranks = []
+    for step in range(0, 21):
+        end_x = 0.8 + step * 0.03  # 0.8 .. 1.4 mm; crosses the edge at x = 1.0
+        result, m = _only(_segment((0.3, y), (end_x, y), 0.2, pad=pad, owner_kind=owner_kind))
+        assert m.disposition == "within_own_pad", (end_x, m.disposition)
+        ranks.append(SEVERITY_RANK[_severity(result)])
+    assert max(ranks) == 1
+    assert ranks == sorted(ranks)
+
+
+def test_one_end_inside_other_on_the_edge_is_within_own_pad():
+    """The old 'neither entry nor wholly on the pad' arm is gone (issue #9261)."""
+    result, m = _only(_segment((0.5, 0.5), (1.0, 0.5)))
+    assert m.disposition == "within_own_pad"
+    assert _severity(result) == "info"
+
+
+def test_pass_through_with_no_end_inside_stays_an_error_after_the_poke_change():
+    result, m = _only(_segment((-0.5, 0.5), (1.5, 0.5)))
+    assert m.disposition in ("violation", "uncertain")
+    assert _severity(result) == "error"
+
+
 def test_back_side_entry_is_classified_like_the_front():
     result, m = _only(_segment((0.5, 0.5), (2.0, 0.5), side="B"))
     assert m.mask_side == "B.Mask"
@@ -199,15 +258,23 @@ def test_translation_sweep_severity_never_drops_as_beside_copper_rises():
         sev = _severity(result)
         excess = m.beside_owner_excess_mm2 if m and m.beside_owner_excess_mm2 is not None else None
         points.append((y, sev, excess, m.disposition if m else None))
-    # Info exactly when the track lies on the pad with nothing beside it.
+    # Info exactly when the copper under mask beside the opening fits one
+    # entry crossing (issue #9261: both ends are inside the pad here, so the
+    # track gets that budget even though its flank pokes past the edge).
+    # 0.05 mm of flank past the edge is far above that budget for this 0.4 mm
+    # track, so only a poke of about 0.04 mm or less may read as info.
     for y, sev, excess, disp in points:
         if disp == "within_own_pad":
             assert excess == pytest.approx(0.0, abs=1e-9)
-            assert y + 0.1 <= 1.0 + 1e-9
-    # Straddling and beside positions are errors (or out of reach).
+            assert y + 0.1 <= 1.0 + 0.05
+    # Straddling and beside positions with real copper past the edge are errors.
     for y, sev, _, _ in points:
-        if 1.0 - 0.1 < y < 1.0 + 0.1 + 0.09:
+        if 1.0 - 0.05 < y < 1.0 + 0.1 + 0.09:
             assert sev == "error", (y, sev)
+    # Walking onto the pad (y falling from 1.18), severity never rises again.
+    # (y = 1.2 is a warning-tier finding, below the error tier, so it is skipped.)
+    ranks = [SEVERITY_RANK[s] for y, s, _, _ in points if s and y < 1.19]
+    assert ranks == sorted(ranks, reverse=True)
     # Ordering: among positions that produce a finding, any position with
     # positive excess is at least as severe as any with zero excess.
     zero = [SEVERITY_RANK[s] for _, s, e, _ in points if s and e == 0]
