@@ -62,11 +62,11 @@ exposed beyond the pad (the construction budget ``u`` tolerated once); and no
 copper under mask within the danger clearance beside the opening beyond what
 one straight entry at 45 degrees or steeper puts there. Only a straight
 segment with at least one authored end strictly inside the pad gets that
-allowance (issue #9261). So a track that straddles,
-runs along or passes through the pad, a shallower entry, an arc, a via or pour
-touching the pad (ring copper beside the opening), a positive expansion ring
-wider than ``u``, solder-mask-defined, custom and padstack pads, pads with no
-net, and any different-net copper all keep their measured verdict.
+allowance (issue #9261). So a track that straddles, runs along or passes
+through the pad, a shallower entry, an arc, a via or pour touching the pad
+(ring copper beside the opening), a positive expansion ring wider than
+``u``, solder-mask-defined, custom and padstack pads, pads with no net, and
+any different-net copper all keep their measured verdict.
 ``exposed_beyond_owner_mm2`` and ``beside_owner_excess_mm2`` record the two
 measured quantities. "Same net" is the net pcbnew loads, which assigns a
 floating stub touching one pad to that pad's net. Evidence:

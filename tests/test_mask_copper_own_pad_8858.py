@@ -161,11 +161,35 @@ def _poke_segment(pad, poke, width=0.2, y=None, owner_kind="pad:rect"):
 @pytest.mark.parametrize("poke", [0.01, 0.02, 0.05])
 @pytest.mark.parametrize(
     "pad,y,owner_kind",
-    [(PAD, 0.5, "pad:rect"), (PAD, 0.5, "pad:roundrect"), (OVAL, 0.25, "pad:oval")],
+    [(PAD, 0.5, "pad:rect"), (OVAL, 0.25, "pad:oval")],
 )
 def test_end_cap_poking_past_the_pad_edge_is_info(pad, y, owner_kind, poke):
     """Both authored ends on the pad; only the round cap pokes out (issue #9261)."""
     result, m = _only(_poke_segment(pad, poke, y=y, owner_kind=owner_kind))
+    assert m.disposition == "within_own_pad"
+    assert _severity(result) == "info"
+    assert result.passed
+
+
+def _roundrect(radius):
+    """A true roundrect pad: a box with *radius* corner arcs (issue #9261)."""
+    return box(0, 0, 1, 1).buffer(-radius, join_style="round").buffer(radius, join_style="round")
+
+
+@pytest.mark.parametrize("poke", [0.01, 0.02, 0.05])
+@pytest.mark.parametrize("radius", [0.25, 0.15])
+def test_end_cap_poking_past_the_roundrect_corner_arc_is_info(radius, poke):
+    """The roundrect row's shape class: a cap poking past a real corner arc.
+
+    The track leaves along the 45-degree diagonal toward corner (1, 1); both
+    authored ends sit strictly inside the pad and only the round cap crosses
+    the corner arc (issue #9261's measured roundrect-corner case).
+    """
+    reach = radius + poke - 0.1  # cap tip lands *poke* past the arc
+    end = (1 - radius + reach * math.sqrt(0.5),) * 2
+    result, m = _only(
+        _segment((0.5, 0.5), end, 0.2, pad=_roundrect(radius), owner_kind="pad:roundrect")
+    )
     assert m.disposition == "within_own_pad"
     assert _severity(result) == "info"
     assert result.passed
