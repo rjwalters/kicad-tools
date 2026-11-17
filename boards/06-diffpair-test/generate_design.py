@@ -3514,10 +3514,13 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # band guard (the drain for this board's via-banded population) is OFF.
     # Resolved from the profile table via the stitcher's helper, never a
     # literal, matching ``route_cmd``'s own resolution idiom.
-    from kicad_tools.cli.stitch_cmd import _resolve_mfr_pad_gap_edge
+    from kicad_tools.cli.stitch_cmd import _resolve_mfr_pad_gap_edge, _resolve_mfr_trace_gap_edge
     from kicad_tools.router import DesignRules, DifferentialPairConfig, load_pcb_for_routing
 
     _same_net_pad_gap_edge_mm = _resolve_mfr_pad_gap_edge("jlcpcb", 4, 1.0)
+    # Issue #9208: and the trace-population edge (jlcpcb 4-layer 1oz ->
+    # 0.1016 mm) for the via-annulus-vs-own-trace twin of that guard.
+    _same_net_trace_gap_edge_mm = _resolve_mfr_trace_gap_edge("jlcpcb", 4, 1.0)
     from kicad_tools.router.optimizer import (
         GridCollisionChecker,
         OptimizationConfig,
@@ -3576,6 +3579,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # jlcpcb 4-layer 1oz stackup, so the C++ pathfinder's via seats stay
         # out of the band ``kct check`` grades (``physical_copper_gap``).
         same_net_pad_gap_band_edge_mm=_same_net_pad_gap_edge_mm,
+        same_net_trace_gap_band_edge_mm=_same_net_trace_gap_edge_mm,
     )
 
     # Power and ground nets are handled via copper pours on the inner planes
