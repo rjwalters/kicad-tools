@@ -210,7 +210,7 @@ def test_intent_requires_exact_binding_identity_layer_and_direct_connection(mode
     )
     assert result.passed is (mode == "valid")
     assert result.intent_audit[0]["accepted"] is (mode == "valid")
-    if mode in net_kwargs:
+    if net_kwargs:
         assert result.intent_audit[0]["reason"] == "connection must share an identified net"
         # A rejected declaration must not suppress the exposure it names.
         assert [m.disposition for m in result.measurements] == ["violation"]
