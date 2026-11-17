@@ -359,7 +359,12 @@ namespace router {
 // v66 (Issue #8994): ``DesignRules::same_net_pad_gap_band_edge_mm`` + the
 // same-net pad slit-band refusal in both A* via checks.  A v65 .so seats
 // via annuli in the (0, edge) slit band beside their own SMD pads.
-constexpr int ROUTER_CPP_BUILD_VERSION = 66;
+// v67 (Issue #8999): ``GridCell::airwire_cost`` + ``Grid3D::clear_airwire_costs``
+// / ``set_airwire_cells`` -- the prospective airwire-separation term summed
+// inside ``Grid3D::get_negotiated_cost``.  A v66 .so prices negotiated cells
+// without the term (and lacks the two verbs), so Python/C++ cost parity
+// breaks silently; it must be rejected.
+constexpr int ROUTER_CPP_BUILD_VERSION = 67;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -382,6 +387,11 @@ struct GridCell {
     int16_t usage_count = 0;
     float history_cost = 0.0f;
     float avoidance_cost = 0.0f;
+    // Issue #8999: prospective airwire-separation cost (already weighted by
+    // the flag-supplied scalar on the Python side; 0.0 when the flag is
+    // off, so the negotiated cost is unchanged).  Mirrors the Python
+    // ``RoutingGrid._airwire_cost`` crossing-count plane.
+    float airwire_cost = 0.0f;
     bool is_obstacle = false;
     bool is_zone = false;
     bool pad_blocked = false;

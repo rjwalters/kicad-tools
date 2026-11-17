@@ -67,6 +67,16 @@ OWNED_BY_ONE_INVOCATION = {
 COMPLETE_PICKS_ITS_OWN = {
     "--auto-layers",
     "--no-auto-layers",
+    # Issue #8999: the airwire-separation term is priced only by the
+    # negotiated grid A* (RoutingGrid.get_negotiated_cost plus the C++ cost
+    # sites fed by refresh_airwire_cost), whose only call sites are
+    # _route_net_negotiated and _route_net_with_corridor -- both on the grid
+    # path route_net dispatches past when _strategy == "lattice" (core.py
+    # returns via _route_net_lattice first).  The lattice netset negotiation
+    # (LatticePathfinder.route_netset) is geometry-only: zero references to
+    # the airwire plane or the negotiated cost.  Forwarding the weight to the
+    # completion pass would be a silent no-op.
+    "--airwire-separation-weight",
     "--grid",
     "--grid-strategy",
     "--max-cells",
