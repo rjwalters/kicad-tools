@@ -6360,12 +6360,6 @@ def run_post_route_drc(
     # reporting a false FAILED on legal tier-gated geometry (e.g. via-in-pad).
     _write_fab_profile_sidecar(output_path, manufacturer, quiet=quiet)
 
-    # Issue #9003: the detour-ratio report + sidecar, when the run opted in
-    # with --report-detour-ratio.  A no-op otherwise (the probe pre-pass
-    # never ran, so the router holds no records).  Prints even under
-    # --quiet, matching --report-stage-quality's explicit-opt-in rule.
-    _report_detour_ratio(output_path, router)
-
     # Issue #3919: emit the ``.kicad_pro`` + ``.kicad_dru`` constraint
     # sidecars from the manufacturer profile *before* the geometric DRC
     # cross-check below, so ``kicad-cli pcb drc`` auto-loads the intended

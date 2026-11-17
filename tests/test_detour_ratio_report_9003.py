@@ -261,6 +261,33 @@ class TestNonPerturbation:
         assert payload["schema"] == "kct-detour-ratio/1"
         assert payload["summary"]["probed"] >= 4
 
+    def test_cli_default_drc_path_reports_once(
+        self, board_path: Path, tmp_path: Path, capsys
+    ) -> None:
+        """Default path (no ``--skip-drc``): exactly one report block.
+
+        The four post-save ``_report_detour_ratio`` calls already cover
+        every flow that reaches DRC; the extra call inside
+        ``run_post_route_drc`` printed the block and rewrote the sidecar a
+        second time on every default run (issue #9047).
+        """
+        out = tmp_path / "drc.kicad_pcb"
+        argv = [
+            str(board_path),
+            "-o",
+            str(out),
+            "--strategy",
+            "basic",
+            "--seed",
+            "7",
+            "--report-detour-ratio",
+        ]
+        route_cmd.main(argv)
+
+        captured = capsys.readouterr().out
+        assert captured.count("=== Detour ratio") == 1
+        assert (tmp_path / "drc.detour_ratio.json").exists()
+
     def test_plain_route_all_identical_and_journal_untouched(self, board_path: Path) -> None:
         """Plain ``route_all`` driver: identical copper, identical journal."""
         from kicad_tools.router.io import load_pcb_for_routing
