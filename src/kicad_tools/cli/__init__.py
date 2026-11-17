@@ -35,7 +35,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools pipeline <pcb>          - End-to-end repair pipeline for existing PCBs
     kicad-tools create-pcb <schematic>  - Create PCB from schematic
     kicad-tools readiness <board>      - Manufacturing-readiness sign-off + readiness.json
-    kicad-tools submit-jlcpcb <bundle> - Prepare JLCPCB PCBA submission (never orders)
+    kicad-tools submit-jlcpcb <bundle> - Prepare JLCPCB PCBA submission (orders only via opt-in attended --checkout)
     kicad-tools tapeout-sign-off <bundle> - Record human sign-off in a tapeout manifest
     kicad-tools init <project>         - Initialize project with manufacturer rules
     kicad-tools run <script>           - Run Python script with kicad-tools interpreter

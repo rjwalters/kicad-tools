@@ -35,6 +35,9 @@ def test_acute_corner_flagged(tmp_path):
     v = _check(tmp_path, _seg((0, 0), (10, 0)), _seg((10, 0), (0, 3)))
     assert [(x.rule_id, x.severity) for x in v] == [("sharp_trace_corner", "warning")]
     assert v[0].actual_value < 90 and v[0].layer == "F.Cu"
+    # Issue #9037: a two-segment bend is the fab-equivalent population.
+    assert v[0].corner_class == "bend"
+    assert "junction" not in v[0].message
 
 
 def test_clean_corners_not_flagged(tmp_path):
@@ -169,6 +172,60 @@ def test_stacked_duplicate_segments_reported_once(tmp_path):
         _seg((10, 0), (0, 3)),
     )
     assert len(v) == 1
+    # Duplicated legs count once: the vertex is still a bend, not a junction.
+    assert v[0].corner_class == "bend"
+
+
+# Issue #9037: three same-net segments meeting at one vertex (headings 180,
+# 163.3 and 90 deg from the vertex; both acute pairs have open wedges).
+def _junction_segs(layer="F.Cu", net=1):
+    return (
+        _seg((0, 0), (10, 0), layer=layer, net=net),
+        _seg((10, 0), (0, 3), layer=layer, net=net),
+        _seg((10, 0), (10, 10), layer=layer, net=net),
+    )
+
+
+def test_open_air_junction_reported_with_junction_sub_type(tmp_path):
+    # The table's "junction of 3 or more segments, in the open" class: still
+    # reported (operator ruling on #8848) but separable from a bend.
+    v = _check(tmp_path, *_junction_segs())
+    assert len(v) == 1
+    assert v[0].corner_class == "junction"
+    assert v[0].actual_value < 90
+    assert "3-segment junction" in v[0].message
+
+
+def test_inner_layer_junction_still_reported(tmp_path):
+    # Issue #9037 decision: inner-layer acute corners are in scope (the fab
+    # never observed one; the angle geometry is layer-independent and these
+    # are warnings).  Through-via burial would still exempt the vertex.
+    v = _check(tmp_path, *_junction_segs(layer="B.Cu"))
+    assert len(v) == 1
+    assert v[0].layer == "B.Cu" and v[0].corner_class == "junction"
+
+
+def test_corner_class_survives_serialization(tmp_path):
+    # Issue #9037 review: ``corner_class`` must reach ``kct check --json``
+    # (``DRCViolation.to_dict()``) or no machine consumer can gate the
+    # fab-equivalent bend subset -- the in-process attribute alone is not a
+    # contract.
+    bend = _check(tmp_path, _seg((0, 0), (10, 0)), _seg((10, 0), (0, 3)))[0]
+    assert bend.to_dict()["corner_class"] == "bend"
+    junction = _check(tmp_path, *_junction_segs())[0]
+    assert junction.to_dict()["corner_class"] == "junction"
+    # Attribution-only, in the serialized form too: waiver identity never
+    # moves.
+    assert "corner_class" not in bend.key
+
+
+def test_junction_vertex_inside_pad_not_flagged(tmp_path):
+    # The table's "junction of 3 or more segments, vertex inside a pad"
+    # class: pad copper fills the wedge, no acid trap (#8848 containment,
+    # pinned here for the junction case since #9037).
+    p = tmp_path / "b.kicad_pcb"
+    p.write_text(_board(*_junction_segs(), _long_pad()))
+    assert SharpTraceCornerRule().check(PCB.load(str(p)), None).violations == []
 
 
 # The three vertices JLC's DFM tool flagged as "Sharp trace corner" on the

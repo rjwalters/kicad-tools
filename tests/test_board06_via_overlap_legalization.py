@@ -75,7 +75,7 @@ def test_legalizer_repairs_partial_drill_overlaps_without_changing_fixture(tmp_p
     ]
 
 
-def write_overlap_board(path, count=12, pad_size=2):
+def write_overlap_board(path, count=12, pad_size=2, via_dx=1.05):
     nodes = [
         "(kicad_pcb (version 20240108) (generator pcbnew)",
         '(general (thickness 1.6)) (layers (0 "F.Cu" signal) (31 "B.Cu" signal))',
@@ -92,7 +92,7 @@ def write_overlap_board(path, count=12, pad_size=2):
                 f'(property "Reference" "R{net}") '
                 f'(pad "1" smd rect (at 0 0) (size {pad_size} {pad_size}) (layers "F.Cu" "F.Mask") '
                 f'(net {net} "N{net}")))',
-                f"(via (at {x + 1.05} {y}) (size .6) (drill .25) "
+                f"(via (at {x + via_dx} {y}) (size .6) (drill .25) "
                 f'(layers "F.Cu" "B.Cu") (net {net}) '
                 f'(uuid "00000000-0000-4000-8000-{net:012d}"))',
             ]
@@ -109,6 +109,68 @@ def test_legalizer_does_not_stop_after_eight_repairs(tmp_path, recipe):
     assert not checker.check(PCB.load(path), rules).violations
     assert len(PCB.load(path).vias) == 12
     assert not segment_angle_census(path)[1]
+
+
+def _via_pad_gap(path, pad_size=2):
+    """Annulus-to-own-pad gap (mm) of the single via on a one-net board.
+
+    ``write_overlap_board`` puts net 1's pad at (110, 60).
+    """
+    from shapely.geometry import Point, box
+
+    text = path.read_text()
+    vx, vy = map(float, re.search(r"\(via \(at ([\d.]+) ([\d.]+)\)", text).groups())
+    size = float(re.search(r"\(via .*?\(size ([\d.]+)\)", text).group(1))
+    half = pad_size / 2
+    return (
+        Point(vx, vy).buffer(size / 2).distance(box(110 - half, 60 - half, 110 + half, 60 + half))
+    )
+
+
+def test_relocation_walks_out_of_same_net_slit_band(tmp_path, recipe, monkeypatch):
+    """Issue #9114: a relocated via must not open a (0, edge) same-net slit."""
+    pad_edge, _trace_edge = recipe._same_net_band_edges()
+    assert pad_edge > 0  # jlcpcb 4layer_1oz resolves a pad_spacing edge
+
+    # Control: with the band disabled the ring seats the via at +0.9 mm east,
+    # an annulus gap of ~0.05 mm to its own pad -- inside (0, edge).
+    control = tmp_path / "control.kicad_pcb"
+    write_overlap_board(control, count=1, pad_size=2, via_dx=0.45)
+    monkeypatch.setattr(recipe, "_same_net_band_edges", lambda: (0.0, 0.0))
+    assert recipe._legalize_signal_vias(control) == 1
+    assert 0 < _via_pad_gap(control) < pad_edge
+
+    monkeypatch.undo()
+    path = tmp_path / "band.kicad_pcb"
+    write_overlap_board(path, count=1, pad_size=2, via_dx=0.45)
+    assert recipe._legalize_signal_vias(path) == 1
+    gap = _via_pad_gap(path)
+    assert gap <= 1e-6 or gap >= pad_edge
+    assert (
+        not ViaInPadRule()
+        .check(PCB.load(path), SimpleNamespace(via_in_pad_supported=False))
+        .violations
+    )
+
+
+def test_grid_escape_seat_is_graded_through_the_band(recipe):
+    """Issue #9114: the same predicate rejects in-band seats, accepts both sides."""
+    from shapely.geometry import LineString, Point
+
+    pad = [(-1.0, -1.0, 1.0, 1.0)]
+    dia = 0.5
+    # Annulus edge 0.05 from the pad (in band) / touching / clear of the band.
+    assert not recipe._same_net_band_seat_ok(1.3, 0, dia, [], pad, 0.15, 0.15)
+    assert recipe._same_net_band_seat_ok(1.25, 0, dia, [], pad, 0.15, 0.15)
+    assert recipe._same_net_band_seat_ok(1.5, 0, dia, [], pad, 0.15, 0.15)
+    # Same-net segment / via copper grade on the trace edge.
+    seg = LineString([(0, 1.65), (3, 1.65)]).buffer(0.075)
+    assert not recipe._same_net_band_seat_ok(1.3, 2.0, dia, [seg], [], 0.15, 0.15)
+    assert not recipe._same_net_band_seat_ok(
+        0, 0, dia, [Point(0.65, 0).buffer(0.3)], [], 0.15, 0.15
+    )
+    # Edge 0 (profile without pad_spacing) leaves behavior unchanged.
+    assert recipe._same_net_band_seat_ok(1.3, 0, dia, [seg], pad, 0.0, 0.0)
 
 
 def test_legalizer_reports_overlap_without_a_legal_escape(tmp_path, recipe):
