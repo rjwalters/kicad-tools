@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import platform
+import stat
 
 import pytest
 
@@ -365,7 +366,9 @@ def test_checkout_flags_refused_before_anything(env, monkeypatch, capsys, extra,
 
 def _site_harness(env, monkeypatch, tmp_path):
     from kicad_tools.export import submission_review
+    from kicad_tools.manufacturers import jlc_ledger
 
+    monkeypatch.setattr(jlc_ledger, "default_ledger_dir", lambda: tmp_path / "home-orders")
     write_manifest(env)
     _stock(monkeypatch, {"C1": 100, "C2": 100})
     monkeypatch.setattr(drv, "require_attended", lambda: None)
@@ -425,10 +428,17 @@ def test_checkout_runs_after_the_cart_and_writes_a_receipt(env, monkeypatch, tmp
         return pay.CheckoutResult("rehearsed", kw["plan_sha256"], str(kw["approval"].total))
 
     monkeypatch.setattr(pay, "run_checkout", fake_checkout)
-    extra = ["--checkout", "--approve-total", "USD 1.00", "--ledger-dir", str(tmp_path / "l")]
+    extra = ["--checkout", "--approve-total", "USD 1.00"]
     assert cmd.main(_argv(env, *args, *extra)) == 0
     assert seen["pay"] is False and seen["card_file"] is None  # rehearsal is the default
-    receipt = json.loads((env["out"] / "checkout-receipt.json").read_text())
+    assert seen["ledger"].directory == tmp_path / "home-orders"  # always the default ledger
+    # receipt and checkout screenshots live beside the ledger, never inside -o
+    assert not list(env["out"].rglob("checkout-receipt.json"))
+    (path,) = (tmp_path / "home-orders" / "checkout").glob("*/checkout-receipt.json")
+    assert seen["shots_dir"] == path.parent
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    receipt = json.loads(path.read_text())
     assert receipt["state"] == "rehearsed" and receipt["approved_total"] == "USD 1.00"
     assert receipt["selectors_verified"] is False
     assert "rehearsed to the pay button" in capsys.readouterr().out
@@ -452,12 +462,34 @@ def test_checkout_failures_exit_nonzero_with_state(env, monkeypatch, tmp_path, e
         raise exc
 
     monkeypatch.setattr(pay, "run_checkout", raise_)
-    extra = ["--checkout", "--auto", "--pay", "--ledger-dir", str(tmp_path / "l")]
+    extra = ["--checkout", "--auto", "--pay"]
     assert cmd.main(_argv(env, *args, *extra)) == rc
-    receipt = json.loads((env["out"] / "checkout-receipt.json").read_text())
-    assert receipt["state"] == state
+    (path,) = (tmp_path / "home-orders" / "checkout").glob("*/checkout-receipt.json")
+    assert json.loads(path.read_text())["state"] == state
 
 
 def test_clear_unconfirmed_payment_refuses_unattended(env, capsys):
     assert cmd.main(_argv(env, "--clear-unconfirmed-payment", "a" * 64)) == 2
     assert "interactive terminal" in capsys.readouterr().err
+
+
+def test_ledger_location_cannot_be_moved_from_the_cli(env, capsys):
+    with pytest.raises(SystemExit) as exc:
+        cmd.main(_argv(env, "--checkout", "--auto", "--ledger-dir", "/tmp/fresh"))
+    assert exc.value.code == 2
+    assert "unrecognized arguments: --ledger-dir" in capsys.readouterr().err
+
+
+def test_checkout_abort_output_is_terminal_safe(env, monkeypatch, tmp_path, capsys):
+    from kicad_tools.manufacturers import jlc_payment as pay
+
+    args = _site_harness(env, monkeypatch, tmp_path)
+    monkeypatch.setattr(pay, "require_attended_checkout", lambda **k: None)
+
+    def raise_(*a, **k):
+        raise pay.CheckoutAbort("open-checkout", "page said \x1b[2J\x1b]0;pwned\x07")
+
+    monkeypatch.setattr(pay, "run_checkout", raise_)
+    assert cmd.main(_argv(env, *args, "--checkout", "--auto")) == 2
+    cap = capsys.readouterr()
+    assert "\x1b" not in cap.err + cap.out and "\x07" not in cap.err + cap.out

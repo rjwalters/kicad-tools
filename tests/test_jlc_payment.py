@@ -60,7 +60,18 @@ class FakeCheckoutPage:
     """Synthetic page. ``screenshot`` dumps the full state, filled values included,
     so a screenshot taken with card data in the page is caught by the leak scan."""
 
-    def __init__(self, state, *, after_pay="confirm", total_after_quote=None, fill_error=False):
+    def __init__(
+        self,
+        state,
+        *,
+        after_pay="confirm",
+        total_after_quote=None,
+        fill_error=False,
+        checkout_lands_on=CHECKOUT,
+        click_error="",
+    ):
+        self.checkout_lands_on = checkout_lands_on
+        self.click_error = click_error
         self.state = copy.deepcopy(state)
         self.url = state["url"]
         self.log: list[tuple] = []
@@ -93,13 +104,20 @@ class FakeCheckoutPage:
 
     def click(self, sel):
         self.log.append(("click", sel))
+        if self.click_error and sel == S["checkout_button"]:
+            raise RuntimeError(self.click_error)
         if sel == S["checkout_button"]:
-            self.url = CHECKOUT
+            self.url = self.checkout_lands_on
         elif sel == S["pay_button"]:
             if self.after_pay == "raise":
                 raise TimeoutError("navigation timeout")
+            if self.after_pay == "raise-after-navigate":
+                self.url = CONFIRMED  # the payment went through, then the wait timed out
+                raise TimeoutError("navigation timeout")
             if self.after_pay == "redirect":
                 self.url = "https://jlcpcb.com/quote"
+            elif self.after_pay == "stay":
+                pass
             else:
                 self.url = CONFIRMED
 
@@ -126,7 +144,10 @@ class FakeCheckoutPage:
 class Answers:
     """Scripted operator: answers 'y' to unverified-step prompts by default."""
 
-    def __init__(self, typed_total=None, start="checkout", unverified="y", cvc="done"):
+    def __init__(
+        self, typed_total=None, start="checkout", unverified="y", cvc="done", on_step=None
+    ):
+        self.on_step = on_step or {}
         self.prompts: list[str] = []
         self.typed_total = typed_total
         self.start = start
@@ -138,6 +159,9 @@ class Answers:
         if prompt.startswith("Attended checkout"):
             return self.start
         if prompt.startswith("[unverified step"):
+            step = prompt.split("]")[0].removeprefix("[unverified step: ")
+            if step in self.on_step:
+                return self.on_step[step]()
             return self.unverified
         if prompt.startswith("To approve"):
             return self.typed_total or ""
@@ -158,7 +182,6 @@ def _run(tmp_path, page, *, approval="USD 123.45", pay_=True, answers=None, **kw
         say=said.append,
         shots_dir=tmp_path / "out" / "site-screenshots",
         pay=pay_,
-        attended=lambda: None,
         sleep=lambda s: None,
         **kw,
     )
@@ -174,6 +197,21 @@ def _write_card(directory: Path, mode=0o600, cvc=CARD_CVC) -> Path:
     )
     os.chmod(path, mode)
     return path
+
+
+#: Tests that exercise the REAL attended check (everything else replaces it).
+_REAL_ATTENDED = {
+    "test_real_attended_check_refuses_under_the_test_suite",
+    "test_run_checkout_checks_attended_before_touching_anything",
+    "test_run_checkout_has_no_parameter_to_skip_the_attended_check",
+}
+
+
+@pytest.fixture(autouse=True)
+def _attended_seam(request, monkeypatch):
+    """Test-only seam: the module-level check is replaced; run_checkout has no skip parameter."""
+    if request.node.originalname not in _REAL_ATTENDED:
+        monkeypatch.setattr(pay, "require_attended_checkout", lambda: None)
 
 
 @pytest.fixture
@@ -305,6 +343,7 @@ def test_every_step_is_confirmed_while_selectors_are_unverified(tmp_path):
         "[unverified step: payment-method",
         "[unverified step: read-total",
         "[unverified step: pay",
+        "[unverified step: confirmation",
     ]
 
 
@@ -372,7 +411,7 @@ def test_run_checkout_checks_attended_before_touching_anything(tmp_path):
             shots_dir=tmp_path / "shots",
             pay=True,
             sleep=lambda s: None,
-        )  # default attended= is the real check
+        )  # the real check, which refuses under pytest
     assert exc.value.step == "attended"
     assert page.log == []
 
@@ -514,6 +553,7 @@ def test_card_data_never_reaches_any_artifact_log_or_output(
         )
     failures.append("".join(traceback.format_exception(exc.value)))
     assert "details withheld" in failures[-1]
+    assert exc.value.__context__ is None and exc.value.__cause__ is None
     cap = capsys.readouterr()
     text = cap.out + cap.err + "\n".join(said) + caplog.text + "\n".join(failures)
     assert [n for n in needles if n in text] == []
@@ -553,7 +593,7 @@ def test_saved_method_is_the_default_and_types_nothing(tmp_path):
 # --- 4. ordered only from a confirmation page ------------------------------
 
 
-@pytest.mark.parametrize("variant", ["redirect", "no-marker", "raise"])
+@pytest.mark.parametrize("variant", ["redirect", "no-marker", "raise", "raise-after-navigate"])
 def test_no_confirmation_page_records_unconfirmed_not_ordered(tmp_path, variant):
     page = FakeCheckoutPage(_state(), after_pay=variant)
     ledger = OrderLedger(tmp_path / "ledger")
@@ -637,7 +677,6 @@ def test_actions_are_paced_and_nothing_is_repeated(tmp_path):
         say=lambda s: None,
         shots_dir=tmp_path / "shots",
         pay=True,
-        attended=lambda: None,
         sleep=sleeps.append,
     )
     assert page.clicks == [S["checkout_button"], S["saved_payment_method"], S["pay_button"]]
@@ -645,13 +684,34 @@ def test_actions_are_paced_and_nothing_is_repeated(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "url", ["https://evil.example/checkout", "https://jlcpcb.com/api/pay", "https://jlcpcb.com/x"]
+    "url, why",
+    [
+        ("https://evil.example/checkout", "allowed hosts"),
+        ("https://evil.example/user-center/checkout", "allowed hosts"),
+        ("https://evil.example/shoppingCart", "allowed hosts"),
+        ("https://jlcpcb.com/api/pay", "robots.txt"),
+        ("https://jlcpcb.com/smtOrder/downloadNoMatchBomList", "robots.txt"),
+        # inside the allowed /shoppingCart prefix: only STILL_DISALLOWED stops it
+        ("https://cart.jlcpcb.com/shoppingCart/smtGood/downloadNoMatchBomList", "robots.txt"),
+        ("https://jlcpcb.com/x", "expected checkout path"),
+    ],
 )
-def test_unexpected_page_aborts_before_paying(tmp_path, url):
+def test_unexpected_page_aborts_before_paying(tmp_path, url, why):
     page = FakeCheckoutPage(_state())
     page.url = url
-    with pytest.raises(pay.CheckoutAbort):
+    with pytest.raises(pay.CheckoutAbort) as exc:
         _run(tmp_path, page)
+    assert why in exc.value.reason
+    assert page.clicks == []
+
+
+def test_url_is_checked_after_each_action(tmp_path):
+    bad = "https://cart.jlcpcb.com/shoppingCart/smtGood/downloadNoMatchBomList"
+    page = FakeCheckoutPage(_state(), checkout_lands_on=bad)
+    with pytest.raises(pay.CheckoutAbort) as exc:
+        _run(tmp_path, page)
+    # caught by the post-action check of the step that navigated, not the next step
+    assert exc.value.step == "open-checkout" and "robots.txt" in exc.value.reason
     assert S["pay_button"] not in page.clicks
 
 
@@ -664,5 +724,171 @@ def test_payment_module_has_no_http_client_or_navigation():
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module.split(".")[0])
     assert not imported & {"requests", "httpx", "urllib3", "aiohttp", "http", "socket"}
-    source = Path(pay.__file__).read_text(encoding="utf-8")
-    assert ".goto(" not in source and "while " not in source
+    assert not any(isinstance(node, ast.While) for node in ast.walk(tree))  # no polling
+    attrs = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+    assert not attrs & {"goto", "request", "fetch", "urlopen", "evaluate", "reload"}
+
+
+# --- Judge round 1 (PR #9101): guards that each need a failing test ----------
+
+
+def test_total_is_reread_after_the_pay_prompt_immediately_before_the_click(tmp_path):
+    """The operator may pause at the pay prompt; a change during that pause must stop."""
+    page = FakeCheckoutPage(_state())
+
+    def change_total():
+        page.state["elements"][S["order_total"]]["text"] = "$130.00"
+        return "y"
+
+    ledger = OrderLedger(tmp_path / "ledger")
+    with pytest.raises(pay.CheckoutAbort) as exc:
+        _run(tmp_path, page, ledger=ledger, answers=Answers(on_step={"pay": change_total}))
+    assert exc.value.step == "re-check-total" and "USD 130.00" in exc.value.reason
+    assert S["pay_button"] not in page.clicks
+    assert not ledger.path.exists()
+
+
+def test_attempt_record_is_fsynced_to_the_ledger_before_the_click(tmp_path, monkeypatch):
+    ledger = OrderLedger(tmp_path / "ledger")
+    page = FakeCheckoutPage(_state())
+    order: list[str] = []
+    real_fsync = os.fsync
+
+    def fsync(fd):
+        if os.fstat(fd).st_ino == ledger.path.stat().st_ino:
+            order.append("fsync-ledger")
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    original = page.click
+
+    def click(sel):
+        if sel == S["pay_button"]:
+            order.append("pay-click")
+        original(sel)
+
+    page.click = click
+    _run(tmp_path, page, ledger=ledger)
+    assert order[:2] == ["fsync-ledger", "pay-click"]
+
+
+def test_ledger_is_rechecked_under_the_lock_right_before_paying(tmp_path):
+    """A second run that ordered this plan mid-session (start check already passed)."""
+    ledger = OrderLedger(tmp_path / "ledger")
+    page = FakeCheckoutPage(_state())
+
+    def other_run_orders():
+        OrderLedger(tmp_path / "ledger").append("ordered", PLAN, order_id="Y2-9999999A")
+        return "y"
+
+    with pytest.raises(pay.CheckoutAbort) as exc:
+        _run(tmp_path, page, ledger=ledger, answers=Answers(on_step={"pay": other_run_orders}))
+    assert exc.value.step == "ledger" and "already ordered" in exc.value.reason
+    assert S["pay_button"] not in page.clicks
+    assert [e["event"] for e in ledger.events()] == ["ordered"]
+
+
+def test_a_concurrent_run_holding_the_ledger_lock_stops_this_one(tmp_path):
+    import fcntl
+
+    ledger = OrderLedger(tmp_path / "ledger")
+    ledger.directory.mkdir(parents=True)
+    lock = ledger.directory / "jlc-orders.lock"
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        page = FakeCheckoutPage(_state())
+        with pytest.raises(pay.CheckoutAbort) as exc:
+            _run(tmp_path, page, ledger=ledger)
+    finally:
+        os.close(fd)
+    assert "another kct checkout" in exc.value.reason and "nothing was paid" in exc.value.reason
+    assert S["pay_button"] not in page.clicks
+    assert not ledger.path.exists()
+
+
+def test_run_checkout_has_no_parameter_to_skip_the_attended_check(tmp_path):
+    import inspect
+
+    assert "attended" not in inspect.signature(pay.run_checkout).parameters
+    page = FakeCheckoutPage(_state())
+    with pytest.raises(pay.CheckoutAbort) as exc:
+        _run(tmp_path, page)  # the real module-level check, under pytest
+    assert exc.value.step == "attended" and page.log == []
+
+
+@pytest.mark.parametrize(
+    "env, needle",
+    [({"DEBUG": "pw:api"}, "DEBUG"), ({"DEBUG": "*"}, "DEBUG"), ({"PWDEBUG": "1"}, "PWDEBUG")],
+)
+def test_playwright_debug_logging_refuses(env, needle):
+    assert any(needle in r for r in _reasons(env))
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["USD -123.45", "USD +123.45", "USD −123.45", "(USD 123.45)", "USD 0.00", "USD 0"],
+)
+def test_signed_bracketed_or_zero_approval_is_refused(text):
+    with pytest.raises(pay.MoneyError):
+        pay.parse_approval(text)
+
+
+@pytest.mark.parametrize(
+    "text, indicator",
+    [
+        ("$-5.00", "USD"),
+        ("-$5.00", "USD"),
+        ("($5.00)", "USD"),
+        ("$0.00", "USD"),
+        ("$١٢.00", "USD"),  # Arabic-Indic digits
+        ("$１２.00", "USD"),  # fullwidth digits
+    ],
+)
+def test_signed_zero_or_non_ascii_page_total_is_refused(text, indicator):
+    with pytest.raises(pay.MoneyError):
+        pay.parse_page_money(text, indicator)
+
+
+@pytest.mark.parametrize("text", ["USD \u0661\u0662.00", "USD 1\uff12.00", "USD 12.0\u0663"])
+def test_non_ascii_digits_are_refused_by_name(text):
+    with pytest.raises(pay.MoneyError, match="non-ASCII digits"):
+        pay.parse_approval(text)
+
+
+def test_control_characters_in_page_text_never_reach_the_terminal(tmp_path, capsys):
+    page = FakeCheckoutPage(_state(), click_error="boom \x1b[2J\x1b]0;owned\x07 " + "x" * 2000)
+    with pytest.raises(pay.CheckoutAbort) as exc:
+        _run(tmp_path, page)
+    text = str(exc.value) + exc.value.reason
+    assert "\x1b" not in text and "\x07" not in text
+    assert len(exc.value.reason) <= 400
+
+
+def test_operator_must_confirm_the_confirmation_page(tmp_path):
+    page = FakeCheckoutPage(_state())
+    ledger = OrderLedger(tmp_path / "ledger")
+    answers = Answers(on_step={"confirmation": lambda: "n"})
+    with pytest.raises(pay.PaymentUnconfirmed, match="did not confirm"):
+        _run(tmp_path, page, ledger=ledger, answers=answers)
+    assert ledger.plan_status(PLAN).state == "unresolved"
+    assert page.clicks.count(S["pay_button"]) == 1
+
+
+def test_unchanged_url_after_the_click_is_unconfirmed(tmp_path):
+    ledger = OrderLedger(tmp_path / "ledger")
+    with pytest.raises(pay.PaymentUnconfirmed, match="did not change"):
+        _run(tmp_path, FakeCheckoutPage(_state(), after_pay="stay"), ledger=ledger)
+    assert ledger.plan_status(PLAN).state == "unresolved"
+
+
+@pytest.mark.parametrize("path", ["/user-center/order/list", "/user-center/orders", "/pay"])
+def test_pre_payment_order_pages_are_not_confirmation_pages(path):
+    assert not any(path.startswith(p) for p in pay.CONFIRMATION_PATH_PREFIXES)
+
+
+def test_amount_pattern_matches_ascii_digits_only():
+    import re
+
+    assert pay._AMOUNT.flags & re.ASCII
+    assert pay._AMOUNT.findall("١٢.00") == []

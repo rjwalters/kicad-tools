@@ -256,3 +256,27 @@ def test_static_no_network_or_order_paths():
 
 def test_protocol_has_no_navigation():
     assert not hasattr(drv.SitePage, "goto") and not hasattr(drv.SitePage, "request")
+
+
+# --- Issue #8935 / PR #9101 review: the site driver itself never enters /user-center/ ---
+
+
+def test_site_driver_bans_api_and_user_center():
+    assert {"/api", "/user-center/"} <= set(drv.DISALLOWED_PATHS)
+
+
+@pytest.mark.parametrize(
+    "url", ["https://jlcpcb.com/user-center/orders", "https://jlcpcb.com/api/x"]
+)
+def test_site_driver_aborts_on_a_disallowed_page(state, inputs, tmp_path, url):
+    state["url"] = url
+    page = FakePage(state)
+    with pytest.raises(drv.DriverAbort) as exc:
+        run(page, inputs, tmp_path)
+    assert exc.value.step == "check-page" and "robots.txt" in exc.value.reason
+    assert page.log == []
+
+
+def test_abort_reasons_are_terminal_safe():
+    exc = drv.DriverAbort("step\x1b[1m", "page said \x1b[2J\x1b]0;t\x07 hi " + "y" * 1000)
+    assert "\x1b" not in str(exc) and "\x07" not in exc.reason and len(exc.reason) <= 400

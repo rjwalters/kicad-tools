@@ -50,6 +50,7 @@ import os
 import platform
 import sys
 import time
+import unicodedata
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -103,10 +104,27 @@ _SIDE_ENUM = {"top": "Top Side", "bottom": "Bottom Side", "both": "Both Sides"}
 _PCBA_TYPE = {True: "Standard", False: "Economic"}
 
 
+#: Longest page-derived string printed to the operator's terminal.
+PRINTABLE_LIMIT = 400
+
+
+def printable(text: object, limit: int = PRINTABLE_LIMIT) -> str:
+    """``text`` safe to print to a terminal: control/format characters replaced, length capped.
+
+    Page text is untrusted (issue #8935): an abort reason can quote it, and raw
+    ANSI or other control sequences would reach the operator's terminal.
+    """
+    out = "".join(
+        "?" if unicodedata.category(ch)[0] == "C" and ch != " " else ch for ch in str(text)
+    )
+    return out if len(out) <= limit else out[: limit - 3] + "..."
+
+
 class DriverAbort(RuntimeError):
     """A step assertion failed; nothing further was attempted and nothing submitted."""
 
     def __init__(self, step: str, reason: str, screenshot: str | None = None):
+        step, reason = printable(step), printable(reason)
         super().__init__(f"{step}: {reason}")
         self.step = step
         self.reason = reason

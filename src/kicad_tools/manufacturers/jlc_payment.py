@@ -20,27 +20,42 @@ Safety properties (each covered by a test in ``tests/test_jlc_payment.py``):
    shipping, tax, fees and coupons are in it), and again immediately before the
    pay click. Any mismatch raises :class:`CheckoutAbort` naming both numbers;
    nothing is clicked and nothing is recorded.
-2. **Attended only.** :func:`require_attended_checkout` refuses without an
-   interactive foreground terminal on stdin/stdout/stderr, and refuses when any
-   CI, scheduler, Loom, agent-harness or MCP marker is in the environment (see
-   :data:`UNATTENDED_ENV_MARKERS`, :data:`UNATTENDED_ENV_PREFIXES`). The
-   operator must also type ``checkout`` to start.
+2. **Attended only (a heuristic, not a security boundary).**
+   :func:`require_attended_checkout` refuses without an interactive foreground
+   terminal on stdin/stdout/stderr, when any CI, scheduler, Loom, agent-harness
+   or MCP marker is in the environment (see :data:`UNATTENDED_ENV_MARKERS`,
+   :data:`UNATTENDED_ENV_PREFIXES`), and when Playwright debug logging would
+   print typed values. The operator must also type ``checkout`` to start. This
+   stops accidental and routine automated use; it does NOT stop a determined
+   caller: a pty wrapper with a scrubbed environment passes the checks, and any
+   Python code can replace :func:`require_attended_checkout` in this module.
+   :func:`run_checkout` always calls it and takes no parameter to skip it.
 3. **Card data.** Optional; the saved site payment method is the default. A
    card file must be a regular file (not a symlink) owned by the user, mode
    exactly 600, and outside every git repository (:func:`check_card_file`). It
    is read only at the fill step (:func:`load_card`) into a :class:`CardSecret`
    that redacts itself under ``str``/``repr``/``format`` and refuses
-   pickling/JSON. Values are typed only into the fab's own page, never into the
+   pickling/JSON. After the fill the object drops its references
+   (:meth:`CardSecret.wipe`); Python strings are immutable, so the values stay
+   in process memory until garbage-collected, and they cross the CDP connection
+   to Chrome. Values are typed only into the fab's own page, never into the
    environment, process arguments, logs, receipts, ledger, screenshots (none
-   are taken once a card value is in the page) or exception messages.
+   are taken once a card value is in the page) or exception messages
+   (exceptions from the fill are replaced, with no chained context).
 4. **``ordered`` only from a confirmation page.** After the single pay click,
-   the order is recorded ``ordered`` only if the page is on a confirmation
-   path, shows the confirmation marker, a well-formed order id and a charged
-   total equal to the approval. Anything else records ``payment-unconfirmed``,
-   prints a check-your-account instruction and is never retried.
-5. **Idempotence.** :class:`.jlc_ledger.OrderLedger` is checked first; a plan
-   already ``ordered`` (or with an unresolved attempt) stops before any click.
-   ``payment-attempted`` is fsynced before the click.
+   the order is recorded ``ordered`` only if the URL changed to a confirmation
+   path, the page shows the confirmation marker, a well-formed order id and a
+   charged total equal to the approval, and (while selectors are unverified)
+   the operator confirms the page. Anything else records
+   ``payment-unconfirmed``, prints a check-your-account instruction and is
+   never retried.
+5. **Idempotence.** :class:`.jlc_ledger.OrderLedger` (under ``$HOME``) is
+   checked at the start and again, under an exclusive lock held across the
+   check and the write, immediately before ``payment-attempted`` is fsynced
+   and the pay button clicked. A plan already ``ordered`` (or with an
+   unresolved attempt) stops before any click. The protection is only as good
+   as the ledger file: deleting it or running with a different ``HOME``
+   removes it.
 6. **Request scope.** UI clicks only, one at a time, at human pace
    (:data:`HUMAN_PACE_S` between actions), no navigation, no HTTP client, no
    retries, no polling loops. URLs are checked after every step against
@@ -53,6 +68,17 @@ formats. While :data:`CHECKOUT_SELECTORS_VERIFIED` is ``False`` the leg stops
 at each step and asks the operator to confirm the page matches before it acts.
 The documented first run is a rehearsal (``--checkout`` without ``--pay``),
 which goes as far as the approved total and stops before the pay button.
+
+Known limitations:
+
+* **Time of check to time of use.** The total is re-read right before the
+  click, but the click is not bound to the DOM state that was read (Playwright
+  cannot read and click atomically). The window is the pay-button lookup, the
+  URL check and the ledger fsync: milliseconds, not zero.
+* **Rehearsal then pay.** The paying run drives the website leg again, which
+  saves another cart line. If the checkout then lists two lines, the run stops
+  at ``cart-lines`` and pays nothing; remove the rehearsal's line from the cart
+  in the browser and run again.
 """
 
 from __future__ import annotations
@@ -63,6 +89,7 @@ import re
 import stat
 import sys
 import time
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
@@ -100,7 +127,11 @@ CHECKOUT_SELECTORS: dict[str, str] = {
 #: here and only here, under the 2026-11-17 ruling.
 CHECKOUT_PATH_PREFIXES = ("/cart", "/shoppingCart", "/user-center/")
 #: Paths a completed-payment confirmation page may be on (UNVERIFIED).
-CONFIRMATION_PATH_PREFIXES = ("/user-center/order", "/user-center/pay-success", "/pay/success")
+CONFIRMATION_PATH_PREFIXES = (
+    "/user-center/order/success",
+    "/user-center/pay-success",
+    "/pay/success",
+)
 #: robots.txt-disallowed prefixes that stay forbidden even during checkout.
 STILL_DISALLOWED = (
     "/api",
@@ -150,7 +181,12 @@ UNATTENDED_ENV_PREFIXES = ("LOOM_", "CODEX_", "OPENCODE", "SQUAD_", "MCP_", "KCT
 
 
 class CheckoutAbort(DriverAbort):
-    """Stopped before the pay click; nothing was paid and nothing recorded."""
+    """Stopped before the pay click; nothing was paid and nothing recorded.
+
+    Like every :class:`DriverAbort`, the reason is passed through
+    ``jlc_site_driver.printable``, so page text cannot put control characters
+    on the operator's terminal.
+    """
 
 
 class PaymentUnconfirmed(DriverAbort):
@@ -186,10 +222,24 @@ def unattended_reasons(
             tty = False
         if not tty:
             reasons.append(f"{getattr(stream, 'name', 'a standard stream')} is not a terminal")
+    reasons += playwright_debug_reasons(env)
     if not reasons:
         check = foreground or _is_foreground
         if not check():
             reasons.append("the process is not in the terminal's foreground process group")
+    return reasons
+
+
+def playwright_debug_reasons(env: Mapping[str, str]) -> list[str]:
+    """Playwright debug logging prints ``fill()`` arguments, i.e. typed card values."""
+    reasons = []
+    debug = env.get("DEBUG", "")
+    if "pw:" in debug or "*" in debug:
+        reasons.append(
+            "DEBUG enables Playwright logging, which would print typed values; unset DEBUG"
+        )
+    if "PWDEBUG" in env:
+        reasons.append("PWDEBUG is set (Playwright inspector/logging); unset it")
     return reasons
 
 
@@ -214,7 +264,10 @@ def require_attended_checkout(**kwargs: Any) -> None:
 _SYMBOLS = {"US$": "USD", "€": "EUR", "£": "GBP"}
 _DOLLAR_CURRENCIES = ("USD", "CAD", "AUD", "NZD", "SGD", "HKD")
 _ISO = re.compile(r"\b([A-Z]{3})\b")
-_AMOUNT = re.compile(r"(?<![\d.,])(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?(?![\d.,])")
+_AMOUNT = re.compile(r"(?<![\d.,])(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?(?![\d.,])", re.ASCII)
+#: A sign, or an accounting-style bracket before the amount, means "not a plain charge".
+_SIGNS = ("-", "\u2212", "+", "\u2012", "\u2013", "\u2014", "\ufe63", "\uff0d")
+_BRACKETED = re.compile(r"\(\s*(?:[A-Z]{3}|US\$|[$\u20ac\u00a3])?\s*\d")
 
 
 @dataclass(frozen=True)
@@ -231,6 +284,10 @@ class MoneyError(ValueError):
 
 
 def _amount(text: str) -> Decimal:
+    if any(sign in text for sign in _SIGNS) or _BRACKETED.search(text):
+        raise MoneyError(f"refusing a signed or bracketed amount in {text!r}")
+    if any(unicodedata.category(ch) == "Nd" and not ch.isascii() for ch in text):
+        raise MoneyError(f"refusing non-ASCII digits in {text!r}")
     found = _AMOUNT.findall(text)
     if len(found) != 1:
         raise MoneyError(f"expected exactly one amount in {text!r}")
@@ -241,6 +298,8 @@ def _amount(text: str) -> Decimal:
         raise MoneyError(f"unreadable amount in {text!r}") from None
     if frac and len(frac) > 2:
         raise MoneyError(f"more than two decimals in {text!r}")
+    if value <= 0:
+        raise MoneyError(f"refusing a zero total in {text!r}")
     return value
 
 
@@ -294,8 +353,12 @@ def _inside_git_repo(path: Path) -> Path | None:
     return None
 
 
-def check_card_file(path: Path, *, getuid: Callable[[], int] = os.getuid) -> Path:
+def check_card_file(path: Path, *, getuid: Callable[[], int] | None = None) -> Path:
     """Refuse a card file that could be shared, committed or swapped. Reads no content."""
+    if getuid is None:
+        getuid = getattr(os, "getuid", None)
+        if getuid is None:
+            raise CardFileError("a card file needs a POSIX system (owner and mode checks)")
     raw = Path(path).expanduser()
     if not raw.is_absolute():
         raise CardFileError("the card file path must be absolute")
@@ -338,6 +401,11 @@ class CardSecret:
         return bool(self._values.get(key))
 
     def wipe(self) -> None:
+        """Drop this object's references to the values.
+
+        This does not erase them: Python strings are immutable, so the bytes
+        stay in process memory until garbage-collected.
+        """
         self._values.clear()
 
     def __repr__(self) -> str:
@@ -366,7 +434,7 @@ def _luhn_ok(number: str) -> bool:
     return total % 10 == 0
 
 
-def load_card(path: Path, *, getuid: Callable[[], int] = os.getuid) -> CardSecret:
+def load_card(path: Path, *, getuid: Callable[[], int] | None = None) -> CardSecret:
     """Re-check and read the card file now (at the moment of use). Errors name keys only."""
     from ..parts.jlc_env import parse_env_text
 
@@ -490,6 +558,7 @@ class _Checkout:
         self, name: str, action: Callable[[], dict[str, Any] | None], *, secret: bool = False
     ) -> dict[str, Any]:
         self.sleep(HUMAN_PACE_S)
+        failure = ""
         try:
             self.check_url(name)
             detail = action() or {}
@@ -498,12 +567,15 @@ class _Checkout:
         except DriverAbort:
             raise
         except Exception as exc:
-            reason = (
+            failure = (
                 "the page did not accept the step (details withheld: card data may be involved)"
                 if secret or self.secret_in_page
                 else f"{type(exc).__name__}: {exc}"
             )
-            raise CheckoutAbort(name, reason, self.shot(f"abort-{name}")) from None
+        if failure:
+            # Raised outside the except block, so the original exception (which
+            # may quote a typed value) is not even attached as __context__.
+            raise CheckoutAbort(name, failure, self.shot(f"abort-{name}"))
         record = {"name": name, "screenshot": self.shot(name), "detail": detail}
         self.steps.append(record)
         return detail
@@ -531,7 +603,6 @@ def run_checkout(
     pay: bool = False,
     card_file: Path | None = None,
     expected_cart_lines: int = 1,
-    attended: Callable[[], None] = require_attended_checkout,
     sleep: Callable[[float], None] = time.sleep,
 ) -> CheckoutResult:
     """From the saved cart to the approved total, then (only with ``pay``) one pay click.
@@ -539,7 +610,7 @@ def run_checkout(
     Raises :class:`CheckoutAbort` for any stop before the pay click and
     :class:`PaymentUnconfirmed` for a click without a recognised confirmation.
     """
-    attended()
+    require_attended_checkout()  # always; there is no parameter to skip it
     try:
         status = ledger.plan_status(plan_sha256)
     except LedgerError as exc:
@@ -664,15 +735,21 @@ def run_checkout(
     run.check_url("pay")
 
     try:
-        ledger.append(
-            "payment-attempted",
-            plan_sha256,
-            kind="pcb-pcba",
-            approved_total=str(approved),
-            driver_version=CHECKOUT_VERSION,
-        )
+        with ledger.locked():
+            # Re-check under the lock: another run may have paid since the start.
+            status = ledger.plan_status(plan_sha256)
+            if status.state != "not-ordered":
+                raise CheckoutAbort("ledger", describe_block(status, ledger))
+            ledger.append(
+                "payment-attempted",
+                plan_sha256,
+                kind="pcb-pcba",
+                approved_total=str(approved),
+                driver_version=CHECKOUT_VERSION,
+            )
     except LedgerError as exc:
         raise CheckoutAbort("ledger", f"{exc}; nothing was paid") from None
+    url_before_click = page.url
 
     def unconfirmed(reason: str) -> PaymentUnconfirmed:
         # "payment-attempted" is already on disk and blocks a re-run even if this fails.
@@ -698,6 +775,8 @@ def run_checkout(
     except Exception:
         raise unconfirmed("the pay click raised an error, so its effect is unknown") from None
 
+    if page.url == url_before_click:
+        raise unconfirmed("the page did not change after the pay click")
     parsed = urlparse(page.url)
     if parsed.hostname not in ALLOWED_HOSTS or not any(
         parsed.path.startswith(p) for p in CONFIRMATION_PATH_PREFIXES
@@ -718,6 +797,14 @@ def run_checkout(
         raise unconfirmed("no well-formed order number on the confirmation page")
     if charged != approved:
         raise unconfirmed(f"the confirmation shows {charged}, not the approved {approved}")
+    if not CHECKOUT_SELECTORS_VERIFIED:
+        answer = ask(
+            f"[unverified step: confirmation] JLC shows a completed payment: order "
+            f"{order_id}, charged {charged}.\nDoes the browser show exactly that? Type 'y' "
+            "to record it as ordered, anything else records it as unconfirmed: "
+        )
+        if answer.strip().lower() != "y":
+            raise unconfirmed("the operator did not confirm the confirmation page")
     try:
         ledger.append(
             "ordered",

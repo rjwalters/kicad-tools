@@ -701,8 +701,12 @@ pays only a total you approve exactly (to the cent and currency, after shipping,
 tax and fees), clicks pay once, and records "ordered" only from JLC's
 confirmation page. Rehearse first (`--checkout --auto` without `--pay` stops
 before the pay button). Its selectors are unverified until an attended run, so
-it asks you to confirm every step. Details and the card-file rules are in the
-`/kct:submit-jlcpcb` skill.
+it asks you to confirm every step. Its "attended" check (terminal, foreground,
+no CI/agent/MCP environment markers) is a heuristic against accidental
+automation, not a security boundary; agents must never run it. The guard
+against paying twice is an order ledger under `$HOME` (`~/.kct/orders/`):
+deleting it or changing `HOME` removes that guard. Details and the card-file
+rules are in the `/kct:submit-jlcpcb` skill.
 kct handles no website credentials. `--guided` prints the same steps as a manual
 checklist, and any failed assertion drops into it. The terms review and the
 2026-11-05 operator ruling behind this are in
