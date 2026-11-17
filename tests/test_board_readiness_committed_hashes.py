@@ -20,6 +20,17 @@ BOARDS_DIR = Path(__file__).resolve().parent.parent / "boards"
 # directory name.  Each entry cites the issue that owns the refresh; remove the
 # entry when that lands (strict xfail turns an unexpected pass into a failure).
 EXPECTED_STALE: dict[str, str] = {
+    # Issue #9058: PR #8848 kept its regenerated board 01 copper (VOUT
+    # sharp_trace_corner wedge removed) over main's, so the evidence main
+    # re-pinned for #8937's ``.kicad_dru`` no longer applies.  The refill
+    # under that DRU agrees with the saved copper; only the re-pin is
+    # missing, and every producer's ``kct check`` gate refuses on this
+    # host's mask_to_copper worker defect (#8939), which main's own board 01
+    # reproduces there.  Stale input: the routed ``.kicad_dru`` only.
+    "01-voltage-divider": (
+        "Issue #9058: board 01 copper from PR #8848 needs its readiness re-pinned "
+        "under #8937's .kicad_dru on a host where mask_to_copper completes (#8939)."
+    ),
     # Issue #8937 (PR #8955) re-emitted the routed ``.kicad_dru`` of the
     # boards whose recipes byte-reproduce it (01/05/06; the recipe-replay
     # tests pin the committed sidecar to the current emitter, so reverting
