@@ -22,6 +22,10 @@ pass to touch router copper, on every emission path).
 Detection parity
 ----------------
 
+Enforced, not just claimed: ``tests/router/test_acute_foldback_parity_8930.py``
+runs the real ``sharp_trace_corner`` rule and this detector over one shared
+geometry table (Issue #8930).
+
 The detector matches ``sharp_trace_corner``'s semantics so the router does not
 repair copper the gate never flags, nor leave copper it does:
 
@@ -29,7 +33,8 @@ repair copper the gate never flags, nor leave copper it does:
   -- i.e. ``[1, 89)`` degrees, with the constants **imported** from
   :mod:`kicad_tools.explain.checks.acid_trap`, never re-declared here;
 * the vertex is not buried under same-net pad/via copper
-  (:meth:`CopperDisc.covers`, inscribed circles);
+  (:meth:`CopperDisc.covers`, inscribed circles -- the rule also honours a
+  pad's full outline, see ``tests/router/test_acute_foldback_parity_8930.py``);
 * the wedge is **open** -- ``min(|VA|, |VB|) > s0`` with
   ``s0 = (w1 + w2) / (4 sin(theta / 2))`` -- plus the thin-leg-inside-wide-leg
   exemption (:func:`wedge_is_open`).
@@ -306,7 +311,9 @@ def wedge_is_open(
     ``s0 = (w1 + w2) / (4 sin(theta / 2))`` along the legs, so a leg shorter
     than that (a width-filled hairpin) leaves solid copper, and a thin leg
     lying entirely inside a wider one adds no notch.  Mirrors
-    ``sharp_trace_corner``'s ``_wedge_is_open`` exactly.
+    ``sharp_trace_corner``'s ``_wedge_is_open``; that equivalence is enforced by
+    ``tests/router/test_acute_foldback_parity_8930.py``, which drives both over
+    one shared geometry table (Issue #8930).
     """
     half = math.radians(angle_deg) / 2
     sin_half = math.sin(half)
@@ -737,6 +744,50 @@ def _plan_group(
     return repairs, repaired, len(unrepairable)
 
 
+def _clear_of_accepted(
+    path_is_clear: PathIsClear,
+    accepted_added: list[Segment],
+    clearance: float | None,
+) -> PathIsClear:
+    """*path_is_clear* extended to also veto copper added earlier in this plan.
+
+    The caller's collision model is bound to the pre-repair copper, so repair
+    N+1 cannot see the chord repair N added (Issue #8930).  ``accepted_added``
+    is read live (the planner appends to it between groups), and only
+    different-net, same-layer segments count -- same-net copper needs no
+    clearance and other layers cannot collide.  The arithmetic is the
+    collision checker's own (:func:`~.optimizer.collision._path_clear_of_segment`,
+    the shared clearance kernel), so this check and the one it extends cannot
+    disagree about the same pair by a rounding epsilon.
+    """
+    if clearance is None:
+        return path_is_clear
+
+    def guarded(
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        layer: Layer,
+        width: float,
+        net: int,
+    ) -> bool:
+        if not path_is_clear(x1, y1, x2, y2, layer, width, net):
+            return False
+        if not accepted_added:
+            return True
+        from .optimizer.collision import _candidate_shape, _path_clear_of_segment
+
+        candidate = _candidate_shape(x1, y1, x2, y2, width)
+        return all(
+            _path_clear_of_segment(candidate, other, clearance)
+            for other in accepted_added
+            if other.net != net and other.layer == layer
+        )
+
+    return guarded
+
+
 def plan_foldback_repairs(
     segments: Iterable[Segment],
     *,
@@ -745,12 +796,20 @@ def plan_foldback_repairs(
     is_mutable: Callable[[Segment], bool] | None = None,
     tolerance: float = JUNCTION_TOL,
     min_segment_length: float = MIN_REPAIR_SEGMENT_LENGTH,
+    clearance: float | None = None,
 ) -> FoldBackResult:
     """Plan fold-back repairs over *segments* without mutating anything.
 
     Like ``shorten_detour_pass``, a whole-corner rewrite is only safe with a
     collision model, so the pass is a **no-op** when *path_is_clear* is
     ``None``.
+
+    *path_is_clear* is a snapshot of the copper as it stood before planning
+    started, so on its own it cannot see the chords this very run has already
+    accepted.  Within one ``(net, layer)`` group that does not matter (same-net
+    copper needs no clearance), but across groups two repairs on different
+    nets of one layer could each clear the old copper and still land within
+    clearance of each other (Issue #8930).  Pass *clearance* to close that gap.
 
     Args:
         segments: Copper to consider.  Net-0 copper is ignored.  Pass fixed
@@ -768,6 +827,11 @@ def plan_foldback_repairs(
             flags it.
         tolerance: Vertex coincidence tolerance in mm.
         min_segment_length: Shortest replacement segment to emit, in mm.
+        clearance: Required edge-to-edge clearance in mm between a candidate
+            and copper **added earlier in this same plan** by a repair on a
+            different net of the same layer.  ``None`` skips that check (the
+            pre-#8930 behaviour, kept so a caller without a clearance rule is
+            unchanged).
 
     Returns:
         A :class:`FoldBackResult` whose ``repairs`` must be applied in order.
@@ -775,6 +839,7 @@ def plan_foldback_repairs(
     result = FoldBackResult()
     if path_is_clear is None:
         return result
+    accepted_added: list[Segment] = []
     for (net, layer), group in sorted(
         _group_by_net_layer(segments).items(),
         key=lambda kv: (kv[0][0], kv[0][1].kicad_name),
@@ -784,11 +849,13 @@ def plan_foldback_repairs(
             layer,
             group,
             discs,
-            path_is_clear,
+            _clear_of_accepted(path_is_clear, accepted_added, clearance),
             is_mutable,
             tolerance,
             min_segment_length,
         )
+        for repair in repairs:
+            accepted_added.extend(repair.added)
         result.repairs.extend(repairs)
         result.repaired += repaired
         result.skipped += skipped
@@ -803,6 +870,7 @@ def repair_foldbacks(
     is_mutable: Callable[[Segment], bool] | None = None,
     tolerance: float = JUNCTION_TOL,
     min_segment_length: float = MIN_REPAIR_SEGMENT_LENGTH,
+    clearance: float | None = None,
 ) -> tuple[list[Segment], FoldBackResult]:
     """Apply :func:`plan_foldback_repairs` to a flat segment list.
 
@@ -822,6 +890,7 @@ def repair_foldbacks(
         is_mutable=is_mutable,
         tolerance=tolerance,
         min_segment_length=min_segment_length,
+        clearance=clearance,
     )
     for repair in result.repairs:
         dropped = {id(s) for s in repair.removed}

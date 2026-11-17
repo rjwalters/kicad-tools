@@ -21933,6 +21933,9 @@ class Autorouter:
             discs=discs,
             path_is_clear=path_is_clear,
             is_mutable=lambda s: id(s) in owner_of,
+            # The checker above is a pre-repair snapshot; this makes later
+            # repairs clear the chords earlier ones added (issue #8930).
+            clearance=float(self.grid.rules.trace_clearance),
         )
         if not result.repairs:
             if result.skipped:
