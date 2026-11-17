@@ -37,7 +37,7 @@ import dataclasses
 import os
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
@@ -1913,7 +1913,7 @@ def _same_net_leg_band_ok(
     pad_bboxes: list[tuple[float, float, float, float]],
     pad_edge_mm: float,
     trace_edge_mm: float,
-    sibling_legs: list = (),
+    sibling_legs: Sequence[tuple[object, float]] = (),
 ) -> bool:
     """True iff a connector leg ``p0 -> p1`` opens no same-net fab-view slit.
 
@@ -1972,10 +1972,7 @@ def _same_net_leg_band_ok(
     # exactly the terms of existing segments -- touching ones chain (the
     # finished connector is one copper union at its bends), detached ones
     # are graded.
-    segments = [
-        *segments,
-        *((geom, half_width) for geom, half_width in sibling_legs),
-    ]
+    segments = [*segments, *sibling_legs]
 
     # Chain of segments grown from those the leg touches.
     sin45 = 0.7071
