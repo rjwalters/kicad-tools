@@ -931,15 +931,23 @@ def _iter_via_apertures(
 
     Tenting is resolved per side via :func:`_via_is_tented` (per-via override
     -> board setup default -> measured absent-token default).
+
+    A side is also skipped when the via never reaches it: a blind/micro via
+    exposes copper only on the outer layer(s) its ``layers`` name and a
+    buried via on neither outer side (Issue #9116, reusing the single
+    :func:`_via_silk_sides` definition #9104 gave the drill path).  An
+    untented ``F.Cu``--``In1.Cu`` blind via therefore yields no ``B``
+    aperture for back silk to collide with.
     """
     setup = pcb.setup
     ox, oy = getattr(pcb, "board_origin", None) or (0.0, 0.0)
     for via in pcb.vias:
         if via.size <= 0:
             continue
+        reached = _via_silk_sides(getattr(via, "via_type", None), getattr(via, "layers", ()))
         geom: _Geometry | None = None
         for side in ("F", "B"):
-            if _via_is_tented(via, setup, side):
+            if side not in reached or _via_is_tented(via, setup, side):
                 continue
             if geom is None:
                 geom = _via_aperture_geometry(via, min_mask_clearance)
@@ -1221,7 +1229,9 @@ def check_silk_over_copper(
     :func:`_iter_pad_apertures`, untented-via mask openings via
     :func:`_iter_via_apertures` (#4624 closed the deliberate pads-only gap
     left by #4612).  Tented vias contribute no aperture, so fully-tented
-    boards -- the entire committed fleet -- behave exactly as before.
+    boards -- the entire committed fleet -- behave exactly as before; a
+    blind/buried via contributes an aperture only on the outer side(s) it
+    actually reaches (Issue #9116).
 
     Args:
         pcb: The PCB to check.
