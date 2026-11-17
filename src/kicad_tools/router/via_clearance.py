@@ -714,12 +714,12 @@ SAME_NET_BAND_WRITE_SLACK_MM = 1.5e-3
 
 
 def same_net_band_edges(
-    profile: str, layers: int, copper_oz: float, thickness_mm: float
+    profile: str, layers: int, copper_oz: float, inner_oz: float
 ) -> tuple[float, float]:
     """``(pad_edge_mm, trace_edge_mm)`` of the fab-view same-net slit band.
 
     Resolved from the caller's stackup: ``profile``, ``layers``, ``copper_oz``
-    and ``thickness_mm`` name the fab entry to grade against -- required, no
+    and ``inner_oz`` name the fab entry to grade against -- required, no
     defaults, so a caller cannot silently inherit another board's stackup
     (#9188).  Edges are never literals, so a repair pass's acceptance bands
     match the fab-view checker by construction (#8957, #8975).  The pad
@@ -730,7 +730,7 @@ def same_net_band_edges(
     from kicad_tools.manufacturers import get_profile
     from kicad_tools.validate.rules.physical_gap import fab_gap_policy_from_entry
 
-    entry = get_profile(profile).get_dfm_entry(layers, copper_oz, thickness_mm)
+    entry = get_profile(profile).get_dfm_entry(layers, copper_oz, inner_oz)
     policy = fab_gap_policy_from_entry(entry) if entry else None
     if policy is None:
         return 0.0, 0.0
