@@ -542,7 +542,9 @@ class TraceLengthAnalyzer:
         from kicad_tools.validate.connectivity import ConnectivityValidator
         from kicad_tools.validate.copper_contact import build_copper_contact_graph
 
-        graph = build_copper_contact_graph(ConnectivityValidator(board), net.number)
+        graph = build_copper_contact_graph(
+            ConnectivityValidator(board), net.number, with_bonds=True
+        )
         path_graph = _build_pad_to_pad_graph(graph.items, graph.bonds)
         adjacency, pad_nodes, via_nodes = (
             path_graph.adjacency,
@@ -573,7 +575,7 @@ class TraceLengthAnalyzer:
             return NetPathMeasurement(pad_count=len(pad_nodes))
 
         path_length, src, dst, prev = best
-        node_to_via = {node: index for index, node in via_nodes.items()}
+        node_to_via = {node: graph.items[index].key for index, node in via_nodes.items()}
         path_via_indices: set[int] = set()
         node: int | None = pad_nodes[dst]
         while node is not None and node != pad_nodes[src]:

@@ -795,7 +795,12 @@ class TestMeasureNetPath:
         assert measurement.pad_count == 2
         assert measurement.path_length_mm == pytest.approx(60.0, abs=0.05)
         assert measurement.off_path_length_mm == pytest.approx(0.0, abs=0.05)
-        assert len(measurement.path_via_indices) == 1
+        # The fixture's single via is board.vias[0]; its contact-graph item
+        # index is 2 (two pads precede it in the net-scoped items list).
+        # Pinning the value keeps path_via_indices in board.vias index space,
+        # the documented contract the board-07 validator indexes with.
+        assert len(pcb.vias) == 1
+        assert measurement.path_via_indices == (0,)
 
     def test_branched_net_reports_longest_pairwise_path(self, path_base_pcb: Path, analyzer):
         """Multi-pin nets measure the longest pairwise pad-to-pad path.
@@ -844,3 +849,34 @@ class TestMeasureNetPath:
         assert with_path.off_path_length_mm == pytest.approx(20.0, abs=0.05)
         assert with_path.to_dict()["path_length_mm"] == pytest.approx(20.0, abs=0.05)
         assert with_path.to_dict()["off_path_length_mm"] == pytest.approx(20.0, abs=0.05)
+
+
+class TestContactGraphBonds:
+    """``bonds`` under ``with_bonds=True`` is the full edge set (#9117)."""
+
+    def test_with_bonds_records_cycle_closing_edges(self, path_base_pcb: Path):
+        """Every bonded pair is recorded, not only a spanning forest.
+
+        The DUP net's four items (two pads, two identical overlapping
+        tracks) are pairwise bonded everywhere except pad-pad: 5 real
+        edges over 4 items.  A union-find shortcut would keep only
+        items - 1 = 3 of them, silently dropping exactly the
+        cycle-closing edges the pad-to-pad path measurement needs.
+        """
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+        from kicad_tools.validate.copper_contact import build_copper_contact_graph
+
+        pcb = PCB.load(str(path_base_pcb))
+        cv = ConnectivityValidator(pcb)
+        net = pcb.get_net_by_name("DUP")
+        assert net is not None
+
+        graph = build_copper_contact_graph(cv, net.number, with_bonds=True)
+
+        assert len(graph.items) == 4
+        assert len(graph.components()) == 1
+        assert len(graph.bonds) == 5
+
+        plain = build_copper_contact_graph(cv, net.number)
+        assert plain.components() == graph.components()
+        assert plain.bonds == []

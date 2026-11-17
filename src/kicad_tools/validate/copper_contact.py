@@ -130,12 +130,15 @@ class CopperItem:
 class CopperContactGraph:
     """Items plus their connected-component labels.
 
-    ``bonds`` lists the bonded item-index pairs ``(a, b)`` with ``a < b``
-    that produced the components -- the *edges* of the contact model, so
-    consumers needing more than component labels (e.g. the weighted
-    pad-to-pad path graph in :mod:`kicad_tools.analysis.trace_length`)
-    can walk real adjacency instead of re-deciding contact themselves
-    (Issue #9117).
+    ``bonds`` lists every bonded item-index pair ``(a, b)`` with
+    ``a < b`` -- the full *edge* set of the contact model, including the
+    pairs that close cycles, so consumers needing more than component
+    labels (e.g. the weighted pad-to-pad path graph in
+    :mod:`kicad_tools.analysis.trace_length`) can walk real adjacency
+    instead of re-deciding contact themselves (Issue #9117).  Populated
+    only by ``build_copper_contact_graph(..., with_bonds=True)``; the
+    default component-only build never runs the full predicate pass and
+    leaves it empty.
     """
 
     items: list[CopperItem]
@@ -435,6 +438,8 @@ def _bonded(a: CopperItem, b: CopperItem) -> bool:
 def build_copper_contact_graph(
     cv: ConnectivityValidator,
     net_number: int | None = None,
+    *,
+    with_bonds: bool = False,
 ) -> CopperContactGraph:
     """Build the copper-contact graph for one net, or label-free for the board.
 
@@ -443,6 +448,13 @@ def build_copper_contact_graph(
         net_number: Restrict the graph to items carrying this net.  ``None``
             includes every item on the board and never consults a net label
             (the independent-LVS partition, Issue #3742).
+        with_bonds: Record the full bonded edge set in
+            :attr:`CopperContactGraph.bonds`, cycles included.  Costs one
+            ``_bonded`` predicate per already-connected candidate pair
+            (the default skips those via union-find, which is why its
+            bonds -- when inspected -- would form a spanning forest);
+            component labels are identical either way and never need the
+            closing edges, so the default stays off the hot LVS path.
 
     Requires shapely (callers keep their own core-only fallbacks).
     """
@@ -474,10 +486,11 @@ def build_copper_contact_graph(
             ia, ib = items[a], items[b]
             if not ia.layers & ib.layers:
                 continue
-            if find(a) == find(b):
+            if not with_bonds and find(a) == find(b):
                 continue
             if _bonded(ia, ib):
-                bonds.append((a, b))
+                if with_bonds:
+                    bonds.append((a, b))
                 union(a, b)
 
     # Same-zone fill fragments: continuous iff their REAL copper meets, which
@@ -495,7 +508,10 @@ def build_copper_contact_graph(
         geoms = [items[i].geom for i in members]
         layers = [next(iter(items[i].layers)) for i in members]
         for a_pos, b_pos in cv._adjacent_fill_pairs(geoms, layers, 2.0 * inflation):
-            bonds.append((min(members[a_pos], members[b_pos]), max(members[a_pos], members[b_pos])))
+            if with_bonds:
+                bonds.append(
+                    (min(members[a_pos], members[b_pos]), max(members[a_pos], members[b_pos]))
+                )
             union(members[a_pos], members[b_pos])
 
     return CopperContactGraph(

@@ -627,6 +627,12 @@ def test_match_lengths_measure_path_not_summed_copper():
         assert measurement.path_length_mm is not None, name
         paths[name] = measurement.path_length_mm
         off_paths[name] = measurement.off_path_length_mm
+        # path_via_indices is documented in board.vias index space; each
+        # entry must name one of this net's own vias (not a contact-graph
+        # item position, which would point at foreign copper).
+        net = board.get_net_by_name(name)
+        for index in measurement.path_via_indices:
+            assert board.vias[index].net_number == net.number, (name, index)
 
     # Nets whose copper the issue evidence calls loop-free stay clean;
     # the measured residual is barrel-overlap copper under pads/vias.
