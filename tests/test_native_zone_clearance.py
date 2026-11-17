@@ -104,12 +104,34 @@ def test_native_clearance_preserves_stronger_net_class(tmp_path):
     assert not pcb.with_suffix(".kicad_dru").exists()
 
 
-def test_native_clearance_preserves_stronger_pad_clearance(tmp_path):
+def test_native_clearance_preserves_stronger_footprint_clearance(tmp_path):
+    from kicad_tools.zones.native_clearance import write_native_zone_clearance_rules
+
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text(BOARD[:-1] + '\n(footprint "Probe" (clearance 0.6) (pad "1" smd rect)))')
+    with pytest.raises(ValueError, match="stronger"):
+        write_native_zone_clearance_rules(pcb)
+    assert not pcb.with_suffix(".kicad_dru").exists()
+
+
+def test_native_clearance_accepts_stronger_pad_local_clearance(tmp_path):
+    """Issue #8900: a stronger pad-local clearance (a fiducial's 0.6 mm) is
+    kept by the native fill (see the native test below), so it no longer
+    refuses the rule block."""
     from kicad_tools.zones.native_clearance import write_native_zone_clearance_rules
 
     pcb = tmp_path / "board.kicad_pcb"
     pcb.write_text(BOARD[:-1] + '\n(footprint "Probe" (pad "1" smd rect (clearance 0.6))))')
-    with pytest.raises(ValueError, match="stronger"):
+    write_native_zone_clearance_rules(pcb)
+    assert "(constraint clearance (min 0.3mm))" in pcb.with_suffix(".kicad_dru").read_text()
+
+
+def test_native_clearance_rejects_invalid_pad_local_clearance(tmp_path):
+    from kicad_tools.zones.native_clearance import write_native_zone_clearance_rules
+
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text(BOARD[:-1] + '\n(footprint "Probe" (pad "1" smd rect (clearance -1))))')
+    with pytest.raises(ValueError, match="finite nonnegative"):
         write_native_zone_clearance_rules(pcb)
     assert not pcb.with_suffix(".kicad_dru").exists()
 
@@ -203,3 +225,75 @@ def test_native_refill_keeps_stronger_adjacent_zone_gap(tmp_path, strong_net, we
     assert len(copper) == 2 and all(not shape.is_empty for shape in copper)
     # Measure actual filled copper, not the emitted rule text or DRC count.
     assert 0.6 <= copper[0].distance(copper[1]) < 0.62
+
+
+def test_native_refill_keeps_stronger_pad_local_clearance(tmp_path):
+    """Issue #8900: the zone rule written below must not weaken a stronger
+    pad-local clearance.  A no-net fiducial-style pad with local clearance
+    0.6 mm sits inside a GND pour whose native rule is 0.3 mm; the refilled
+    copper must stay 0.6 mm from the pad edge."""
+    import subprocess
+    import uuid
+
+    from kicad_tools.sexp import parse_file
+    from kicad_tools.zones.native_clearance import write_native_zone_clearance_rules
+
+    geometry = pytest.importorskip("shapely.geometry")
+    ops = pytest.importorskip("shapely.ops")
+    cli = runner.find_kicad_cli()
+    if cli is None:
+        pytest.skip("requires native KiCad")
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text(
+        f"""(kicad_pcb (version 20260206) (generator "pcbnew")
+      (general (thickness 1.6)) (paper "A4")
+      (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (39 "F.Mask" user) (44 "Edge.Cuts" user))
+      (setup (pad_to_mask_clearance 0))
+      (net 0 "") (net 1 "GND")
+      (gr_rect (start 0 0) (end 30 30) (stroke (width 0.05) (type default))
+        (fill no) (layer "Edge.Cuts"))
+      (footprint "Fiducial:Fiducial_1mm_Mask2mm" (layer "F.Cu") (uuid "{uuid.uuid4()}")
+        (at 15 15)
+        (property "Reference" "FID1" (at 0 -2) (layer "F.SilkS") (uuid "{uuid.uuid4()}"))
+        (attr smd board_only exclude_from_pos_files exclude_from_bom)
+        (pad "" smd circle (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask")
+          (solder_mask_margin 0.5) (clearance 0.6) (uuid "{uuid.uuid4()}")))
+      (zone (net 1) (net_name "GND") (layer "F.Cu") (uuid "{uuid.uuid4()}")
+        (hatch edge 0.5) (connect_pads (clearance 0.2)) (min_thickness 0.2)
+        (fill yes (thermal_gap 0.2) (thermal_bridge_width 0.25) (island_removal_mode 0))
+        (polygon (pts (xy 1 1) (xy 29 1) (xy 29 29) (xy 1 29)))))"""
+    )
+    write_native_zone_clearance_rules(pcb)
+    assert "(constraint clearance (min 0.3mm))" in pcb.with_suffix(".kicad_dru").read_text()
+    result = subprocess.run(
+        [
+            str(cli),
+            "pcb",
+            "drc",
+            str(pcb),
+            "--refill-zones",
+            "--save-board",
+            "--format",
+            "json",
+            "-o",
+            str(tmp_path / "drc.json"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    polygons = []
+    for zone in parse_file(pcb).find_all("zone"):
+        for fill in zone.find_all("filled_polygon"):
+            points = fill.find("pts")
+            polygons.append(
+                geometry.Polygon(
+                    [(point.get_float(0), point.get_float(1)) for point in points.find_all("xy")]
+                )
+            )
+    copper = ops.unary_union(polygons)
+    assert not copper.is_empty
+    pad = geometry.Point(15, 15).buffer(0.5, 64)
+    # Measure actual filled copper: the pad-local 0.6 mm, not the 0.3 mm rule.
+    assert 0.59 <= copper.distance(pad) < 0.62

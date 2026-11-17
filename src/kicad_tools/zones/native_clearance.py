@@ -81,10 +81,25 @@ def write_native_zone_clearance_rules(pcb_path: Path) -> None:
     if "clearance_min" in settings.get("defaults", {}):
         preserve(settings["defaults"]["clearance_min"])
     for footprint in doc.find_all("footprint"):
-        for item in [footprint, *footprint.find_all("pad")]:
-            local = item.find("clearance")
+        local = footprint.find_child("clearance")
+        if local is not None:
+            preserve(local.get_float(0))
+        # Issue #8900: a *pad-level* local clearance stronger than the zone
+        # target is not weakened by the rule appended below.  Black-box probe
+        # on the pinned kicad-cli (10.0.6): a no-net pad with local clearance
+        # 0.6 mm inside a GND pour whose native rule is 0.3 mm refills with a
+        # 0.600 mm gap, while the same pad without a local value refills at
+        # 0.300 mm (0.200 mm with no rule), so the rule is live and the
+        # stronger pad value still wins.  Pinned by
+        # ``test_native_refill_keeps_stronger_pad_local_clearance``.  Only the
+        # pad case was measured: footprint-level clearances, net classes,
+        # board minimums and existing DRU rules still refuse.
+        for pad in footprint.find_all("pad"):
+            local = pad.find_child("clearance")
             if local is not None:
-                preserve(local.get_float(0))
+                value = local.get_float(0)
+                if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                    raise ValueError("Existing clearance must be a finite nonnegative mm value")
 
     # Both zone rules match a pair of unlike-net zones. KiCad selects the
     # last matching custom rule, so emit stronger targets last regardless

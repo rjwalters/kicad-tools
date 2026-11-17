@@ -1083,6 +1083,17 @@ def run_drc(pcb_path: Path) -> bool:
                 str(pcb_path),
                 "--mfr",
                 "jlcpcb-tier1",
+                # Issue #8842: mask_to_copper is default-on under --mfr but has
+                # no baseline in this gate; skipped until #8858 lands.
+                "--skip",
+                "mask_to_copper",
+                # Issue #8845: the JLCDFM fab-parity table makes any otherwise
+                # passing jlcpcb-family check "incomplete" (tht_to_smd and
+                # silkscreen_to_hole are danger-capable with no kct rule), which
+                # is a property of kct's rule coverage, not of this board.  Let
+                # it exit 0 -- error-level findings still fail the gate -- the
+                # way boards 00/01/02 already do.
+                "--allow-incomplete",
                 "--drc-only",
                 "--emit-drc-constraints",
                 "--net-class-map",
@@ -1213,6 +1224,20 @@ def main() -> int:
         # fill would tie solid (#7275), so they stay balanced and any starved
         # spoke fails native DRC instead of being repaired into solid copper.
         apply_pad_thermal_overrides(routed_path)
+
+        # Step 5.48: Issue #8900 (operator ruling 2026-11-16; #8532): every
+        # board carries global fiducials and a board-ID silkscreen.  Added
+        # after the reviewed routing-plan replay and the GND stitching vias
+        # (the reviewed fingerprint ignores fiducial footprints, so the plan
+        # still matches) and before the fill so the pours back off the new
+        # copper.  Both tools are idempotent.
+        from kicad_tools.cli.pcb_add_board_info import run_add_board_info
+        from kicad_tools.cli.pcb_add_fiducials import run_add_fiducials
+
+        if run_add_fiducials(routed_path, sides="populated") != 0:
+            raise RuntimeError("pcb add-fiducials failed")
+        if run_add_board_info(routed_path, auto=True) != 0:
+            raise RuntimeError("pcb add-board-info failed")
 
         # Step 5.5: Fill the zone polygons in the routed PCB so DRC's
         # ``connectivity`` rule sees the power-net pads as connected.  This

@@ -222,6 +222,11 @@ def physical_contract(path):
     pcb, doc = PCB.load(path), parse_file(path)
     footprints = []
     for fp in sorted(pcb.footprints, key=lambda f: f.reference):
+        # Issue #8900 (as board 04, #8532): assembly-prep fiducials are added
+        # to the routed board after the reviewed physical design and carry no
+        # pad on a net; they are not part of the reviewed circuit.
+        if fp.name.startswith("Fiducial:"):
+            continue
         pads = [
             {
                 "number": p.number,
