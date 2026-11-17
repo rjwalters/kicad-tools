@@ -2263,6 +2263,15 @@ class Autorouter:
         self.detour_probe_records: list[DetourConnectionRecord] | None = None
         self._detour_unattributed_drawn_mm: float = 0.0
 
+        # Issue #9013: ``--detour-repair`` attribute-on-router pattern (same
+        # shape as ``report_detour_ratio`` above).  When True the alone-on-empty
+        # probe pre-pass runs too (it is the offender list) and
+        # ``route_all_negotiated`` invokes the targeted post-settle repair pass
+        # once the loop settles.  Default off: with the flag absent, routed
+        # output is byte-identical (pinned by the #9003 report test).
+        self.detour_repair: bool = False
+        self.detour_repair_outcomes: list[Any] = []
+
         # Fine zones for multi-resolution escape routing (Issue #1828)
         # Set externally (e.g., from CLI's MultiResolutionGridPlan) before
         # routing so the SubGridRouter uses fine grid resolution for pads
@@ -12653,7 +12662,9 @@ class Autorouter:
     def _probe_alone_on_empty_lengths(self, net_order: list[int] | None = None) -> None:
         """Pre-pass probe: every connection's alone-on-empty length (#9003).
 
-        ``--report-detour-ratio`` only.  Runs BEFORE any copper is committed
+        ``--report-detour-ratio``, or ``--detour-repair`` (Issue #9013: the
+        repair pass consumes these records as its offender list).  Runs
+        BEFORE any copper is committed
         -- the grid at this point already is the empty board (pads, keepouts
         and fixed copper only), which is exactly the substrate the metric's
         denominator is defined on.  For each net the probe runs the SAME
@@ -12716,7 +12727,9 @@ class Autorouter:
         A failure here is never fatal: the report is advisory, so an
         unexpected error degrades to empty records plus one warning line.
         """
-        if not getattr(self, "report_detour_ratio", False):
+        if not getattr(self, "report_detour_ratio", False) and not getattr(
+            self, "detour_repair", False
+        ):
             return
         if getattr(self, "detour_probe_records", None) is not None:
             # Already probed on this Autorouter (a re-entered driver); the
@@ -13314,6 +13327,15 @@ class Autorouter:
         # callers of ``route_all_negotiated`` picks it up uniformly.  Default
         # ``"negotiated"`` falls through to the unmodified loop below.
         if getattr(self, "_ripup_strategy", "negotiated") == "sequential-n1":
+            # Issue #9013: the detour repair pass settles after the negotiated
+            # loop this prototype replaces, so the flag combination would be a
+            # silent no-op here (the #5908 lesson).  Warn and skip.
+            if getattr(self, "detour_repair", False):
+                flush_print(
+                    "  --detour-repair: not available under --ripup-strategy "
+                    "sequential-n1 (that strategy replaces the negotiated loop "
+                    "the repair pass settles after); skipping the pass"
+                )
             from .sequential_ripup import route_all_sequential_ripup
 
             return route_all_sequential_ripup(
@@ -13992,6 +14014,20 @@ class Autorouter:
             # Issue #2657 / Epic #2556 Phase 3H-cont: post-route
             # diff-pair skew bookkeeping (see _finalize_routing docstring).
             self._finalize_routing()
+            # Issue #9013: the same opt-in post-settle repair pass as the
+            # main tail below -- a zero-overflow initial pass is still a
+            # settled board whose nets may detour around each other's
+            # copper (order-of-routing detours produce no overflow).
+            if getattr(self, "detour_repair", False):
+                from .detour_repair import run_detour_repair_pass
+
+                run_detour_repair_pass(
+                    self,
+                    net_routes=net_routes,
+                    pads_by_net=pads_by_net,
+                    neg_router=neg_router,
+                    per_net_timeout=per_net_timeout,
+                )
             return list(self.routes)
         elif initial_partial:
             partial_names = sorted(self.net_names.get(n, f"Net_{n}") for n in initial_partial)
@@ -16988,6 +17024,27 @@ class Autorouter:
                 f"{_tail_end - _tail_t_final:.1f}s; excursion deadline "
                 f"{'left ' + format(_left, '.1f') + 's' if _left is not None and _left > 0 else 'spent'} "
                 "(issue #5923)"
+            )
+
+        # Issue #9013: opt-in targeted post-settle detour repair pass.  Read
+        # once here, at the SAME relative point as the rescue sweep above --
+        # after the loop, the demote safety nets and _finalize_routing have
+        # settled the board -- so every internal caller of
+        # ``route_all_negotiated`` picks it up uniformly.  The pass is
+        # transactional per offender (whole-board ``RouteScore`` accept
+        # gate, exact rollback) and bounded (one attempt per offender
+        # net), so it can only shorten copper, never regress the routed
+        # count.  Default off: with ``detour_repair`` False this is a
+        # no-op and routed output is byte-identical (#9003 pin).
+        if getattr(self, "detour_repair", False):
+            from .detour_repair import run_detour_repair_pass
+
+            run_detour_repair_pass(
+                self,
+                net_routes=net_routes,
+                pads_by_net=pads_by_net,
+                neg_router=neg_router,
+                per_net_timeout=per_net_timeout,
             )
 
         return list(self.routes)
@@ -20279,6 +20336,18 @@ class Autorouter:
         # Issue #2657 / Epic #2556 Phase 3H-cont: post-route diff-pair
         # skew bookkeeping (see _finalize_routing docstring).
         self._finalize_routing()
+        # Issue #9013: opt-in targeted post-settle detour repair pass on the
+        # two-phase settle path.  ``kct route`` sends every escape-routed
+        # board HERE (``route_with_escape`` -> ``route_all_two_phase`` ->
+        # ``TwoPhaseRouter``), which never reaches ``route_all_negotiated`` --
+        # dispatching only there would make the flag a silent no-op on
+        # exactly the boards the #9003 measurement flagged (03/05; the
+        # #5908 shape).  Same transactional, bounded pass as the negotiated
+        # tail; default off keeps this a no-op.
+        if getattr(self, "detour_repair", False):
+            from .detour_repair import run_detour_repair_pass_from_autorouter
+
+            run_detour_repair_pass_from_autorouter(self, per_net_timeout=per_net_timeout)
         _emit_route_checkpoint(
             getattr(checkpoint_callback, "checkpoint_completed", None),
             self.routes,
