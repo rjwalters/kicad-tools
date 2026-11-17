@@ -152,7 +152,7 @@ reset_state() {
     rm -f "$STUB_DIR"/comments.json "$STUB_DIR"/comments-fail \
         "$STUB_DIR"/check-branch-rc "$STUB_DIR"/check-branch-stdout \
         "$STUB_DIR"/check-branch-args.log "$STUB_DIR"/check-branch-legacy-rc
-    unset LOOM_LEASE_FENCE_NOW LOOM_HOST_ID LOOM_LEASE_TTL_MINUTES HOSTNAME \
+    unset LOOM_LEASE_FENCE_NOW LOOM_HOST_ID LOOM_LEASE_HOST_ID LOOM_LEASE_TTL_MINUTES HOSTNAME \
         LOOM_LEASE_PUBLISH_HOSTNAME LOOM_REPO 2> /dev/null || true
 }
 
@@ -301,6 +301,20 @@ cat > "$STUB_DIR/comments.json" <<'JSON'
 JSON
 LOOM_HOST_ID="opaque-test-host" LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309
 assert_eq "4" "$RC" "(n) a raw-hostname lease comment does not match the opaque default -> ABORT SUPERSEDED"
+
+# --- (n2) LOOM_LEASE_HOST_ID outranks LOOM_HOST_ID and $HOSTNAME: a session
+# in a container (its own hostname) is handed its dispatcher's lease host id
+# and must read the dispatcher's lease -- published under the opaque id of
+# THAT host, the pinned `host-60a4fb97` of (m) -- as its own.
+reset_state
+cat > "$STUB_DIR/comments.json" <<'JSON'
+[{"id": 1, "updated_at": "2026-08-15T15:51:00Z", "body": "<!-- loom:lease host=host-60a4fb97 sweep=step-builder-6309-1 -->\nprose"}]
+JSON
+LOOM_LEASE_HOST_ID="opaque-test-host" LOOM_HOST_ID="telemetry-host" HOSTNAME="a9a3f88cc974" LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309
+assert_eq "0" "$RC" "(n2) LOOM_LEASE_HOST_ID names the dispatcher's lease host from inside a container -> exit 0"
+# The same lease without the pin is what the container read before: a peer's.
+HOSTNAME="a9a3f88cc974" LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309
+assert_eq "4" "$RC" "(n2) without LOOM_LEASE_HOST_ID the container's own hostname decides -> ABORT SUPERSEDED"
 
 # --- (o) a lease excluded by a same (host, sweep) loom:lease-yield record
 # (#6485) falls back to the next-freshest, non-yielded candidate -- here

@@ -150,7 +150,7 @@ def _strategy_applied(profile: dict, variant: str) -> bool:
     """Did the run actually dispatch to the sequential-n1 prototype?
 
     Guards against a silent no-op the same way ``net_order_experiment.py``'s
-    ``_order_applied`` does for ``--order-method`` (#5908's lesson): an A/B
+    ``_treatment_applied`` does for ``--order-method`` (#5908's lesson): an A/B
     whose treatment arm never applied the treatment is worse than no
     measurement. ``negotiated`` has no marker to check (it IS the absence of
     the banner), so it is trivially "applied".

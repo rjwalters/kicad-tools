@@ -67,6 +67,20 @@ def via_travel_mm(via, segments, elevations: dict[str, float]) -> float:
     return max(depths) - min(depths)
 
 
+def matched_length_mm(measurement, segments, vias_by_index, elevations: dict[str, float]) -> float:
+    """Matched length of one net: pad-to-pad copper path plus its via travel.
+
+    The single definition shared by the gate and by
+    ``tests/test_board07_byte0_physical_spread.py`` so the two cannot disagree
+    (Issue #9198). ``measurement`` is a ``measure_net_path`` result whose
+    ``path_length_mm`` is not None; the caller reports that error itself.
+    """
+    return measurement.path_length_mm + sum(
+        via_travel_mm(vias_by_index[index], segments, elevations)
+        for index in measurement.path_via_indices
+    )
+
+
 # Off-path copper above this does not count toward matched length and is
 # an error (Issue #9117).  Source of the margin: with contact links charged
 # the distance they span (the #9117 review's weighting fix), defect-free
@@ -558,10 +572,7 @@ def check(candidate: Path, source: Path, evidence: Path) -> bool:
         if measurement.path_length_mm is None:
             errors.append(f"{name}: no connected pad-to-pad copper path for match length")
             continue
-        lengths[name] = measurement.path_length_mm + sum(
-            via_travel_mm(vias_by_index[index], segments, elevations)
-            for index in measurement.path_via_indices
-        )
+        lengths[name] = matched_length_mm(measurement, segments, vias_by_index, elevations)
         off_path = measurement.off_path_length_mm or 0.0
         if off_path > OFF_PATH_TOLERANCE_MM:
             errors.append(off_path_error(name, off_path))

@@ -380,6 +380,81 @@ def test_drill_pair_slide_walks_out_of_same_net_slit_band(tmp_path, recipe, monk
     assert ((bx - 120.0) ** 2 + (by - 70.0) ** 2) ** 0.5 - 0.25 >= 0.5 - 1e-3
 
 
+def _via_positions(path):
+    """``(x, y)`` of every via on the board, in file order."""
+    return [
+        (float(x), float(y))
+        for x, y in re.findall(r"\(via \(at ([\d.]+) ([\d.]+)\)", path.read_text())
+    ]
+
+
+def _write_staple_collapse_board(path, dy=0.22):
+    """Same-net drill-pair vias whose staple collapse needs a 2-leg dogleg.
+
+    Victim ``A`` at ``(120, 70)`` and survivor ``B`` at ``(120.60, 70 + dy)``
+    (size .5, drill .25 -> 0.39-0.41 mm drill edge, sub-floor) share one B.Cu
+    chain; ``A``'s only other attachment is an In1.Cu escape west and ``B``'s
+    an F.Cu escape east, so the collapse deletes ``A`` plus the chain and
+    re-draws the link on In1.Cu: leg 1 runs ``dx - dy`` along the axis, leg 2
+    closes the 45-degree remainder.  With ``dy=0.22`` leg 2 starts 0.38 mm
+    from the victim -- 0.055 mm from its annulus edge (0.25 + 0.075), inside
+    the ``(0, 0.1016)`` trace band.  With ``dy=0.27`` leg 1's tip is instead
+    0.057 mm from the *survivor* annulus, a notch the finished connector
+    fills at the bend (the sibling-leg case of Issue #9186).
+    """
+    nodes = [
+        "(kicad_pcb (version 20240108) (generator pcbnew)",
+        '(general (thickness 1.6)) (layers (0 "F.Cu" signal) '
+        '(1 "In1.Cu" signal) (31 "B.Cu" signal))',
+        "(gr_rect (start 98.5 47.5) (end 198.5 127.5) "
+        '(stroke (width .1) (type default)) (fill none) (layer "Edge.Cuts"))',
+        '(net 1 "N1")',
+        '(via (at 120 70) (size .5) (drill .25) (layers "F.Cu" "B.Cu") (net 1) '
+        '(uuid "00000000-0000-4000-8000-00000000000a"))',
+        f'(via (at 120.60 {70 + dy:.3f}) (size .5) (drill .25) (layers "F.Cu" "B.Cu") (net 1) '
+        '(uuid "00000000-0000-4000-8000-00000000000b"))',
+        f"(segment (start 120 70) (end 120.60 {70 + dy:.3f}) (width .2) "
+        f'(layer "B.Cu") (net 1) (uuid "00000000-0000-4000-8000-00000000000c"))',
+        '(segment (start 119 70) (end 120 70) (width .15) (layer "In1.Cu") (net 1) '
+        '(uuid "00000000-0000-4000-8000-00000000000d"))',
+        f"(segment (start 120.60 {70 + dy:.3f}) (end 121.60 {70 + dy:.3f}) (width .15) "
+        f'(layer "F.Cu") (net 1) (uuid "00000000-0000-4000-8000-00000000000e"))',
+    ]
+    path.write_text("\n".join(nodes) + "\n)\n")
+
+
+def test_staple_collapse_skips_annulus_it_deletes(tmp_path, recipe):
+    """Issue #9186: the dogleg must not be graded against the victim annulus.
+
+    The collapse deletes the victim via, so its annulus is post-repair air;
+    grading leg 2 against it rejects a legal repair and the legalizer falls
+    through to the slide (which keeps both vias).
+    """
+    path = tmp_path / "collapse.kicad_pcb"
+    _write_staple_collapse_board(path)
+    assert recipe._legalize_signal_vias(path) == 1
+    # The collapse removed the victim; the slide fallback would keep both.
+    assert _via_positions(path) == [(120.6, 70.22)]
+    assert _same_net_slits(path) == []
+    assert not segment_angle_census(path)[1]
+
+
+def test_staple_collapse_sibling_leg_notch_is_not_a_slit(tmp_path, recipe):
+    """Issue #9186: a bend notch the finished connector fills is no slit.
+
+    Measured: leg 1's tip 0.057 mm from the survivor annulus with leg 2
+    bridging the mouth grades clean under ``check_physical_copper_gap_fab_view``
+    (the scan skips gaps whose connector crosses a third shape), so the
+    per-leg band check must not reject the collapse for it either.
+    """
+    path = tmp_path / "collapse.kicad_pcb"
+    _write_staple_collapse_board(path, dy=0.27)
+    assert recipe._legalize_signal_vias(path) == 1
+    assert _via_positions(path) == [(120.6, 70.27)]
+    assert _same_net_slits(path) == []
+    assert not segment_angle_census(path)[1]
+
+
 def test_legalizer_reports_overlap_without_a_legal_escape(tmp_path, recipe):
     path = tmp_path / "blocked.kicad_pcb"
     # A broad SMT land surrounds every candidate in the bounded search.

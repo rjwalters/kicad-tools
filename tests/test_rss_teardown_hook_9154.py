@@ -47,10 +47,30 @@ _RATCHET_TOLERANCE_MB = 64.0
 # (gc.collect() merely frees them into the heap), so this is the direct
 # observation of the pages-returned-to-OS half of the hook: deleting the
 # _malloc_trim(0) call leaves the whole round's garbage resident and this
-# goes red. 24 MB of slack absorbs madvise alignment waste and interpreter
-# noise (~3 MB measured on 4K pages) while staying ~40 MB below the
-# retention level of a trim-less hook.
+# goes red. The ceiling's slack is this page-independent noise margin plus
+# the page-size-derived straddle term from _straddle_slack_mb() below
+# (Issue #9201) -- a fixed MB constant would mis-measure a healthy hook on
+# a 16K/64K-page runner.
 _TRIM_SLACK_MB = 24.0
+
+
+def _straddle_slack_mb(rounds_done: int, live_count: int) -> float:
+    """Ceiling slack for malloc_trim straddle waste, scaled by page size.
+
+    madvise returns whole pages only, so each interior free run loses up to
+    two partial pages (its start and end edges) to alignment, and each live
+    separator pins a 64 KB block whose tail page is shared with the
+    neighbouring run. That waste is ~3 MB at 4K pages -- the measured
+    healthy-hook residual -- and scales linearly with the page size (~72 MB
+    at 64K pages), so the ceiling charges it explicitly instead of hiding
+    it in the fixed slack (Issue #9201). Analytical, not measured on a
+    large-page host: the term bounds the 4K measurement from the heap shape
+    (3 rounds x (128 runs x 2 edges + separators), x page size).
+    """
+    page_mb = conftest._PAGE_SIZE / 1048576
+    runs_per_round = (_GARBAGE_MB * 1048576) // (_TRIM_RUN_PIECES * _TRIM_PIECE_BYTES)
+    straddle_pages = 2 * rounds_done * runs_per_round + live_count
+    return straddle_pages * page_mb
 
 
 class _Cyclic:
@@ -98,7 +118,7 @@ def test_teardown_hook_holds_rss_floor(monkeypatch):
     assert baseline_mb is not None
     live: list[bytearray] = []
     floors = []
-    for _ in range(_ROUNDS):
+    for round_no in range(_ROUNDS):
         _grow_interleaved_garbage(live)
         rss_mb = conftest._statm_rss_mb()
         assert rss_mb is not None
@@ -114,13 +134,18 @@ def test_teardown_hook_holds_rss_floor(monkeypatch):
         # which the floor-to-floor ratchet check below never sees.
         post_mb = conftest._statm_rss_mb()
         assert post_mb is not None
-        ceiling_mb = baseline_mb + len(live) * _TRIM_PIECE_BYTES / 1048576 + _TRIM_SLACK_MB
+        straddle_mb = _straddle_slack_mb(round_no + 1, len(live))
+        ceiling_mb = (
+            baseline_mb + len(live) * _TRIM_PIECE_BYTES / 1048576 + _TRIM_SLACK_MB + straddle_mb
+        )
         assert post_mb <= ceiling_mb, (
             f"post-teardown RSS {post_mb:.1f} MB stayed above {ceiling_mb:.1f} MB "
             f"(baseline {baseline_mb:.1f} MB + live separators "
-            f"{len(live) * _TRIM_PIECE_BYTES / 1048576:.1f} MB + {_TRIM_SLACK_MB} MB "
-            f"slack): the freed pages were not returned to the OS -- is "
-            f"malloc_trim(0) still called by the teardown hook? (floors: {floors})"
+            f"{len(live) * _TRIM_PIECE_BYTES / 1048576:.1f} MB + "
+            f"{_TRIM_SLACK_MB} MB slack + {straddle_mb:.1f} MB page-straddle "
+            f"slack @ {conftest._PAGE_SIZE} B pages): the freed pages were not "
+            f"returned to the OS -- is malloc_trim(0) still called by the "
+            f"teardown hook? (floors: {floors})"
         )
 
     assert floors[0] > 0.0, "hook never fired: _rss_floor_mb still 0.0"
@@ -139,3 +164,22 @@ def test_teardown_hook_inert_when_statm_unreadable(monkeypatch):
     floor_before = conftest._rss_floor_mb
     conftest.pytest_runtest_teardown(None, None)  # must not raise
     assert conftest._rss_floor_mb == floor_before
+
+
+def test_straddle_slack_scales_with_page_size(monkeypatch):
+    """Issue #9201: the ceiling slack must grow with the host's page size.
+
+    Pins the analytical term against constant drift: 128 free runs per
+    round, each with 2 straddling edges, plus 128 live separators per
+    round = 384 pages per round, i.e. 1152 pages after 3 rounds -- ~4.5 MB
+    at 4K pages (comfortably above the ~3 MB measured healthy-hook
+    residual) and ~72 MB at 64K pages, the estimate a fixed
+    ``_TRIM_SLACK_MB`` could not cover.
+    """
+    assert (_GARBAGE_MB * 1048576) // (_TRIM_RUN_PIECES * _TRIM_PIECE_BYTES) == 128
+    monkeypatch.setattr(conftest, "_PAGE_SIZE", 4096)
+    assert _straddle_slack_mb(3, 384) == pytest.approx(1152 * 4096 / 1048576)
+    monkeypatch.setattr(conftest, "_PAGE_SIZE", 16384)
+    assert _straddle_slack_mb(3, 384) == pytest.approx(1152 * 16384 / 1048576)
+    monkeypatch.setattr(conftest, "_PAGE_SIZE", 65536)
+    assert _straddle_slack_mb(3, 384) == pytest.approx(1152 * 65536 / 1048576)
