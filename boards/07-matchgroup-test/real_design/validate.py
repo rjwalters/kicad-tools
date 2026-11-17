@@ -73,9 +73,9 @@ def via_travel_mm(via, segments, elevations: dict[str, float]) -> float:
 # nets on this board measure under 1.6 mm of residual copper --
 # barrel-overlap under pads/vias and in-pad joints.  Beyond that is
 # copper the signal never travels on the path: a dead-end loop, an
-# overlapping duplicate or a stub.  On the committed copper this flags
-# DQ7 and LDQM (the issue's loop nets) and SDCKE1 (2.08 mm); tracked for
-# repair in #9118.
+# overlapping duplicate or a stub.  The DQ7/LDQM same-net loops the
+# issue evidence named were repaired in #9118 (PR #9139); on the
+# committed copper this flags SDCKE1 (2.08 mm).
 OFF_PATH_TOLERANCE_MM = 2.0
 
 

@@ -589,19 +589,27 @@ def test_off_path_error_names_net_and_amount():
 def test_match_lengths_measure_path_not_summed_copper():
     """#9117: matched length uses the pad-to-pad path, never summed copper.
 
-    The reviewed-routing copper carries dead-end loops (DQ7, LDQM per the
-    issue evidence) and, per the path graph, branch stubs on several byte
-    nets.  On the corrected measurement (contact links charged the
-    distance they span) byte 0's physical spread exceeds the 5 mm budget
-    while its summed-copper spread hides the violation, and byte 1 stays
-    inside the budget once its dead copper is excluded.  Copper repair is
-    tracked in #9118.
+    The DQ7/LDQM dead-end loops the issue evidence named were repaired
+    on main (#9118, PR #9139) after this measurement landed, so on the
+    committed copper their off-path residual sits inside the 2 mm
+    tolerance like every other loop-free net (every loop-free net on
+    this board is under 1.6 mm) and both byte groups' physical spreads
+    stay inside the 5 mm budget.  The regression the loops anchored --
+    summed copper counting a loop the signal never travels as matched
+    length -- is covered where a board repair cannot remove it: on
+    reconstructed pre-repair copper in test_board07_byte0_physical_spread
+    and on the synthetic loop/duplicate/stub fixtures in
+    test_trace_length.py.  What this test pins on the live artifact is
+    that the path measurement tracks the board as committed and that
+    SDCKE1, the one net still carrying more than a loop-free residual
+    (2.08 mm), is exactly the off-path error the validator raises.
     """
     from kicad_tools.analysis.trace_length import TraceLengthAnalyzer
     from kicad_tools.schema.pcb import PCB
 
     board = PCB.load(ROOT / "reviewed-routing/sdram_demo.kicad_pcb")
     analyzer = TraceLengthAnalyzer()
+    tolerance = load("validate").OFF_PATH_TOLERANCE_MM
 
     paths = {}
     off_paths = {}
@@ -624,6 +632,7 @@ def test_match_lengths_measure_path_not_summed_copper():
         "DQ15",
         "LDQM",
         "UDQM",
+        "SDCKE1",
     ):
         measurement = analyzer.measure_net_path(board, name)
         assert measurement.path_length_mm is not None, name
@@ -642,16 +651,24 @@ def test_match_lengths_measure_path_not_summed_copper():
     for name in ("DQ0", "DQ1", "DQ11"):
         assert off_paths[name] < 1.0, (name, off_paths[name])
 
-    # The dead-end loops the evidence names measure as off-path copper.
-    assert off_paths["DQ7"] > 5.0
-    assert off_paths["LDQM"] > 5.0
+    # The DQ7/LDQM loops the evidence named were repaired in #9118
+    # (PR #9139): their off-path residual now sits inside the tolerance
+    # with the other loop-free nets, so they raise no off-path error.
+    assert off_paths["DQ7"] < tolerance, ("DQ7", off_paths["DQ7"])
+    assert off_paths["LDQM"] < tolerance, ("LDQM", off_paths["LDQM"])
 
-    # Byte 0's physical spread (LDQM 55.2 .. DQ2 63.4 mm) exceeds the
-    # 5 mm group budget while its summed-copper spread (0.63 mm) hides
-    # the violation -- the blind spot this validator change closes.
-    # Byte 1 stays inside the budget once its dead copper is excluded
-    # (3.28 mm physical vs 2.82 mm summed); the previously reported
-    # 10.9 mm byte-1 spread was the zero-weight contact-link artifact.
+    # SDCKE1 is the one net on the committed copper still carrying more
+    # than a loop-free residual (2.08 mm) -- the surviving off-path error
+    # the validator raises on this board.
+    assert off_paths["SDCKE1"] > tolerance, ("SDCKE1", off_paths["SDCKE1"])
+
+    # Both byte groups' physical spreads stay inside the 5 mm budget on
+    # the repaired copper (byte 0: 1.18 mm, byte 1: 3.28 mm), matching
+    # test_board07_byte0_physical_spread's post-#9118 expectation; the
+    # pre-repair byte-0 violation (> 5 mm physical while summed copper
+    # hid it) is asserted there against reconstructed pre-repair copper,
+    # and the 10.9 mm byte-1 spread once reported here was the
+    # zero-weight contact-link artifact, not physical copper.
     constraints_path = ROOT.parent / "output/sdram_constraints.json"
     import json
 
@@ -663,7 +680,4 @@ def test_match_lengths_measure_path_not_summed_copper():
     ):
         values = [paths[name] for name in members if name in paths]
         spread = max(values) - min(values)
-        if byte == "SDRAM_BYTE0":
-            assert spread > limit, (byte, spread)
-        else:
-            assert spread < limit, (byte, spread)
+        assert spread < limit, (byte, spread)
