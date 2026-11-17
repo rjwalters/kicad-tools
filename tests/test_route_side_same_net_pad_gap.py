@@ -34,6 +34,7 @@ from shapely.geometry import Point, box  # noqa: E402
 from kicad_tools.cli.stitch_cmd import _resolve_mfr_pad_gap_edge  # noqa: E402
 from kicad_tools.router.core import RoutingGrid  # noqa: E402
 from kicad_tools.router.escape import EscapeRouter  # noqa: E402
+from kicad_tools.router.layers import Layer  # noqa: E402
 from kicad_tools.router.link_router import (  # noqa: E402
     LinkRouteRules,
     LinkTerminal,
@@ -43,7 +44,7 @@ from kicad_tools.router.link_router import (  # noqa: E402
     route_link,
 )
 from kicad_tools.router.oracle_completion import PourLinkCloser  # noqa: E402
-from kicad_tools.router.primitives import Pad  # noqa: E402
+from kicad_tools.router.primitives import Pad, pad_half_extents  # noqa: E402
 from kicad_tools.router.rules import DesignRules  # noqa: E402
 from kicad_tools.router.via_clearance import (  # noqa: E402
     same_net_pad_gap_acceptable,
@@ -186,6 +187,97 @@ def test_foreign_pads_alone_do_not_trip_the_band():
     y = PAD_TOP + R + 0.0891
     router = _router(EDGE_1OZ)
     assert router._can_place_via(0.0, y, net=1, foreign_pads=[_foreign_pad()], clearance=0.05)
+
+
+# -- Issue #9236: rotated pads use the rotation-aware AABB --------------------
+#
+# ``Pad.width``/``height`` are pre-rotation local dims plus a residual
+# ``Pad.rotation`` (primitives.py).  A raw ``p.x +/- p.width/2`` box under-sizes
+# a non-cardinal pad, so a via seated beside its long diagonal reads as
+# "far enough" and escapes the slit band.  ``pad_half_extents`` is the repo's
+# rotation-aware AABB helper.
+
+
+def _rotated_pad(rotation: float, layer: Layer = Layer.F_CU, net: int = 1) -> Pad:
+    return Pad(
+        x=0.0,
+        y=0.0,
+        width=PAD_W,
+        height=PAD_H,
+        net=net,
+        net_name="GND" if net == 1 else "VCC",
+        layer=layer,
+        rotation=rotation,
+    )
+
+
+@pytest.mark.parametrize(
+    ("rotation", "layer"),
+    [(45.0, Layer.F_CU), (30.0, Layer.B_CU)],
+)
+def test_rotated_same_net_pad_uses_rotation_aware_bbox(rotation, layer):
+    pad = _rotated_pad(rotation, layer)
+    hw, _hh = pad_half_extents(pad)
+    # Seat beside the pad on +X: the raw 0.3 mm-wide box sees a gap well past
+    # the 0.15 mm edge, the true rotated AABB sees a gap inside the band.
+    x = 0.72
+    raw_gap = x - PAD_W / 2 - R
+    true_gap = x - hw - R
+    assert raw_gap >= EDGE_1OZ
+    assert 0.0 < true_gap < EDGE_1OZ
+    router = _router(EDGE_1OZ)
+    assert not router._can_place_via(x, 0.0, net=1, foreign_pads=[pad], clearance=0.05)
+
+
+@pytest.mark.parametrize("rotation", [0.0, 90.0])
+def test_cardinal_rotation_bbox_is_unchanged(rotation):
+    # rotation 0 / 90 keep the pre-fix result: 0 is the raw box; 90 is
+    # handled by the loader's axis swap (``rotation`` carries only the residual
+    # 0 here), so the in-band / beyond-edge seats behave exactly as before.
+    pad = _rotated_pad(rotation)
+    router = _router(EDGE_1OZ)
+    in_band = PAD_TOP + R + 0.0891
+    beyond = PAD_TOP + R + EDGE_1OZ + 0.05
+    if rotation == 90.0:
+        # An unswapped 90-degree pad is a 0.7 x 0.3 box on the board.
+        in_band = PAD_W / 2 + R + 0.0891
+        beyond = PAD_W / 2 + R + EDGE_1OZ + 0.05
+        assert not router._can_place_via(0.0, in_band, net=1, foreign_pads=[pad], clearance=0.05)
+        assert router._can_place_via(0.0, beyond, net=1, foreign_pads=[pad], clearance=0.05)
+        return
+    assert not router._can_place_via(0.0, in_band, net=1, foreign_pads=[pad], clearance=0.05)
+    assert router._can_place_via(0.0, beyond, net=1, foreign_pads=[pad], clearance=0.05)
+
+
+def test_rotated_through_hole_same_net_pad_still_skipped():
+    pad = _rotated_pad(45.0)
+    pad.through_hole = True
+    pad.drill = 0.3
+    router = _router(EDGE_1OZ)
+    assert router._can_place_via(0.72, 0.0, net=1, foreign_pads=[pad], clearance=0.05)
+
+
+def test_rotated_foreign_pad_uses_rotation_aware_box():
+    # Same raw-dims shape on the foreign-pad 5-tuple: a 45-degree foreign pad
+    # whose raw 0.3 mm width leaves the via 0.05 mm clear but whose true AABB
+    # half-width (0.354) puts the via annulus inside clearance.
+    pad = _rotated_pad(45.0, net=2)
+    router = _router(EDGE_1OZ)
+    x = 0.72  # raw edge 0.15 -> 0.57 mm to via edge >> 0.2; true edge 0.354 -> 0.066
+    assert not router._can_place_via(x, 0.0, net=1, foreign_pads=[pad], clearance=0.15)
+    # With rotation 0 the same seat is clear -> proves rotation is the cause.
+    assert router._can_place_via(
+        x, 0.0, net=1, foreign_pads=[_rotated_pad(0.0, net=2)], clearance=0.15
+    )
+
+
+def test_via_clears_other_pads_uses_rotation_aware_box():
+    router = _router(EDGE_1OZ)
+    x = 0.72
+    rotated = _rotated_pad(45.0, net=2)
+    flat = _rotated_pad(0.0, net=2)
+    assert not router._via_clears_other_pads(x, 0.0, VIA, 0.15, [rotated], same_net=1)
+    assert router._via_clears_other_pads(x, 0.0, VIA, 0.15, [flat], same_net=1)
 
 
 # -- the edge is stackup-derived, never a literal -----------------------------
