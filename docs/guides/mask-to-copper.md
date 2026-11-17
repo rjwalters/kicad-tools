@@ -139,8 +139,18 @@ these must hold, otherwise the measurement keeps its verdict:
 
 So these stay errors:
 
-- a track that runs along, straddles or overlaps the pad edge (JLCDFM danger,
-  #8914);
+- a track that runs along or straddles the pad edge, or overlaps it by more than
+  the allowance above (JLCDFM danger, #8914). The allowance is an **area
+  budget**, not a ban on touching the edge: a straight entry may put up to
+  1.45 × track width × 0.09 mm of copper under mask within 0.09 mm of the
+  opening. A perpendicular entry uses 1.0 of that factor, so the rest can be
+  copper beside an adjacent pad side, and the finding stays info. Measured on
+  the pinned image (kicad-cli 10.0.6), 0 mm expansion: a 0.2 mm track entering
+  a 1 × 1 mm rect pad perpendicular, with its centreline 0.05 mm inside the
+  pad's side edge, 0.1 mm deep; a 0.4 mm track entering a 0.3 mm-wide pad
+  0.1 mm deep; and a 0.3 mm track entering a 0.25 mm-wide pin 0.2 mm deep are
+  all info, although the track's shoulder sits under mask against the pad's side
+  at 0 mm;
 - a straight **pass-through** with no end on the pad: it is not a clean entry,
   and the fab evidence does not decide it;
 - an entry shallower than about 45°;

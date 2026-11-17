@@ -154,7 +154,7 @@ O − P = 0 and 0 mm² beyond the pad.
 | 00 | 6 → 4 | 6 → 4 (2) | 3 | 4.0 / 4.5 s |
 | 01 | 12 → 7 | 12 → 7 (5) | 8 | 4.3 / 4.3 s |
 | 02 | 141 → 51 | 127 → 37 (90) | 1 | 10.3 / 10.5 s |
-| 03 | 422 → 183 | 385 → 146 (239) | 76 | 24.7 / 26.0 s |
+| 03 | 422 → 183 | 385 → 146 (239) | 79 | 24.7 / 26.0 s |
 | 04 | 103 → 61 | 69 → 27 (42) | 6 | 9.8 / 10.3 s |
 | 05 | 385 → 185 | 356 → 156 (200) | 122 | 38.4 / 40.6 s |
 | 06 | 180 → 48 | 180 → 48 (132) | 0 | 17.0 / 18.0 s |
@@ -172,11 +172,18 @@ everything stays capped at warning. That is unchanged and not regressed.
   are single entries: three 2.6 mm power tracks into 2.6 mm round pads, and one
   0.2 mm track. kct's capsule-based triage label calls them pass-through.
 
-I **cannot show that all five fab dangers survive**, because the fab's item
-coordinates are not in the record. All five are described as beside, along,
-bending or branching shapes. Per object those are either non-entry segments
-(errors) or entries with excess beside copper (errors). None is described as a
-clean straight entry.
+The fab's item coordinates are not in the record, so I cannot match the five
+fab dangers to objects. The consumer's re-test of `c96d21e9a` on #8858
+([comment](https://github.com/rjwalters/kicad-tools/issues/8858#issuecomment-6960603314))
+located them **by pad (opening owner)** and did show that all five survive: each
+of the five fab-danger pads still has at least one track or via finding at
+warning level (two through a pass-through segment plus the via, one through
+the via and two of its four entry segments, two through a pass-through segment
+alone). That is evidence per pad, not per object. All five are described as
+beside, along, bending or branching shapes, and per object those are either
+non-entry segments (errors) or entries with excess beside copper (errors). None
+is described as a clean straight entry. The severity there is `warning` rather
+than `error` only because the assessment is provisional.
 
 ## #9107 (per-object distance)
 
