@@ -58,7 +58,11 @@ class DRCViolation:
         fab_band: The fab band the finding was graded against, ``"trace"`` or
             ``"pad"``, on a fab-band-graded ``physical_copper_gap`` finding
             (Issue #8972).  ``None`` when the emitting site has no band
-            concept.  Labels the population only -- it never enters
+            concept.
+        corner_class: The population of the ``sharp_trace_corner`` rule a
+            finding belongs to, ``"bend"`` (two segments meet at the vertex)
+            or ``"junction"`` (three or more do) (Issue #9037).  ``None``
+            when the emitting rule does not classify.  Labels the population only -- it never enters
             :attr:`key`, so waiver identity is band-independent.
     """
 
@@ -88,6 +92,17 @@ class DRCViolation:
     # when the emitting site has no band concept (the legacy opt-in pass,
     # the zone-fill ``info`` branch).
     fab_band: str | None = None
+    # Issue #9037: which population of the ``sharp_trace_corner`` rule a
+    # finding belongs to -- ``"bend"`` (exactly two segments meet at the
+    # vertex, the subset JLCDFM was observed to flag) or ``"junction"``
+    # (three or more do, reported by operator ruling on PR #8848 but not
+    # observed fab behaviour).  Like ``fab_band`` this only labels the
+    # population so consumers can gate on the fab-equivalent subset without
+    # splitting the user-visible ``rule_id`` -- ``DRCViolation.key`` embeds
+    # ``rule_id``, so an id split would break every existing
+    # ``.kct_waivers.json`` entry for this rule.  ``None`` when the emitting
+    # rule does not classify.
+    corner_class: str | None = None
     waived: bool = False
     waiver_reason: str | None = None
     waiver_issue: str | None = None

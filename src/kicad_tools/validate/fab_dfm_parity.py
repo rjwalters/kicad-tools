@@ -23,13 +23,17 @@ Rules for editing the table:
   pad fab bands (issue #8938) divides across the ``trace_spacing`` /
   ``pad_spacing`` rows; the bare id still matches the bandless emit sites
   (the legacy opt-in pass, zone-fill ``info`` findings), which stay on
-  ``pad_spacing``.  ``kct_rules`` is coverage *provenance*
+  ``pad_spacing``.  A ``#corner_class`` qualifier works the same way
+  (``sharp_trace_corner#bend``, issue #9037).  ``kct_rules`` is coverage *provenance*
   at mixed granularity (mostly category ids) and is deliberately NOT the
   attribution key.  Ids deliberately unattributed: ``*_incomplete`` run-state
   infos, ``clearance_net0_bridge`` and the zone-clearance ids (the fab does
-  not judge zone-fill clearance), and the kct-only silk advisories
+  not judge zone-fill clearance), the kct-only silk advisories
   (``silk_over_mask_opening``, ``silk_edge_clearance``, ``silk_overlap``,
-  ``silk_ref_obscured``, ``silkscreen_text_height``).
+  ``silk_ref_obscured``, ``silkscreen_text_height``), and the
+  ``sharp_trace_corner#junction`` population (issue #9037: 3-or-more-segment
+  vertices are kct-only over-reporting under the #8848 operator ruling --
+  the fab flagged none of them).
   ``count_rule_ids`` adds no parity *claim*; re-keying an existing row's
   attribution (as #8972 did) does bump :data:`TABLE_VERSION`, which moves
   the stanza header's version with it.
@@ -70,7 +74,12 @@ Status = Literal["covered", "partial", "not_covered"]
 #:    granularity; no threshold, severity or attribution change.
 #: 9: #8840 -- ``sharp_trace_corner`` and ``missing_plated_through_hole``
 #:    rows flip from ``not_covered`` now that both rules ship.
-TABLE_VERSION = 9
+#: 10: #9037 -- the ``sharp_trace_corner`` row attributes only the
+#:    two-segment bend population (``sharp_trace_corner#bend``) to JLCDFM's
+#:    category; the junction findings are kct-only and stay deliberately
+#:    unattributed, separable via ``DRCViolation.corner_class``.  No status
+#:    or severity change.
+TABLE_VERSION = 10
 
 #: Where the observed categories/thresholds came from (counts are hand-recorded).
 SOURCE = "https://github.com/rjwalters/kicad-tools/issues/8838"
@@ -278,11 +287,22 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         ("sharp_trace_corner",),
         "covered",
         False,
-        ("sharp_trace_corner",),
+        # Only the two-segment open-air bend is the fab-equivalent subset
+        # (issue #9037); the junction population (``#junction``) is kct-only
+        # over-reporting, reported by operator ruling on PR #8848 and left
+        # deliberately unattributed so the tallies cannot read as fab-aligned.
+        ("sharp_trace_corner#bend",),
         "`sharp_trace_corner` (#8840) reports all 3 observed vertices (pinned in its "
-        "tests). It is stricter than JLCDFM was observed to be: it also reports "
-        "branch junctions with an open wedge, which JLCDFM did not flag on that board "
-        "(over-reporting tracked in #9037).",
+        "tests). Only its two-segment open-air bend population maps to JLCDFM's "
+        "category (``#bend``): the fab flagged 3 of the 8 bends on that board, and "
+        "no criterion separates the other 5 (leg length and width do not), so they "
+        "are recorded as unexplained, not covered (#9037). The rule's junction "
+        "findings (3+ segments at the vertex) are kct-only over-reporting -- 39 on "
+        "that board, 0 flagged -- carried as warnings under the #8848 operator "
+        "ruling, separable since #9037 via ``corner_class='junction'`` and not "
+        "attributed here. A vertex inside same-net pad copper is not reported "
+        "since #8848 (the board's 5 in-pad findings should be gone; pinned by "
+        "tests, not re-measured on the board).",
     ),
     ParityRow(
         "missing_plated_through_hole",
@@ -440,11 +460,18 @@ def attribution_key(v: DRCViolation) -> str:
     ``rule_id#fab_band`` for a fab-band-graded finding (issue #8972:
     ``physical_copper_gap`` is one rule id spanning the trace and pad fab
     bands of issue #8938, and the band it was graded against is carried on
-    :attr:`DRCViolation.fab_band`), the bare ``rule_id`` otherwise.  The
-    qualifier is attribution-only -- the rule id, and so
-    ``DRCViolation.key`` / every ``.kct_waivers.json`` entry, is unchanged.
+    :attr:`DRCViolation.fab_band`), ``rule_id#corner_class`` for a classified
+    ``sharp_trace_corner`` finding (issue #9037: the bend population maps to
+    JLCDFM's category, the junction population is kct-only), the bare
+    ``rule_id`` otherwise.  The qualifier is attribution-only -- the rule
+    id, and so ``DRCViolation.key`` / every ``.kct_waivers.json`` entry, is
+    unchanged.
     """
-    return f"{v.rule_id}#{v.fab_band}" if v.fab_band else v.rule_id
+    if v.fab_band:
+        return f"{v.rule_id}#{v.fab_band}"
+    if v.corner_class:
+        return f"{v.rule_id}#{v.corner_class}"
+    return v.rule_id
 
 
 def evaluate_parity(
