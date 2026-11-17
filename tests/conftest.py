@@ -1,5 +1,7 @@
 """Pytest fixtures for kicad-tools tests."""
 
+import ctypes
+import gc
 import hashlib
 import importlib
 import os
@@ -218,6 +220,45 @@ def pytest_report_header(config):
     from tests.kicad_docker_session import report_header
 
     return report_header()
+
+
+# Issue #9089: each native router / coupled-search replay leaks its nanobind
+# wrapper objects into cyclic garbage (nanobind itself reports "leaked type
+# CenterlineRouteResult ... leaked 383 functions"), and the automatic
+# generational GC does not fire often enough between tests to reclaim them.
+# On top of that, glibc keeps freed pages in its malloc arenas. An xdist
+# worker's RSS therefore ratchets toward multi-GB across the bulk suite
+# (measured: 4.4 GB after one 37-test Board07 replay file) until the
+# runner's OOM killer kills the worker mid-test -- the "worker 'gw0'
+# crashed while running ..." flake. After every test, when RSS grew since
+# the previous teardown, a full gc.collect() reclaims the cyclic garbage
+# (measured: it alone returned 140 MB of one replay) and glibc's
+# malloc_trim(0) returns the freed pages to the OS (measured: this bounds
+# the same file at a 523 MB peak instead of a 4.4 GB ratchet). No-op when
+# glibc's malloc_trim is unavailable.
+try:
+    _malloc_trim = ctypes.CDLL("libc.so.6").malloc_trim
+    _malloc_trim.argtypes = [ctypes.c_size_t]
+    _malloc_trim.restype = ctypes.c_int
+except (OSError, AttributeError):
+    _malloc_trim = None
+
+_rss_floor_mb = 0.0
+_RSS_GROWTH_TRIGGER_MB = 32.0
+
+
+def pytest_runtest_teardown(item, nextitem):
+    global _rss_floor_mb
+    if _malloc_trim is None or sys.platform != "linux":
+        return
+    with open("/proc/self/statm") as fh:
+        rss_mb = int(fh.read().split()[1]) * 4096 / 1048576
+    if rss_mb - _rss_floor_mb < _RSS_GROWTH_TRIGGER_MB:
+        return
+    gc.collect()
+    _malloc_trim(0)
+    with open("/proc/self/statm") as fh:
+        _rss_floor_mb = int(fh.read().split()[1]) * 4096 / 1048576
 
 
 @pytest.fixture(scope="session", autouse=True)
