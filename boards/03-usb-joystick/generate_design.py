@@ -687,6 +687,26 @@ def add_gnd_stitching_vias(routed_path: Path) -> int:
     return len(vias)
 
 
+def add_assembly_markings(routed_path: Path) -> None:
+    """Add global fiducials and the board-ID silkscreen to the routed PCB.
+
+    Issue #8900 (operator ruling 2026-11-16; #8532): every board carries
+    global fiducials and a board-ID silkscreen.  Runs after the reviewed
+    routing-plan replay and the GND stitching vias -- the reviewed physical
+    fingerprint ignores ``Fiducial:`` footprints, so the plan still matches --
+    and before the zone fill, so the pours back off the new copper.  The
+    board-ID text resolves ``{rev}``/``{date}`` from the PCB title block
+    ``generate_pcb.py`` writes.  Both tools are idempotent.
+    """
+    from kicad_tools.cli.pcb_add_board_info import run_add_board_info
+    from kicad_tools.cli.pcb_add_fiducials import run_add_fiducials
+
+    if run_add_fiducials(routed_path, sides="populated") != 0:
+        raise RuntimeError("pcb add-fiducials failed")
+    if run_add_board_info(routed_path, auto=True) != 0:
+        raise RuntimeError("pcb add-board-info failed")
+
+
 def require_saved_copper_connected(routed_path: Path) -> None:
     """Gate Board03 on native connectivity of the exact saved copper (#5358).
 
@@ -1225,19 +1245,10 @@ def main() -> int:
         # spoke fails native DRC instead of being repaired into solid copper.
         apply_pad_thermal_overrides(routed_path)
 
-        # Step 5.48: Issue #8900 (operator ruling 2026-11-16; #8532): every
-        # board carries global fiducials and a board-ID silkscreen.  Added
-        # after the reviewed routing-plan replay and the GND stitching vias
-        # (the reviewed fingerprint ignores fiducial footprints, so the plan
-        # still matches) and before the fill so the pours back off the new
-        # copper.  Both tools are idempotent.
-        from kicad_tools.cli.pcb_add_board_info import run_add_board_info
-        from kicad_tools.cli.pcb_add_fiducials import run_add_fiducials
-
-        if run_add_fiducials(routed_path, sides="populated") != 0:
-            raise RuntimeError("pcb add-fiducials failed")
-        if run_add_board_info(routed_path, auto=True) != 0:
-            raise RuntimeError("pcb add-board-info failed")
+        # Step 5.48: global fiducials and board-ID silk (#8900).  After the
+        # routing-plan replay and the GND stitching vias, before the fill so
+        # the pours back off the new copper.
+        add_assembly_markings(routed_path)
 
         # Step 5.5: Fill the zone polygons in the routed PCB so DRC's
         # ``connectivity`` rule sees the power-net pads as connected.  This

@@ -416,6 +416,7 @@ class TestBoard03PartialRouteFastFail:
         monkeypatch.setattr(module, "add_gnd_stitching_vias", lambda *a, **k: 0)
         monkeypatch.setattr(module, "apply_manufacturing_profile", lambda *a, **k: None)
         monkeypatch.setattr(module, "apply_pad_thermal_overrides", lambda *a, **k: 6)
+        monkeypatch.setattr(module, "add_assembly_markings", lambda *a, **k: None)
         monkeypatch.setattr(module, "fill_zones_in_routed_pcb", lambda *a, **k: None)
         monkeypatch.setattr(module, "run_drc", lambda *a, **k: True)
         monkeypatch.setattr(module, "require_saved_copper_connected", lambda *a, **k: None)
