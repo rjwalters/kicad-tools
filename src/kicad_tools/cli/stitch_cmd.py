@@ -184,6 +184,24 @@ def _resolve_mfr_pad_gap_edge(mfr: str, layers: int, copper: float = 1.0) -> flo
     construction.  ``None`` when the fab ships no table or the stackup has no
     entry: the band guard then stays off rather than guessing an edge.
     """
+    return _resolve_mfr_gap_edge(mfr, layers, copper, "pad_spacing")
+
+
+def _resolve_mfr_trace_gap_edge(mfr: str, layers: int, copper: float = 1.0) -> float | None:
+    """Fab-view trace-population detection edge (mm) for the stackup, or ``None``.
+
+    Issue #9208: the ``trace_spacing`` sibling of :func:`_resolve_mfr_pad_gap_edge`
+    -- ``GapBand.detection_edge_mm`` of the resolved stackup's ``trace_spacing``
+    dfm entry (0.1016 mm on jlcpcb ``4layer_1oz``), the edge ``kct check --mfr``
+    grades a same-net via-annulus-vs-trace copper gap at (``fab_band: trace``).
+    ``None`` when the fab ships no table or the stackup has no entry: the guard
+    then stays off rather than guessing an edge.
+    """
+    return _resolve_mfr_gap_edge(mfr, layers, copper, "trace_spacing")
+
+
+def _resolve_mfr_gap_edge(mfr: str, layers: int, copper: float, population: str) -> float | None:
+    """Shared body of the per-population detection-edge resolvers."""
     from kicad_tools.manufacturers.base import load_dfm_thresholds
     from kicad_tools.validate.rules.physical_gap import GapBand
 
@@ -206,8 +224,8 @@ def _resolve_mfr_pad_gap_edge(mfr: str, layers: int, copper: float = 1.0) -> flo
     entry = table.lookup(layers, float(rules.outer_copper_oz), inner)
     if entry is None:
         return None
-    pad = entry.thresholds["pad_spacing"]
-    return float(GapBand(pad.danger_mm, pad.warning_mm).detection_edge_mm)
+    band = entry.thresholds[population]
+    return float(GapBand(band.danger_mm, band.warning_mm).detection_edge_mm)
 
 
 def _resolve_mfr_via_dimensions(
