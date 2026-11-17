@@ -303,6 +303,18 @@ def test_symlinked_ledger_directory_is_refused(tmp_path):
         OrderLedger(link).append("payment-attempted", A)
 
 
+def test_locked_refuses_a_symlinked_ledger_directory(tmp_path):
+    """locked() must run _check_directory itself, before it creates any lock file (issue #9189)."""
+    real = tmp_path / "real-orders"
+    real.mkdir(mode=0o700)
+    link = tmp_path / "link-orders"
+    link.symlink_to(real)
+    with pytest.raises(LedgerError, match="not a real directory"):
+        with OrderLedger(link).locked():
+            pass
+    assert not list(real.iterdir())  # no lock file in the refused directory
+
+
 def test_group_or_world_writable_ledger_directory_is_refused(tmp_path):
     shared = tmp_path / "shared-orders"
     shared.mkdir()

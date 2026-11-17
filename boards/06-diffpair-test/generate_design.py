@@ -836,16 +836,18 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     from shapely.ops import nearest_points
 
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
-    from kicad_tools.manufacturers import get_profile
     from kicad_tools.router.clearance_kernel import (
         CLEARANCE_EPSILON_MM,
         KSegment,
         KVia,
         copper_gap,
     )
-    from kicad_tools.router.via_clearance import same_net_pad_gap_acceptable
+    from kicad_tools.router.via_clearance import (
+        same_net_band_edges,
+        same_net_band_seat_ok,
+        same_net_trace_band_clear,
+    )
     from kicad_tools.validate.clearance_shapes import pad_shape as kernel_pad_shape
-    from kicad_tools.validate.rules.physical_gap import fab_gap_policy_from_entry
     from kicad_tools.zones.pour_bridge import BridgeSide, plan_via_hop_bridge
 
     text = pcb_path.read_text()
@@ -934,17 +936,10 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         smd_bboxes_by_net.setdefault(pnet, []).append(
             (min(xs) - cr, min(ys) - cr, max(xs) + cr, max(ys) + cr)
         )
-    # Issue #8975: the same-net band edges the fab-view grader resolves for
-    # this board's stackup (jlcpcb ``4layer_1oz``): the pad population's
-    # error edge grades via-annulus-to-SMD-pad slits, the trace population's
-    # grades annulus/segment pairs.  Resolved from the profile table, never
-    # literals, so the repair pass's acceptance bands match the checker by
-    # construction (the stitcher's reasoning, #8957).  A missing entry
-    # disables the band guards (0.0) rather than guessing an edge.
-    _dfm_entry = get_profile("jlcpcb").get_dfm_entry(4, 1.0, 0.5)
-    _gap_policy = fab_gap_policy_from_entry(_dfm_entry) if _dfm_entry else None
-    SAME_NET_PAD_GAP_MM = _gap_policy.pad.error_edge_mm if _gap_policy else 0.0
-    SAME_NET_TRACE_GAP_MM = _gap_policy.trace.error_edge_mm if _gap_policy else 0.0
+    # Issue #8975 / #9150: the same-net band edges the fab-view grader
+    # resolves for this board's stackup, from the one shared resolver (never
+    # literals; a missing profile entry disables the band, 0.0).
+    SAME_NET_PAD_GAP_MM, SAME_NET_TRACE_GAP_MM = same_net_band_edges()
 
     # Segments: (geom, net, layer)
     seg_index: list[tuple] = []
@@ -1081,24 +1076,25 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     def _same_net_band_ok(net: str, vx: float, vy: float, diameter: float) -> bool:
         """Same-net fab-view slit band for an annulus of ``diameter`` (#8975, #9007)."""
         vgeom = Point(vx, vy).buffer(diameter / 2)
-        for seg_i in seg_tree.candidates(vgeom.bounds, MAX_CLEAR):
-            geom, snet, _lay = seg_index[seg_i]
-            # The annulus exists on every layer, so any-layer same-net
-            # copper counts; overlap is one copper union.  ``+ 1.5e-3``
-            # covers both sides' 3-decimal write rounding so a seat
-            # accepted here cannot land a hair under the edge on disk.
-            if snet == net and 1e-6 < vgeom.distance(geom) < SAME_NET_TRACE_GAP_MM + 1.5e-3:
-                return False
-        for pt, vnet, radius, _drill in via_index:
-            if (
-                vnet == net
-                and 1e-6 < vgeom.distance(pt.buffer(radius)) < SAME_NET_TRACE_GAP_MM + 1.5e-3
-            ):
-                return False
-        # The pad population's edge (#8957); no-op when the profile ships
-        # no ``pad_spacing`` entry (edge 0).
-        return same_net_pad_gap_acceptable(
-            vx, vy, diameter, smd_bboxes_by_net.get(net), SAME_NET_PAD_GAP_MM
+        # The annulus exists on every layer, so any-layer same-net copper
+        # counts.  The band itself (union exemption, write-rounding slack,
+        # pad population's edge) is the shared predicate (#9150).
+        same_net_copper = [
+            seg_index[seg_i][0]
+            for seg_i in seg_tree.candidates(vgeom.bounds, MAX_CLEAR)
+            if seg_index[seg_i][1] == net
+        ]
+        same_net_copper += [
+            pt.buffer(radius) for pt, vnet, radius, _drill in via_index if vnet == net
+        ]
+        return same_net_band_seat_ok(
+            vx,
+            vy,
+            diameter,
+            same_net_copper,
+            smd_bboxes_by_net.get(net),
+            SAME_NET_PAD_GAP_MM,
+            SAME_NET_TRACE_GAP_MM,
         )
 
     def _via_ok(net: str, vx: float, vy: float) -> bool:
@@ -1174,16 +1170,6 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             geom, snet, lay = seg_index[seg_i]
             if snet != net and lay == layer and path.distance(geom) < _pair_clear(net, snet):
                 return False
-            # Issue #8975: same-net slit band on the path's own layer, on
-            # the trace population's edge (+ the two-sided write-rounding
-            # guard) -- a stub/bridge leg grazing own-net copper at a
-            # sub-edge gap is a fab-view finding; overlap is one union.
-            if (
-                snet == net
-                and lay == layer
-                and 1e-6 < path.distance(geom) < SAME_NET_TRACE_GAP_MM + 1.5e-3
-            ):
-                return False
         for pt, vnet, radius, drill in via_index:
             if vnet != net:
                 if path.distance(pt.buffer(radius)) < _pair_clear(net, vnet):
@@ -1194,10 +1180,19 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 # annulus could still land 3 um inside the hole floor.
                 if path.distance(pt.buffer(drill / 2.0)) < HOLE_CLEAR:
                     return False
-            # Issue #8975: same-net annulus-to-path slit band.
-            elif 1e-6 < path.distance(pt.buffer(radius)) < SAME_NET_TRACE_GAP_MM + 1.5e-3:
-                return False
-        return True
+        # Issue #8975 / #9150: same-net slit band on the path's own layer
+        # (segments) plus annuli (every layer) on the trace population's
+        # edge -- a stub/bridge leg grazing own-net copper at a sub-edge gap
+        # is a fab-view finding; overlap is one union.
+        same_net_copper = [
+            seg_index[seg_i][0]
+            for seg_i in seg_tree.candidates(path.bounds, MAX_CLEAR)
+            if seg_index[seg_i][1] == net and seg_index[seg_i][2] == layer
+        ]
+        same_net_copper += [
+            pt.buffer(radius) for pt, vnet, radius, _drill in via_index if vnet == net
+        ]
+        return same_net_trace_band_clear(path, same_net_copper, SAME_NET_TRACE_GAP_MM)
 
     def _shipped_path_ok(
         net: str,
@@ -1909,59 +1904,6 @@ def _relocate_pad_edge_vias(pcb_path: Path) -> int:
     return len(result.moved)
 
 
-def _same_net_band_edges() -> tuple[float, float]:
-    """``(pad_edge_mm, trace_edge_mm)`` of the fab-view same-net slit band.
-
-    Resolved from the jlcpcb ``4layer_1oz`` profile entry, exactly as
-    ``_repair_pour_connectivity`` does (#8975): never literals.  A missing
-    entry yields ``(0.0, 0.0)``, which disables the band rather than guessing.
-    """
-    from kicad_tools.manufacturers import get_profile
-    from kicad_tools.validate.rules.physical_gap import fab_gap_policy_from_entry
-
-    entry = get_profile("jlcpcb").get_dfm_entry(4, 1.0, 0.5)
-    policy = fab_gap_policy_from_entry(entry) if entry else None
-    if policy is None:
-        return 0.0, 0.0
-    return policy.pad.error_edge_mm, policy.trace.error_edge_mm
-
-
-def _same_net_band_seat_ok(
-    x: float,
-    y: float,
-    diameter: float,
-    same_net_copper: list,
-    same_net_pad_bboxes: list[tuple[float, float, float, float]],
-    pad_edge_mm: float,
-    trace_edge_mm: float,
-) -> bool:
-    """True iff a via annulus at ``(x, y)`` opens no same-net fab-view slit.
-
-    Issue #9114 (the #8938/#8957/#8975 family).  The annulus exists on every
-    layer, so same-net copper on any layer counts.  Overlap/touch is one
-    copper union (no slit); the band ``[0, edge)`` is rejected, a tangent
-    pad seat (``gap == 0``, Issue #9124) included -- a one-point touch is not
-    a union.
-    ``same_net_copper`` holds shapely geometries (segment outlines and via
-    circles) of the via's own net; the via being moved must be excluded by
-    the caller.  Pads grade on the pad population's edge, everything else
-    on the trace population's.  An edge of ``0`` disables that test.
-    """
-    from shapely.geometry import Point
-
-    from kicad_tools.router.via_clearance import same_net_pad_gap_acceptable
-
-    if not same_net_pad_gap_acceptable(x, y, diameter, same_net_pad_bboxes, pad_edge_mm):
-        return False
-    if trace_edge_mm <= 0:
-        return True
-    annulus = Point(x, y).buffer(diameter / 2)
-    # ``+ 1.5e-3`` covers both sides' 3-decimal write rounding (as #8975).
-    return not any(
-        1e-6 < annulus.distance(geom) < trace_edge_mm + 1.5e-3 for geom in same_net_copper
-    )
-
-
 def _same_net_leg_band_ok(
     p0: tuple[float, float],
     p1: tuple[float, float],
@@ -1974,7 +1916,7 @@ def _same_net_leg_band_ok(
 ) -> bool:
     """True iff a connector leg ``p0 -> p1`` opens no same-net fab-view slit.
 
-    Issue #9167 (the #9114 family): ``_same_net_band_seat_ok`` grades the via
+    Issue #9167 (the #9114 family): ``same_net_band_seat_ok`` grades the via
     annulus at a repair seat but never the connector legs written to reach
     it.  ``_leg_ok`` only judges foreign nets, so a leg could run 0.05 mm
     beside same-net copper -- a ``(0, edge)`` slit the fab view flags.
@@ -2084,6 +2026,8 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
 
     from shapely.geometry import LineString, Point, box
 
+    from kicad_tools.router.via_clearance import same_net_band_edges, same_net_band_seat_ok
+
     CLEAR = 0.15
     MIN_H2H = 0.5
     # KiCad board-setup ``hole_clearance`` constraint: FOREIGN copper must
@@ -2168,7 +2112,7 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
                     return False
         return True
 
-    band_pad_edge, band_trace_edge = _same_net_band_edges()
+    band_pad_edge, band_trace_edge = same_net_band_edges()
 
     def _leg_ok(net, p0, p1, layer, width, vias, skip_uuids=frozenset(), clearance=CLEAR):
         if math.hypot(p1[0] - p0[0], p1[1] - p0[1]) < EPS:
@@ -2248,7 +2192,7 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
             for p in pads
             if p["net"] == net and not p["is_th"] and p["drill"] <= 0
         ]
-        return _same_net_band_seat_ok(
+        return same_net_band_seat_ok(
             vx, vy, diameter, copper, bboxes, band_pad_edge, band_trace_edge
         )
 

@@ -9101,6 +9101,24 @@ class Autorouter:
             num_copper_layers=None,
         )
 
+    def _refresh_skew_trackers_after_detour_repair(self, outcomes: list) -> None:
+        """Re-run :meth:`_finalize_routing` when a detour repair mutated routes (#9197).
+
+        The opt-in ``--detour-repair`` pass (#9013) runs AFTER the
+        ``_finalize_routing`` at the tail of each ``route_all_*`` entry point,
+        and a ``kept`` attempt lifts, re-routes and re-lands nets in
+        ``self.routes``.  Without a refresh the diff-pair / match-group
+        trackers would keep lengths for copper that no longer exists, breaking
+        the "``self.routes`` is final when ``_finalize_routing`` runs" contract.
+
+        Gated on a ``kept`` verdict so the flag-off path and a no-keep pass
+        (every attempt rolled back or skipped restores the exact prior board)
+        make no extra call and stay byte-identical.  ``_finalize_routing`` is
+        safe to repeat: ``record_routes`` overwrites per net id.
+        """
+        if any(getattr(o, "verdict", None) == "kept" for o in outcomes):
+            self._finalize_routing()
+
     def _pair_via_parity_copper(self) -> list[Route]:
         """The copper ``kct check`` sees on the written board, for the parity audit.
 
@@ -14055,12 +14073,14 @@ class Autorouter:
             if getattr(self, "detour_repair", False):
                 from .detour_repair import run_detour_repair_pass
 
-                run_detour_repair_pass(
-                    self,
-                    net_routes=net_routes,
-                    pads_by_net=pads_by_net,
-                    neg_router=neg_router,
-                    per_net_timeout=per_net_timeout,
+                self._refresh_skew_trackers_after_detour_repair(
+                    run_detour_repair_pass(
+                        self,
+                        net_routes=net_routes,
+                        pads_by_net=pads_by_net,
+                        neg_router=neg_router,
+                        per_net_timeout=per_net_timeout,
+                    )
                 )
             return list(self.routes)
         elif initial_partial:
@@ -17073,12 +17093,14 @@ class Autorouter:
         if getattr(self, "detour_repair", False):
             from .detour_repair import run_detour_repair_pass
 
-            run_detour_repair_pass(
-                self,
-                net_routes=net_routes,
-                pads_by_net=pads_by_net,
-                neg_router=neg_router,
-                per_net_timeout=per_net_timeout,
+            self._refresh_skew_trackers_after_detour_repair(
+                run_detour_repair_pass(
+                    self,
+                    net_routes=net_routes,
+                    pads_by_net=pads_by_net,
+                    neg_router=neg_router,
+                    per_net_timeout=per_net_timeout,
+                )
             )
 
         return list(self.routes)
@@ -20396,7 +20418,9 @@ class Autorouter:
         if getattr(self, "detour_repair", False):
             from .detour_repair import run_detour_repair_pass_from_autorouter
 
-            run_detour_repair_pass_from_autorouter(self, per_net_timeout=per_net_timeout)
+            self._refresh_skew_trackers_after_detour_repair(
+                run_detour_repair_pass_from_autorouter(self, per_net_timeout=per_net_timeout)
+            )
         _emit_route_checkpoint(
             getattr(checkpoint_callback, "checkpoint_completed", None),
             self.routes,
@@ -21933,6 +21957,9 @@ class Autorouter:
             discs=discs,
             path_is_clear=path_is_clear,
             is_mutable=lambda s: id(s) in owner_of,
+            # The checker above is a pre-repair snapshot; this makes later
+            # repairs clear the chords earlier ones added (issue #8930).
+            clearance=float(self.grid.rules.trace_clearance),
         )
         if not result.repairs:
             if result.skipped:
