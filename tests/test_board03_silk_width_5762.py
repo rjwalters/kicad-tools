@@ -22,13 +22,22 @@ def test_fp_poly_is_repaired():
     assert "fp_poly" in FP_GRAPHIC_TYPES
 
 
-@pytest.mark.parametrize("name", ["usb_joystick.kicad_pcb", "usb_joystick_routed.kicad_pcb"])
-def test_board03_artifacts_have_no_undersized_silk(name: str):
+@pytest.mark.parametrize(
+    "name,expected_widths",
+    [
+        ("usb_joystick.kicad_pcb", 139),
+        # Issue #9065: the recipe's silk-vs-drill clip removes the R5 / R16
+        # fp_lines that cross via drills -- two fewer silk strokes than the
+        # generator emits; every remaining stroke still clears FLOOR.
+        ("usb_joystick_routed.kicad_pcb", 137),
+    ],
+)
+def test_board03_artifacts_have_no_undersized_silk(name: str, expected_widths: int):
     path = BOARDS / "03-usb-joystick" / "output" / name
     result = SilkscreenRepairer(path).repair_line_widths(FLOOR, dry_run=True)
     assert result.total_fixed == 0, result.fixes[:3]
     widths = [float(m.group(2)) for m in _SILK_WIDTH.finditer(path.read_text())]
-    assert len(widths) == 139
+    assert len(widths) == expected_widths
     assert min(widths) >= FLOOR
 
 
@@ -120,10 +129,31 @@ def regenerated_board03(tmp_path_factory) -> Path:
     return generated
 
 
-@pytest.mark.parametrize("name", ["usb_joystick.kicad_pcb", "usb_joystick_routed.kicad_pcb"])
-def test_committed_silk_matches_fresh_write_pcb(regenerated_board03: Path, name: str):
-    committed = BOARDS / "03-usb-joystick" / "output" / name
-    assert _silk_geometry(regenerated_board03) == _silk_geometry(committed)
+@pytest.mark.parametrize(
+    "name,expected_removals",
+    [
+        ("usb_joystick.kicad_pcb", []),
+        # Issue #9065: the recipe clips R5 / R16 fp_lines off via drills after
+        # routing -- the ONLY routed-vs-generator delta in this view.  U1's
+        # fp_poly is trimmed in place (its ink area changes), but an fp_poly
+        # carries no start/mid/end points, so this geometry view sees it
+        # unchanged; reference moves are text, not graphics, and are also
+        # invisible here.
+        (
+            "usb_joystick_routed.kicad_pcb",
+            [("R16", "fp_line"), ("R5", "fp_line")],
+        ),
+    ],
+)
+def test_committed_silk_matches_fresh_write_pcb(
+    regenerated_board03: Path, name: str, expected_removals: list[tuple[str, str]]
+):
+    committed = _silk_geometry(BOARDS / "03-usb-joystick" / "output" / name)
+    fresh = _silk_geometry(regenerated_board03)
+    removed = sorted(g for g in fresh if g not in committed)
+    added = sorted(g for g in committed if g not in fresh)
+    assert [(g[0], g[1]) for g in removed] == expected_removals
+    assert added == []
 
 
 def test_regenerated_j3_pin1_marker_stays_joined(regenerated_board03: Path):

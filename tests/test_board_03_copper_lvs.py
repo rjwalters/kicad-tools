@@ -376,6 +376,9 @@ class TestBoard03PartialRouteFastFail:
         monkeypatch.setattr(module, "fill_zones_in_routed_pcb", _boom("fill_zones_in_routed_pcb"))
         monkeypatch.setattr(module, "run_drc", _boom("run_drc"))
         monkeypatch.setattr(module, "write_lvs_report", _boom("write_lvs_report"))
+        # Step 5.48 (#9065) is a post-gate step like its siblings; the guard
+        # was silently incomplete for it until the #9083 review.
+        monkeypatch.setattr(module, "repair_silk_over_holes", _boom("repair_silk_over_holes"))
 
     def test_partial_route_fails_fast_with_distinct_message(
         self, monkeypatch, capsys, tmp_path: Path
@@ -416,6 +419,9 @@ class TestBoard03PartialRouteFastFail:
         monkeypatch.setattr(module, "add_gnd_stitching_vias", lambda *a, **k: 0)
         monkeypatch.setattr(module, "apply_manufacturing_profile", lambda *a, **k: None)
         monkeypatch.setattr(module, "apply_pad_thermal_overrides", lambda *a, **k: 6)
+        # Step 5.48 (#9065) parses the routed PCB for real; this hermetic test
+        # has no routed artifact on disk, so it must be a no-op here too.
+        monkeypatch.setattr(module, "repair_silk_over_holes", lambda *a, **k: 0)
         monkeypatch.setattr(module, "fill_zones_in_routed_pcb", lambda *a, **k: None)
         monkeypatch.setattr(module, "run_drc", lambda *a, **k: True)
         monkeypatch.setattr(module, "require_saved_copper_connected", lambda *a, **k: None)

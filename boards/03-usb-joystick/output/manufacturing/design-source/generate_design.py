@@ -687,6 +687,73 @@ def add_gnd_stitching_vias(routed_path: Path) -> int:
     return len(vias)
 
 
+def repair_silk_over_holes(routed_path: Path) -> int:
+    """Clip silkscreen off drilled holes; move refs out from over them (#9065).
+
+    Delivers the recipe-level acceptance criteria of #9054 that PR #9061
+    left open: the routed PCB carries ``fp_line`` / ``fp_poly`` silk
+    crossing via drills (5 ``silk_hole_overlap`` findings) and reference
+    labels sitting over holes (C6, U1).  This step runs the library
+    equivalents of ``kct fix-silkscreen --clip-to-holes`` and
+    ``kct place-silk-refs --over-holes`` on ``routed_path`` -- after
+    routing so the vias exist, before the zone fill because silk edits do
+    not touch copper -- with no hand-placed coordinates, then hard-gates
+    ``silk_hole_overlap == 0`` so the ``board-03-end-to-end`` CI job keeps
+    it there on every main push.  Each save fires only when its pass
+    actually changed something, so a second recipe run is a byte-identical
+    no-op (#9065 Observed).
+
+    Returns the number of silk elements clipped plus references moved.
+    Raises RuntimeError when any ``silk_hole_overlap`` finding remains.
+    """
+    from kicad_tools.drc.repair_silkscreen import SilkscreenRepairer
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.silkscreen.place_refs import SilkRefPlacer, references_over_holes
+    from kicad_tools.validate.rules.silkscreen import check_all_silkscreen
+
+    print("\nRepairing silkscreen over drilled holes (issue #9065)...")
+
+    repairer = SilkscreenRepairer(routed_path)
+    hole_result = repairer.repair_hole_clearance()
+    if hole_result.total_fixed:
+        repairer.save()
+    for fix in hole_result.fixes:
+        print(f"   {fix.footprint_ref}: {fix.element_type} {fix.action} ({', '.join(fix.holes)})")
+
+    placer = SilkRefPlacer(routed_path)
+    moved = 0
+    over = references_over_holes(placer.pcb)
+    if over:
+        placement = placer.plan(only=over)
+        moved = placer.apply(placement)
+        if moved:
+            placer.save()
+        for p in placement.placements:
+            print(f"   {p.footprint_ref}: {p.status} -> {p.new_position}")
+
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    remaining = [
+        v
+        for v in check_all_silkscreen(PCB.load(routed_path), rules).violations
+        if v.rule_id == "silk_hole_overlap"
+    ]
+    if remaining:
+        for v in remaining:
+            print(f"   silk_hole_overlap: {v.message}")
+        raise RuntimeError(
+            f"silk hole clearance gate: {len(remaining)} silk_hole_overlap finding(s) "
+            "remain after repair_hole_clearance + place-silk-refs --over-holes; "
+            "see the messages above."
+        )
+
+    print(
+        f"   {hole_result.total_fixed} clip(s) + {moved} ref move(s); "
+        "silk_hole_overlap = 0 (jlcpcb, 4 layers)"
+    )
+    return hole_result.total_fixed + moved
+
+
 def require_saved_copper_connected(routed_path: Path) -> None:
     """Gate Board03 on native connectivity of the exact saved copper (#5358).
 
@@ -1103,6 +1170,7 @@ def run_drc(pcb_path: Path) -> bool:
                 print(f"   {line}")
 
         if report_path.is_file():
+            _strip_mask_geometry_provenance(report_path)
             print(f"\n   DRC report: {report_path}")
 
         if result.returncode == 0:
@@ -1115,6 +1183,32 @@ def run_drc(pcb_path: Path) -> bool:
     except Exception as e:
         print(f"\n   Error running DRC: {e}")
         return False
+
+
+def _strip_mask_geometry_provenance(report_path: Path) -> None:
+    """Drop per-object mask provenance from a ``kct check`` JSON report.
+
+    ``mask_copper_assessments[*].geometry_provenance`` (#5255) carries the
+    exported native geometry and per-object margins for introspection --
+    ~21 MB on this board, dwarfing the verdict/summary the committed
+    evidence exists for (#9065 regen).  Nothing downstream of the committed
+    artifact (gate, manifest, receipt, fleet) reads it; the verdict,
+    coverage, policy and source binding stay.  No-op on reports without
+    assessments.  Re-serialised compactly so the report survives as plain
+    committed JSON instead of a blob.
+    """
+    import json
+
+    try:
+        data = json.loads(report_path.read_text())
+    except (OSError, ValueError):
+        return
+    changed = False
+    for assessment in data.get("mask_copper_assessments") or []:
+        if isinstance(assessment, dict) and assessment.pop("geometry_provenance", None) is not None:
+            changed = True
+    if changed:
+        report_path.write_text(json.dumps(data) + "\n")
 
 
 # =============================================================================
@@ -1213,6 +1307,15 @@ def main() -> int:
         # fill would tie solid (#7275), so they stay balanced and any starved
         # spoke fails native DRC instead of being repaired into solid copper.
         apply_pad_thermal_overrides(routed_path)
+
+        # Step 5.48: Clip silkscreen off drilled holes and move reference
+        # labels out from over them (#9065, delivering #9054's recipe AC).
+        # Runs AFTER routing (the vias must exist to be clipped around) and
+        # BEFORE the zone fill: silk edits do not touch copper, so the fill
+        # below still sees the same copper the DRC/LVS gates re-derive.
+        # Hard-gates ``silk_hole_overlap == 0`` -- the standing CI check the
+        # ``board-03-end-to-end`` job exercises on every main push.
+        repair_silk_over_holes(routed_path)
 
         # Step 5.5: Fill the zone polygons in the routed PCB so DRC's
         # ``connectivity`` rule sees the power-net pads as connected.  This

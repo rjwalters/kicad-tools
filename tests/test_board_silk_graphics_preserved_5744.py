@@ -122,6 +122,16 @@ def test_committed_routed_artifact_keeps_footprint_silk_graphics(
     # and have no unrouted counterpart.
     for ref in [r for r in routed_silk if r.startswith("FID") and r not in unrouted_silk]:
         del routed_silk[ref]
+    # Issue #9065: board 03's post-route Step 5.48 (``repair_silk_over_holes``)
+    # clips footprint silk that crosses a drilled hole.  It may only REMOVE
+    # silk graphics -- R5 and R16 each lose exactly the one ``fp_line`` crossing
+    # a via drill -- never add or rewrite them, so any other delta (including a
+    # whole-footprint delete, the #5744 regression this test exists for) still
+    # fails the assert below.
+    hole_clipped_silk_9065 = {"03-usb-joystick": {"R5": 1, "R16": 1}}
+    for ref, removed in hole_clipped_silk_9065.get(unrouted.parent.parent.name, {}).items():
+        assert unrouted_silk.get(ref, 0) - removed >= 0, f"{ref}: no silk graphic to clip"
+        unrouted_silk[ref] -= removed
     assert routed_silk == unrouted_silk
 
 

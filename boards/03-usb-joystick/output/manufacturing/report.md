@@ -1,8 +1,8 @@
 ---
 title: "usb_joystick_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.24.0"
-date: "Rev 1 | 2026-10-21 | jlcpcb-tier1"
+author: "kicad-tools 0.29.0"
+date: "Rev 1 | 2026-11-17 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -149,7 +149,7 @@ GPIO and ADC map is fixed to Microchip TQFP-44 pinout
 | Errors | 0 |
 | Errors: kct (`--mfr jlcpcb-tier1` rules) | 0 |
 | Errors: kicad-cli (geometric) | 0 |
-| Warnings | 14 |
+| Warnings | 307 |
 | Blocking | 0 |
 
 **Status**: PASS
@@ -158,8 +158,17 @@ GPIO and ADC map is fixed to Microchip TQFP-44 pinout
 
 | Violation Type | Count |
 |----------------|-------|
+| redundant_copper_duplicate | 134 |
+| redundant_copper_covered | 52 |
+| redundant_copper_staircase | 43 |
+| pour_slot | 39 |
+| silk_pad_clearance | 21 |
 | hole_to_hole_clearance | 14 |
+| redundant_copper_detour | 2 |
 | diffpair_routing_continuity | 1 |
+| fiducials_missing | 1 |
+| board_id_missing | 1 |
+
 
 
 \newpage
@@ -171,7 +180,7 @@ GPIO and ADC map is fixed to Microchip TQFP-44 pinout
 ### Action Items
 
 - **[OPTIONAL]** Refill zones to verify 2 zone-connected nets, then re-run kct audit
-- **[OPTIONAL]** Review 14 DRC warnings
+- **[OPTIONAL]** Review 307 DRC warnings
 
 
 \newpage
