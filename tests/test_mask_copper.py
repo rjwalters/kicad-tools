@@ -1311,3 +1311,80 @@ def test_v1_payload_without_new_fields_loads_and_round_trips():
     assert measurement.owner_ref is None
     reloaded = MaskCopperAssessment.from_dict(assessment.to_dict())
     assert reloaded.measurements[0].to_dict() == measurement.to_dict()
+
+
+def _merged_region_geometry(trace_kind):
+    """Two pads on nets N/M whose mask openings are bridged by one native region.
+
+    The native F.Mask is wider than the two per-pad openings, so the residual
+    bridge strip (x 1.1..1.3) becomes a ``merged_region`` opening with both pads
+    as contributors. A conductor on net N sits wholly inside that strip.
+    """
+    from shapely.geometry import Point, box
+    from shapely.ops import unary_union
+
+    from kicad_tools.validate.mask_copper_geometry import AttributedMaskGeometry
+    from kicad_tools.validate.mask_export_geometry import ExportedMaskGeometry
+
+    pad_a, pad_b, trace = (f"00000000-0000-0000-0000-00000000000{i}" for i in (1, 2, 3))
+    open_a, open_b = box(-0.1, -0.1, 1.1, 1.1), box(1.3, -0.1, 2.3, 1.1)
+    native = unary_union([open_a, open_b, box(1.0, -0.1, 1.3, 1.1)])
+    copper_a, copper_b = box(0, 0, 1, 1), box(1.4, 0, 2.2, 1)
+    conductor = Point(1.2, 0.5).buffer(0.04) if trace_kind == "via" else box(1.15, 0.4, 1.25, 0.6)
+    exported = ExportedMaskGeometry(
+        "a" * 64,
+        None,
+        None,
+        "10.0.5",
+        {},
+        layers={"F.Mask": native, "F.Cu": unary_union([copper_a, copper_b, conductor])},
+    )
+    return AttributedMaskGeometry(
+        exported,
+        {
+            pad_a: {
+                "kind": "pad:rect",
+                "net": "N",
+                "pad_ref": "R1/1",
+                "layers_geometry": {"F.Mask": open_a, "F.Cu": copper_a},
+                "margin_mm": {"F.Mask": 0.1},
+            },
+            pad_b: {
+                "kind": "pad:rect",
+                "net": "M",
+                "pad_ref": "R2/1",
+                "layers_geometry": {"F.Mask": open_b, "F.Cu": copper_b},
+                "margin_mm": {"F.Mask": 0.1},
+            },
+            trace: {
+                "kind": trace_kind,
+                "net": "N",
+                "layers_geometry": {"F.Cu": conductor},
+                "margin_mm": {},
+            },
+        },
+    )
+
+
+@pytest.mark.parametrize("trace_kind", ["segment", "via"])
+def test_same_net_conductor_over_merged_region_prints_bare_same_net(trace_kind):
+    """Issue #9149: bare ``same-net`` is also the no-single-owner-pad path.
+
+    A segment/arc/via has a terminating endpoint, yet over a merged-region
+    opening there is no single owner pad to test it against, so the relation
+    is the bare ``same-net`` string -- not own-pad entry / pass-through.
+    """
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    assessment = assess_attributed_geometry(_merged_region_geometry(trace_kind), _POLICY)
+    merged = [m for m in assessment.measurements if m.opening_kind == "merged_region"]
+    assert len(merged) == 1
+    assert merged[0].conductor_kind == trace_kind
+    assert merged[0].same_net is True and merged[0].own_pad_entry is None
+    labels = [
+        v.message
+        for v in _mask_findings(assessment_results(assessment))
+        if "opening merged_region" in v.message
+    ]
+    assert len(labels) == 1
+    assert labels[0].endswith("; same-net")
