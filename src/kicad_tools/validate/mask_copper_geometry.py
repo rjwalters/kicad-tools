@@ -100,6 +100,25 @@ class AttributedMaskGeometry:
     provenance: dict[str, Any] = field(default_factory=dict)
 
 
+def _finite_mm(node, index):
+    """A finite number at *index* of an s-expression node, or None.
+
+    ``.3`` (no leading zero) parses as a string atom and ``0.3`` as a float, so
+    the value is read through its string form.
+    """
+    value = node.get_string(index) if node is not None else None
+    try:
+        parsed = float(value) if value is not None else None
+    except ValueError:
+        return None
+    return parsed if parsed is not None and math.isfinite(parsed) else None
+
+
+def _positive_mm(node, index):
+    value = _finite_mm(node, index)
+    return value if value is not None and value > 0 else None
+
+
 def _digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
@@ -418,15 +437,23 @@ def inspect_attributed_mask_geometry(
             # opening) out of that class. None when absent or unreadable.
             drill_mm = None
             if feature["kind"] == "via":
-                drill = feature["node"].find_child("drill")
-                # ``.3`` (no leading zero) parses as a string atom, ``0.3`` as a float.
-                value = drill.get_string(0) if drill is not None else None
-                try:
-                    parsed = float(value) if value is not None else None
-                except ValueError:
-                    parsed = None
-                if parsed is not None and math.isfinite(parsed) and parsed > 0:
-                    drill_mm = parsed
+                drill_mm = _positive_mm(feature["node"].find_child("drill"), 0)
+            # Authored straight-track centreline and width (issue #8858): the
+            # within-own-pad class grants a track one pad-edge crossing, which
+            # needs to know where the track ends and how wide it is. The native
+            # copper is a capsule that does not carry either. None when absent.
+            width_mm = None
+            endpoints_mm = None
+            if feature["kind"] == "segment":
+                width_mm = _positive_mm(feature["node"].find_child("width"), 0)
+                ends = []
+                for tag in ("start", "end"):
+                    child = feature["node"].find_child(tag)
+                    x = _finite_mm(child, 0)
+                    y = _finite_mm(child, 1)
+                    if x is not None and y is not None:
+                        ends.append((x, y))
+                endpoints_mm = tuple(ends) if len(ends) == 2 else None
             result.objects[identity] = {
                 **{k: v for k, v in feature.items() if k != "node"},
                 "net": item["net"],
@@ -435,6 +462,8 @@ def inspect_attributed_mask_geometry(
                 "margin_source": margin_source,
                 "pad_ref": pad_ref,
                 "drill_mm": drill_mm,
+                "width_mm": width_mm,
+                "endpoints_mm": endpoints_mm,
             }
         # Verify source and all sidecar bytes (including their absence) after
         # both native operations. The author files themselves were never passed.
