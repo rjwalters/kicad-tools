@@ -685,8 +685,11 @@ def test_match_lengths_measure_path_not_summed_copper():
     # test_board07_byte0_physical_spread grade (Issue #9217) -- stay
     # inside the 5 mm budget on the repaired copper (byte 0: 1.65 mm,
     # byte 1: 3.38 mm; before #9217 this block graded the raw copper
-    # path only, 1.18 mm and 3.28 mm, and via travel moves the two
-    # spreads differently because DQ2 and LDQM carry no path vias). The
+    # path only, 1.18 mm and 3.28 mm, and via travel does not cancel
+    # within a group, so each spread moves by its own amount: in byte 0
+    # DQ2 and LDQM carry no path vias against 0.573 mm for the other
+    # seven, and in byte 1 DQ15 and UDQM carry one path via, 0.287 mm,
+    # against 0.573 mm for the other seven). The
     # pre-repair byte-0 violation (> 5 mm physical while summed copper
     # hid it) is asserted there against reconstructed pre-repair copper,
     # and the 10.9 mm byte-1 spread once reported here was the
