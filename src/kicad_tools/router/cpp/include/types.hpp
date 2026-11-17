@@ -356,7 +356,10 @@ namespace router {
 // pads drains as FAILURE_PAIRWISE_BLOCKED instead of a bare NO_PATH
 // (``Grid3D::segment_pads_pairwise_blocker`` is new).  A v64 .so cannot emit
 // that attribution, so it must be rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 65;
+// v66 (Issue #8994): ``DesignRules::same_net_pad_gap_band_edge_mm`` + the
+// same-net pad slit-band refusal in both A* via checks.  A v65 .so seats
+// via annuli in the (0, edge) slit band beside their own SMD pads.
+constexpr int ROUTER_CPP_BUILD_VERSION = 66;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -762,6 +765,16 @@ struct DesignRules {
     // via that does not overlap the pad (Python
     // ``DesignRules.min_via_pad_edge_gap``).  0 disables.
     float min_via_pad_edge_gap = 0.0f;
+    // Issue #8994: the fab-view same-net pad slit band's detection edge in
+    // mm (Python ``DesignRules.same_net_pad_gap_band_edge_mm``, the
+    // caller-resolved ``pad_spacing`` dfm entry's
+    // ``GapBand.detection_edge_mm``).  A via ANNULUS whose copper gap to a
+    // same-net SMD pad lands strictly inside ``(0, edge)`` is refused --
+    // the two acceptable regions (unioned copper at ``gap <= 0``, or clear
+    // at ``gap >= edge``) mirror Python
+    // ``via_clearance.same_net_pad_gap_acceptable``.  0 (Python ``None``)
+    // disables: never guess a literal edge (#8974 AC-3).
+    float same_net_pad_gap_band_edge_mm = 0.0f;
     // Issue #4071: soft corridor-attractor bonus (mirrors Python
     // ``DesignRules.cost_corridor_attractor``, default 3.0).  Subtracted
     // from a cell's positive step cost when the cell is reserved for the
@@ -828,6 +841,65 @@ struct PadInfo {
     // instead of the board-wide largest class.
     float class_clearance = 0.0f;
 };
+
+// Issue #8994: half extents of the AABB the Python pad model gives a pad --
+// ``cli.stitch_cmd.find_all_pad_bboxes`` / ``_rotated_rect_half_extents``:
+// cardinal rotations swap or keep the dimensions exactly, any other angle
+// takes the conservative AABB of the rotated rect, and a ``circle`` pad uses
+// its exact bounding square (rotation-invariant, no inflation).  This is the
+// model ``via_clearance.same_net_pad_gap_acceptable`` measures against, NOT
+// the exact rotated rect of the #7296 blocks above -- the exact-rect model is
+// less conservative, so using it here would let the A* accept a seat the
+// fab-view checker rejects on a non-cardinally-rotated pad.
+inline void same_net_pad_aabb_half_extents(const PadInfo& pad, float& half_w,
+                                           float& half_h) {
+    if (pad.is_circular) {
+        const float half = std::max(pad.width, pad.height) / 2.0f;
+        half_w = half;
+        half_h = half;
+        return;
+    }
+    const float rot = std::fmod(std::fabs(pad.rotation), 360.0f);
+    if (std::fabs(rot - 90.0f) < 0.001f || std::fabs(rot - 270.0f) < 0.001f) {
+        half_w = pad.height / 2.0f;
+        half_h = pad.width / 2.0f;
+        return;
+    }
+    if (rot < 0.001f || std::fabs(rot - 180.0f) < 0.001f) {
+        half_w = pad.width / 2.0f;
+        half_h = pad.height / 2.0f;
+        return;
+    }
+    const float rad = pad.rotation * 3.14159265358979323846f / 180.0f;
+    const float abs_cos = std::fabs(std::cos(rad));
+    const float abs_sin = std::fabs(std::sin(rad));
+    half_w = (pad.width * abs_cos + pad.height * abs_sin) / 2.0f;
+    half_h = (pad.width * abs_sin + pad.height * abs_cos) / 2.0f;
+}
+
+// Issue #8994: the same-net pad slit-band verdict, the faithful C++ mirror of
+// Python ``via_clearance.same_net_pad_gap_acceptable`` for a via ANNULUS of
+// radius ``annulus_half_mm`` at world ``(wx, wy)`` against one same-net SMD
+// pad.  Two acceptable regions, not a floor: ``gap <= 0`` (annulus unions
+// with its own pad -- one copper body, no slit) and ``gap >= edge_mm`` are
+// both ACCEPTED; only the open band ``(0, edge_mm)`` in between is rejected.
+// The 1e-9 slack on both band edges mirrors the Python predicate's
+// float-noise tolerance for a gap computed as exactly 0 or exactly the edge.
+// Computed in double: Python measures in float64, and a float32 gap could
+// flip the 1e-9-band-edge verdicts the slack exists to keep stable.
+inline bool same_net_pad_gap_in_band(double wx, double wy, double annulus_half_mm,
+                                     const PadInfo& pad, double edge_mm) {
+    float half_w = 0.0f, half_h = 0.0f;
+    same_net_pad_aabb_half_extents(pad, half_w, half_h);
+    const double dx = std::max(
+        {static_cast<double>(pad.x - half_w) - wx,
+         wx - static_cast<double>(pad.x + half_w), 0.0});
+    const double dy = std::max(
+        {static_cast<double>(pad.y - half_h) - wy,
+         wy - static_cast<double>(pad.y + half_h), 0.0});
+    const double gap = std::hypot(dx, dy) - annulus_half_mm;
+    return 1e-9 < gap && gap < edge_mm - 1e-9;
+}
 
 // Stored segment for validation (Issue #2439)
 // Segments from completed routes, used for clearance checking.

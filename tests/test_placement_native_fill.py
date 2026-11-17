@@ -422,3 +422,65 @@ def test_find_kicad_python_returns_first_passing_candidate(monkeypatch):
         lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "", ""),
     )
     assert placement_fill.find_kicad_python(probe="import pcbnew") == Path(sys.executable)
+
+
+def test_find_kicad_python_probes_differently_named_links_to_same_interpreter(
+    monkeypatch, tmp_path
+):
+    """A symlinked candidate failing its probe must not hide other names for it.
+
+    Under a uv venv ``sys.executable`` is a symlink to the system
+    interpreter, so resolve()-based dedup marked every other name for that
+    interpreter ``seen`` and pcbnew discovery returned None on apt-KiCad
+    hosts (Issue #9086).
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from kicad_tools.zones import placement_fill
+
+    system = tmp_path / "python3-real"
+    system.write_text("", encoding="utf-8")
+    venv_python = tmp_path / "venv-python"
+    venv_python.symlink_to(system)
+    alias_python = tmp_path / "alias-python"
+    alias_python.symlink_to(system)
+
+    probed = []
+
+    def fake_run(cmd, **kw):
+        probed.append(Path(cmd[0]))
+        rc = 0 if Path(cmd[0]) == alias_python else 1
+        return subprocess.CompletedProcess(cmd, rc, "", "")
+
+    monkeypatch.setattr(sys, "executable", str(venv_python))
+    monkeypatch.setattr(placement_fill.shutil, "which", lambda name: str(alias_python))
+    monkeypatch.setattr(placement_fill.subprocess, "run", fake_run)
+
+    assert placement_fill.find_kicad_python(probe="import pcbnew") == alias_python
+    assert venv_python in probed
+
+
+def test_find_kicad_python_probes_repeated_identical_path_only_once(monkeypatch, tmp_path):
+    """Exact duplicate argv entries (e.g. python3 on PATH == sys.executable) probe once."""
+    import subprocess
+    import sys
+
+    from kicad_tools.zones import placement_fill
+
+    duplicate = tmp_path / "python3-duplicate"
+    duplicate.write_text("", encoding="utf-8")
+
+    probed = []
+
+    def fake_run(cmd, **kw):
+        probed.append(cmd[0])
+        return subprocess.CompletedProcess(cmd, 1, "", "")
+
+    monkeypatch.setattr(sys, "executable", str(duplicate))
+    monkeypatch.setattr(placement_fill.shutil, "which", lambda name: str(duplicate))
+    monkeypatch.setattr(placement_fill.subprocess, "run", fake_run)
+
+    assert placement_fill.find_kicad_python(probe="import pcbnew") is None
+    assert probed.count(str(duplicate)) == 1
