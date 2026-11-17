@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 
 import pytest
@@ -309,10 +310,10 @@ def test_unowned_ledger_directory_is_refused(tmp_path, monkeypatch):
     import os
 
     orders = tmp_path / "other-orders"
-    orders.mkdir()
+    orders.mkdir(mode=0o700)  # not umask-dependent: 0700 never trips the writable check
     real = os.getuid()
     monkeypatch.setattr(os, "getuid", lambda: real + 1)
-    with pytest.raises(LedgerError, match="not owned"):
+    with pytest.raises(LedgerError, match=rf"{re.escape(str(orders))} is not owned"):
         OrderLedger(orders).append("payment-attempted", A)
 
 

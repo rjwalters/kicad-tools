@@ -1021,6 +1021,8 @@ def test_ledger_write_failure_after_a_confirmed_order_names_the_order(tmp_path, 
         ("$5.00 CR", "USD"),
         ("USD 123.45%", ""),
         ("$12.34CR", "USD"),
+        ("$12.34CREDIT", "USD"),
+        ("$12.34DEBIT", "USD"),
         ("USD 12.34 CREDIT", ""),
     ],
 )
