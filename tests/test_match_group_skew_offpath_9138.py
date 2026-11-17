@@ -147,6 +147,38 @@ def test_via_on_path_keeps_its_stackup_height(tmp_path: Path):
     assert skew_data["DDR_DATA"] == pytest.approx(max(summed) - min(summed), abs=0.05)
 
 
+def test_sub_threshold_off_path_keeps_summed_length(tmp_path: Path, caplog):
+    """AC 4 (Issue #9138 review): a clean real-board net keeps its summed length.
+
+    Real loop-free nets carry up to ~1.6 mm of residual copper the path
+    decomposition reports as off-path (#9117: barrel overlap under
+    pads/vias, in-pad joints).  That residual differs per net, so
+    excluding it per member would manufacture group skew out of clean
+    copper: on board 07 it turned ADDR_BUS's 0.0169 mm kicad-cli-verified
+    skew into 0.3743 mm.  Off-path copper within
+    ``OFF_PATH_REPORT_THRESHOLD_MM`` therefore keeps the summed
+    kicad-cli figure, and the loop exclusion only applies above it.
+    """
+    rows = {1: ("DQ0", 10.0, 25.0), 2: ("DQ1", 20.0, 25.0), 3: ("DQ2", 30.0, 25.5)}
+    # DQ0 carries a 1 mm dead-end stub: real off-path copper, but below
+    # the 2 mm threshold, so the summed measurement stands.
+    body = (
+        _seg(5, 10, 25, 10, 1)
+        + _seg(15, 10, 16, 10, 1)
+        + _seg(5, 20, 25, 20, 2)
+        + _seg(5, 30, 25.5, 30, 3)
+    )
+    pcb = _write(tmp_path, body, rows)
+    lengths = [measure_pcb_net(pcb, n) for n in (1, 2, 3)]
+    assert lengths[0] == pytest.approx(lengths[1] + 1.0, abs=0.05)  # premise
+
+    with caplog.at_level(logging.WARNING, logger="kicad_tools.validate.match_group_skew"):
+        skew_data, _g, _t = derive_group_skew_data(pcb, NET_CLASS_MAP)
+
+    assert skew_data["DDR_DATA"] == pytest.approx(max(lengths) - min(lengths), abs=1e-6)
+    assert not [r for r in caplog.records if "off-path" in r.getMessage()]
+
+
 def test_falls_back_to_summed_length_without_shapely(tmp_path: Path, monkeypatch):
     pcb = _loop_board(tmp_path)
     monkeypatch.setattr("kicad_tools._shapely.has_shapely", lambda: False)

@@ -16,16 +16,21 @@ This module provides the producer side -- a thin shim that:
 
 1. Detects match groups on a routed PCB using the same layered
    detector the router uses (:func:`match_group_detection.detect_match_groups`).
-2. Measures each declared member's length from the PCB.  The primary
-   measurement is the physical pad-to-pad copper path
-   (:meth:`TraceLengthAnalyzer.measure_net_path`) plus the stackup height
-   of the vias that path runs through; copper the signal never travels
-   (dead-end loops, overlapping duplicates, stubs) is reported but not
-   counted (Issue #9138).  When no pad-to-pad path exists (open net,
-   fewer than two pads, no shapely, a PCB stand-in without a net table)
-   it falls back to the summed kicad-cli length
-   (:meth:`MatchGroupTracker.measure_net_from_pcb`, a thin forwarder to
-   :meth:`DiffPairLengthTracker.measure_net_from_pcb`).
+2. Measures each declared member's length from the PCB.  A member whose
+   net carries *material* off-path copper -- more than
+   :data:`OFF_PATH_REPORT_THRESHOLD_MM` of it, i.e. a dead-end loop,
+   overlapping duplicate or stub -- is measured along its physical
+   pad-to-pad copper path (:meth:`TraceLengthAnalyzer.measure_net_path`)
+   plus the stackup height of the vias on that path, so the off-path
+   copper does not inflate (and mask) the group's skew (Issue #9138);
+   the excluded amount is logged as a warning.  Members whose off-path
+   copper is within the threshold -- a clean net, where the residual is
+   barrel overlap under pads/vias and in-pad joints (#9117) -- keep the
+   summed kicad-cli length (:meth:`MatchGroupTracker.measure_net_from_pcb`,
+   a thin forwarder to :meth:`DiffPairLengthTracker.measure_net_from_pcb`),
+   the #6725/#7790-anchored figure.  When no pad-to-pad path exists
+   (open net, fewer than two pads, no shapely, a PCB stand-in without a
+   net table) the summed length is used as well.
 3. Builds the ``group_skew_data`` (``max(L) - min(L)`` across the
    group), the detected ``tracker_match_groups`` list, and the per-group
    ``threshold_map`` from each group's net class
@@ -91,10 +96,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Off-path copper at or below this is not reported (Issue #9138).  Same
-# margin as board 07's validator (``OFF_PATH_TOLERANCE_MM``, Issue #9117):
-# loop-free nets there carry up to ~1.6 mm of residual copper from barrel
-# overlap under pads/vias and in-pad joints, which is not a routing defect.
+# Off-path copper above this excludes it from the measurement and is
+# reported (Issue #9138).  Same margin as board 07's validator
+# (``OFF_PATH_TOLERANCE_MM``, Issue #9117): loop-free nets there carry up
+# to ~1.6 mm of residual copper from barrel overlap under pads/vias and
+# in-pad joints, which is not a routing defect.  Below this margin the
+# path decomposition cannot tell residual from real off-path copper, so
+# the net keeps its summed kicad-cli length (the #6725/#7790-anchored
+# figure) rather than silently shedding a per-net amount of legitimate
+# copper into the group's skew.
 OFF_PATH_REPORT_THRESHOLD_MM = 2.0
 
 
@@ -167,9 +177,10 @@ def derive_group_skew_data(
         :meth:`MatchGroupTracker.get_all_skews` for routes recorded
         via :meth:`MatchGroupTracker.record_routes`.  This is the
         property tested in ``tests/test_validate_match_group_skew.py``.
-        It holds for nets without off-path copper; a net with a dead-end
-        loop, duplicate or stub measures shorter here than the summed
-        router-side figure by design (Issue #9138).
+        It holds for nets without material off-path copper (at or below
+        :data:`OFF_PATH_REPORT_THRESHOLD_MM`), and for open nets; a net
+        with a dead-end loop, duplicate or stub measures shorter here
+        than the summed router-side figure by design (Issue #9138).
 
         Suffix inference is OFF here (``enable_suffix_inference=False``,
         the detector's default).  Standalone ``kct check`` follows the
@@ -390,10 +401,14 @@ def _measure_member_mm(
 ) -> float:
     """Length of one group member in mm (Issue #9138).
 
-    Pad-to-pad path length plus the stackup height of the vias on that
-    path; off-path copper above :data:`OFF_PATH_REPORT_THRESHOLD_MM` is
-    logged as a warning.  Falls back to the summed kicad-cli length when
-    the path is unavailable (see :func:`_measure_path_length_mm`).
+    A net carrying more than :data:`OFF_PATH_REPORT_THRESHOLD_MM` of
+    off-path copper is measured along its pad-to-pad path plus the
+    stackup height of the vias on that path, excluding the off-path
+    copper (logged as a warning).  Every other net -- clean or without a
+    measurable path -- keeps the summed kicad-cli length: below the
+    threshold the path decomposition cannot tell legitimate residual
+    (#9117: barrel overlap, in-pad joints) from real off-path copper, and
+    shedding a per-net slice of it would manufacture group skew (AC 4).
     """
     net_name = net_names.get(net_id, f"net {net_id}")
     path = _measure_path_length_mm(pcb, net_id, net_names.get(net_id), num_copper_layers)
@@ -407,7 +422,7 @@ def _measure_member_mm(
                 net_name,
                 off_path_mm,
             )
-        return length_mm
+            return length_mm
 
     from kicad_tools.router.match_group_length import MatchGroupTracker
 
@@ -430,9 +445,11 @@ def _measure_path_length_mm(
 
     ``path_length_mm`` is :meth:`TraceLengthAnalyzer.measure_net_path`'s
     pad-to-pad length plus the kicad-cli stackup height of each via on that
-    path, so a clean net equals its summed kicad-cli length.  For a net with
-    more than two pads the path is the longest pairwise pad path (the
-    binding length), and the other branches count as off-path copper.
+    path.  For a net with more than two pads the path is the longest
+    pairwise pad path (the binding length), and the other branches count
+    as off-path copper.  The caller only adopts this figure when
+    ``off_path_mm`` exceeds :data:`OFF_PATH_REPORT_THRESHOLD_MM`; below it
+    the summed kicad-cli length stands (AC 4).
 
     ``None`` means "no path-based figure" -- the caller falls back to the
     summed length: unnamed net, a PCB stand-in without ``get_net_by_name``,
