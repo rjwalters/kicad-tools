@@ -2487,6 +2487,13 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
                                 skip_uuids={victim["uuid"]},
                             ):
                                 continue
+                            # Same-net fab-view slit band (#9127, as the
+                            # class-2 sites).  Unlike the staple collapse
+                            # this slide deletes nothing: the victim's chain
+                            # stays and the connectors below are added, so
+                            # the victim via itself is the only exclusion.
+                            if not _band_ok(net, nx, ny, victim["size"], victim["uuid"]):
+                                continue
                             if not all(
                                 _leg_ok(
                                     net,
