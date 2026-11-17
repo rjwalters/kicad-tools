@@ -105,22 +105,14 @@ PARAMS = [
 ]
 
 
-# Board 02's committed DRU was re-pinned from a full recipe run (#8759) and carries
-# rules (ampacity, max hole size, B.Silkscreen floors) that this exporter-only
-# replay does not emit, so the byte-for-byte replay is still pending there.
-BYTE_FOR_BYTE_PARAMS = [
-    pytest.param(
-        p.values[0],
-        id=p.id,
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason="committed DRU re-pinned from a full recipe run; export-only replay differs (#8759)",
-        ),
-    )
-    if p.id == "board02"
-    else p
-    for p in PARAMS
-]
+# Board 02 used to be a strict xfail here (#8759): its committed DRU carried an
+# "Ampacity Min Width" rule the exporter-only replay does not emit.  Issue #8979
+# regenerated board 02 through its recipe, whose DRU now matches the replay
+# byte for byte.  Note: a standalone ``kct export`` of the committed board
+# (with ``output/net_class_map.json`` declaring VCC target_ampacity) re-adds the
+# ampacity rule, so the recipe's DRU depends on which net-class sidecar its
+# export step sees.
+BYTE_FOR_BYTE_PARAMS = PARAMS
 
 
 def _committed_dru(board: str) -> str:
