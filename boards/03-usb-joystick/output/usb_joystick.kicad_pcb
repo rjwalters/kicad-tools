@@ -5,6 +5,11 @@
 		(thickness 1.6)
 	)
 	(paper "A4")
+	(title_block
+		(title "USB joystick controller - ATmega32U4")
+		(date "2026-09")
+		(rev "B")
+	)
 	(layers
 		(0 "F.Cu" signal)
 		(1 "In1.Cu" signal)

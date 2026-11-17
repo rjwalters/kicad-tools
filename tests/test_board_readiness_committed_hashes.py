@@ -38,6 +38,19 @@ EXPECTED_STALE: dict[str, str] = {
         "errors (check completes since #9064/#9009); waits on same-net "
         "mask_to_copper qualification."
     ),
+    # PR #9177 (issue #9143) landed the fiducials + board-ID silk on board 03
+    # and refreshed its evidence, but deliberately did NOT re-issue the
+    # readiness receipt: every fresh board-03 receipt is blocked (385
+    # same-net mask_to_copper errors, #8900/#9144), and whether that demotes
+    # board 03 from the ready set is the operator decision parked in #9144
+    # (recommended: keep ready).  Until #9144 lands, main's 2026-10-21 ready
+    # receipt stays committed and goes stale against the #9143 tree change.
+    "03-usb-joystick": (
+        "Issue #9144: board 03's tree moved in #9143 (fiducials, board-ID "
+        "silk, refreshed evidence) while every fresh receipt is blocked; the "
+        "pending ready/demote decision owns the re-pin. Remove when #9144 "
+        "lands."
+    ),
     # Issue #8937 (PR #8955) re-emitted the routed ``.kicad_dru`` of the
     # boards whose recipes byte-reproduce it (01/05/06; the recipe-replay
     # tests pin the committed sidecar to the current emitter, so reverting
