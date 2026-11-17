@@ -1083,6 +1083,56 @@ def test_incomplete_mask_with_provisional_findings_is_named_and_stays_fail(
     assert "mask_to_copper" in data["summary"]["coverage_blocking_unknown"]
 
 
+def test_completed_mask_with_real_violation_is_not_named_as_incomplete(
+    tmp_path: Path, capsys, monkeypatch
+):
+    """Issue #9062: "did not pass" is not "did not complete" -- the discriminator.
+
+    A default-applied mask check that COMPLETED and found a real violation
+    is ``passed=False`` (a failed check) but ``coverage == "complete"`` (a
+    completed check).  The coverage row keys on ``coverage`` -- it reads
+    ``checked`` -- so the serialized ``incomplete_categories`` must key on
+    the same predicate and leave the category unnamed.  Keying on
+    ``passed`` here would report a board with a genuine mask violation as
+    "did not complete", inverting the list's meaning.
+    """
+    from kicad_tools.cli.check_cmd import main
+    from kicad_tools.validate.mask_copper import MaskCopperMeasurement
+
+    pcb = _stage_board00_for_mask(tmp_path)
+    violation = MaskCopperMeasurement(
+        opening_uuids=("00000000-0000-0000-0000-000000000001",),
+        conductor_uuid="00000000-0000-0000-0000-000000000002",
+        mask_side="F.Mask",
+        copper_layer="F.Cu",
+        location_mm=(1.0, 2.0),
+        clearance_mm=0.01,
+        exposed_area_mm2=0.5,
+        relation="overlap",
+        disposition="violation",
+        uncertainty_mm=0.0,
+        opening_kind="pad:rect",
+        mask_defined=False,
+        margin_provenance="native",
+    )
+    _patch_mask_assessment(monkeypatch, coverage="complete", measurements=[violation])
+
+    result = main([str(pcb), "--mfr", "jlcpcb", "--format", "json"])
+    assert result == 2
+    data = json.loads(capsys.readouterr().out)
+
+    # The board genuinely fails on the violation...
+    assert data["verdict"] == "fail"
+    assert data["exit_code"] == 2
+    meta = data["meta_checks"]
+    assert meta["overall"] == "FAILED"
+    # ...but the check completed, so nothing is named as incomplete --
+    # agreeing with the coverage row (checked, not unknown).
+    assert meta["incomplete_categories"] == []
+    assert data["coverage"]["mask_to_copper"]["state"] == "checked"
+    assert data["summary"]["coverage_blocking_unknown"] == []
+
+
 # ---------------------------------------------------------------------------
 # Issue #4616: full-fidelity LVS records under meta_checks.lvs
 # ---------------------------------------------------------------------------

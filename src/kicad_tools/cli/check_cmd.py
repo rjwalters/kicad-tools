@@ -282,9 +282,13 @@ class MetaCheckResult:
     # every tracked category (mask_to_copper, dfm_table, fab_dfm_parity)
     # that could not finish, named on the ``Overall:`` line and serialized
     # as ``meta_checks.incomplete_categories`` -- the run-time counterpart
-    # of ``coverage.*.state``.  Wider than the flag: a default-applied mask
-    # assessment that did not pass with provisional ``violation`` /
-    # ``uncertain`` measurements keeps the verdict FAILED (it drives
+    # of ``coverage.*.state``.  ``mask_to_copper`` is keyed on the same
+    # predicate the coverage row keys on (``assessment.coverage``, never
+    # ``assessment.passed`` -- see ``cov.mask_copper_unknown``): a mask
+    # check that completed and found a real violation did NOT fail to
+    # complete, so it is not named.  Wider than the flag: a default-applied
+    # mask assessment that did not complete with provisional ``violation``
+    # / ``uncertain`` measurements keeps the verdict FAILED (it drives
     # ``mask_failed``), yet its category still did not complete, so it is
     # named here while ``coverage_incomplete`` stays False.  The list is a
     # name list, never the reason for ``overall`` -- ``compute_overall``
@@ -3256,17 +3260,24 @@ def evaluate_check_verdict(
         # Issue #9062: ``incomplete_categories`` -- serialized as
         # ``meta_checks.incomplete_categories`` -- is deliberately WIDER
         # than that flag.  It names every category whose check did not
-        # complete on this run, so a default-applied mask assessment that
-        # did not pass is named even when its provisional
-        # ``violation``/``uncertain`` measurements send it to ``mask_failed``
-        # (verdict FAILED) instead of ``mask_incomplete``; until it completes,
-        # ``coverage.mask_to_copper`` reads ``unknown`` and its findings are
-        # provisional.  ``coverage_incomplete`` keeps the narrower #8949
-        # set so the rollup, the ``Overall:`` line and the exit code do not
-        # move (``compute_overall`` ranks FAILED first anyway, so the wider
-        # list never changes the printed line either).
+        # complete on this run, keyed on the SAME predicate the coverage
+        # row keys on (``assessment.coverage``, never ``assessment.passed``
+        # -- see ``cov.mask_copper_unknown``), so a default-applied mask
+        # assessment that did not complete is named even when its
+        # provisional ``violation``/``uncertain`` measurements send it to
+        # ``mask_failed`` (verdict FAILED) instead of ``mask_incomplete``
+        # and ``coverage.mask_to_copper`` reads ``unknown``.  A mask check
+        # that completed and found a real violation is ``passed=False`` but
+        # ``coverage == "complete"``: the check DID complete, so it is not
+        # named (the coverage row reads ``checked`` too).
+        # ``coverage_incomplete`` keeps the narrower #8949 set so the
+        # rollup, the ``Overall:`` line and the exit code do not move
+        # (``compute_overall`` ranks FAILED first anyway, so the wider list
+        # never changes the printed line either).
         incomplete_categories: list[str] = []
-        if mask_copper_default and any(not a.passed for a in results.mask_copper_assessments):
+        if mask_copper_default and any(
+            a.coverage != "complete" for a in results.mask_copper_assessments
+        ):
             incomplete_categories.append("mask_to_copper")
         if dfm_incomplete:
             incomplete_categories.append("dfm_table")
