@@ -31,6 +31,7 @@ design_rules:
     min_silk_to_pad_clearance_mm: 0.15
     silk_to_pad_danger_mm: 0.12   # JLCDFM silk-to-pad danger band, observed 2026-11-12 (epic #8838)
     silk_to_pad_warning_mm: 0.18  # JLCDFM silk-to-pad warning band, observed 2026-11-12 (epic #8838)
+    silk_to_hole_danger_mm: 0.0    # JLCDFM silkscreen-to-hole: danger-only band (0 warnings on both recorded boards), 0 mm = drill overlap; observed 2026-11-12 (issue #9033)
     min_smd_pad_clearance_mm: 0.15  # Different-net SMD copper, not general clearance
     min_pth_hole_to_track_mm: 0.28 # PTH hole edge; 0.35 is recommended, not the floor
     min_inner_pth_hole_to_copper_mm: 0.30
@@ -60,6 +61,7 @@ design_rules:
     min_silk_to_pad_clearance_mm: 0.15
     silk_to_pad_danger_mm: 0.12   # JLCDFM silk-to-pad danger band, observed 2026-11-12 (epic #8838)
     silk_to_pad_warning_mm: 0.18  # JLCDFM silk-to-pad warning band, observed 2026-11-12 (epic #8838)
+    silk_to_hole_danger_mm: 0.0    # JLCDFM silkscreen-to-hole: danger-only band (0 warnings on both recorded boards), 0 mm = drill overlap; observed 2026-11-12 (issue #9033)
     min_smd_pad_clearance_mm: 0.15  # Different-net SMD copper, not general clearance
     min_pth_hole_to_track_mm: 0.28 # PTH hole edge; 0.35 is recommended, not the floor
     min_inner_pth_hole_to_copper_mm: 0.30
@@ -89,6 +91,7 @@ design_rules:
     min_silk_to_pad_clearance_mm: 0.15
     silk_to_pad_danger_mm: 0.12   # JLCDFM silk-to-pad danger band, observed 2026-11-12 (epic #8838)
     silk_to_pad_warning_mm: 0.18  # JLCDFM silk-to-pad warning band, observed 2026-11-12 (epic #8838)
+    silk_to_hole_danger_mm: 0.0    # JLCDFM silkscreen-to-hole: danger-only band (0 warnings on both recorded boards), 0 mm = drill overlap; observed 2026-11-12 (issue #9033)
     min_smd_pad_clearance_mm: 0.15  # Different-net SMD copper, not general clearance
     min_pth_hole_to_track_mm: 0.28 # PTH hole edge; 0.35 is recommended, not the floor
     min_inner_pth_hole_to_copper_mm: 0.30
@@ -124,6 +127,7 @@ design_rules:
     min_silk_to_pad_clearance_mm: 0.15
     silk_to_pad_danger_mm: 0.12   # JLCDFM silk-to-pad danger band, observed 2026-11-12 (epic #8838)
     silk_to_pad_warning_mm: 0.18  # JLCDFM silk-to-pad warning band, observed 2026-11-12 (epic #8838)
+    silk_to_hole_danger_mm: 0.0    # JLCDFM silkscreen-to-hole: danger-only band (0 warnings on both recorded boards), 0 mm = drill overlap; observed 2026-11-12 (issue #9033)
     min_smd_pad_clearance_mm: 0.15  # Different-net SMD copper, not general clearance
     min_pth_hole_to_track_mm: 0.28 # PTH hole edge; 0.35 is recommended, not the floor
     min_inner_pth_hole_to_copper_mm: 0.30
@@ -154,6 +158,7 @@ design_rules:
     min_silk_to_pad_clearance_mm: 0.15
     silk_to_pad_danger_mm: 0.12   # JLCDFM silk-to-pad danger band, observed 2026-11-12 (epic #8838)
     silk_to_pad_warning_mm: 0.18  # JLCDFM silk-to-pad warning band, observed 2026-11-12 (epic #8838)
+    silk_to_hole_danger_mm: 0.0    # JLCDFM silkscreen-to-hole: danger-only band (0 warnings on both recorded boards), 0 mm = drill overlap; observed 2026-11-12 (issue #9033)
     min_smd_pad_clearance_mm: 0.15  # Different-net SMD copper, not general clearance
     min_pth_hole_to_track_mm: 0.28 # PTH hole edge; 0.35 is recommended, not the floor
     min_inner_pth_hole_to_copper_mm: 0.30
@@ -183,6 +188,7 @@ design_rules:
     min_silk_to_pad_clearance_mm: 0.15
     silk_to_pad_danger_mm: 0.12   # JLCDFM silk-to-pad danger band, observed 2026-11-12 (epic #8838)
     silk_to_pad_warning_mm: 0.18  # JLCDFM silk-to-pad warning band, observed 2026-11-12 (epic #8838)
+    silk_to_hole_danger_mm: 0.0    # JLCDFM silkscreen-to-hole: danger-only band (0 warnings on both recorded boards), 0 mm = drill overlap; observed 2026-11-12 (issue #9033)
     min_smd_pad_clearance_mm: 0.15  # Different-net SMD copper, not general clearance
     min_pth_hole_to_track_mm: 0.28 # PTH hole edge; 0.35 is recommended, not the floor
     min_inner_pth_hole_to_copper_mm: 0.30
@@ -212,6 +218,7 @@ design_rules:
     min_silk_to_pad_clearance_mm: 0.15
     silk_to_pad_danger_mm: 0.12   # JLCDFM silk-to-pad danger band, observed 2026-11-12 (epic #8838)
     silk_to_pad_warning_mm: 0.18  # JLCDFM silk-to-pad warning band, observed 2026-11-12 (epic #8838)
+    silk_to_hole_danger_mm: 0.0    # JLCDFM silkscreen-to-hole: danger-only band (0 warnings on both recorded boards), 0 mm = drill overlap; observed 2026-11-12 (issue #9033)
     min_smd_pad_clearance_mm: 0.15  # Different-net SMD copper, not general clearance
     min_pth_hole_to_track_mm: 0.28 # PTH hole edge; 0.35 is recommended, not the floor
     min_inner_pth_hole_to_copper_mm: 0.30

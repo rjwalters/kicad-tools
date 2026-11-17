@@ -1351,17 +1351,25 @@ def check_silk_hole_overlap(
     the mask aperture, so silk over a *tented* via hole is reported (Issue
     #8844; the fab's DFM flags it).  Holes pierce every layer, so both silk
     sides are tested.  Text uses the same bbox approximation as the other
-    silk checks.  Emits one ``silk_hole_overlap`` warning per (silk, hole)
+    silk checks.  Emits one ``silk_hole_overlap`` finding per (silk, hole)
     pair.  Holes come from :func:`iter_drill_holes` and the threshold is
     :data:`SILK_HOLE_CLEARANCE_MM` (0 mm: any overlap), both shared with the
-    tools that clear these findings (Issue #9054).
+    tools that clear these findings (Issue #9054).  Severity is a warning
+    unless the profile sets ``silk_to_hole_danger_mm`` (Issue #9033: the
+    fab's silkscreen-to-hole band has no warning tier), which both buffers
+    the hole by at least that clearance and upgrades the finding to an
+    error.
     """
     require_shapely("silk-hole overlap geometry")
     from shapely import STRtree
 
     results = DRCResults(rules_checked=1)
     origin = getattr(pcb, "board_origin", None) or (0.0, 0.0)
-    clearance = SILK_HOLE_CLEARANCE_MM
+    danger = design_rules.silk_to_hole_danger_mm
+    clearance = (
+        SILK_HOLE_CLEARANCE_MM if danger is None else max(SILK_HOLE_CLEARANCE_MM, float(danger))
+    )
+    severity = "warning" if danger is None else "error"
 
     holes = list(iter_drill_holes(pcb.vias, pcb.footprints, origin))
     if not holes:
@@ -1378,7 +1386,7 @@ def check_silk_hole_overlap(
             found.append(
                 DRCViolation(
                     rule_id="silk_hole_overlap",
-                    severity="warning",
+                    severity=severity,
                     message=f"Silkscreen {silk_label} overlaps drilled hole of {hole_label}",
                     location=location,
                     layer=layer,

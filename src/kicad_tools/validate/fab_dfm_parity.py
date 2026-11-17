@@ -70,7 +70,11 @@ Status = Literal["covered", "partial", "not_covered"]
 #:    granularity; no threshold, severity or attribution change.
 #: 9: #8840 -- ``sharp_trace_corner`` and ``missing_plated_through_hole``
 #:    rows flip from ``not_covered`` now that both rules ship.
-TABLE_VERSION = 9
+#: 10: #9033 -- ``silkscreen_to_hole`` row: jlcpcb's new
+#:    ``silk_to_hole_danger_mm`` band makes ``silk_hole_overlap`` an error;
+#:    the count gap is explained (aggregate-only fab counts, per-item list
+#:    never captured) with the measured per-candidate results.
+TABLE_VERSION = 10
 
 #: Where the observed categories/thresholds came from (counts are hand-recorded).
 SOURCE = "https://github.com/rjwalters/kicad-tools/issues/8838"
@@ -229,10 +233,23 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         ("silk_hole_overlap",),
         "`silk_hole_overlap` (#8844) flags silk that *overlaps* a via/PTH/NPTH drill "
         "circle, tented vias included -- a rule id under the `silkscreen` category. "
-        "Threshold is 0 mm, so a silk-to-hole gap narrower than JLCDFM's clearance "
-        "but not touching is still unchecked, and text is tested as its bounding box "
-        "rather than glyph outlines. Observed 75 danger, not reproduced against the "
-        "live tool.",
+        "Since #9033 the jlcpcb profiles set `silk_to_hole_danger_mm: 0.0` (the fab's "
+        "band for this category is danger-only: 0 warnings on both recorded boards), "
+        "which makes every finding an error at the same 0 mm threshold; other "
+        "manufacturers keep the warning. The count gap is explained, not closed -- "
+        "only aggregate fab counts are recorded, the per-item list was never "
+        "captured. Of the candidates: (a) a fab clearance > 0 mm is supported by "
+        "measurement (board 05 silk-to-drill-edge gaps of 0.005-0.287 mm report 0 "
+        "findings at 0 mm, and silk registration is ~+-0.1 mm) but no fab-published "
+        "or per-item-derived figure exists to adopt, so the threshold stays 0 mm; "
+        "(b) kct's hole set covers vias (tented included), PTH and NPTH with real "
+        "drill geometry (187 holes on the recorded 4-layer board), with no evidence "
+        "of misses; (c) counting granularity: on the recorded 2-layer board the only "
+        "silk is 7 reference-designator texts against 6 holes, so no per-(silk, "
+        "hole) rule can reach the fab's 75 items even at an infinite threshold -- "
+        "the fab must count finer units (per stroke segment or gerber feature). "
+        "kct measured 13 findings on the committed 4-layer routed board vs the "
+        "fab's 50. Text is still tested as its bounding box.",
     ),
     ParityRow(
         "annular_ring",
