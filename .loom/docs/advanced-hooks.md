@@ -162,8 +162,7 @@ issue, model, start/end ts, and `arm`/`attempt` when a model experiment is activ
 `~/.claude`. Per-agent isolated config dirs (`.loom/claude-config/<agent>/`) get a
 fresh `projects/`, so the copier resolves its source through
 `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects` (the same base path
-`loom-daemon/src/terminal.rs`'s `claude_config` module uses when it provisions
-those isolated dirs).
+`loom-daemon/src/claude_config.rs` uses when it provisions those isolated dirs).
 
 **When it runs**: cron-friendly periodic sync (the durability backstop — the
 session's own top-level `<uuid>.jsonl` is still being appended while the session

@@ -201,6 +201,37 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # split to its own child of #8962 rather than widened into #8974.  Every
 # surviving entry still fires; they are re-pointed to #8962, the parent
 # tracker (#8957's own scope ended at the merged stitcher path).
+# Issue #8994 (measured 2026-11-17, first live run of the C++ mirror): the
+# mirror lands (``DesignRules.same_net_pad_gap_band_edge_mm`` threaded into
+# ``cpp_backend``'s marshalling, refused in both A* via checks; the recipe
+# resolves the jlcpcb 4-layer edge itself) and the guard demonstrably fires
+# in the live search -- but the four findings survive, because they are NOT
+# annulus-vs-pad pairs in the mirrored predicate's model:
+#   * PCIE_RX+ (174.15, 92.25): the annulus is FACE-ALIGNED with the pad --
+#     centre distance == annulus radius, so the predicate's gap is exactly
+#     0.0 (touch == union, accepted) while the checker measures the wedge
+#     under the corner at 0.0011 mm and flags it.
+#   * USB2_D- x3: annulus-vs-own-net-TRACE slits at the trace population's
+#     0.1016 edge -- #8976's population, out of #8994's scope by its own
+#     Out-of-Scope list.
+# The entries therefore STAY until the trace-population / corner-wedge
+# guard exists; deleting them here fails the gate on the still-firing
+# identities.
+# Issue #9140 (re-measured 2026-11-17, fresh seed-42 regen judged by this
+# gate): the coupled-leg gates drained the remaining population to 15
+# blocking physical_copper_gap findings -- MIPI_CLK+ 11, GND 2, USB2_D- 1,
+# PCIE_RX+ 1 (was 21: MIPI_CLK+ 11, GND 6, USB2_D- 3, PCIE_RX+ 1).  The
+# pose/trunk and stub-tail spans have been re-verified through the
+# slit-band predicate since #9156, and the joint-search candidate plus the
+# Phase-B fine-grid repair are swept through it before commit (#9140), so
+# the LVDS1_P..4_P own-pad population the issue filed is at 0 and the
+# GND / USB2_D- remainder drained with the changed coupled-vs-fallback
+# mix.  Both sibling via populations persist, one finding each: the
+# PCIE_RX+ 0.0011 mm face-aligned corner wedge and a USB2_D- 0.0413 mm
+# annulus-vs-own-net-TRACE slit (0.1016 edge).  All four entries still
+# fire (0 unallowed, 0 stale), reach 21/21, pour audit OK.  CI's
+# regeneration remains the authority on the final counts (host-sensitive
+# board).
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("physical_copper_gap", "GND"): 8962,
     ("physical_copper_gap", "MIPI_CLK+"): 8962,

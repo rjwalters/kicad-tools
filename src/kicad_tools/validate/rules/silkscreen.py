@@ -931,15 +931,23 @@ def _iter_via_apertures(
 
     Tenting is resolved per side via :func:`_via_is_tented` (per-via override
     -> board setup default -> measured absent-token default).
+
+    A side is also skipped when the via never reaches it: a blind/micro via
+    exposes copper only on the outer layer(s) its ``layers`` name and a
+    buried via on neither outer side (Issue #9116, reusing the single
+    :func:`_via_silk_sides` definition #9104 gave the drill path).  An
+    untented ``F.Cu``--``In1.Cu`` blind via therefore yields no ``B``
+    aperture for back silk to collide with.
     """
     setup = pcb.setup
     ox, oy = getattr(pcb, "board_origin", None) or (0.0, 0.0)
     for via in pcb.vias:
         if via.size <= 0:
             continue
+        reached = _via_silk_sides(getattr(via, "via_type", None), getattr(via, "layers", ()))
         geom: _Geometry | None = None
         for side in ("F", "B"):
-            if _via_is_tented(via, setup, side):
+            if side not in reached or _via_is_tented(via, setup, side):
                 continue
             if geom is None:
                 geom = _via_aperture_geometry(via, min_mask_clearance)
@@ -1221,7 +1229,9 @@ def check_silk_over_copper(
     :func:`_iter_pad_apertures`, untented-via mask openings via
     :func:`_iter_via_apertures` (#4624 closed the deliberate pads-only gap
     left by #4612).  Tented vias contribute no aperture, so fully-tented
-    boards -- the entire committed fleet -- behave exactly as before.
+    boards -- the entire committed fleet -- behave exactly as before; a
+    blind/buried via contributes an aperture only on the outer side(s) it
+    actually reaches (Issue #9116).
 
     Args:
         pcb: The PCB to check.
@@ -1289,12 +1299,34 @@ def check_silk_over_copper(
     return results
 
 
+def _via_silk_sides(via_type: str | None, layers: Iterable[str]) -> frozenset[str]:
+    """Silk sides (``"F"`` / ``"B"``) a via's drill can sit under (#9076).
+
+    A keyword-less via is a through via whatever its layer pair says
+    (#6493), so it pierces the board: both sides.  A ``blind`` / ``micro``
+    via reaches only the outer copper layer(s) its ``layers`` name --
+    ``F.Cu`` on the front, ``B.Cu`` on the back; a pair naming both outers
+    (or an unrecognised type token) is taken conservatively as both.  A
+    ``buried`` via spans inner layers only, so no silk side: an empty set
+    tells the caller to skip the hole entirely.
+    """
+    if via_type not in ("blind", "micro", "buried"):
+        return frozenset(("F", "B"))
+    names = set(layers)
+    sides: set[str] = set()
+    if "F.Cu" in names:
+        sides.add("F")
+    if "B.Cu" in names:
+        sides.add("B")
+    return frozenset(sides)
+
+
 def iter_drill_holes(
     vias: Iterable[Any],
     footprints: Iterable[Footprint],
     origin: tuple[float, float] = (0.0, 0.0),
-) -> Iterator[tuple[_Geometry, str]]:
-    """Yield ``(geom, label)`` for every drilled hole: via, PTH and NPTH.
+) -> Iterator[tuple[_Geometry, str, frozenset[str]]]:
+    """Yield ``(geom, label, sides)`` for every drilled hole: via, PTH, NPTH.
 
     The single definition of "a hole silk may not cover" (Issue #9054).
     :func:`check_silk_hole_overlap` measures against it, ``kct
@@ -1303,6 +1335,11 @@ def iter_drill_holes(
     counts **whatever its tenting, fill or capping**: the drill pierces the
     board, and the fab's DFM flags silk over it (#8844).  Pad holes use the
     real round/oval, offset and rotated drill (``_hole_geometry``).
+
+    ``sides`` is the frozenset of silk sides the drill can be printed
+    under: both for through vias and pad holes, only the reached outer
+    side for blind/micro vias; buried vias pierce neither outer side and
+    are **not yielded at all** (Issue #9076).
 
     ``vias`` / ``footprints`` are taken separately (not a ``PCB``) so a
     caller working on a raw S-expression tree can pass objects parsed in the
@@ -1316,10 +1353,14 @@ def iter_drill_holes(
     ox, oy = origin
     for via in vias:
         if via.drill > 0:
+            sides = _via_silk_sides(getattr(via, "via_type", None), getattr(via, "layers", ()))
+            if not sides:
+                continue
             x, y = via.position
             yield (
                 Point(x, y).buffer(via.drill / 2.0, quad_segs=32),
                 f"via at ({x + ox:.3f}, {y + oy:.3f})",
+                sides,
             )
     for footprint in footprints:
         for pad in footprint.pads:
@@ -1327,7 +1368,11 @@ def iter_drill_holes(
                 continue
             geom = _hole_geometry(pad, footprint)
             if geom is not None and not geom.is_empty:
-                yield geom, f"{footprint.reference} pad {pad.number} hole"
+                yield (
+                    geom,
+                    f"{footprint.reference} pad {pad.number} hole",
+                    frozenset(("F", "B")),
+                )
 
 
 def silk_hits_hole(silk: _Geometry, hole: _Geometry, clearance_mm: float) -> bool:
@@ -1349,10 +1394,12 @@ def check_silk_hole_overlap(
 
     Unlike :func:`check_silk_over_copper` this tests the **drill** circle, not
     the mask aperture, so silk over a *tented* via hole is reported (Issue
-    #8844; the fab's DFM flags it).  Holes pierce every layer, so both silk
-    sides are tested.  Text uses the same bbox approximation as the other
-    silk checks.  Emits one ``silk_hole_overlap`` warning per (silk, hole)
-    pair.  Holes come from :func:`iter_drill_holes` and the threshold is
+    #8844; the fab's DFM flags it).  Through-via and pad holes pierce every
+    layer so both silk sides are tested; a blind/micro via only the outer
+    side it reaches and a buried via neither (Issue #9076).  Text uses the
+    same bbox approximation as the other silk checks.  Emits one
+    ``silk_hole_overlap`` warning per (silk, hole) pair.  Holes come from
+    :func:`iter_drill_holes` and the threshold is
     :data:`SILK_HOLE_CLEARANCE_MM` (0 mm: any overlap), both shared with the
     tools that clear these findings (Issue #9054).
     """
@@ -1367,12 +1414,14 @@ def check_silk_hole_overlap(
     if not holes:
         return results
 
-    tree = STRtree([g for g, _ in holes])
+    tree = STRtree([geom for geom, _label, _sides in holes])
     found: list[DRCViolation] = []
-    for _side, geom, silk_label, location, layer, _uuid in _iter_silk_geometries(pcb):
+    for side, geom, silk_label, location, layer, _uuid in _iter_silk_geometries(pcb):
         query = geom.buffer(clearance) if clearance > 0 else geom
         for idx in tree.query(query):
-            hole_geom, hole_label = holes[int(idx)]
+            hole_geom, hole_label, hole_sides = holes[int(idx)]
+            if side not in hole_sides:
+                continue
             if not silk_hits_hole(geom, hole_geom, clearance):
                 continue
             found.append(

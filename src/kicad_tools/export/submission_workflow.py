@@ -32,8 +32,12 @@ It lives in the manifest, never in the hash-pinned ``readiness.json``; it binds 
 board and gerber sha256 like the sign-offs, is recommended before ``fab-review``
 but not required by it, and never gates anything.
 
-Nothing here calls checkout, payment or parts purchase, and "ordered" is never
-set by code: the states it reports stop at ``stock-checked`` / ``uploaded``.
+Nothing here calls checkout, payment or parts purchase, and nothing here sets
+"ordered": the states it reports stop at ``stock-checked`` / ``uploaded``. The
+one payment path in kicad-tools is the opt-in, attended, exact-total-approved
+checkout leg in :mod:`kicad_tools.manufacturers.jlc_payment` (issue #8935),
+reached only from ``kct submit-jlcpcb --website --checkout``; this module never
+imports it.
 """
 
 from __future__ import annotations

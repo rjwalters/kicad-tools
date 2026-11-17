@@ -433,6 +433,9 @@ def _negotiated_kwargs(args, *, timeout, checkpoint_callback) -> dict:
         "use_targeted_ripup": getattr(args, "targeted_ripup", False),
         "max_ripups_per_net": _targeted_ripup_budget(args),
         "best_stall_patience": (getattr(args, "early_stop_patience", 2) or None),
+        # Issue #8999: the airwire-separation weight (0.0 = flag off =
+        # byte-identical cost model).
+        "airwire_weight": float(getattr(args, "airwire_separation_weight", 0.0) or 0.0),
         **_deterministic_rescue_kwargs(args),
     }
 
@@ -8698,17 +8701,70 @@ def _apply_detour_ratio_report(router: "Autorouter", args) -> None:
         router.report_detour_ratio = True
 
 
+def _apply_detour_repair(router: "Autorouter", args) -> None:
+    """Enable the ``--detour-repair`` post-settle pass (issue #9013).
+
+    Off by default (mirrors the ``_ripup_strategy`` attribute-on-router
+    pattern): without the flag no probe pre-pass and no repair pass run
+    and routed output is byte-identical.  When passed, sets
+    ``router.detour_repair``: ``route_all_negotiated`` runs the
+    alone-on-empty probe pre-pass (its offender list) and, after the
+    loop settles, the transactional repair pass
+    (``router/detour_repair.py``).  A no-op when the flag is absent, so
+    every attempt helper can call it unconditionally.
+    """
+    if getattr(args, "detour_repair", False):
+        from kicad_tools.cli.progress import flush_print
+
+        strategy = getattr(args, "strategy", "negotiated")
+        if strategy != "negotiated":
+            # Issue #9013 / #5908 lesson: the repair pass settles after the
+            # negotiated loop (or the escape/two-phase detailed loop whose
+            # no-blocks fallback lands there).  ``route_all`` (basic) and the
+            # multistart strategies never reach those hooks, so the flag
+            # would silently do nothing -- say so and ignore it instead.
+            flush_print(
+                f"  --detour-repair: not available with --strategy {strategy} "
+                "(the repair pass settles after the negotiated/escape drivers); "
+                "flag ignored"
+            )
+            return
+        router.detour_repair = True
+
+
+def _apply_airwire_separation(router: "Autorouter", args) -> None:
+    """Set the ``--airwire-separation-weight`` on the router (Issue #8999).
+
+    Attribute-on-router (the ``_ripup_strategy`` / ``report_detour_ratio``
+    pattern) rather than a ``route_all_negotiated`` kwarg alone: board 03's
+    dispatch reaches the negotiated loop through the adaptive
+    multi-resolution driver, which calls ``route_all_negotiated`` bare --
+    a kwarg-only wire would be silently dropped there (the #5908
+    ``--order-method`` lesson; the A/B harness's "Airwire separation cost:"
+    log guard exists to catch exactly that).  ``route_all_negotiated``
+    still accepts an explicit ``airwire_weight`` that overrides this.
+    A no-op when the flag is absent/zero, so every attempt helper can call
+    it unconditionally and the flag-off run stays byte-identical.
+    """
+    weight = getattr(args, "airwire_separation_weight", 0.0) or 0.0
+    if weight > 0.0:
+        router._airwire_separation_weight = float(weight)
+
+
 def _report_detour_ratio(output_path: Path, router: object | None) -> None:
     """Print the detour-ratio report and write its sidecar (#9003).
 
-    A no-op unless the router ran the probe (flag off, or a mesh/lattice
-    run that never reaches the grid-engine pre-pass).  Like
-    ``--report-stage-quality``, printing is NOT cancelled by ``--quiet``:
-    a non-empty ``detour_probe_records`` means the user opted in
-    explicitly.  The sidecar write is best-effort on the established
-    post-route sidecar contract -- a blocked write warns and never fails
-    the route.
+    A no-op unless ``--report-detour-ratio`` was passed AND the router ran
+    the probe (a ``--detour-repair``-only run also probes, but it consumes
+    the records as its offender list and does not opt into this report --
+    issue #9013).  Like ``--report-stage-quality``, printing is NOT
+    cancelled by ``--quiet``: a non-empty ``detour_probe_records`` means
+    the user opted in explicitly.  The sidecar write is best-effort on the
+    established post-route sidecar contract -- a blocked write warns and
+    never fails the route.
     """
+    if not getattr(router, "report_detour_ratio", False):
+        return
     records = getattr(router, "detour_probe_records", None)
     if not records:
         return
@@ -13087,6 +13143,8 @@ def route_with_layer_escalation(
         _apply_pad_access_invariant(router, args)
         _apply_ripup_strategy(router, args)
         _apply_detour_ratio_report(router, args)
+        _apply_detour_repair(router, args)
+        _apply_airwire_separation(router, args)
         # Issue #6401: reserve pour-pad via sites before signal routing.
         _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
         # Issue #5787: --order-method crossing (the single-attempt tail's
@@ -14299,6 +14357,8 @@ def route_with_rule_relaxation(
         _apply_pad_access_invariant(router, args)
         _apply_ripup_strategy(router, args)
         _apply_detour_ratio_report(router, args)
+        _apply_detour_repair(router, args)
+        _apply_airwire_separation(router, args)
         # Issue #6401: reserve pour-pad via sites before signal routing.
         _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
         # Issue #5787: --order-method crossing (see the layer-escalation path).
@@ -16805,6 +16865,8 @@ def route_with_combined_escalation(
             _apply_pad_access_invariant(router, args)
             _apply_ripup_strategy(router, args)
             _apply_detour_ratio_report(router, args)
+            _apply_detour_repair(router, args)
+            _apply_airwire_separation(router, args)
             # Issue #6401: reserve pour-pad via sites before signal routing.
             _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
             # Issue #5787: --order-method crossing (see layer-escalation path).
@@ -20473,6 +20535,28 @@ def _route_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--airwire-separation-weight",
+        type=float,
+        default=0.0,
+        metavar="WEIGHT",
+        help=(
+            "Issue #8999: weight of the prospective airwire-separation cost "
+            "term in the negotiated driver.  While any net is still "
+            "unrouted, each grid cell is priced by how many unrouted nets' "
+            "straight-line desire lines (minimum-spanning flight lines "
+            "between pad centres) cover it, so a candidate path that slips "
+            "around other nets' pending connections is preferred to one "
+            "that cuts across them at slightly greater length.  The plane "
+            "is recomputed from the committed set before every per-net "
+            "search (the routing net's own desire lines excluded) and is a "
+            "cost only -- never a passability change.  0.0 (the default) "
+            "disables the term entirely and is byte-identical to the "
+            "historical cost model.  Values around 1.0 make crossing one "
+            "other net's desire line comparable to a few cells of detour; "
+            "see docs/research/ (the #8999 note) for the measured A/B."
+        ),
+    )
+    parser.add_argument(
         "--ripup-strategy",
         choices=["negotiated", "sequential-n1"],
         default="negotiated",
@@ -21367,6 +21451,24 @@ def _route_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--detour-repair",
+        action="store_true",
+        help=(
+            "After the negotiated loop settles, run ONE targeted repair pass "
+            "over the connections the detour probe flags (above ~1.25x their "
+            "alone-on-empty cost, worst first): lift the few nets blocking "
+            "the offender's short corridor, re-route the offender the short "
+            "way, re-land the lifted nets, and keep the rearrangement only "
+            "if the whole-board score is strictly better (nothing unrouted, "
+            "less copper). One attempt per offender; a losing attempt is "
+            "rolled back exactly. Implies the #9003 probe pre-pass but NOT "
+            "its report/sidecar -- pass --report-detour-ratio for that. "
+            "Off by default: without the flag routed output is byte-identical "
+            "(issue #9013). Grid engine only; a no-op on the mesh/lattice "
+            "engines."
+        ),
+    )
+    parser.add_argument(
         "--auto-pour",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -22009,6 +22111,12 @@ def _chain_complete_argv(
     * ``--auto-layers``, ``--route-engine``, ``--grid`` and the grid-engine
       search/strategy flags -- ``--complete`` picks its own engine (lattice),
       lattice and single-attempt path.
+    * ``--airwire-separation-weight`` (Issue #8999) -- the term is priced
+      only by the negotiated grid A* (``get_negotiated_cost`` and the C++
+      cost sites fed by ``refresh_airwire_cost``), reached from
+      ``_route_net_negotiated`` / ``_route_net_with_corridor`` -- paths the
+      lattice netset negotiation (``LatticePathfinder.route_netset``) never
+      takes, so the inner pass could not honour it.
     * ``-o``, ``--complete-report``, ``--checkpoint``, ``--timeout`` and the
       other per-invocation I/O and budget flags -- the pass has its own staged
       output, and the ``--timeout`` deadline reaches it through the environment.
@@ -23885,6 +23993,8 @@ def _run_main_impl(args, parser, argv) -> int:
     _apply_pad_access_invariant(router, args)
     _apply_ripup_strategy(router, args)
     _apply_detour_ratio_report(router, args)
+    _apply_detour_repair(router, args)
+    _apply_airwire_separation(router, args)
     # Issue #6401: reserve pour-pad via sites before signal routing.
     _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
 

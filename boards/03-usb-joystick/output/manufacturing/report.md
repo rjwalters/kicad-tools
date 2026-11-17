@@ -1,8 +1,8 @@
 ---
 title: "usb_joystick_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.24.0"
-date: "Rev 1 | 2026-10-21 | jlcpcb-tier1"
+author: "kicad-tools 0.29.0"
+date: "Rev 1 | 2026-11-17 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -18,7 +18,7 @@ header-includes:
 | Property | Value |
 |----------|-------|
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
-| Footprints | 38 (37 SMD, 1 THT, 0 other) |
+| Footprints | 41 (40 SMD, 1 THT, 0 other) |
 | Nets | 27 |
 | Traces | 910 segments |
 | Vias | 85 |
@@ -149,7 +149,7 @@ GPIO and ADC map is fixed to Microchip TQFP-44 pinout
 | Errors | 0 |
 | Errors: kct (`--mfr jlcpcb-tier1` rules) | 0 |
 | Errors: kicad-cli (geometric) | 0 |
-| Warnings | 14 |
+| Warnings | 310 |
 | Blocking | 0 |
 
 **Status**: PASS
@@ -158,8 +158,16 @@ GPIO and ADC map is fixed to Microchip TQFP-44 pinout
 
 | Violation Type | Count |
 |----------------|-------|
+| redundant_copper_duplicate | 134 |
+| redundant_copper_covered | 52 |
+| redundant_copper_staircase | 43 |
+| pour_slot | 39 |
+| silk_pad_clearance | 21 |
 | hole_to_hole_clearance | 14 |
+| silk_hole_overlap | 5 |
+| redundant_copper_detour | 2 |
 | diffpair_routing_continuity | 1 |
+
 
 
 \newpage
@@ -171,7 +179,7 @@ GPIO and ADC map is fixed to Microchip TQFP-44 pinout
 ### Action Items
 
 - **[OPTIONAL]** Refill zones to verify 2 zone-connected nets, then re-run kct audit
-- **[OPTIONAL]** Review 14 DRC warnings
+- **[OPTIONAL]** Review 310 DRC warnings
 
 
 \newpage
@@ -198,9 +206,9 @@ GPIO and ADC map is fixed to Microchip TQFP-44 pinout
 | Metric | Per Board (estimated) |
 |--------|-------|
 | PCB Fabrication | ~2.96 USD |
-| Components (estimated) | ~2.11 USD |
-| Assembly (estimated) | ~2.16 USD |
-| **Total (estimated)** | **~7.23 USD** |
+| Components (estimated) | ~2.14 USD |
+| Assembly (estimated) | ~2.18 USD |
+| **Total (estimated)** | **~7.28 USD** |
 | Batch Quantity | 5 |
-| Batch Total (estimated) | ~36.14 USD |
+| Batch Total (estimated) | ~36.39 USD |
 

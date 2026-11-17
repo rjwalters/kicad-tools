@@ -134,7 +134,15 @@ STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
 # v65 (Issue #7887): the own-pad step gate attributes a refusal decided by the
 # pairwise (HV) floor alone, so an HV pad walled in by LV pads drains as
 # ``FAILURE_PAIRWISE_BLOCKED``.  A v64 .so still reports a bare NO_PATH.
-_REQUIRED_CPP_BUILD_VERSION = 65
+# v66 (Issue #8994): ``DesignRules.same_net_pad_gap_band_edge_mm`` + the
+# same-net pad slit-band refusal in both A* via checks.  A v65 .so seats via
+# annuli in the (0, edge) slit band beside their own SMD pads (board 06's
+# d0.25/s0.6 PCIE_RX+/USB2_D- population).
+# v67 (Issue #8999): ``GridCell::airwire_cost`` + the ``clear_airwire_costs``
+# / ``set_airwire_cells`` verbs -- the prospective airwire-separation term
+# summed inside ``Grid3D::get_negotiated_cost``.  A v66 .so prices negotiated
+# cells without the term, silently breaking Python/C++ cost parity.
+_REQUIRED_CPP_BUILD_VERSION = 67
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -1483,6 +1491,11 @@ class CppPathfinder:
         cpp_rules.min_hole_to_hole = rules.min_hole_to_hole
         # Issue #7296: the mask-dam floor for the single-ended via check.
         cpp_rules.min_via_pad_edge_gap = float(getattr(rules, "min_via_pad_edge_gap", 0.0) or 0.0)
+        # Issue #8994: the caller-resolved same-net pad slit-band edge for the
+        # single-ended via check (``None`` collapses to 0.0 = guard off).
+        cpp_rules.same_net_pad_gap_band_edge_mm = float(
+            getattr(rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0
+        )
         cpp_rules.grid_resolution = rules.grid_resolution
         cpp_rules.cost_straight = rules.cost_straight
         cpp_rules.cost_turn = rules.cost_turn
@@ -4196,6 +4209,26 @@ class CppPathfinder:
         """
         self._grid._impl.clear_avoidance_costs()
 
+    def clear_airwire_costs(self) -> None:
+        """Zero the C++ airwire-separation plane (Issue #8999).
+
+        Thin passthrough for ``Grid3D::clear_airwire_costs``; the plane is
+        normally managed end-to-end by
+        :func:`kicad_tools.router.airwire_cost.refresh_airwire_cost`.
+        """
+        self._grid._impl.clear_airwire_costs()
+
+    def set_airwire_cells(self, xs: list[int], ys: list[int], costs: list[float]) -> None:
+        """Push the weighted sparse airwire plane onto the C++ grid (Issue #8999).
+
+        ``xs``/``ys``/``costs`` are parallel lists; each column is written to
+        every layer (a desire line is layer-less).  Callers must
+        ``clear_airwire_costs()`` first -- the refresh contract is a full
+        clear + rewrite, never an increment, so the native plane stays a
+        pure function of the committed set.
+        """
+        self._grid._impl.set_airwire_cells(xs, ys, costs)
+
     def _try_python_fallback(
         self,
         start: Pad,
@@ -4807,7 +4840,17 @@ class CppPathfinder:
     # #6098 memo without making it any safer.  ``_saved_*`` are rip-up
     # snapshots the search never reads.
     _COST_ONLY_GRID_ARRAYS = frozenset(
-        {"_history_cost", "_congestion", "_congestion_counted", "_present_cost_ema"}
+        {
+            "_history_cost",
+            "_congestion",
+            "_congestion_counted",
+            "_present_cost_ema",
+            # Issue #8999: the airwire-separation crossing-count plane feeds
+            # negotiated-cell COSTS only (never passability) and is rewritten
+            # on every negotiated refresh, so fingerprinting it would churn
+            # the #6098 fallback memo for no safety benefit.
+            "_airwire_cost",
+        }
     )
 
     def _py_grid_state_stamp(self, py_grid) -> tuple:
@@ -5777,6 +5820,12 @@ class CppCoupledPathfinder:
         # Issue #7296: the mask-dam floor, so the coupled via move refuses a
         # drill edge within the fab's dam of an SMD pad.
         cpp_rules.min_via_pad_edge_gap = float(getattr(rules, "min_via_pad_edge_gap", 0.0) or 0.0)
+        # Issue #8994: the same-net pad slit-band edge, so the coupled via
+        # move keeps each rail's annulus out of the band beside its own SMD
+        # pads (``None`` collapses to 0.0 = guard off).
+        cpp_rules.same_net_pad_gap_band_edge_mm = float(
+            getattr(rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0
+        )
         self._impl = router_cpp.CoupledPathfinder(
             cpp_grid._impl,
             cpp_rules,

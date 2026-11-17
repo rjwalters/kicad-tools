@@ -667,3 +667,177 @@ class TestCleanupArtifactsStep6:
         stats = router.cleanup_artifacts()
         assert stats["acute_foldbacks_repaired"] == 0
         assert stats["acute_foldbacks_skipped"] == 0
+
+
+# --------------------------------------------------------------------------
+# Issue #8930: repairs on different nets must clear each other, not just the
+# pre-repair copper the collision model was bound to
+# --------------------------------------------------------------------------
+
+#: ``trace_clearance`` the exact-clearance model below enforces (mm).
+_CLEARANCE = 0.2
+
+
+def _edge_gap(a: Segment, b: Segment) -> float:
+    """Exact edge-to-edge gap between two trace segments (centreline distance
+    less both half widths); an independent oracle, not the router's kernel."""
+
+    def point_to_seg(p: Point, q: Point, r: Point) -> float:
+        dx, dy = r[0] - q[0], r[1] - q[1]
+        t = max(0.0, min(1.0, ((p[0] - q[0]) * dx + (p[1] - q[1]) * dy) / (dx * dx + dy * dy)))
+        return math.dist(p, (q[0] + t * dx, q[1] + t * dy))
+
+    def cross(o: Point, p: Point, q: Point) -> float:
+        return (p[0] - o[0]) * (q[1] - o[1]) - (p[1] - o[1]) * (q[0] - o[0])
+
+    d1, d2 = cross(b.start, b.end, a.start), cross(b.start, b.end, a.end)
+    d3, d4 = cross(a.start, a.end, b.start), cross(a.start, a.end, b.end)
+    if d1 * d2 < 0 and d3 * d4 < 0:
+        centre = 0.0
+    else:
+        centre = min(
+            point_to_seg(a.start, b.start, b.end),
+            point_to_seg(a.end, b.start, b.end),
+            point_to_seg(b.start, a.start, a.end),
+            point_to_seg(b.end, a.start, a.end),
+        )
+    return centre - a.width / 2 - b.width / 2
+
+
+def _snapshot_model(copper: list[Segment]):
+    """An exact-clearance ``path_is_clear`` bound to *copper* as it stands now.
+
+    This is what ``_repair_acute_foldbacks`` hands the planner: the checker is
+    built once from the pre-repair grid, so it never learns about a chord the
+    plan itself adds.
+    """
+
+    def path_is_clear(x1, y1, x2, y2, layer, width, net):
+        cand = seg((x1, y1), (x2, y2), width=width, net=net, layer=layer)
+        return all(
+            _edge_gap(cand, other) >= _CLEARANCE
+            for other in copper
+            if other.net != net and other.layer == layer
+        )
+
+    return path_is_clear
+
+
+#: Two net's fold-backs found by randomized search (seed 4242): each clears the
+#: other's *original* copper by >= 0.2 mm, and each one's perpendicular chord
+#: clears the other's original copper -- but the two chords end 0.1689 mm apart.
+_NET5 = [
+    seg((0.4393, 0.4393), (0.0, 0.0), width=0.25, net=5, net_name="A"),
+    seg((0.0, 0.0), (1.0622, 0.0), width=0.15, net=5, net_name="A"),
+]
+_NET6 = [
+    seg((0.6233, -0.7643), (0.265, -0.406), width=0.25, net=6, net_name="B"),
+    seg((0.265, -0.406), (1.7782, -0.406), width=0.15, net=6, net_name="B"),
+]
+
+
+class TestCrossNetRepairsClearEachOther:
+    """Item 2 of Issue #8930: a stale collision model across ``(net, layer)`` groups."""
+
+    def _scene(self) -> list[Segment]:
+        return _NET5 + _NET6
+
+    @staticmethod
+    def _cross_net_violations(copper: list[Segment]) -> list[float]:
+        return [
+            _edge_gap(a, b)
+            for i, a in enumerate(copper)
+            for b in copper[i + 1 :]
+            if a.net != b.net and a.layer == b.layer and _edge_gap(a, b) < _CLEARANCE - 1e-4
+        ]
+
+    def test_scene_is_clean_before_repair(self):
+        """The fixture is a legal board: the original copper already clears."""
+        assert self._cross_net_violations(self._scene()) == []
+
+    def test_snapshot_model_alone_accepts_two_chords_too_close(self):
+        """The mechanism: without ``clearance`` both repairs are accepted."""
+        scene = self._scene()
+        out, result = repair_foldbacks(scene, path_is_clear=_snapshot_model(scene))
+        assert result.repaired == 2
+        violations = self._cross_net_violations(out)
+        assert len(violations) == 1
+        assert violations[0] == pytest.approx(0.1689, abs=1e-3)
+
+    def test_clearance_makes_the_second_repair_see_the_first(self):
+        scene = self._scene()
+        out, result = repair_foldbacks(
+            scene, path_is_clear=_snapshot_model(scene), clearance=_CLEARANCE
+        )
+        assert self._cross_net_violations(out) == []
+        # Net 5 is planned first and keeps its chord; net 6 falls through to a
+        # construction that clears it, so both fold-backs are still repaired.
+        assert (result.repaired, result.skipped) == (2, 0)
+        by_net = {r.net: r.construction for r in result.repairs}
+        stale = repair_foldbacks(scene, path_is_clear=_snapshot_model(scene))[1]
+        stale_by_net = {r.net: r.construction for r in stale.repairs}
+        assert by_net[5] == stale_by_net[5]
+        assert by_net[6] != stale_by_net[6]
+
+    def test_clearance_rejects_and_counts_when_no_construction_clears(self):
+        """No surviving candidate: rejected and counted, never forced."""
+        scene = self._scene()
+        base = _snapshot_model(scene)
+
+        def only_stale_chord_for_net6(x1, y1, x2, y2, layer, width, net):
+            # Net 6 may only reproduce the chord that is too close to net 5's.
+            if net == 6 and (round(x1, 4), round(y1, 4)) != (0.6233, -0.7643):
+                return False
+            return base(x1, y1, x2, y2, layer, width, net)
+
+        result = plan_foldback_repairs(
+            _NET5 + _NET6, path_is_clear=only_stale_chord_for_net6, clearance=_CLEARANCE
+        )
+        assert [r.net for r in result.repairs] == [5]
+        assert result.skipped == 1
+
+    def test_plan_with_clearance_is_deterministic(self):
+        scene = self._scene()
+        runs = [
+            plan_foldback_repairs(scene, path_is_clear=_snapshot_model(scene), clearance=_CLEARANCE)
+            for _ in range(2)
+        ]
+        shape = [
+            [(r.net, r.construction, [s.start + s.end for s in r.added]) for r in run.repairs]
+            for run in runs
+        ]
+        assert shape[0] == shape[1]
+        # Sorted (net, layer) iteration: the lower net id is planned first.
+        assert [r.net for r in runs[0].repairs] == [5, 6]
+
+    def test_same_net_chords_need_no_clearance(self):
+        """Clearance applies across nets only: a same-net plan is unchanged."""
+        legs = [seg((0.0, 0.0), (0.0, 1.0)), seg((0.0, 0.0), (1.0, 1.0))]
+        without = repair_foldbacks(legs, path_is_clear=clear)
+        with_clearance = repair_foldbacks(legs, path_is_clear=clear, clearance=_CLEARANCE)
+        assert without[1].repaired == with_clearance[1].repaired == 1
+        assert without[0] == with_clearance[0]
+
+    def test_other_layer_chord_is_ignored(self):
+        scene = _NET5 + [
+            seg(s.start, s.end, width=s.width, net=6, layer=Layer.B_CU, net_name="B") for s in _NET6
+        ]
+        out, result = repair_foldbacks(scene, path_is_clear=clear, clearance=_CLEARANCE)
+        assert (result.repaired, result.skipped) == (2, 0)
+
+    def test_router_passes_the_grid_clearance_to_the_planner(self, monkeypatch):
+        """``_repair_acute_foldbacks`` wires ``trace_clearance`` through."""
+        import kicad_tools.router.acute_foldback as af
+
+        router = _router()
+        router.routes = [Route(net=5, net_name="USER_LED", segments=list(USER_LED_REGEN))]
+        seen: dict[str, object] = {}
+        real_plan = af.plan_foldback_repairs
+
+        def spy(segments, **kw):
+            seen.update(kw)
+            return real_plan(segments, **kw)
+
+        monkeypatch.setattr("kicad_tools.router.acute_foldback.plan_foldback_repairs", spy)
+        router.cleanup_artifacts()
+        assert seen["clearance"] == pytest.approx(float(router.grid.rules.trace_clearance))

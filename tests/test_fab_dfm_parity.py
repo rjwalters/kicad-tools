@@ -232,8 +232,10 @@ def test_partial_does_not_trigger_incomplete():
 #: 7 -> 8 (note-only row change), so only the header's digit moved -- rows,
 #: order and wording are unchanged. #8840 bumps it 8 -> 9 and flips the
 #: ``sharp_trace_corner`` / ``missing_plated_through_hole`` rows now that
-#: both rules ship. #8858 bumps it 9 -> 11 (note-only change to the
-#: ``solder_mask_opening_exposing_trace`` row; v10 is claimed by an open PR).
+#: both rules ship. #9037 bumps it 9 -> 10 (``sharp_trace_corner`` row
+#: attribution narrows to the ``#bend`` population); again only the digit.
+#: #8858 bumps it 10 -> 11 (note-only change to the
+#: ``solder_mask_opening_exposing_trace`` row).
 EXPECTED_DEFAULT_STANZA = (
     "\n"
     "Fab DFM parity (JLCDFM, table v11, 2026-11-12): 0 danger-capable categories not covered\n"
@@ -440,10 +442,10 @@ def test_physical_copper_gap_rule_id_is_band_stable():
     assert len({v.key for v in (trace, pad, legacy)}) == 1
 
 
-def _finding(rule_id: str, severity: str = "error", *, waived: bool = False):
+def _finding(rule_id: str, severity: str = "error", *, waived: bool = False, **extra):
     from kicad_tools.validate.violations import DRCViolation
 
-    return DRCViolation(rule_id, severity, f"synthetic {rule_id}", waived=waived)
+    return DRCViolation(rule_id, severity, f"synthetic {rule_id}", waived=waived, **extra)
 
 
 RECORDED_8838 = RECORDED
@@ -480,6 +482,22 @@ def test_comparison_counts_attributed_by_count_rule_ids():
         by_cat["silkscreen_line_width"].kct_warnings,
     ) == (0, 2)
     assert (by_cat["fiducial"].kct_errors, by_cat["fiducial"].kct_warnings) == (0, 1)
+
+
+def test_sharp_trace_corner_bend_population_attributes_to_its_row():
+    """Issue #9037: the ``#bend`` qualified key counts only two-segment
+    bends toward the ``sharp_trace_corner`` row; junction findings are
+    kct-only over-reporting and count to neither row's tallies."""
+    bend = _finding("sharp_trace_corner", "warning", corner_class="bend")
+    junction = _finding("sharp_trace_corner", "warning", corner_class="junction")
+    assert fdp.attribution_key(bend) == "sharp_trace_corner#bend"
+    assert fdp.attribution_key(junction) == "sharp_trace_corner#junction"
+    rep = fdp.evaluate_parity("jlcpcb", findings=[bend, junction], recorded_counts=RECORDED_8838)
+    by_cat = {c.category: c for c in rep.comparisons}
+    assert by_cat["sharp_trace_corner"].kct_warnings == 1
+    # The qualified key is attribution-only: rule_id (and so DRCViolation.key)
+    # is identical across both populations.
+    assert bend.key == junction.key
 
 
 def test_silk_finding_lands_in_exactly_one_silk_row():

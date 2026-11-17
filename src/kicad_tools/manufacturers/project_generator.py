@@ -1153,7 +1153,8 @@ def _zone_clearance_floor(rules: DesignRules, layer: str) -> float:
 
     ``min_clearance_mm`` is the *outer*-layer floor; the 2 oz profiles split
     the floors (#8836) and bind inner layers at ``min_inner_clearance_mm``
-    when it is set and lighter.  The zone arm must compare against the floor
+    when it is set and lighter (``DesignRules.__post_init__`` enforces that
+    ordering, Issue #9113).  The zone arm must compare against the floor
     that actually governs the zone's own layer, or a zone authored between
     the two floors is skipped as "redundant" while no rule protects it.
     """
@@ -1185,9 +1186,13 @@ def generate_project_dru(
       clearance, via drill/diameter, annular ring, copper-to-edge) becomes
       ``max(profile, native project minimum)``.  A ``Reviewed clearance -
       <class>`` rule is emitted only for netclasses whose clearance is
-      strictly greater than that clearance floor; a rule at or below the
-      floor is redundant and, because later matching KiCad rules win, could
-      only shadow more specific rules.  A ``Zone clearance - <net>
+      strictly greater than the clearance floor of a layer it can govern;
+      a rule at or below the floor is redundant and, because later
+      matching KiCad rules win, could only shadow more specific rules.
+      The floor is per layer (#9015): with the 2 oz profiles' split floors
+      a class authored between the two is redundant on the outer layers
+      only, and its rule is emitted scoped ``(layer inner)`` at the
+      authored value.  A ``Zone clearance - <net>
       (<layer>)`` rule is emitted the same way for each zone whose
       ``connect_pads`` clearance exceeds the floor (Issue #8937: the
       unconditional floor rule *replaces* the zone's own clearance during
@@ -1278,9 +1283,18 @@ def generate_project_dru(
         # pair that reproduces the native ``max(zone, net class)`` semantics
         # a flat last-match-wins file cannot otherwise express.
         emitted: list[tuple[float, str, str]] = []
+        # Issue #9015: redundancy is per layer, not global.  The 2 oz
+        # profiles bind inner layers at ``min_inner_clearance_mm`` (#8836),
+        # so the skip predicate is the floor of the layers a rule would
+        # govern -- a class authored between the two floors is redundant on
+        # the outer layers only.  An unsplit profile (``None`` inner floor)
+        # keeps the single floor for every layer, byte-identical to before.
+        inner_floor = _zone_clearance_floor(dru_rules, "In1.Cu")
         for cls in sorted(classes, key=lambda c: c.get("clearance", 0)):
-            clearance = max(dru_rules.min_clearance_mm, cls.get("clearance", 0))
-            if mode == PRESERVE_MODE_STRICTER and clearance <= dru_rules.min_clearance_mm:
+            authored = cls.get("clearance", 0)
+            inner_clearance = max(inner_floor, authored)
+            clearance = max(dru_rules.min_clearance_mm, authored)
+            if mode == PRESERVE_MODE_STRICTER and inner_clearance <= inner_floor:
                 continue
             # Issue #6390: a router-declared class does not govern pad pairs
             # inside one footprint (see ``netclass_dru.netclass_condition``).
@@ -1288,6 +1302,23 @@ def generate_project_dru(
             condition = netclass_condition(
                 cls["name"], router=cls["name"] in router_classes, extra_pairs=coupled_pairs
             )
+            if mode == PRESERVE_MODE_STRICTER and clearance <= dru_rules.min_clearance_mm:
+                # Between the two floors: the outer floor already binds
+                # outer-layer pairs at >= the authored value, so the rule
+                # is scoped to the inner layers only (the same
+                # ``(layer inner)`` scope the split floor itself carries)
+                # instead of being skipped as globally redundant.
+                emitted.append(
+                    (
+                        inner_clearance,
+                        f"class:{cls['name']}",
+                        f"\n(rule {json.dumps('Reviewed clearance - ' + cls['name'])}\n"
+                        f"  (layer inner)\n"
+                        f"  (condition {json.dumps(condition)})\n"
+                        f"  (constraint clearance (min {inner_clearance}mm)))\n",
+                    )
+                )
+                continue
             emitted.append(
                 (
                     clearance,

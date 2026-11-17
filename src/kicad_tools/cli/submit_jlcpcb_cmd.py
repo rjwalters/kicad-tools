@@ -1,13 +1,17 @@
 """``kct submit-jlcpcb``: agent-prepared JLCPCB PCBA submission (issues #8465, #8466).
 
 Composes the existing submission plan / stock / upload / review pieces via
-:mod:`kicad_tools.export.submission_workflow`. It never places an order.
+:mod:`kicad_tools.export.submission_workflow`. By default it never places an
+order. The opt-in ``--checkout`` leg (issue #8935, attended only) continues from
+the saved cart to a payment whose exact total the operator approves; see
+:mod:`kicad_tools.manufacturers.jlc_payment`.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -69,6 +73,43 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "--match-mapping",
         help="JSON file giving the column schema (SelectionMapping fields) of JLC's part-matching CSV; supplied up front, while the CSV itself is requested mid-run",
     )
+    pay = parser.add_argument_group(
+        "checkout leg (opt-in, attended only, off by default; issue #8935)",
+        "Continues --website from the saved cart to JLC's payment step. Needs an "
+        "approval naming the exact total. Without --pay it is a rehearsal that stops "
+        "before the pay button (run that first).",
+    )
+    pay.add_argument(
+        "--checkout",
+        action="store_true",
+        help="Continue from the saved cart to the payment step (needs --website and an approval)",
+    )
+    approval = pay.add_mutually_exclusive_group()
+    approval.add_argument(
+        "--auto",
+        action="store_true",
+        help="Show the final total and ask you to type it back to approve it",
+    )
+    approval.add_argument(
+        "--approve-total",
+        metavar="'USD 123.45'",
+        help="Approve exactly this total (currency code and amount); any other total stops",
+    )
+    pay.add_argument(
+        "--pay",
+        action="store_true",
+        help="Press the pay button once after the approval matches (default: stop before it)",
+    )
+    pay.add_argument(
+        "--card-file",
+        metavar="PATH",
+        help="Mode-600 card file outside every git repository (default: the saved site method)",
+    )
+    pay.add_argument(
+        "--clear-unconfirmed-payment",
+        metavar="PLAN_SHA256",
+        help="Record that you checked your account and an unconfirmed attempt was NOT charged",
+    )
     add_format_flag(parser)
 
 
@@ -121,6 +162,7 @@ def _website_leg(args: argparse.Namespace, result, out: Path) -> int:
         path = input("Download JLC's part-matching export, then enter its path: ").strip()
         return Path(path).read_bytes()
 
+    checkout_rc: int | None = None
     try:
         drv.require_attended()
         lock_dir = Path(args.lock_dir) if args.lock_dir else None
@@ -137,10 +179,16 @@ def _website_leg(args: argparse.Namespace, result, out: Path) -> int:
                     out / "site-screenshots",
                     fab_review_signed=result.fab_review_signoff is not None,
                 )
+                if getattr(args, "checkout", False):
+                    # Issue #9151: report the outcome before close() and
+                    # render_review_page can fail -- after a payment the
+                    # ORDERED line (or the unconfirmed instruction) must not
+                    # be hidden by a teardown error.
+                    checkout_rc = _report_checkout(_checkout_leg(args, plan, page, out))
             finally:
                 close()
     except drv.DriverAbort as exc:
-        print(f"ABORTED at {exc.step}: {exc.reason}", file=sys.stderr)
+        print(f"ABORTED at {exc.step}: {exc.reason}", file=sys.stderr)  # sanitised by DriverAbort
         if exc.screenshot:
             print(f"screenshot: {out / 'site-screenshots' / exc.screenshot}", file=sys.stderr)
         print("Nothing was submitted. Continue by hand (--guided):", file=sys.stderr)
@@ -155,9 +203,168 @@ def _website_leg(args: argparse.Namespace, result, out: Path) -> int:
         fab_review_signoff=result.fab_review_signoff,
         fab_dfm=result.fab_dfm,
     )
-    print(f"cart: {site.cart_url}  (state: {site.state})")
+    print(f"cart: {drv.printable(site.cart_url)}  (state: {site.state})")
     print(f"review page: {page_out.directory}")
-    return 0
+    return 0 if checkout_rc is None else checkout_rc
+
+
+def _checkout_run_dir(plan_sha256: str) -> Path:
+    """Private per-run directory beside the ledger (under $HOME, never inside ``-o``).
+
+    The checkout screenshots and receipt can show the order number, the charged
+    total, your address and a masked card, and ``-o`` may be inside a git
+    repository, so none of it is written there.
+    """
+    import time as _time
+
+    from ..manufacturers import jlc_ledger
+
+    stamp = _time.strftime("%Y%m%dT%H%M%SZ", _time.gmtime())
+    run_dir = jlc_ledger.default_ledger_dir() / "checkout" / f"{plan_sha256[:16]}-{stamp}"
+    run_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(run_dir, 0o700)
+    return run_dir
+
+
+def _write_private(path: Path, payload: dict) -> None:
+    from ..export._fsutil import open_nofollow
+
+    fd = open_nofollow(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def _checkout_leg(
+    args: argparse.Namespace, plan, page, out: Path
+) -> tuple[str, object, Path | None]:
+    """Run the opt-in checkout leg on the page the driver left at the saved cart."""
+    from ..manufacturers import jlc_payment as pay
+    from ..manufacturers.jlc_ledger import OrderLedger
+
+    approval = pay.Approval(pay.parse_approval(args.approve_total) if args.approve_total else None)
+    ledger = OrderLedger()  # always the default ledger under $HOME; no flag moves it
+    try:
+        run_dir = _checkout_run_dir(plan.sha256)
+    except OSError as exc:
+        reason = f"cannot create the checkout run directory ({exc.strerror})"
+        return ("aborted", pay.CheckoutAbort("run-dir", reason), None)
+    try:
+        done = pay.run_checkout(
+            page,
+            plan_sha256=plan.sha256,
+            approval=approval,
+            ledger=ledger,
+            ask=input,
+            say=print,
+            shots_dir=run_dir,
+            pay=bool(args.pay),
+            card_file=Path(args.card_file).expanduser() if args.card_file else None,
+        )
+    except pay.PaymentUnconfirmed as exc:
+        return ("unconfirmed", exc, run_dir)
+    except pay.CheckoutAbort as exc:
+        return ("aborted", exc, run_dir)
+    return ("done", done, run_dir)
+
+
+def _report_checkout(outcome: tuple[str, object, Path | None]) -> int:
+    """Print the outcome FIRST (order number, or what to check), then write the receipt.
+
+    A receipt-write failure after a real payment must never hide the outcome.
+    """
+    from ..manufacturers import jlc_payment as pay
+
+    kind, value, run_dir = outcome
+    if kind == "done":
+        assert isinstance(value, pay.CheckoutResult)
+        if value.state == "ordered":
+            print(f"ORDERED: order {value.order_id}, charged {value.charged_total}")
+        else:
+            print(f"checkout rehearsed to the pay button; approved {value.approved_total}")
+        payload: dict = value.as_dict()
+        rc = 0
+    else:
+        assert isinstance(value, pay.CheckoutAbort | pay.PaymentUnconfirmed)
+        if kind == "unconfirmed":
+            print(f"PAYMENT UNCONFIRMED at {value.step}: {value.reason}", file=sys.stderr)
+            rc = 3
+        else:
+            print(f"CHECKOUT STOPPED at {value.step}: {value.reason}", file=sys.stderr)
+            print("Nothing was paid. The cart is saved; you can pay it yourself.", file=sys.stderr)
+            rc = 2
+        payload = {
+            "checkout_version": pay.CHECKOUT_VERSION,
+            "state": "payment-unconfirmed" if kind == "unconfirmed" else "not-ordered",
+            "step": value.step,
+            "reason": value.reason,
+        }
+    if run_dir is None:
+        return rc
+    receipt = run_dir / "checkout-receipt.json"
+    stream = sys.stdout if rc == 0 else sys.stderr
+    try:
+        _write_private(receipt, payload)
+    except OSError as exc:
+        print(
+            f"warning: could not write the checkout receipt {receipt} ({exc.strerror}); "
+            "the outcome above stands, so write it down",
+            file=sys.stderr,
+        )
+        return rc
+    print(f"checkout receipt: {receipt}", file=stream)
+    return rc
+
+
+def _checkout_preflight(args: argparse.Namespace) -> str | None:
+    """Refusal text for an inconsistent or unattended checkout request, else None."""
+    from ..manufacturers import jlc_payment as pay
+
+    wants = args.auto or args.approve_total or args.pay or args.card_file
+    if not args.checkout:
+        if wants:
+            return "--auto, --approve-total, --pay and --card-file only apply with --checkout"
+        return None
+    if not args.website or args.guided or args.dry_run:
+        return "--checkout continues the --website leg; use it with --website only"
+    if not (args.auto or args.approve_total):
+        return "--checkout needs an approval: --auto (type the total) or --approve-total"
+    if args.approve_total:
+        try:
+            pay.parse_approval(args.approve_total)
+        except pay.MoneyError as exc:
+            return f"--approve-total: {exc}"
+    try:
+        pay.require_attended_checkout()
+        if args.card_file:
+            pay.check_card_file(Path(args.card_file).expanduser())
+    except pay.CheckoutAbort as exc:
+        return exc.reason
+    return None
+
+
+def _clear_unconfirmed(args: argparse.Namespace) -> int:
+    from ..manufacturers import jlc_payment as pay
+    from ..manufacturers.jlc_ledger import OrderLedger, clear_unconfirmed
+
+    try:
+        pay.require_attended_checkout()
+    except pay.CheckoutAbort as exc:
+        print(f"REFUSED: {exc.reason}", file=sys.stderr)
+        return 2
+    from ..manufacturers.jlc_ledger import LedgerError
+
+    ledger = OrderLedger()
+    try:
+        with ledger.locked():
+            cleared = clear_unconfirmed(ledger, args.clear_unconfirmed_payment, input)
+    except LedgerError as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 2
+    if cleared:
+        print("Recorded: the unconfirmed attempt was not charged. A new checkout may run.")
+        return 0
+    print("Nothing recorded (no unresolved attempt for that plan, or not confirmed).")
+    return 2
 
 
 def run(args: argparse.Namespace) -> int:
@@ -173,6 +380,13 @@ def run(args: argparse.Namespace) -> int:
             "--website (without --upload nothing is sent to the API), or use --guided",
             file=sys.stderr,
         )
+        return 2
+    if getattr(args, "clear_unconfirmed_payment", None):
+        return _clear_unconfirmed(args)
+    refusal = _checkout_preflight(args)
+    if refusal:
+        # Before the preflight: nothing is written and nothing is contacted.
+        print(f"REFUSED: {refusal}", file=sys.stderr)
         return 2
     load_jlc_env(Path(args.board))
     credentials = JLCCredentials.from_env()

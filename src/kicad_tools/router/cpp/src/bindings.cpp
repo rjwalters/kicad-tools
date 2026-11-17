@@ -65,6 +65,9 @@ NB_MODULE(router_cpp, m) {
         // blockage instead of erasing it.
         .def_rw("static_blocked", &GridCell::static_blocked)
         .def_rw("avoidance_cost", &GridCell::avoidance_cost)
+        // Issue #8999: prospective airwire-separation cost (weighted
+        // unrouted-desire-line crossing count; 0.0 when the flag is off).
+        .def_rw("airwire_cost", &GridCell::airwire_cost)
         // Issue #4071: per-cell corridor-reservation owner set count
         // (read-only surface for parity tests; the owner nets are written
         // via ``Grid3D::reserve_cell`` / read via ``is_reserved_for``).
@@ -94,6 +97,8 @@ NB_MODULE(router_cpp, m) {
         .def_rw("min_drill_clearance", &DesignRules::min_drill_clearance)
         .def_rw("min_hole_to_hole", &DesignRules::min_hole_to_hole)
         .def_rw("min_via_pad_edge_gap", &DesignRules::min_via_pad_edge_gap)
+        // Issue #8994: same-net pad slit-band detection edge (0 = guard off).
+        .def_rw("same_net_pad_gap_band_edge_mm", &DesignRules::same_net_pad_gap_band_edge_mm)
         // Issue #4071: soft corridor-attractor bonus (Python default 3.0).
         .def_rw("cost_corridor_attractor", &DesignRules::cost_corridor_attractor);
 
@@ -343,6 +348,10 @@ NB_MODULE(router_cpp, m) {
         .def("boost_region_cost", &Grid3D::boost_region_cost,
              "center_x"_a, "center_y"_a, "layer"_a, "radius_cells"_a, "amount"_a)
         .def("clear_avoidance_costs", &Grid3D::clear_avoidance_costs)
+        // Issue #8999: airwire-separation plane verbs (see grid.hpp).
+        .def("clear_airwire_costs", &Grid3D::clear_airwire_costs)
+        .def("set_airwire_cells", &Grid3D::set_airwire_cells,
+             "xs"_a, "ys"_a, "costs"_a)
         // Congestion
         .def("get_congestion", &Grid3D::get_congestion, "x"_a, "y"_a, "layer"_a)
         .def("update_congestion", &Grid3D::update_congestion,
