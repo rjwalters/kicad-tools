@@ -474,6 +474,36 @@ def test_final_native_intent_and_exposure_outcomes(tmp_path, native_options, cas
         assert intended.measurements[0].disposition == "intentional"
 
 
+def test_rule_area_keepouts_do_not_block_native_attribution(tmp_path, native_options):
+    """Issue #9234: rule areas are not mask-attribution objects, end to end.
+
+    A keepout embedded in a footprint (the stock RF-module shape) was never
+    found by the worker, and a board-level keepout was reported as
+    uninventoried native material; either one made ``mask_to_copper`` read
+    incomplete for the whole board. Both must now be invisible to the
+    object comparison: the pad alone carries the plotted material.
+    """
+    body = """(footprint "RF" (layer "F.Cu") (at 10 10)
+      (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask"))
+      (zone (layers "F.Cu" "B.Cu")
+        (keepout (tracks not_allowed) (vias not_allowed) (pads not_allowed)
+          (copperpour not_allowed) (footprints not_allowed))
+        (name "") (hatch edge 0.508)
+        (polygon (pts (xy -2 -2) (xy 2 -2) (xy 2 2) (xy -2 2)))))
+      (zone (layers "F.Cu" "B.Cu")
+        (keepout (tracks not_allowed) (vias not_allowed) (pads not_allowed)
+          (copperpour not_allowed) (footprints not_allowed))
+        (name "") (hatch edge 0.508)
+        (polygon (pts (xy 20 20) (xy 24 20) (xy 24 24) (xy 20 24))))"""
+    path = _board(tmp_path / "keepout.kicad_pcb", body, setup="(pad_to_mask_clearance .05)")
+    before = path.read_bytes()
+    result = check_mask_to_copper(path, POLICY, **native_options)
+    assert result.coverage == "complete", result.reasons
+    assert result.passed, result.to_dict()
+    assert path.read_bytes() == before
+    assert not [r for r in result.reasons if "keepout" in r or "uninventoried" in r]
+
+
 def test_native_merged_bridge_exposes_third_copper_with_multiple_contributors(
     tmp_path, native_options
 ):
