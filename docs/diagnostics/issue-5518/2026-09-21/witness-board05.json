@@ -3,7 +3,7 @@
   "board": "05",
   "runs": {
     "run1": {
-      "out_dir": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/05-run1",
+      "out_dir": ".loom/worktrees/issue-5518/5508-1c-scratch/out/05-run1",
       "harness_dumps": [],
       "offline_replays": [],
       "deadline_checkpoint": {
@@ -20,7 +20,7 @@
       }
     },
     "run2": {
-      "out_dir": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/05-run2",
+      "out_dir": ".loom/worktrees/issue-5518/5508-1c-scratch/out/05-run2",
       "times": [
         "START 2026-09-21T05:45:56Z",
         "END 2026-09-21T06:01:13Z RC=1"
@@ -41,7 +41,7 @@
       }
     },
     "run3": {
-      "out_dir": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/05-run3",
+      "out_dir": ".loom/worktrees/issue-5518/5508-1c-scratch/out/05-run3",
       "times": [
         "START 2026-09-21T06:07:28Z",
         "END 2026-09-21T06:22:38Z RC=1"
@@ -248,8 +248,8 @@
         {
           "schema_version": 1,
           "label": "run3-attempt1",
-          "dump": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/witness-board05-run3.escape-return.01.json",
-          "input": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/05-run3/bldc_controller.kicad_pcb",
+          "dump": ".loom/worktrees/issue-5518/5508-1c-scratch/witness-board05-run3.escape-return.01.json",
+          "input": ".loom/worktrees/issue-5518/5508-1c-scratch/out/05-run3/bldc_controller.kicad_pcb",
           "replayed_at": "2026-09-21T09:49:37Z",
           "rules_used": {
             "grid_resolution": 0.0635,
@@ -431,8 +431,8 @@
         {
           "schema_version": 1,
           "label": "run3-attempt2",
-          "dump": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/witness-board05-run3.escape-unwind.02.json",
-          "input": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/05-run3/bldc_controller.kicad_pcb",
+          "dump": ".loom/worktrees/issue-5518/5508-1c-scratch/witness-board05-run3.escape-unwind.02.json",
+          "input": ".loom/worktrees/issue-5518/5508-1c-scratch/out/05-run3/bldc_controller.kicad_pcb",
           "replayed_at": "2026-09-21T10:03:49Z",
           "rules_used": {
             "grid_resolution": 0.0635,
@@ -908,7 +908,7 @@
           "returncode": 0,
           "source": "captured:board05-run3-completed.json",
           "payload": {
-            "pcb": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/05-run3/bldc_controller_routed_completed_unverified_8cpb5npe.kicad_pcb",
+            "pcb": ".loom/worktrees/issue-5518/5508-1c-scratch/out/05-run3/bldc_controller_routed_completed_unverified_8cpb5npe.kicad_pcb",
             "connectivity_model": "strict",
             "summary": {
               "stuck_nets": 11,
@@ -1333,7 +1333,7 @@
       }
     },
     "run4": {
-      "out_dir": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/05-run4",
+      "out_dir": ".loom/worktrees/issue-5518/5508-1c-scratch/out/05-run4",
       "times": [
         "START 2026-09-21T06:24:49Z",
         "END 2026-09-21T06:39:59Z RC=1"
@@ -1393,8 +1393,8 @@
         {
           "schema_version": 1,
           "label": "run4-attempt1",
-          "dump": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/witness-board05-run4.escape-return.01.json",
-          "input": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/05-run4/bldc_controller.kicad_pcb",
+          "dump": ".loom/worktrees/issue-5518/5508-1c-scratch/witness-board05-run4.escape-return.01.json",
+          "input": ".loom/worktrees/issue-5518/5508-1c-scratch/out/05-run4/bldc_controller.kicad_pcb",
           "replayed_at": "2026-09-21T10:27:14Z",
           "rules_used": {
             "grid_resolution": 0.0635,
@@ -1768,7 +1768,7 @@
           "returncode": 0,
           "source": "captured:board05-run4-completed.json",
           "payload": {
-            "pcb": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/05-run4/bldc_controller_routed_completed_unverified_zavttb1r.kicad_pcb",
+            "pcb": ".loom/worktrees/issue-5518/5508-1c-scratch/out/05-run4/bldc_controller_routed_completed_unverified_zavttb1r.kicad_pcb",
             "connectivity_model": "strict",
             "summary": {
               "stuck_nets": 11,

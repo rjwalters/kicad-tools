@@ -19,7 +19,7 @@
         "USB_MCU_D-"
       ],
       "deterministic_rescue": false,
-      "cmd": "-m kicad_tools.cli route /tmp/w6442/br/03-lattice-s42/r0/usb_joystick.kicad_pcb -o /tmp/w6442/br/03-lattice-s42/r0/usb_joystick_routed.kicad_pcb --timeout 600 --no-cache --route-engine lattice --strategy basic --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --net-class-map /home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6442/boards/03-usb-joystick/output/net_class_map.json --seed 42",
+      "cmd": "-m kicad_tools.cli route /tmp/w6442/br/03-lattice-s42/r0/usb_joystick.kicad_pcb -o /tmp/w6442/br/03-lattice-s42/r0/usb_joystick_routed.kicad_pcb --timeout 600 --no-cache --route-engine lattice --strategy basic --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --net-class-map .loom/worktrees/issue-6442/boards/03-usb-joystick/output/net_class_map.json --seed 42",
       "exit_code": 2,
       "wall_s": 240.0,
       "killed_by_harness": false,
@@ -178,7 +178,7 @@
         "USB_MCU_D-"
       ],
       "deterministic_rescue": true,
-      "cmd": "-m kicad_tools.cli route /tmp/w6442/br/03-grid-s42/r0/usb_joystick.kicad_pcb -o /tmp/w6442/br/03-grid-s42/r0/usb_joystick_routed.kicad_pcb --timeout 600 --no-cache --route-engine grid --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --deterministic-rescue --net-class-map /home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6442/boards/03-usb-joystick/output/net_class_map.json --seed 42",
+      "cmd": "-m kicad_tools.cli route /tmp/w6442/br/03-grid-s42/r0/usb_joystick.kicad_pcb -o /tmp/w6442/br/03-grid-s42/r0/usb_joystick_routed.kicad_pcb --timeout 600 --no-cache --route-engine grid --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --deterministic-rescue --net-class-map .loom/worktrees/issue-6442/boards/03-usb-joystick/output/net_class_map.json --seed 42",
       "exit_code": 3,
       "wall_s": 342.1,
       "killed_by_harness": false,
