@@ -36,9 +36,14 @@ def test_slack_matches_the_historical_literal():
 
 
 def test_band_edges_resolve_from_the_jlcpcb_profile():
-    pad_edge, trace_edge = same_net_band_edges()
+    pad_edge, trace_edge = same_net_band_edges("jlcpcb", 4, 1.0, 0.5)
     assert pad_edge > 0
     assert trace_edge > 0
+
+
+def test_missing_stackup_entry_disables_the_band():
+    """A stackup the fab profile has no entry for yields (0.0, 0.0), not a guess (#9188)."""
+    assert same_net_band_edges("jlcpcb", 3, 1.0, 0.5) == (0.0, 0.0)
 
 
 @pytest.mark.parametrize(

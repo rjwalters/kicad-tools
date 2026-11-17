@@ -130,14 +130,14 @@ def _via_pad_gap(path, pad_size=2):
 
 def test_relocation_walks_out_of_same_net_slit_band(tmp_path, recipe, monkeypatch):
     """Issue #9114: a relocated via must not open a (0, edge) same-net slit."""
-    pad_edge, _trace_edge = via_clearance.same_net_band_edges()
+    pad_edge, _trace_edge = via_clearance.same_net_band_edges("jlcpcb", 4, 1.0, 0.5)
     assert pad_edge > 0  # jlcpcb 4layer_1oz resolves a pad_spacing edge
 
     # Control: with the band disabled the ring seats the via at +0.9 mm east,
     # an annulus gap of ~0.05 mm to its own pad -- inside (0, edge).
     control = tmp_path / "control.kicad_pcb"
     write_overlap_board(control, count=1, pad_size=2, via_dx=0.45)
-    monkeypatch.setattr(via_clearance, "same_net_band_edges", lambda: (0.0, 0.0))
+    monkeypatch.setattr(via_clearance, "same_net_band_edges", lambda *a, **k: (0.0, 0.0))
     assert recipe._legalize_signal_vias(control) == 1
     assert 0 < _via_pad_gap(control) < pad_edge
 
@@ -405,12 +405,12 @@ def test_drill_pair_slide_walks_out_of_same_net_slit_band(tmp_path, recipe, monk
     slide keeps the victim's chain and only adds connectors, so the only
     exclusion the check needs is the victim via itself.
     """
-    pad_edge, _trace_edge = via_clearance.same_net_band_edges()
+    pad_edge, _trace_edge = via_clearance.same_net_band_edges("jlcpcb", 4, 1.0, 0.5)
     assert pad_edge > 0
 
     control = tmp_path / "control.kicad_pcb"
     write_drill_pair_slide_board(control)
-    monkeypatch.setattr(via_clearance, "same_net_band_edges", lambda: (0.0, 0.0))
+    monkeypatch.setattr(via_clearance, "same_net_band_edges", lambda *a, **k: (0.0, 0.0))
     assert recipe._legalize_signal_vias(control) == 1
     assert 0 < _slid_via_pad_gap(control) < pad_edge
 

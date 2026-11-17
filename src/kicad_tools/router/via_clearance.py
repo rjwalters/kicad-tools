@@ -713,20 +713,24 @@ SAME_NET_BAND_UNION_EPS_MM = 1e-6
 SAME_NET_BAND_WRITE_SLACK_MM = 1.5e-3
 
 
-def same_net_band_edges() -> tuple[float, float]:
+def same_net_band_edges(
+    profile: str, layers: int, copper_oz: float, inner_oz: float
+) -> tuple[float, float]:
     """``(pad_edge_mm, trace_edge_mm)`` of the fab-view same-net slit band.
 
-    Resolved from the jlcpcb ``4layer_1oz`` profile entry the board recipes
-    grade against -- never literals, so a repair pass's acceptance bands match
-    the fab-view checker by construction (#8957, #8975).  The pad population's
-    error edge grades via-annulus-to-SMD-pad slits; the trace population's
-    grades annulus/segment pairs.  A missing profile entry yields
+    Resolved from the caller's stackup: ``profile``, ``layers``, ``copper_oz``
+    and ``inner_oz`` name the fab entry to grade against -- required, no
+    defaults, so a caller cannot silently inherit another board's stackup
+    (#9188).  Edges are never literals, so a repair pass's acceptance bands
+    match the fab-view checker by construction (#8957, #8975).  The pad
+    population's error edge grades via-annulus-to-SMD-pad slits; the trace
+    population's grades annulus/segment pairs.  A missing profile entry yields
     ``(0.0, 0.0)``, which disables the band rather than guessing an edge.
     """
     from kicad_tools.manufacturers import get_profile
     from kicad_tools.validate.rules.physical_gap import fab_gap_policy_from_entry
 
-    entry = get_profile("jlcpcb").get_dfm_entry(4, 1.0, 0.5)
+    entry = get_profile(profile).get_dfm_entry(layers, copper_oz, inner_oz)
     policy = fab_gap_policy_from_entry(entry) if entry else None
     if policy is None:
         return 0.0, 0.0
