@@ -84,6 +84,140 @@ def test_docker_fallback_carries_pinned_config_home(monkeypatch):
     assert toolchain.check_config_home(host_home) == []
 
 
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        # The native python worker's docker prefix (#8946): mounts, forwarded
+        # env, --user and --platform all carry host state and drop; the image
+        # reference and the entrypoint stay.
+        (
+            [
+                "docker",
+                "run",
+                "--rm",
+                "-i",
+                "--platform",
+                "linux/amd64",
+                "--user",
+                "1000:1000",
+                "-v",
+                "/tmp/kct-mask-objects-x:/tmp/kct-mask-objects-x",
+                "-v",
+                "/home/me/.config:/home/me/.config",
+                "-e",
+                "KICAD_CONFIG_HOME=/home/me/.config",
+                "-e",
+                "HOME=/home/me",
+                "--entrypoint",
+                "python3",
+                "kicad/kicad:10.0.6",
+            ],
+            ["docker", "run", "kicad/kicad:10.0.6", "python3"],
+        ),
+        # Doubled resolved-mount spelling (macOS /private/var) and a -w both go.
+        (
+            [
+                "docker",
+                "run",
+                "--rm",
+                "-v",
+                "/var/folders/T/a:/var/folders/T/a",
+                "-v",
+                "/private/var/folders/T/a:/private/var/folders/T/a",
+                "-w",
+                "/var/folders/T/a",
+                "--entrypoint",
+                "kicad-cli",
+                "example/kicad@sha256:" + "a" * 64,
+            ],
+            ["docker", "run", "example/kicad@sha256:" + "a" * 64, "kicad-cli"],
+        ),
+        # A KCT_KICAD_DOCKER_IMAGE override is whatever image the argv names.
+        (
+            ["docker", "run", "--entrypoint", "kicad-cli", "example/kicad:9.0"],
+            ["docker", "run", "example/kicad:9.0", "kicad-cli"],
+        ),
+        (
+            ["/usr/bin/docker", "run", "--entrypoint", "kicad-cli", "img"],
+            ["docker", "run", "img", "kicad-cli"],
+        ),
+        # Non-docker commands record the executable basename only.
+        (["/opt/kicad/bin/python3"], ["python3"]),
+        (["/explicit/python3", "-I"], ["python3"]),
+        (["kicad-cli"], ["kicad-cli"]),
+        (["C:\\Program Files\\KiCad\\kicad-cli.exe"], ["kicad-cli.exe"]),
+        # Long forms outside the docker_kicad_cli_prefix vocabulary (#9080):
+        # the argv is not a recognised prefix shape, so its value could be a
+        # flag's value rather than the image -- record nothing else.
+        (
+            [
+                "docker",
+                "run",
+                "--volume",
+                "/home/me/board:/home/me/board",
+                "--entrypoint",
+                "kicad-cli",
+                "img",
+            ],
+            ["docker"],
+        ),
+        (["docker", "run", "--env", "HOME=/home/me", "img"], ["docker"]),
+        (["docker", "run", "--env-file", "/home/me/board/.env", "img"], ["docker"]),
+        (["docker", "run", "--name", "kct", "img"], ["docker"]),
+        (["docker", "run", "--network", "none", "img"], ["docker"]),
+        (
+            ["docker", "run", "--mount", "type=bind,src=/home/me/board,dst=/work", "img"],
+            ["docker"],
+        ),
+        (["docker", "run", "--workdir", "/home/me/board", "img"], ["docker"]),
+        # Degenerate shapes stay honest rather than guessing.
+        ([], []),
+        (["docker", "version"], ["docker"]),
+        (["docker", "run", "--entrypoint"], ["docker"]),
+    ],
+)
+def test_portable_native_command_drops_host_state(argv, expected):
+    """The recorded form of a native command carries no host state (#9055)."""
+    assert toolchain.portable_native_command(argv) == expected
+
+
+def test_portable_native_command_long_forms_leak_no_host_path():
+    """The #6532 scan finds no host path in a reduced unknown-flag argv (#9080)."""
+    from tests.test_board_evidence_portable_paths_6532 import ABSOLUTE_HOST_PATH
+
+    for flag, value in (
+        ("--volume", "/home/me/board:/home/me/board"),
+        ("--env", "HOME=/home/me"),
+        ("--env-file", "/tmp/kct/.env"),
+        ("--name", "kct"),
+        ("--network", "none"),
+        ("--mount", "type=bind,src=/tmp/kct,dst=/work"),
+        ("--workdir", "/tmp/kct"),
+    ):
+        argv = ["docker", "run", flag, value, "--entrypoint", "kicad-cli", "img"]
+        recorded = toolchain.portable_native_command(argv)
+        assert recorded == ["docker"]
+        assert not ABSOLUTE_HOST_PATH.search(json.dumps(recorded))
+
+
+def test_portable_native_command_drops_model_dir_mount_args():
+    """docker_model_args output (the 3D model mount) drops with -v/-e (#9055)."""
+    argv = [
+        "docker",
+        "run",
+        *toolchain.docker_model_args(Path("/home/me/.cache/kct-models")),
+        "--entrypoint",
+        "kicad-cli",
+        "kicad/kicad:10.0.6",
+    ]
+    assert toolchain.portable_native_command(argv) == [
+        "docker",
+        "run",
+        "kicad/kicad:10.0.6",
+        "kicad-cli",
+    ]
+
+
 def test_ci_workflow_image_requires_exactly_one_pin(tmp_path):
     workflow = tmp_path / "ci.yml"
     workflow.write_text("env:\n  KICAD_IMAGE: a\n  KICAD_IMAGE: b\n")

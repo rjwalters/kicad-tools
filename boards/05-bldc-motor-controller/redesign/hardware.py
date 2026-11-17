@@ -464,10 +464,41 @@ def build_schematic():
 # 0.8631 mm from R4's own pad 1 (5.8x the floor).  The tightest remaining
 # silk-to-pad pair on the board is U2's library outline against its own
 # pad 29 at 0.2073 mm, so the 0.15 mm floor holds board-wide.
+#
+# The remaining entries (issue #9071) move reference fields whose library
+# position intersects a routed via's drill hole -- the strict gate's
+# silk_hole_overlap findings for C2, R11, R12, R2, R5 and U1.  Each offset is
+# the smallest single-axis shift whose text bounding box clears every hole on
+# the board by at least 0.3 mm (measured with the checker's own bbox model
+# against the routed copper, not just the listed via), so the fix cannot
+# relocate a finding onto a neighbouring hole.
 REFERENCE_OFFSETS = {
     "R4": (0, 1.65),
-    "R11": (0, 1.8),
+    "R11": (0.6, 1.8),
     "RV1": (0, 6.0),
+    "C2": (0.6, -1.68),
+    "R12": (0, -2.15),
+    "R2": (0.55, -1.65),
+    "R5": (0, -2.05),
+    "U1": (0, -6.4),
+}
+
+# fp_line silkscreen strokes that a routed via drill crosses outright
+# (issue #9071: the fp_line half of the silk_hole_overlap findings).  The
+# outline position IS the footprint, so these strokes cannot be offset like
+# reference text; the crossing stroke is deleted (C16/C4/C8 bottom edge,
+# R11/R4 top edge -- each footprint keeps its opposite edge) or trimmed away
+# from the hole (D1's cathode bar, whose top 1.65 -> 0.6 leaves ~0.28 mm of
+# ink-to-drill clearance while keeping the polarity marking).  Vias come from
+# the routing replay, never from this file, so the staged rebuild re-measures
+# every entry against the actual copper.
+SILK_STROKE_EDITS = {
+    "C16": (("drop_horizontal", -0.735),),
+    "C4": (("drop_horizontal", -0.735),),
+    "C8": (("drop_horizontal", -0.735),),
+    "R11": (("drop_horizontal", 0.735),),
+    "R4": (("drop_horizontal", 0.735),),
+    "D1": (("trim_vertical_top", -3.51, 1.65, 0.6),),
 }
 
 
@@ -524,6 +555,8 @@ def build_pcb():
             x, y = REFERENCE_OFFSETS[ref]
             at.set_value(0, x)
             at.set_value(1, y)
+        for edit in SILK_STROKE_EDITS.get(ref, ()):
+            _apply_silk_stroke_edit(fp, ref, edit)
         for line in fp.children:
             if line.name in {"fp_line", "fp_poly", "fp_arc", "fp_rect", "fp_circle"} and line.find(
                 "layer"
@@ -531,6 +564,49 @@ def build_pcb():
                 width = line.find("stroke").find("width")
                 width.set_value(0, max(0.15, width.get_float(0)))
     return pcb
+
+
+def _apply_silk_stroke_edit(fp, ref, edit):
+    """Apply one SILK_STROKE_EDITS entry to a footprint node (Issue #9071).
+
+    Coordinates are footprint-local mm matched with a small tolerance so the
+    edit tracks the committed footprint libraries rather than exact string
+    equality.  ``drop_horizontal`` deletes the horizontal silk stroke whose
+    midpoint sits at ``y``; ``trim_vertical_top`` shortens the vertical silk
+    stroke at ``x`` whose upper end is at ``top`` down to ``new_top``.  A
+    missing match fails the rebuild instead of silently shipping the finding.
+    """
+    op = edit[0]
+    matched = False
+    for line in list(fp.children):
+        if line.name != "fp_line":
+            continue
+        if line.find("layer").get_string(0) not in {"F.SilkS", "B.SilkS"}:
+            continue
+        start, end = line.find("start"), line.find("end")
+        x1, y1, x2, y2 = (
+            start.get_float(0),
+            start.get_float(1),
+            end.get_float(0),
+            end.get_float(1),
+        )
+        if op == "drop_horizontal":
+            if abs(y1 - y2) > 0.01 or abs((y1 + y2) / 2 - edit[1]) > 0.01:
+                continue
+            fp.remove(line)
+            matched = True
+        elif op == "trim_vertical_top":
+            x_target, top, new_top = edit[1], edit[2], edit[3]
+            if abs(x1 - x_target) > 0.01 or abs(x2 - x_target) > 0.01:
+                continue
+            if abs(max(y1, y2) - top) > 0.01:
+                continue
+            (start if y1 > y2 else end).set_value(1, new_top)
+            matched = True
+        else:
+            raise ValueError(f"Unknown silk stroke edit op: {op!r}")
+    if not matched:
+        raise ValueError(f"Silk stroke edit {edit} matched no fp_line on {ref}")
 
 
 def generate(output):

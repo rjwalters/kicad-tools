@@ -342,9 +342,14 @@ def inspect_attributed_mask_geometry(
         if str(data["native_version"]).split()[0] != exported.native_version.split()[0]:
             result.errors.append("Native object/export versions differ")
         result.errors.extend(data["errors"])
+        from kicad_tools.cli.kicad_toolchain import portable_native_command
+
+        # Recorded form is host-independent (#9055): the docker prefix keeps
+        # only the image and entrypoint, other commands only the basename.
+        # The executed argv (*command*) is untouched above.
         result.provenance = {
             "worker_sha256": _digest(worker_raw),
-            "native_python_command": command,
+            "native_python_command": portable_native_command(command),
             "native_version": data["native_version"],
             "objects_sha256": _digest(output.read_bytes()),
             "max_error_mm_per_construction": data["max_error_mm"],
