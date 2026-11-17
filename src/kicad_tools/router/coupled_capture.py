@@ -404,6 +404,34 @@ class ReplayResult:
     objects: dict[int, Any]
 
 
+def _resolve(v: Any, objects: dict[int, Any], router_cpp: Any) -> Any:
+    """Resolve one decoded fixture value against the live native module.
+
+    Module-level (not a closure inside :func:`replay`) on purpose: the old
+    nested ``resolve`` referenced itself for the recursion, so every call
+    built a ``resolve -> cell -> resolve`` cycle that also pinned ``objects``
+    -- and with it every native Grid3D/CoupledPathfinder and route result --
+    until the cyclic GC happened to run.  With no closure there is no cycle
+    and plain refcounting frees everything when ``replay`` returns (#9110).
+    """
+    if isinstance(v, _ObjRef):
+        return objects[v.obj]
+    if isinstance(v, _Struct):
+        obj = getattr(router_cpp, v.type_name)()
+        for name, x in v.fields.items():
+            setattr(obj, name, _resolve(x, objects, router_cpp))
+        return obj
+    if isinstance(v, list):
+        return [_resolve(x, objects, router_cpp) for x in v]
+    if isinstance(v, tuple):
+        return tuple(_resolve(x, objects, router_cpp) for x in v)
+    if isinstance(v, dict):
+        return {
+            _resolve(k, objects, router_cpp): _resolve(x, objects, router_cpp) for k, x in v.items()
+        }
+    return v
+
+
 def replay(calls: list[dict], router_cpp=None) -> ReplayResult:
     """Re-execute a decoded call sequence against the native module.
 
@@ -415,31 +443,14 @@ def replay(calls: list[dict], router_cpp=None) -> ReplayResult:
 
         router_cpp = cpp_backend.router_cpp
     objects: dict[int, Any] = {}
-
-    def resolve(v: Any) -> Any:
-        if isinstance(v, _ObjRef):
-            return objects[v.obj]
-        if isinstance(v, _Struct):
-            obj = getattr(router_cpp, v.type_name)()
-            for name, x in v.fields.items():
-                setattr(obj, name, resolve(x))
-            return obj
-        if isinstance(v, list):
-            return [resolve(x) for x in v]
-        if isinstance(v, tuple):
-            return tuple(resolve(x) for x in v)
-        if isinstance(v, dict):
-            return {resolve(k): resolve(x) for k, x in v.items()}
-        return v
-
     routes: list[dict] = []
     for e in calls:
         op = e["op"]
         if op == "new":
             cls = getattr(router_cpp, e["type"])
             objects[e["obj"]] = cls(
-                *[resolve(a) for a in e["args"]],
-                **{k: resolve(v) for k, v in e["kwargs"].items()},
+                *[_resolve(a, objects, router_cpp) for a in e["args"]],
+                **{k: _resolve(v, objects, router_cpp) for k, v in e["kwargs"].items()},
             )
         elif op == "batch":
             fn = getattr(objects[e["obj"]], e["method"])
@@ -452,8 +463,8 @@ def replay(calls: list[dict], router_cpp=None) -> ReplayResult:
         else:
             fn = getattr(objects[e["obj"]], e["method"])
             result = fn(
-                *[resolve(a) for a in e["args"]],
-                **{k: resolve(v) for k, v in e["kwargs"].items()},
+                *[_resolve(a, objects, router_cpp) for a in e["args"]],
+                **{k: _resolve(v, objects, router_cpp) for k, v in e["kwargs"].items()},
             )
             if e["method"] == "route":
                 routes.append(diagnostics_of(result))
