@@ -780,7 +780,7 @@ def same_net_band_seat_ok(
         return False
     if trace_edge_mm <= 0:
         return True
-    from shapely.geometry import Point  # type: ignore[import-untyped]
+    from shapely.geometry import Point
 
     return same_net_trace_band_clear(
         Point(x, y).buffer(diameter / 2), same_net_copper, trace_edge_mm

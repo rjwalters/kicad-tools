@@ -226,12 +226,12 @@ def test_drill_pair_slide_walks_out_of_same_net_slit_band(tmp_path, recipe, monk
     slide keeps the victim's chain and only adds connectors, so the only
     exclusion the check needs is the victim via itself.
     """
-    pad_edge, _trace_edge = recipe._same_net_band_edges()
+    pad_edge, _trace_edge = via_clearance.same_net_band_edges()
     assert pad_edge > 0
 
     control = tmp_path / "control.kicad_pcb"
     write_drill_pair_slide_board(control)
-    monkeypatch.setattr(recipe, "_same_net_band_edges", lambda: (0.0, 0.0))
+    monkeypatch.setattr(via_clearance, "same_net_band_edges", lambda: (0.0, 0.0))
     assert recipe._legalize_signal_vias(control) == 1
     assert 0 < _slid_via_pad_gap(control) < pad_edge
 
