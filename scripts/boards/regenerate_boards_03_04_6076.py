@@ -279,6 +279,23 @@ def board03_receipt(base_commit: str, checked_at: str | None, known: tuple[str, 
             if previous.exists():
                 shutil.move(str(previous), verification)
             raise RuntimeError(f"kct readiness refused board 03:\n{stderr.getvalue()[-2000:]}")
+    # mask_copper_assessments[*].geometry_provenance (#5255) is per-object
+    # introspection payload (~21 MB on this board) that nothing downstream of
+    # the committed evidence reads; the verdict, coverage, policy and binding
+    # stay (#9065 regen).  verify re-runs kct check fresh, so this strip never
+    # invalidates a recorded hash.
+    kct_check_report = out / "readiness-verification/kct-check.json"
+    if kct_check_report.is_file():
+        data = json.loads(kct_check_report.read_text())
+        changed = False
+        for assessment in data.get("mask_copper_assessments") or []:
+            if (
+                isinstance(assessment, dict)
+                and assessment.pop("geometry_provenance", None) is not None
+            ):
+                changed = True
+        if changed:
+            kct_check_report.write_text(json.dumps(data) + "\n")
     receipt = json.loads((out / "readiness-verification/readiness.json").read_text())
     for rel in SUPPLEMENTAL_BINDINGS:
         receipt["inputs"][rel] = sha256(board / rel)

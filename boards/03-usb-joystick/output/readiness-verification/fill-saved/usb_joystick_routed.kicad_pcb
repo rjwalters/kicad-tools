@@ -1693,16 +1693,6 @@
 		(attr smd)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
-			(start -0.237258 -0.5225)
-			(end 0.237258 -0.5225)
-			(stroke
-				(width 0.15)
-				(type solid)
-			)
-			(layer "F.SilkS")
-			(uuid "4a1d0742-17ab-573f-80c6-9397bdd8b262")
-		)
-		(fp_line
 			(start -0.237258 0.5225)
 			(end 0.237258 0.5225)
 			(stroke
@@ -2532,16 +2522,6 @@
 		)
 		(attr smd)
 		(duplicate_pad_numbers_are_jumpers no)
-		(fp_line
-			(start -0.237258 -0.5225)
-			(end 0.237258 -0.5225)
-			(stroke
-				(width 0.15)
-				(type solid)
-			)
-			(layer "F.SilkS")
-			(uuid "f2feb4ad-41a6-5a5d-af8c-fc870ff04c33")
-		)
 		(fp_line
 			(start -0.237258 0.5225)
 			(end 0.237258 0.5225)
@@ -6301,7 +6281,7 @@
 		(descr "Capacitor SMD 0603 (1608 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 76, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "capacitor")
 		(property "Reference" "C6"
-			(at -1.76777 1.76777 0)
+			(at -2.48 0 0)
 			(layer "F.SilkS")
 			(uuid "ee3bc03b-905b-42b2-8278-5ed2fcf2ef6c")
 			(effects
@@ -7697,7 +7677,7 @@
 		(descr "TQFP, 44 Pin (JEDEC MS-026 variation ACB, 1.00mm body thickness, https://www.jedec.org/document_search?search_api_views_fulltext=MS-026, https://ww1.microchip.com/downloads/en/PackagingSpec/00000049BZ.pdf#page=658)")
 		(tags "TQFP QFP Microchip_44-Lead-Plastic-Thin-Quad-Flatpack-(PT)")
 		(property "Reference" "U1"
-			(at -7.4 0 0)
+			(at 0 -7.65 0)
 			(layer "F.SilkS")
 			(uuid "c551fb1b-306b-4104-8ccb-75c09a66551b")
 			(effects
@@ -7834,14 +7814,16 @@
 			(layer "F.SilkS")
 			(uuid "10fc0fec-c3dd-5c71-b726-07ff3564ce3e")
 		)
-		(fp_poly (pts (xy -5.75 -4.54) (xy -6.09 -5.01) (xy -5.41 -5.01))
+		(fp_poly
+			(pts (xy -6.09 -5.01) (xy -5.83576 -5.01) (xy -5.8358 -5.00922) (xy -5.83598 -5.00186) (xy -5.83598 -4.99814) (xy -5.8358 -4.99078) (xy -5.83561 -4.98705) (xy -5.83507 -4.97971) (xy -5.83471 -4.97599) (xy -5.8338 -4.96869) (xy -5.83326 -4.965) (xy -5.832 -4.95774) (xy -5.83127 -4.95409) (xy -5.82966 -4.9469) (xy -5.82875 -4.94328) (xy -5.82679 -4.93619) (xy -5.82571 -4.93262) (xy -5.8234 -4.92563) (xy -5.82214 -4.92211) (xy -5.81949 -4.91524) (xy -5.81806 -4.9118) (xy -5.81508 -4.90507) (xy -5.81348 -4.9017) (xy -5.81017 -4.89512) (xy -5.80842 -4.89183) (xy -5.80479 -4.88542) (xy -5.80287 -4.88223) (xy -5.79893 -4.87601) (xy -5.79686 -4.8729) (xy -5.79262 -4.86688) (xy -5.7904 -4.86389) (xy -5.78587 -4.85808) (xy -5.7835 -4.8552) (xy -5.77869 -4.84962) (xy -5.77618 -4.84686) (xy -5.77111 -4.84153) (xy -5.76847 -4.83889) (xy -5.76314 -4.83382) (xy -5.76037 -4.83131) (xy -5.7548 -4.8265) (xy -5.75192 -4.82413) (xy -5.74611 -4.81961) (xy -5.74312 -4.81738) (xy -5.7371 -4.81314) (xy -5.734 -4.81107) (xy -5.72778 -4.80713) (xy -5.72458 -4.80521) (xy -5.71817 -4.80159) (xy -5.71488 -4.79983) (xy -5.7083 -4.79652) (xy -5.70493 -4.79492) (xy -5.6982 -4.79194) (xy -5.69475 -4.79051) (xy -5.68789 -4.78786) (xy -5.68437 -4.7866) (xy -5.67738 -4.7843) (xy -5.67381 -4.78321) (xy -5.66672 -4.78125) (xy -5.6631 -4.78034) (xy -5.65592 -4.77873) (xy -5.65226 -4.778) (xy -5.645 -4.77674) (xy -5.64131 -4.7762) (xy -5.63401 -4.77529) (xy -5.63029 -4.77493) (xy -5.62295 -4.77439) (xy -5.61923 -4.7742) (xy -5.61186 -4.77402) (xy -5.60813 -4.77402) (xy -5.60077 -4.7742) (xy -5.59705 -4.77439) (xy -5.58971 -4.77493) (xy -5.58599 -4.77529) (xy -5.57918 -4.77613) (xy -5.75 -4.54)
+			)
 			(stroke
 				(width 0.15)
 				(type solid)
 			)
 			(fill yes)
 			(layer "F.SilkS")
-			(uuid "b0f10673-1904-50d0-907f-ee1798ed261e")
+			(uuid "69d63ef3-a0dd-5e06-891b-41f25271d71d")
 		)
 		(fp_line
 			(start -4.53 6.65)

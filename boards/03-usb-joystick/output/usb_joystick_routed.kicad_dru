@@ -44,11 +44,11 @@
 (rule "Silkscreen Height - jlcpcb-tier1"
   (condition "A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')")
   (constraint text_height (min 1.0mm)))
-(rule "Ampacity Min Width (Power, external) - jlcpcb-tier1"
-  (condition "A.NetClass == 'Power' && A.Type == 'track' && (A.Layer == 'F.Cu' || A.Layer == 'B.Cu')")
+(rule "Ampacity Min Width (Power 0.1A, external) - jlcpcb-tier1"
+  (condition "(A.NetName == 'VCC' || A.NetName == 'VBUS') && A.Type == 'track' && (A.Layer == 'F.Cu' || A.Layer == 'B.Cu')")
   (constraint track_width (min 0.0125mm)))
-(rule "Ampacity Min Width (Power, internal) - jlcpcb-tier1"
-  (condition "A.NetClass == 'Power' && A.Type == 'track' && A.Layer != 'F.Cu' && A.Layer != 'B.Cu'")
+(rule "Ampacity Min Width (Power 0.1A, internal) - jlcpcb-tier1"
+  (condition "(A.NetName == 'VCC' || A.NetName == 'VBUS') && A.Type == 'track' && A.Layer != 'F.Cu' && A.Layer != 'B.Cu'")
   (constraint track_width (min 0.0751mm)))
 
 (rule "Reviewed clearance - Debug"
@@ -73,6 +73,26 @@
 
 (rule "Reviewed clearance - Power"
   (condition "(A.NetClass == 'Power' || B.NetClass == 'Power') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
+  (constraint clearance (min 0.2mm)))
+
+(rule "Zone clearance - GND (B.Cu)"
+  (layer "B.Cu")
+  (condition "(A.Type == 'Zone' && A.NetName == 'GND') || (B.Type == 'Zone' && B.NetName == 'GND')")
+  (constraint clearance (min 0.2mm)))
+
+(rule "Zone clearance - GND (F.Cu)"
+  (layer "F.Cu")
+  (condition "(A.Type == 'Zone' && A.NetName == 'GND') || (B.Type == 'Zone' && B.NetName == 'GND')")
+  (constraint clearance (min 0.2mm)))
+
+(rule "Zone clearance - GND (In1.Cu)"
+  (layer "In1.Cu")
+  (condition "(A.Type == 'Zone' && A.NetName == 'GND') || (B.Type == 'Zone' && B.NetName == 'GND')")
+  (constraint clearance (min 0.2mm)))
+
+(rule "Zone clearance - VCC (In2.Cu)"
+  (layer "In2.Cu")
+  (condition "(A.Type == 'Zone' && A.NetName == 'VCC') || (B.Type == 'Zone' && B.NetName == 'VCC')")
   (constraint clearance (min 0.2mm)))
 # END kct fab floors
 
