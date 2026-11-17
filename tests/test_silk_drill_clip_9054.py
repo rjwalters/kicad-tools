@@ -470,3 +470,71 @@ def test_kct_dispatch_forwards_hole_flags(tmp_path: Path):
         == 0
     )
     assert _hole_findings(path) == []
+
+
+# ---------------------------------------------------------------------------
+# Pin-1 marker loss report (Issue #9077)
+# ---------------------------------------------------------------------------
+
+_PADS_3 = (
+    ' (pad "1" smd rect (at -1.5 0) (size 1 0.5) (layers "F.Cu" "F.Mask"))'
+    ' (pad "2" smd rect (at 0 0) (size 1 0.5) (layers "F.Cu" "F.Mask"))'
+    ' (pad "3" smd rect (at 1.5 0) (size 1 0.5) (layers "F.Cu" "F.Mask"))'
+)
+
+
+def test_marker_wholly_under_drill_is_removed_and_reported(tmp_path: Path):
+    # A filled pin-1 dot ~0.9mm left of pad 1, wholly inside a via drill's
+    # keep-out: the clip erases it outright, and the rule that recognised it
+    # before the clip must flag the footprint after.  A dry run edits
+    # nothing, so it never reports a loss.
+    dot = _poly([(-2.84, -0.04), (-2.76, -0.04), (-2.76, 0.04)])
+    path = _write(tmp_path, _fp(_PADS_3 + dot) + _via(127.2, 130))
+    assert SilkscreenRepairer(path).repair_hole_clearance(dry_run=True).marker_lost == []
+
+    result = _clip(path)
+    (fix,) = result.fixes
+    assert (fix.element_type, fix.action, fix.pieces) == ("fp_poly", "removed", 0)
+    assert result.marker_lost == ["U1"]
+
+
+def test_cli_reports_marker_loss(tmp_path: Path, capsys):
+    import json
+
+    from kicad_tools.cli.fix_silkscreen_cmd import main
+
+    body = _fp(_PADS_3 + _poly([(-2.84, -0.04), (-2.76, -0.04), (-2.76, 0.04)])) + _via(127.2, 130)
+    for fmt, expect in (
+        ("text", "pin-1 / polarity marker lost (re-add clear of the hole): U1"),
+        ("summary", "1 pin-1 marker(s) lost"),
+    ):
+        (tmp_path / fmt).mkdir()
+        path = _write(tmp_path / fmt, body)
+        assert main([str(path), "--clip-to-holes", "--format", fmt]) == 0
+        assert expect in capsys.readouterr().out
+    (tmp_path / "json").mkdir()
+    path = _write(tmp_path / "json", body)
+    assert main([str(path), "--clip-to-holes", "--format", "json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["hole_clearance_marker_lost"] == ["U1"]
+
+
+def test_trimmed_marker_that_survives_is_not_reported(tmp_path: Path):
+    # Board 03 U1 shape: the drill takes a bite out of a bigger marker and
+    # the remainder is still recognised -- no loss, no report.
+    triangle = _poly([(-3.3, -0.4), (-3.3, 0.4), (-2.5, 0)])
+    path = _write(tmp_path, _fp(_PADS_3 + triangle) + _via(126.7, 130))
+    result = _clip(path)
+    (fix,) = result.fixes
+    assert fix.element_type == "fp_poly" and fix.pieces == 1
+    assert _hole_findings(path) == []
+    assert result.marker_lost == []
+
+
+def test_footprint_without_marker_is_not_reported(tmp_path: Path):
+    # U1 never had a marker: the rule flags it before *and* after the clip,
+    # so the before/after diff -- not the bare after-state -- is reported.
+    path = _write(tmp_path, _fp(_PADS_3 + _line(-3, 3, 3, 3)) + _via(130, 133))
+    result = _clip(path)
+    assert len(result.fixes) == 1
+    assert result.marker_lost == []

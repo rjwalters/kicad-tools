@@ -181,6 +181,7 @@ def _hole_dicts(hole_result: HoleClearanceRepairResult) -> dict:
         ],
         "hole_clearance_residual": hole_result.residual,
         "hole_clearance_text_residual": hole_result.text_residual,
+        "hole_clearance_marker_lost": hole_result.marker_lost,
     }
 
 
@@ -292,6 +293,8 @@ def _print_summary(
         )
     if hole_result is not None and hole_result.total_fixed > 0:
         parts.append(f"{hole_result.total_fixed} silk-over-hole violation(s)")
+    if hole_result is not None and hole_result.marker_lost:
+        parts.append(f"{len(hole_result.marker_lost)} pin-1 marker(s) lost")
     if not parts:
         parts.append("0 silkscreen violation(s)")
     print(f"{action} {total} silkscreen violation(s){source}: {'; '.join(parts)}")
@@ -316,6 +319,7 @@ def _print_text(
         or hole_result.skipped
         or hole_result.residual
         or hole_result.text_residual
+        or hole_result.marker_lost
     )
 
     if not has_line_fixes and not has_text_fixes and not has_clip and not has_hole:
@@ -396,6 +400,8 @@ def _print_text(
             print(f"  still over a hole: {item}")
         for item in hole_result.text_residual:
             print(f"  text over a hole (use place-silk-refs --over-holes): {item}")
+        for ref in hole_result.marker_lost:
+            print(f"  pin-1 / polarity marker lost (re-add clear of the hole): {ref}")
 
 
 def main(argv: list[str] | None = None) -> int:
