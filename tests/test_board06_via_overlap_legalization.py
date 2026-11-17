@@ -173,6 +173,98 @@ def test_grid_escape_seat_is_graded_through_the_band(recipe):
     assert recipe._same_net_band_seat_ok(1.3, 0, dia, [seg], pad, 0.0, 0.0)
 
 
+def _write_stub_board(path, stubs):
+    """One net-1 SMD pad at (110, 60) with a via in it, plus same-net F.Cu stubs.
+
+    ``stubs`` are ``(x1, y1, x2, y2, width)`` segments of net 1.
+    """
+    nodes = [
+        "(kicad_pcb (version 20240108) (generator pcbnew)",
+        '(general (thickness 1.6)) (layers (0 "F.Cu" signal) (31 "B.Cu" signal))',
+        "(gr_rect (start 98.5 47.5) (end 198.5 127.5) "
+        '(stroke (width .1) (type default)) (fill none) (layer "Edge.Cuts"))',
+        '(net 1 "N1")',
+        '(footprint "test" (layer "F.Cu") (at 110 60) (property "Reference" "R1") '
+        '(pad "1" smd rect (at 0 0) (size 2 2) (layers "F.Cu" "F.Mask") (net 1 "N1")))',
+        '(via (at 110.45 60) (size .6) (drill .25) (layers "F.Cu" "B.Cu") (net 1) '
+        '(uuid "00000000-0000-4000-8000-000000000001"))',
+    ]
+    for i, (x1, y1, x2, y2, w) in enumerate(stubs):
+        nodes.append(
+            f"(segment (start {x1} {y1}) (end {x2} {y2}) (width {w}) "
+            f'(layer "F.Cu") (net 1) (uuid "00000000-0000-4000-8000-1{i:011d}"))'
+        )
+    path.write_text("\n".join(nodes) + "\n)\n")
+
+
+def _same_net_slits(path):
+    """Same-net fab-view slit findings -- the authority the legs are graded against."""
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.validate.rules.physical_gap import (
+        check_physical_copper_gap_fab_view,
+        fab_gap_policy_from_entry,
+    )
+
+    policy = fab_gap_policy_from_entry(get_profile("jlcpcb").get_dfm_entry(4, 1.0, 0.5))
+    result = check_physical_copper_gap_fab_view(PCB.load(path), policy)
+    return [v for v in result.violations if getattr(v, "same_net", False)]
+
+
+def test_relocation_connector_leg_stays_out_of_same_net_slit_band(tmp_path, recipe, monkeypatch):
+    """Issue #9167: the connector written to a relocation seat is graded too.
+
+    The pad-attached stub runs 0.05 mm beside the straight connector leg that
+    leaves the pad.  The seat annulus is fine (#9114); only the leg is in band.
+    """
+    stubs = [(111.0, 60.2, 111.1, 60.2, 0.15)]
+
+    control = tmp_path / "control.kicad_pcb"
+    _write_stub_board(control, stubs)
+    assert _same_net_slits(control) == []
+    # Control: with the leg grading disabled the leg lands 0.05 mm from the stub.
+    monkeypatch.setattr(recipe, "_same_net_leg_band_ok", lambda *a, **k: True)
+    assert recipe._legalize_signal_vias(control) == 1
+    assert [v.actual_value for v in _same_net_slits(control)] == [pytest.approx(0.05)]
+
+    monkeypatch.undo()
+    path = tmp_path / "graded.kicad_pcb"
+    _write_stub_board(path, stubs)
+    assert recipe._legalize_signal_vias(path) == 1
+    assert _same_net_slits(path) == []
+    assert (
+        not ViaInPadRule()
+        .check(PCB.load(path), SimpleNamespace(via_in_pad_supported=False))
+        .violations
+    )
+
+
+def test_leg_band_predicate_grades_slits_but_not_unions_or_bends(recipe):
+    """Issue #9167: touching / chained copper is a union; detached copper is graded."""
+    from shapely.geometry import LineString
+
+    def seg(x1, y1, x2, y2, w=0.15):
+        return LineString([(x1, y1), (x2, y2)]).buffer(w / 2), w / 2
+
+    ok = recipe._same_net_leg_band_ok
+    leg = ((0.0, 0.0), (1.0, 0.0), 0.15)
+    # Detached parallel stub 0.05 away (in band), exactly at / past the edge, far away.
+    assert not ok(*leg, [seg(0.2, 0.2, 0.6, 0.2)], [], [], 0.15, 0.1016)
+    assert ok(*leg, [seg(0.2, 0.3, 0.6, 0.3)], [], [], 0.15, 0.1016)
+    assert ok(*leg, [seg(0.2, 2.0, 0.6, 2.0)], [], [], 0.15, 0.1016)
+    # A chain the leg grows out of: touching piece + its neighbour at a 90 degree bend.
+    chain = [seg(0.0, 0.0, 0.0, 0.05), seg(0.0, 0.05, 0.0, 0.1), seg(0.0, 0.1, 0.0, 0.15)]
+    assert ok(*leg, chain, [], [], 0.15, 0.1016)
+    # ... but a hairpin of the same chain far beyond the notch reach is graded.
+    hairpin = chain + [seg(0.0, 0.15, 0.0, 0.7), seg(0.0, 0.7, 0.5, 0.7), seg(0.5, 0.7, 0.5, 0.2)]
+    assert not ok(*leg, hairpin, [], [], 0.15, 0.1016)
+    # Same-net SMD pad: touched is a union, 0.05 away is a slit, clear of the edge is fine.
+    assert ok(*leg, [], [], [(0.9, -0.5, 1.5, 0.5)], 0.15, 0.1016)
+    assert not ok(*leg, [], [], [(1.0, 0.125, 1.5, 0.6)], 0.15, 0.1016)
+    assert ok(*leg, [], [], [(1.0, 0.3, 1.5, 0.6)], 0.15, 0.1016)
+    # Edges of 0 disable the band.
+    assert ok(*leg, [seg(0.2, 0.2, 0.6, 0.2)], [], [(1.0, 0.125, 1.5, 0.6)], 0.0, 0.0)
+
+
 def test_legalizer_reports_overlap_without_a_legal_escape(tmp_path, recipe):
     path = tmp_path / "blocked.kicad_pcb"
     # A broad SMT land surrounds every candidate in the bounded search.
