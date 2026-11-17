@@ -248,6 +248,7 @@ def inspect_exported_mask_geometry(
     ``artifact_dir`` retains exact native outputs and the source-bound manifest.
     No zone refill, source write, manufacturer policy or exposure waiver occurs.
     """
+    from kicad_tools.cli.kicad_toolchain import is_docker_shim, portable_native_command
     from kicad_tools.cli.runner import find_kicad_cli
     from kicad_tools.sexp import parse_string
 
@@ -302,7 +303,10 @@ def inspect_exported_mask_geometry(
         _sha(siblings[".kicad_dru"]) if siblings[".kicad_dru"] is not None else None,
         version,
         {
-            "command": list(native_command),
+            # Recorded form is host-independent (#9055): docker prefixes keep
+            # only the image and entrypoint, other commands only the basename.
+            # The argv actually executed stays in *native_command* untouched.
+            "command": portable_native_command(native_command),
             "arguments": args,
             "profile": "macro-free-native-gerber",
             "board_plot_params": options.board_plot_params,
@@ -310,7 +314,10 @@ def inspect_exported_mask_geometry(
         },
     )
     command_file = Path(native_command[0])
-    if command_file.is_file():
+    # A docker shim's bytes embed per-run mounts and the scratch config home,
+    # so their digest would differ on every run and pin no tool identity
+    # (#9055); the pinned image is the identity on that path.
+    if command_file.is_file() and not is_docker_shim(command_file):
         snapshot.export_identity["command_file_sha256"] = _sha(command_file.read_bytes())
     if not re.match(r"^10\.", version):
         snapshot.unsupported.append(

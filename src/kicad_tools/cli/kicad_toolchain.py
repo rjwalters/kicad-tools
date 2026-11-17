@@ -53,7 +53,7 @@ import sys
 import tempfile
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 #: Mirror of ``.github/workflows/ci.yml``'s ``KICAD_IMAGE`` (the source of
@@ -307,6 +307,67 @@ def docker_kicad_cli_prefix(
     return cmd
 
 
+#: ``docker run`` flags whose *value* carries host state (mounts, forwarded
+#: environment, uid/gid, working directory, platform) and is therefore dropped
+#: from the recorded form of a native command (``portable_native_command``).
+_DOCKER_VALUE_FLAGS = frozenset({"-v", "-e", "--user", "-w", "--platform"})
+
+
+def _recorded_executable_name(text: str) -> str:
+    """Basename of a recorded executable, Windows spelling included."""
+    name = os.path.basename(text)
+    if "\\" in text:
+        name = PureWindowsPath(text).name or name
+    return name
+
+
+def portable_native_command(argv: Iterable[str]) -> list[str]:
+    """Stable, host-independent form of a *recorded* native command (#9055).
+
+    A ``docker run`` argv reduces to ``["docker", "run", "<image>",
+    "<entrypoint>"]``: every ``-v``/``-e``/``--user``/``-w``/``--platform``
+    value names host directories (per-run temp stages, the config home, the
+    calling user), so keeping any of them would put a per-run path into
+    hash-bound evidence; the image reference and the entrypoint still name
+    the tool.  Any other argv records only the executable's basename -- a
+    real binary's bytes are already pinned by ``command_file_sha256`` where
+    that is recorded, and a kct docker shim's bytes are per-run by
+    construction (see :func:`is_docker_shim`).  Only what evidence
+    *records* goes through this; the argv that actually executes is
+    untouched.
+    """
+    argv = list(argv)
+    if not argv:
+        return []
+    if _recorded_executable_name(argv[0]) not in ("docker", "docker.exe"):
+        return [_recorded_executable_name(argv[0])]
+    # Only the recorded ``docker run`` prefix shape (docker_kicad_cli_prefix)
+    # carries an image; any other docker subcommand reduces to the basename.
+    if len(argv) < 2 or argv[1] != "run":
+        return ["docker"]
+    image = None
+    entrypoint = None
+    index = 2
+    while index < len(argv):
+        token = argv[index]
+        if token == "--entrypoint":
+            if index + 1 < len(argv):
+                entrypoint = argv[index + 1]
+            index += 2
+            continue
+        if token in _DOCKER_VALUE_FLAGS:
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        image = token
+        break
+    if image is None:
+        return ["docker"]
+    return ["docker", "run", image, *([entrypoint] if entrypoint else [])]
+
+
 def write_docker_shim(directory: Path, mounts: Iterable[Path], config_home: Path) -> Path:
     """Write an executable ``kicad-cli`` that runs the pinned image's kicad-cli."""
     prefix = docker_kicad_cli_prefix(mounts, config_home)
@@ -322,6 +383,25 @@ def write_docker_shim(directory: Path, mounts: Iterable[Path], config_home: Path
     )
     shim.chmod(0o755)
     return shim
+
+
+#: Stable marker line every shim written by :func:`write_docker_shim` carries.
+_DOCKER_SHIM_MARKER = b"# kct evidence toolchain (Issue #6962)"
+
+
+def is_docker_shim(path: str | os.PathLike[str]) -> bool:
+    """True when *path* is a kicad-cli shim written by :func:`write_docker_shim`.
+
+    A shim's bytes embed its per-run mounts and config home, so they pin no
+    stable tool identity: callers must not record a ``command_file_sha256``
+    for one (#9055).  The pinned image, not the shim script, is the tool
+    identity on that path.
+    """
+    try:
+        head = Path(path).read_bytes()[:256]
+    except OSError:
+        return False
+    return _DOCKER_SHIM_MARKER in head
 
 
 # ---------------------------------------------------------------------------

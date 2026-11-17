@@ -794,7 +794,8 @@ def test_native_worker_launches_under_explicit_command(monkeypatch, tmp_path):
         board, native_python_command=command, scratch_dir=tmp_path
     )
     assert seen["cmd"][:2] == command
-    assert result.provenance["native_python_command"] == command
+    # Executed argv is untouched; the recorded form is host-independent (#9055).
+    assert result.provenance["native_python_command"] == ["python3"]
 
 
 def test_native_worker_launches_in_pinned_container(monkeypatch, tmp_path):
@@ -826,8 +827,59 @@ def test_native_worker_launches_in_pinned_container(monkeypatch, tmp_path):
     stage = Path(cmd[-1]).parent
     assert f"{stage}:{stage}" in cmd
     assert f"KICAD_CONFIG_HOME={cfg}" in cmd
-    assert result.provenance["native_python_command"] == cmd[:-4]
+    # Executed argv keeps every mount; the recorded form drops them all and
+    # keeps only the pinned image and the entrypoint (#9055).
+    from kicad_tools.cli.kicad_toolchain import docker_image
+
+    assert result.provenance["native_python_command"] == [
+        "docker",
+        "run",
+        docker_image(),
+        "python3",
+    ]
     assert [Path(p).parent for p in cmd[-4:]] == [stage] * 4
+
+
+def test_recorded_provenance_is_stable_across_stage_dirs(monkeypatch, tmp_path):
+    """Two docker runs with different temp dirs record identical bytes (#9055).
+
+    Per-run stage mounts and config homes must not reach the recorded
+    provenance, so neither the provenance dict nor the ``export_profile_sha256``
+    binding hash (which folds it in) may vary between runs.
+    """
+    from kicad_tools.cli.kicad_toolchain import docker_image
+    from kicad_tools.validate.mask_copper import source_binding
+    from kicad_tools.validate.mask_copper_geometry import (
+        inspect_attributed_mask_geometry,
+    )
+
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.docker_fallback_enabled", lambda: True)
+    monkeypatch.setattr(
+        "kicad_tools.validate.mask_copper_geometry.shutil.which",
+        lambda name: "/usr/bin/docker" if name == "docker" else None,
+    )
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain._synced_model_dir", lambda: None)
+    provenance = []
+    bindings = []
+    for run in ("stage-one", "stage-two"):
+        scratch = tmp_path / run
+        scratch.mkdir()
+        cfg = scratch / "cfg"
+        cfg.mkdir()
+        monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.process_config_home", lambda: cfg)
+        board, _ = _fake_native_launch(monkeypatch, tmp_path / run)
+        _forbid_discovery(monkeypatch)
+        result = inspect_attributed_mask_geometry(board, scratch_dir=scratch)
+        assert result.provenance["native_python_command"] == [
+            "docker",
+            "run",
+            docker_image(),
+            "python3",
+        ]
+        provenance.append(result.provenance)
+        bindings.append(source_binding(result).export_profile_sha256)
+    assert provenance[0] == provenance[1]
+    assert bindings[0] == bindings[1]
 
 
 def test_native_worker_discovers_pcbnew_interpreter(monkeypatch, tmp_path):
@@ -848,7 +900,8 @@ def test_native_worker_discovers_pcbnew_interpreter(monkeypatch, tmp_path):
     result = inspect_attributed_mask_geometry(board, scratch_dir=tmp_path)
     assert seen["cmd"][0] == "/opt/kicad/bin/python3"
     assert probes == ["import pcbnew"]
-    assert result.provenance["native_python_command"] == ["/opt/kicad/bin/python3"]
+    # Recorded form keeps only the executable name (#9055); execution unchanged.
+    assert result.provenance["native_python_command"] == ["python3"]
 
 
 def test_unqualified_discovered_interpreter_still_fails_version_binding(monkeypatch, tmp_path):
