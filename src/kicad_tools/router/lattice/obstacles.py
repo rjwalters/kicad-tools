@@ -410,6 +410,67 @@ class LatticeObstacleModel:
                 return True
         return False
 
+    def same_net_pad_band_blocked(
+        self,
+        a: Pt,
+        b: Pt,
+        layer: int,
+        net: int,
+        half: float,
+        edge_mm: float,
+    ) -> bool:
+        """True when the copper swept by segment ``a-b`` parks in the fab
+        slit band beside an own-net SMD pad on ``layer`` (issue #9018).
+
+        The leg form of the #8974 via-seat guard.  A same-net pad is not an
+        obstacle -- ``segment_blocked`` skips it above -- so a leg-acceptance
+        predicate that never looks at it lets A* pick lines parallel to an
+        own-net pad edge inside the fab ``pad_spacing`` band: copper the fab
+        grades as a slit (board 07's 14 same-net findings, #9011).  The
+        acceptable regions are exactly two, as in
+        :func:`~kicad_tools.router.via_clearance.same_net_segment_pad_gap_acceptable`
+        (#9012): the swept copper UNIONS the pad (gap <= 0 -- the pad's own
+        stub or attach necessarily qualifies) or keeps the detection edge
+        ``edge_mm`` (the ``GapBand.detection_edge_mm`` of the resolved
+        ``pad_spacing`` dfm entry, never ``error_edge_mm`` -- #8976).  The
+        open band ``(0, edge_mm)`` in between is rejected.
+
+        The gap is exact swept-copper geometry: the kernel's true pad outline
+        (rotated, oval, roundrect -- the #7503 discipline) minus the sweep
+        identity, ``gap = centreline-to-outline distance - half``, never a
+        grown rectangle.  Pads with a drill are skipped -- the #9012
+        predicate's SMD scope, mirroring ``_via_ok_at``'s band branch (a
+        through-hole neighbour is the hole-to-hole floor's business).  The
+        degenerate ``a == b`` form is the point probe.  ``edge_mm <= 0``
+        keeps the guard off (an unresolvable stackup changes nothing).
+        """
+        if edge_mm <= 0.0:
+            return False
+        reach = half + edge_mm + 0.5
+        x0, x1 = min(a[0], b[0]) - reach, max(a[0], b[0]) + reach
+        y0, y1 = min(a[1], b[1]) - reach, max(a[1], b[1]) + reach
+        ax0, ax1 = min(a[0], b[0]), max(a[0], b[0])
+        ay0, ay1 = min(a[1], b[1]), max(a[1], b[1])
+        eps = ka.LATTICE_CLEARANCE_EPSILON_MM
+        for idx in self.pads_near(x0, y0, x1, y1):
+            pad = self.pads[idx]
+            if pad.net != net or pad.through_hole or pad.drill > 0:
+                continue
+            if layer not in self.pad_layer_indices[idx]:
+                continue
+            hw, hh = pad_half_extents(pad)
+            # Perf (#6182 pattern): the exact centreline-to-outline distance
+            # is >= the axis-aligned bbox separation, so a separation that
+            # already clears the band skips the kernel call without moving a
+            # verdict.
+            sep = max(pad.x - hw - ax1, ax0 - (pad.x + hw), pad.y - hh - ay1, ay0 - (pad.y + hh))
+            if sep - half > edge_mm + eps:
+                continue
+            gap = self.pad_centerline_gap(idx, a, b) - half
+            if eps < gap < edge_mm - eps:
+                return True
+        return False
+
     def pairwise_pad_blocked(
         self,
         a: Pt,
