@@ -7,7 +7,7 @@
     "sdram_demo.kicad_pro": "f6ee5e69e9cd153a3ca4b57f8fa9005f8c755774db97a6c5a6ad0c6378b79198"
   },
   "sha256": {
-    "sdram_demo.kicad_pcb": "b6585732be6793a1f6d290bfe725284e2bcf4a5b314c6de3f8ce1d8aa1ca24bc"
+    "sdram_demo.kicad_pcb": "cb1a2322eba616ebee1c1f66231cf05f898c7213d5e380deb19060bbdd900011"
   },
   "parts": 43,
   "bound_pads": 216,
