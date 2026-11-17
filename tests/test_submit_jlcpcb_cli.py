@@ -337,3 +337,127 @@ def test_guided_contact_values_only_on_tty_and_never_in_output_tree(env, monkeyp
     for p in env["out"].rglob("*"):
         if p.is_file():
             assert sentinel.encode() not in p.read_bytes(), p
+
+
+# --- Issue #8935: opt-in, attended checkout leg -------------------------------
+
+
+@pytest.mark.parametrize(
+    "extra, message",
+    [
+        (["--pay"], "only apply with --checkout"),
+        (["--approve-total", "USD 1.00"], "only apply with --checkout"),
+        (["--card-file", "/x/card.env"], "only apply with --checkout"),
+        (["--checkout", "--auto"], "with --website only"),
+        (["--checkout", "--website"], "needs an approval"),
+        (["--checkout", "--website", "--approve-total", "12.00"], "currency code"),
+        (["--checkout", "--website", "--auto"], "interactive terminal"),
+    ],
+)
+def test_checkout_flags_refused_before_anything(env, monkeypatch, capsys, extra, message):
+    write_manifest(env)
+    _no_browser(monkeypatch)
+    monkeypatch.setattr(cmd, "run_submission", lambda **k: pytest.fail("preflight ran"))
+    assert cmd.main(_argv(env, *extra)) == 2
+    assert message in capsys.readouterr().err
+    assert not env["out"].exists()
+
+
+def _site_harness(env, monkeypatch, tmp_path):
+    from kicad_tools.export import submission_review
+
+    write_manifest(env)
+    _stock(monkeypatch, {"C1": 100, "C2": 100})
+    monkeypatch.setattr(drv, "require_attended", lambda: None)
+    monkeypatch.setattr(drv, "connect_attended_page", lambda port: (object(), lambda: None))
+    site = drv.SiteResult(
+        drv.DRIVER_VERSION, [], {}, {"issues": []}, "https://cart.jlcpcb.com/c", "$1", "5d"
+    )
+    monkeypatch.setattr(drv, "run_driver", lambda *a, **k: site)
+
+    class _Page:
+        directory = tmp_path / "rp"
+
+    monkeypatch.setattr(submission_review, "render_review_page", lambda *a, **k: _Page())
+    mapping = tmp_path / "mapping.json"
+    mapping.write_text(
+        json.dumps(
+            {
+                "reference": "Refs",
+                "selected": "Selected",
+                "selected_values": ["yes"],
+                "unselected_values": ["no"],
+            }
+        )
+    )
+    return [
+        "--website",
+        "--match-mapping",
+        str(mapping),
+        "--lock-dir",
+        str(tmp_path / "locks"),
+        "--thickness-mm",
+        "1.6",
+        "--outer-copper-oz",
+        "1",
+    ]
+
+
+def test_website_without_checkout_never_reaches_payment(env, monkeypatch, tmp_path, capsys):
+    from kicad_tools.manufacturers import jlc_payment as pay
+
+    args = _site_harness(env, monkeypatch, tmp_path)
+    monkeypatch.setattr(pay, "run_checkout", lambda *a, **k: pytest.fail("checkout ran"))
+    assert cmd.main(_argv(env, *args)) == 0
+    assert "state: in-cart" in capsys.readouterr().out
+    assert not (env["out"] / "checkout-receipt.json").exists()
+
+
+def test_checkout_runs_after_the_cart_and_writes_a_receipt(env, monkeypatch, tmp_path, capsys):
+    from kicad_tools.manufacturers import jlc_payment as pay
+
+    args = _site_harness(env, monkeypatch, tmp_path)
+    monkeypatch.setattr(pay, "require_attended_checkout", lambda **k: None)
+    seen = {}
+
+    def fake_checkout(page, **kw):
+        seen.update(kw)
+        return pay.CheckoutResult("rehearsed", kw["plan_sha256"], str(kw["approval"].total))
+
+    monkeypatch.setattr(pay, "run_checkout", fake_checkout)
+    extra = ["--checkout", "--approve-total", "USD 1.00", "--ledger-dir", str(tmp_path / "l")]
+    assert cmd.main(_argv(env, *args, *extra)) == 0
+    assert seen["pay"] is False and seen["card_file"] is None  # rehearsal is the default
+    receipt = json.loads((env["out"] / "checkout-receipt.json").read_text())
+    assert receipt["state"] == "rehearsed" and receipt["approved_total"] == "USD 1.00"
+    assert receipt["selectors_verified"] is False
+    assert "rehearsed to the pay button" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "error, rc, state", [("abort", 2, "not-ordered"), ("unconfirmed", 3, "payment-unconfirmed")]
+)
+def test_checkout_failures_exit_nonzero_with_state(env, monkeypatch, tmp_path, error, rc, state):
+    from kicad_tools.manufacturers import jlc_payment as pay
+
+    args = _site_harness(env, monkeypatch, tmp_path)
+    monkeypatch.setattr(pay, "require_attended_checkout", lambda **k: None)
+    exc = (
+        pay.CheckoutAbort("approval", "mismatch")
+        if error == "abort"
+        else pay.PaymentUnconfirmed("confirmation", "unknown")
+    )
+
+    def raise_(*a, **k):
+        raise exc
+
+    monkeypatch.setattr(pay, "run_checkout", raise_)
+    extra = ["--checkout", "--auto", "--pay", "--ledger-dir", str(tmp_path / "l")]
+    assert cmd.main(_argv(env, *args, *extra)) == rc
+    receipt = json.loads((env["out"] / "checkout-receipt.json").read_text())
+    assert receipt["state"] == state
+
+
+def test_clear_unconfirmed_payment_refuses_unattended(env, capsys):
+    assert cmd.main(_argv(env, "--clear-unconfirmed-payment", "a" * 64)) == 2
+    assert "interactive terminal" in capsys.readouterr().err

@@ -24,8 +24,11 @@ Binding constraints (each is enforced in code and covered by a test):
   tapeout manifest carries a ``fab_review_signoff`` (a human looked at the fab's
   gerber viewer / DFM result and ran ``kct tapeout-sign-off --stage
   fab-review``). Re-run after signing; the pause is the abort itself.
-* **Stops at the saved cart.** The last action is "save to cart". Nothing here
-  places an order, pays for anything or buys parts, and "ordered" is never set.
+* **Stops at the saved cart.** The last action is "save to cart". Nothing in
+  this module places an order, pays for anything or buys parts, and it never
+  sets "ordered". The only path past the cart is a separate, opt-in,
+  attended module (issue #8935) that needs an approval naming the exact total;
+  this module never imports it.
 * **Kill switch.** Any failed assertion raises :class:`DriverAbort` (with a
   screenshot) and the caller falls back to :func:`guided_checklist`
   (``--guided``). The driver never retries and never submits after an abort.
@@ -171,7 +174,8 @@ class SiteResult:
     state: str = "in-cart"  # never "ordered": only the human sets that
     remaining_human_steps: tuple[str, ...] = (
         "Confirm consignment / parts inventory choices",
-        "Place and pay for the order yourself (this tool never does)",
+        "Place and pay for the order yourself (kct pays only in the opt-in, attended "
+        "leg of issue #8935, for a total you approve)",
     )
 
     def as_dict(self) -> dict[str, Any]:
@@ -599,6 +603,11 @@ class _PlaywrightPage:  # pragma: no cover - thin adapter, exercised only in a l
 
     def click(self, selector: str) -> None:
         self._p.click(selector)
+
+    def fill(self, selector: str, value: str) -> None:
+        # Used only by the opt-in leg of issue #8935, which withholds error
+        # details from this call so a typed value never reaches a log or message.
+        self._p.fill(selector, value)
 
     def set_file(self, selector: str, path: Path) -> None:
         self._p.set_input_files(selector, str(path))
