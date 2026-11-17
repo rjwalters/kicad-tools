@@ -21,6 +21,9 @@ Examples:
 
     # Apply, then run an independent native DRC check on the silk rules
     kct place-silk-refs board.kicad_pcb --verify-drc
+
+    # Move only the references sitting on a drilled hole (Issue #9054)
+    kct place-silk-refs board.kicad_pcb --over-holes
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ from kicad_tools.silkscreen.place_refs import (
     SILK_EDGE_CLEARANCE_MM,
     PlaceSilkRefsResult,
     SilkRefPlacer,
+    references_over_holes,
 )
 
 
@@ -269,6 +273,14 @@ def main(argv: list[str] | None = None) -> int:
             "stay put (but still act as obstacles). Default: all references"
         ),
     )
+    parser.add_argument(
+        "--over-holes",
+        action="store_true",
+        help=(
+            "Move only references whose text overlaps a drilled hole (the "
+            "silk_hole_overlap findings); combined with --refs, the intersection"
+        ),
+    )
     parser.add_argument("-o", "--output", help="Output file path (default: overwrite input)")
     parser.add_argument(
         "--dry-run", action="store_true", help="Preview the move plan without modifying files"
@@ -326,6 +338,10 @@ def main(argv: list[str] | None = None) -> int:
         if unknown:
             print(f"Error: unknown reference(s) in --refs: {', '.join(unknown)}", file=sys.stderr)
             return 1
+    if args.over_holes:
+        # Issue #9054: only the references silk_hole_overlap flags.
+        over = references_over_holes(placer.pcb)
+        only = over if only is None else only & over
 
     try:
         result = placer.plan(
