@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -306,6 +307,95 @@ class TestTieVias:
             assert change.count == need
             assert change.current_capacity_a() >= 15.0
         assert PathAmpacityRule([_spec()]).check(pcb, rules).errors == []
+
+    def test_tie_row_groups_across_widened_clearance(self):
+        """Issue #8992: the row's grouping bound is derived from the placer's
+        own spacing rule, so widening ``min_clearance_mm`` past the old
+        ~0.485 mm crossing (where the placed row spacing outgrew the constant
+        bound) still groups the row into one summed layer change per end.
+
+        40 mm leg (``end=60.0``): the 20 mm default refuses these widened
+        rows outright for want of room, which is different behaviour.
+        0.4850 mm itself is a float knife edge and stays unasserted."""
+        for clearance_mm in (0.127, 0.400, 0.500, 0.600, 0.800):
+            rules = replace(_rules(), min_clearance_mm=clearance_mm)
+            pcb = self._smd_leg(end=60.0)
+            result = reinforce_net(
+                pcb, NET, strategy="parallel", current_paths=[_spec()], design_rules=rules
+            )
+            (leg,) = result.legs
+            assert leg.copy_status == COPY_PLACED, leg.reason
+            assert PathAmpacityRule([_spec()]).check(pcb, rules).errors == []
+            res = resolve_current_path(pcb, _spec(), design_rules=rules)
+            assert res.ok, res.reason
+            assert len(res.series_layer_changes) == 2
+            for change in res.series_layer_changes:
+                assert change.count == 10
+                assert change.current_capacity_a() >= 15.0
+
+    @pytest.mark.parametrize(
+        ("rules", "need"),
+        [
+            # 0.20 mm drill tier, 0.45 mm pads, 0.600 mm clearance: the
+            # crossing is via-size independent, so this geometry breaks the
+            # old constant bound too (spacing 1.065 > 0.950).
+            (
+                replace(
+                    _rules(), min_via_drill_mm=0.2, min_via_diameter_mm=0.45, min_clearance_mm=0.600
+                ),
+                13,
+            ),
+            # 1.00 mm pads at only 0.500 mm clearance: spacing 1.515 already
+            # exceeds the old 1.500 constant bound for this geometry.
+            (replace(_rules(), min_via_diameter_mm=1.0, min_clearance_mm=0.500), 10),
+        ],
+    )
+    def test_tie_row_grouping_is_not_calibrated_to_one_via_geometry(self, rules, need):
+        """Issue #8992 edge case: the derived bound groups rows placed with
+        other via geometries, not just the 0.60/0.30 mm probe."""
+        pcb = self._smd_leg(end=60.0)
+        result = reinforce_net(
+            pcb, NET, strategy="parallel", current_paths=[_spec()], design_rules=rules
+        )
+        (leg,) = result.legs
+        assert leg.copy_status == COPY_PLACED, leg.reason
+        res = resolve_current_path(pcb, _spec(), design_rules=rules)
+        assert res.ok, res.reason
+        assert len(res.series_layer_changes) == 2
+        for change in res.series_layer_changes:
+            assert change.count == need
+            assert change.current_capacity_a() >= 15.0
+        assert PathAmpacityRule([_spec()]).check(pcb, rules).errors == []
+
+    def test_tie_row_groups_when_the_hole_to_hole_floor_dominates(self):
+        """Issue #8992 edge case: the derived bound also covers a rule set
+        whose hole-to-hole floor, not copper clearance, sets the row spacing
+        (1.2 + 0.3 > 0.6 + 0.127) -- the old constant bound missed it."""
+        rules = replace(_rules(), min_hole_to_hole_mm=1.2)
+        pcb = self._smd_leg(end=60.0)
+        result = reinforce_net(
+            pcb, NET, strategy="parallel", current_paths=[_spec()], design_rules=rules
+        )
+        (leg,) = result.legs
+        assert leg.copy_status == COPY_PLACED, leg.reason
+        res = resolve_current_path(pcb, _spec(), design_rules=rules)
+        assert res.ok, res.reason
+        assert len(res.series_layer_changes) == 2
+        for change in res.series_layer_changes:
+            assert change.count == 10
+        assert PathAmpacityRule([_spec()]).check(pcb, rules).errors == []
+
+    def test_distributed_stitches_stay_separate_under_the_derived_bound(self):
+        """Issue #8992 / #8916: the derived bound must stay far below the
+        5 mm distributed-stitch pitch -- an ungated copy's interior stitches
+        never collapse into one summed ``LayerChange``."""
+        pcb = self._smd_leg()
+        reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+        res = resolve_current_path(pcb, _spec(), design_rules=_rules())
+        assert res.ok, res.reason
+        # Two single end ties + three interior stitches, each its own change.
+        assert len(res.layer_changes) == 5
+        assert all(change.count == 1 for change in res.layer_changes)
 
     def test_a_blocked_tie_row_refuses_the_copy_whole(self):
         """An other-net via part-way along the row stops it: the leg is
