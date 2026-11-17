@@ -7194,11 +7194,28 @@ class EscapeRouter:
                     return False
 
             seg_list: list[Segment] = []
+            # Issue #9272: the same-net tracks skipped below are the
+            # population the via-annulus-vs-own-trace slit band (#9208, the
+            # C++ ``is_via_blocked_diag`` twin) grades.  Collect them only
+            # when the caller-resolved edge is on (None/0 ⇒ guard off).
+            trace_band_edge_mm = float(
+                getattr(self.rules, "same_net_trace_gap_band_edge_mm", 0.0) or 0.0
+            )
+            same_net_trace_segs: list[tuple[float, float, float, float, float]] = []
             if foreign_tracks:
                 for s in foreign_tracks:
                     if net is not None and s.net == net:
+                        if trace_band_edge_mm > 0:
+                            same_net_trace_segs.append((s.x1, s.y1, s.x2, s.y2, s.width))
                         continue
                     seg_list.append(s)
+            if same_net_trace_segs:
+                from .via_clearance import via_annulus_trace_band_ok
+
+                if not via_annulus_trace_band_ok(
+                    x, y, eff_diameter, same_net_trace_segs, trace_band_edge_mm
+                ):
+                    return False
 
             # Adapt Segment (x1/y1/x2/y2) to the predicate's expected
             # start_x/start_y/end_x/end_y interface.

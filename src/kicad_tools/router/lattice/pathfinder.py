@@ -71,7 +71,7 @@ from ..pairplan.via_pair import ViaPair, via_pair_sites
 from ..primitives import Pad, Route, Segment, Via, pad_half_extents
 from ..quantize import dogleg_points
 from ..rules import DesignRules, layer_permitted
-from ..via_clearance import same_net_pad_gap_acceptable
+from ..via_clearance import same_net_pad_gap_acceptable, via_annulus_trace_band_ok
 from .coupled import CoupledConnection
 from .escape_plan import EscapeChoice, chosen_stub, foreign_reservations, plan_tapered_escapes
 from .geometry import Pt, Rect, dist, pt_in_rect, seg_pt_dist, seg_seg_dist
@@ -2350,6 +2350,18 @@ class LatticePathfinder:
         # of the area's layers (the barrel spans the whole stack).
         if self._keepouts is not None and self._keepouts.via_blocked(point, net, via_radius):
             return False
+        # Issue #9272: the own-net TRACE slit band (#9208).  The through-via
+        # annulus exists on every layer, so an own-net committed segment on
+        # ANY layer is held to the fab-view ``(0, edge)`` band -- the
+        # pure-Python twin of the C++ ``is_via_blocked_diag`` guard.  None/0
+        # keeps it off; committed (stored) segments only, like C++.
+        trace_edge_mm = float(getattr(self.rules, "same_net_trace_gap_band_edge_mm", 0.0) or 0.0)
+        if trace_edge_mm > 0:
+            own_segments = committed.same_net_segments_near(point, net, via_radius + trace_edge_mm)
+            if own_segments and not via_annulus_trace_band_ok(
+                point[0], point[1], self.rules.via_diameter, own_segments, trace_edge_mm
+            ):
+                return False
         return committed.via_clear(point, net, clearance)
 
     # -- the route contract ------------------------------------------------------

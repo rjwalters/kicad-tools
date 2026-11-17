@@ -1117,6 +1117,26 @@ class CommittedCopper:
                         return False
         return True
 
+    def same_net_segments_near(
+        self, point: Pt, net: int, reach: float
+    ) -> list[tuple[float, float, float, float, float]]:
+        """Own-net committed segments, on ANY layer, within ``reach`` of ``point``.
+
+        ``(x1, y1, x2, y2, width)`` centrelines for the via-vs-own-trace slit
+        band (Issue #9272).  ``reach`` is the annulus radius plus the band
+        edge; each segment's own half-width widens the query pad.  A segment
+        stored on several layers is returned once per layer (harmless: the
+        band test is a pure ``any``).
+        """
+        out: list[tuple[float, float, float, float, float]] = []
+        for layer in range(self.num_layers):
+            for c, d, cnet, hw, _iclr in self.copper[layer].query_seg(
+                point, point, pad=reach + self.trace_half + 2.0
+            ):
+                if cnet == net:
+                    out.append((c[0], c[1], d[0], d[1], 2.0 * hw))
+        return out
+
     def via_clear(self, point: Pt, net: int, clearance: float | None = None) -> bool:
         """True if a through-via at ``point`` clears committed copper (ALL
         layers) and committed vias (cross-net body gap, same-net hole gap).

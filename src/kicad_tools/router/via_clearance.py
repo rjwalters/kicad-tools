@@ -773,6 +773,44 @@ def same_net_trace_band_clear(
     )
 
 
+def via_annulus_trace_band_ok(
+    x: float,
+    y: float,
+    diameter: float,
+    same_net_segments: Any,
+    trace_edge_mm: float,
+) -> bool:
+    """True iff a via annulus at ``(x, y)`` opens no slit against own-net traces.
+
+    The router-engine form of :func:`same_net_trace_band_clear` (Issue #9272):
+    the pure-Python twin of the C++ ``same_net_trace_gap_band_edge_mm`` via
+    guard (#9208).  ``same_net_segments`` is an iterable of
+    ``(x1, y1, x2, y2, width)`` centrelines of the via's OWN net's stored
+    segments on ANY layer (the annulus exists on every layer).  Each is built
+    as a round-capped outline -- the exact shape the C++ gap measures -- and
+    graded by the shared predicate, so overlap/touch (one copper union) and
+    clear-of-edge seats stay accepted.  ``trace_edge_mm <= 0`` (or no
+    segments) disables the test.
+    """
+    if trace_edge_mm <= 0:
+        return True
+    from shapely.geometry import LineString, Point
+
+    segs = list(same_net_segments)
+    if not segs:
+        return True
+    # A fine ``quad_segs`` keeps the polygonal arcs within ~1e-4 mm of the
+    # true circle, well inside the 1e-9-scale union epsilon's practical use.
+    annulus = Point(x, y).buffer(diameter / 2.0, quad_segs=64)
+    outlines = [
+        (Point(x1, y1) if (x1 == x2 and y1 == y2) else LineString([(x1, y1), (x2, y2)])).buffer(
+            width / 2.0, quad_segs=64
+        )
+        for x1, y1, x2, y2, width in segs
+    ]
+    return same_net_trace_band_clear(annulus, outlines, trace_edge_mm)
+
+
 def same_net_band_seat_ok(
     x: float,
     y: float,
