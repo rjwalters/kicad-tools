@@ -305,9 +305,7 @@ class TestRollback:
         # exactly that).
         assert np.array_equal(to_numpy(router.grid._usage_count), usage_before)
 
-    def test_discard_partial_never_touches_the_usage_ledger(
-        self, offender_pcb: Path
-    ) -> None:
+    def test_discard_partial_never_touches_the_usage_ledger(self, offender_pcb: Path) -> None:
         """#3501: a partial search result is blocked-grid-marked ONLY
         (the search's commit closure never writes usage), so discarding
         it must leave the usage ledger untouched -- per-cell counts on
