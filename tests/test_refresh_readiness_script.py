@@ -500,3 +500,27 @@ def test_repin_staged_gates_and_publishes_a_staged_copy(mod, tmp_path, monkeypat
     )
     # dry_run: the committed board is untouched
     assert json.loads((board / "output" / "readiness.json").read_text())["checked_at"] != CHECKED_AT
+
+
+def test_waivers_sidecar_beside_the_routed_pcb_is_bound_into_inputs(mod, tmp_path, monkeypatch):
+    """``repin_staged`` binds the auto-loaded waivers sidecar (Issue #9006, #9025)."""
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=0)
+    sidecar = board / "output" / "board_routed.kct-waivers.json"
+    sidecar.write_text(json.dumps({"version": 1, "waivers": []}))
+
+    mod.refresh(board, CHECKED_AT)
+
+    report = json.loads((board / "output" / "readiness.json").read_text())
+    assert report["inputs"]["output/board_routed.kct-waivers.json"] == mod.sha256(sidecar)
+
+
+def test_waivers_sidecar_named_for_a_different_pcb_is_not_bound(mod, tmp_path, monkeypatch):
+    board = _hooked_board(mod, tmp_path, monkeypatch, warnings=0)
+    (board / "output" / "board.kct-waivers.json").write_text(
+        json.dumps({"version": 1, "waivers": []})
+    )
+
+    mod.refresh(board, CHECKED_AT)
+
+    report = json.loads((board / "output" / "readiness.json").read_text())
+    assert not any(k.endswith("kct-waivers.json") for k in report["inputs"])

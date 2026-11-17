@@ -82,17 +82,21 @@ class TestBoard07Allowance:
         nets: every other blocking finding counts.  #8974's route-side
         slit-band fix, measured on the tree merged with #8975 and #8937,
         drained DQS_P, DQS_N, GND and +1V2 entirely (entries deleted) and
-        re-pointed the six survivors to the #8962 parent tracker."""
+        re-pointed the six survivors to the #8962 parent tracker.  #9018's
+        leg-side band guard drained the pad-vs-trace population entirely
+        (MIPI_CLK_N / MIPI_DAT0_N / MIPI_DAT1_N deleted); the residual six
+        TMDS entries are the re-sited gateway fan vias' tangency wedges,
+        measured and re-pointed under #8962 (the via population's child)."""
         mod = _load_helper_module()
         assert set(mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS) == {
             ("physical_copper_gap", net)
             for net in (
-                "MIPI_CLK_N",
-                "MIPI_DAT0_N",
-                "MIPI_DAT1_N",
                 "TMDS_D0_N",
+                "TMDS_D0_P",
                 "TMDS_D1_N",
+                "TMDS_D1_P",
                 "TMDS_D2_N",
+                "TMDS_D2_P",
             )
         }
         assert set(mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS.values()) == {8962}
