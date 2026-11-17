@@ -32,6 +32,7 @@ import logging
 import warnings
 from collections import deque
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -219,7 +220,7 @@ class BayesianOptStrategy(PlacementStrategy):
         self._pending_trial_indices = []
 
         # Build Ax parameter definitions
-        parameters = []
+        parameters: list[dict[str, Any]] = []
         for d in range(ndim):
             if bounds.discrete_mask[d]:
                 lo = int(bounds.lower[d])
@@ -405,7 +406,7 @@ class BayesianOptStrategy(PlacementStrategy):
         else:
             # LHS phase: attach trials manually via attach_trial
             for placement, score in zip(placements, scores, strict=True):
-                params = {f"x{d}": float(placement.data[d]) for d in range(ndim)}
+                params: dict[str, Any] = {f"x{d}": float(placement.data[d]) for d in range(ndim)}
                 # Convert discrete dims to int for Ax
                 for d in range(ndim):
                     if self._bounds.discrete_mask[d]:
@@ -613,6 +614,7 @@ class BayesianOptStrategy(PlacementStrategy):
                     actual = [PlacementVector(data=v.copy()) for v in batch_vecs]
                     # Complete the Ax trials with the actual scores
                     if instance._pending_trial_indices:
+                        assert instance._ax_client is not None
                         for trial_idx, score in zip(
                             instance._pending_trial_indices,
                             batch_scores,
