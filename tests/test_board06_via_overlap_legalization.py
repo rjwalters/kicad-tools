@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from kicad_tools.router import via_clearance
 from kicad_tools.router.quantize import segment_angle_census
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.validate.rules.via_in_pad import ViaInPadRule
@@ -129,14 +130,14 @@ def _via_pad_gap(path, pad_size=2):
 
 def test_relocation_walks_out_of_same_net_slit_band(tmp_path, recipe, monkeypatch):
     """Issue #9114: a relocated via must not open a (0, edge) same-net slit."""
-    pad_edge, _trace_edge = recipe._same_net_band_edges()
+    pad_edge, _trace_edge = via_clearance.same_net_band_edges()
     assert pad_edge > 0  # jlcpcb 4layer_1oz resolves a pad_spacing edge
 
     # Control: with the band disabled the ring seats the via at +0.9 mm east,
     # an annulus gap of ~0.05 mm to its own pad -- inside (0, edge).
     control = tmp_path / "control.kicad_pcb"
     write_overlap_board(control, count=1, pad_size=2, via_dx=0.45)
-    monkeypatch.setattr(recipe, "_same_net_band_edges", lambda: (0.0, 0.0))
+    monkeypatch.setattr(via_clearance, "same_net_band_edges", lambda: (0.0, 0.0))
     assert recipe._legalize_signal_vias(control) == 1
     assert 0 < _via_pad_gap(control) < pad_edge
 
@@ -153,24 +154,24 @@ def test_relocation_walks_out_of_same_net_slit_band(tmp_path, recipe, monkeypatc
     )
 
 
-def test_grid_escape_seat_is_graded_through_the_band(recipe):
+def test_grid_escape_seat_is_graded_through_the_band():
     """Issue #9114: the same predicate rejects in-band seats, accepts both sides."""
     from shapely.geometry import LineString, Point
 
     pad = [(-1.0, -1.0, 1.0, 1.0)]
     dia = 0.5
     # Annulus edge 0.05 from the pad (in band) / touching / clear of the band.
-    assert not recipe._same_net_band_seat_ok(1.3, 0, dia, [], pad, 0.15, 0.15)
-    assert recipe._same_net_band_seat_ok(1.25, 0, dia, [], pad, 0.15, 0.15)
-    assert recipe._same_net_band_seat_ok(1.5, 0, dia, [], pad, 0.15, 0.15)
+    assert not via_clearance.same_net_band_seat_ok(1.3, 0, dia, [], pad, 0.15, 0.15)
+    assert via_clearance.same_net_band_seat_ok(1.25, 0, dia, [], pad, 0.15, 0.15)
+    assert via_clearance.same_net_band_seat_ok(1.5, 0, dia, [], pad, 0.15, 0.15)
     # Same-net segment / via copper grade on the trace edge.
     seg = LineString([(0, 1.65), (3, 1.65)]).buffer(0.075)
-    assert not recipe._same_net_band_seat_ok(1.3, 2.0, dia, [seg], [], 0.15, 0.15)
-    assert not recipe._same_net_band_seat_ok(
+    assert not via_clearance.same_net_band_seat_ok(1.3, 2.0, dia, [seg], [], 0.15, 0.15)
+    assert not via_clearance.same_net_band_seat_ok(
         0, 0, dia, [Point(0.65, 0).buffer(0.3)], [], 0.15, 0.15
     )
     # Edge 0 (profile without pad_spacing) leaves behavior unchanged.
-    assert recipe._same_net_band_seat_ok(1.3, 0, dia, [seg], pad, 0.0, 0.0)
+    assert via_clearance.same_net_band_seat_ok(1.3, 0, dia, [seg], pad, 0.0, 0.0)
 
 
 def test_legalizer_reports_overlap_without_a_legal_escape(tmp_path, recipe):
