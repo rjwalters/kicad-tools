@@ -74,7 +74,9 @@ def test_actual_cli_missing_policy_never_prints_or_serializes_pass(tmp_path, cap
     )
 
 
-def toy_geometry(conductor_x=1.2, *, overlap_owner=False, merged=False):
+def toy_geometry(
+    conductor_x=1.2, *, overlap_owner=False, merged=False, owner_net="N", conductor_net="N"
+):
     from shapely.geometry import box
 
     from kicad_tools.validate.mask_copper_geometry import AttributedMaskGeometry
@@ -92,13 +94,13 @@ def toy_geometry(conductor_x=1.2, *, overlap_owner=False, merged=False):
         {
             owner: {
                 "kind": "pad:rect",
-                "net": "N",
+                "net": owner_net,
                 "layers_geometry": {"F.Mask": opening, "F.Cu": pad},
                 "margin_mm": {"F.Mask": 0.1},
             },
             other: {
                 "kind": "segment",
-                "net": "N",
+                "net": conductor_net,
                 "layers_geometry": {"F.Cu": trace},
                 "margin_mm": {},
             },
@@ -161,7 +163,19 @@ def test_same_net_conductor_inside_the_opening_is_flagged_without_overlapping(
     ]
 
 
-@pytest.mark.parametrize("mode", ["valid", "stale", "wrong_uuid", "wrong_layer", "disconnected"])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "valid",
+        "stale",
+        "wrong_uuid",
+        "wrong_layer",
+        "disconnected",
+        "different_net",
+        "unidentified_owner_net_none",
+        "unidentified_owner_net_empty",
+    ],
+)
 def test_intent_requires_exact_binding_identity_layer_and_direct_connection(mode):
     from dataclasses import replace
 
@@ -171,7 +185,16 @@ def test_intent_requires_exact_binding_identity_layer_and_direct_connection(mode
         source_binding,
     )
 
-    geometry, owner, other = toy_geometry(overlap_owner=mode != "disconnected", conductor_x=1.05)
+    # Geometry stays directly connected for the net modes so that only the
+    # net check can reject the declaration.
+    net_kwargs = {
+        "different_net": {"conductor_net": "M"},
+        "unidentified_owner_net_none": {"owner_net": None},
+        "unidentified_owner_net_empty": {"owner_net": ""},
+    }.get(mode, {})
+    geometry, owner, other = toy_geometry(
+        overlap_owner=mode != "disconnected", conductor_x=1.05, **net_kwargs
+    )
     binding = source_binding(geometry)
     if mode == "stale":
         binding = replace(binding, source_sha256="b" * 64)
@@ -187,6 +210,10 @@ def test_intent_requires_exact_binding_identity_layer_and_direct_connection(mode
     )
     assert result.passed is (mode == "valid")
     assert result.intent_audit[0]["accepted"] is (mode == "valid")
+    if mode in net_kwargs:
+        assert result.intent_audit[0]["reason"] == "connection must share an identified net"
+        # A rejected declaration must not suppress the exposure it names.
+        assert [m.disposition for m in result.measurements] == ["violation"]
     assert result.measurements
 
 
