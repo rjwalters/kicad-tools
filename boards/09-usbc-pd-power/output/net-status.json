@@ -9,6 +9,8 @@
     "stranded": 0,
     "total_unconnected_pads": 0
   },
+  "schema_version": 1,
+  "findings": [],
   "nets": [
     {
       "net_number": 1,
