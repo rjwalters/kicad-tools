@@ -100,6 +100,36 @@ incomplete`, so an unfinished run never inflates the error count. A closing
 `mask_to_copper_openings` info finding counts the findings per opening, so one pad
 with many findings reads as one opening.
 
+### Copper on the pad's own land: `within_own_pad`
+
+A track, via, pour or stacked pad of the pad's own net that joins the pad lies
+partly under it, so the pad's opening covers that copper. When the copper the
+opening exposes is **wholly the pad's own land**, nothing beyond the pad is
+exposed and the measurement reads `within_own_pad` at **info** (issue #8858):
+
+```text
+Mask-to-copper overlap: within_own_pad; exposed area 0.42 mm²; beyond owner pad
+copper 0 mm²; ...; opening pad:R1/1; exposed copper segment (net VOUT); same-net own-pad entry
+```
+
+All of the following must hold, otherwise the measurement keeps its verdict:
+
+- the opening has one pad owner (a merged region never qualifies);
+- the copper has the pad's identified net (different-net copper on a pad is a short);
+- the copper overlaps the pad's copper by more than the construction budget;
+- no copper beyond the pad's copper is exposed by more than that budget, so a
+  positive mask expansion that uncovers the track between the pad edge and the
+  opening edge stays an error;
+- a via's authored drill lies wholly under mask, so a via-in-pad stays an error.
+
+Same-net copper *beside* the pad (a track passing it, or the jog right after a
+pad exit) is not on the pad's land and is still measured at the policy's
+clearance: that is the shape JLCDFM reported as danger. `exposed_beyond_owner_mm2`
+in each measurement records the copper exposed beyond the owner pad. On boards
+00-07 (0 mm expansion) this class was 1,292 of 1,542 errors; every one was checked
+against the pinned KiCad's own plotted mask and copper
+([evidence](../research/mask-to-copper-own-pad-8858.md)).
+
 ## Declare a particular connected escape
 
 The owning pad is excluded only by its source UUID. Other copper remains eligible
@@ -161,7 +191,8 @@ owner. A single-pad escape declaration does not waive a merged-region finding.
 Measurements record location in millimetres, mask side, copper layer, opening and
 conductor UUIDs, clearance in millimetres and exposed area in square millimetres.
 Exposure area is not penetration depth. Relations are `disjoint`, `touching` or
-`overlap`; dispositions are `violation`, `uncertain` or `intentional`.
+`overlap`; dispositions are `violation`, `uncertain`, `warning`, `intentional` or
+`within_own_pad`.
 
 The comparison uses a recorded numerical construction budget, including native
 polygon approximation and Gerber reconstruction. A result at the threshold,

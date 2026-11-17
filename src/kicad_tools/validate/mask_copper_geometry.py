@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import shutil
 import subprocess
 import tempfile
@@ -411,6 +412,21 @@ def inspect_attributed_mask_geometry(
                     )
                 if reference and number:
                     pad_ref = f"{reference}/{number}"
+            # Authored via drill (issue #8858). The native via copper is a solid
+            # disk, so the hole is not in its geometry; the within-own-pad
+            # classification needs it to keep a via-in-pad (drill inside the
+            # opening) out of that class. None when absent or unreadable.
+            drill_mm = None
+            if feature["kind"] == "via":
+                drill = feature["node"].find_child("drill")
+                # ``.3`` (no leading zero) parses as a string atom, ``0.3`` as a float.
+                value = drill.get_string(0) if drill is not None else None
+                try:
+                    parsed = float(value) if value is not None else None
+                except ValueError:
+                    parsed = None
+                if parsed is not None and math.isfinite(parsed) and parsed > 0:
+                    drill_mm = parsed
             result.objects[identity] = {
                 **{k: v for k, v in feature.items() if k != "node"},
                 "net": item["net"],
@@ -418,6 +434,7 @@ def inspect_attributed_mask_geometry(
                 "margin_mm": item["margin_mm"],
                 "margin_source": margin_source,
                 "pad_ref": pad_ref,
+                "drill_mm": drill_mm,
             }
         # Verify source and all sidecar bytes (including their absence) after
         # both native operations. The author files themselves were never passed.

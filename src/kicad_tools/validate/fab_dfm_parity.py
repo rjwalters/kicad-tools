@@ -70,7 +70,10 @@ Status = Literal["covered", "partial", "not_covered"]
 #:    granularity; no threshold, severity or attribution change.
 #: 9: #8840 -- ``sharp_trace_corner`` and ``missing_plated_through_hole``
 #:    rows flip from ``not_covered`` now that both rules ship.
-TABLE_VERSION = 9
+#: 11: #8858 -- ``solder_mask_opening_exposing_trace`` note records the
+#:    ``within_own_pad`` class and what stays an error; status, attribution
+#:    and danger-capability unchanged. (10 is claimed by an open PR.)
+TABLE_VERSION = 11
 
 #: Where the observed categories/thresholds came from (counts are hand-recorded).
 SOURCE = "https://github.com/rjwalters/kicad-tools/issues/8838"
@@ -184,12 +187,18 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "`mask_to_copper` is default-on for an explicit --mfr `jlcpcb*` since #8842 "
         "(interim 0.09 mm danger / 0.15 mm warning); a bare `kct check` with no "
         "--mfr does not engage it, and the native path needs an unmodified saved "
-        "source. Observed 5 danger. The rule has no same-net exclusion and traces "
-        "are in its comparison set, so the fab's same-net track-in-pad-opening "
-        "items are in scope; since #8914 an assessment that could not complete "
-        "reports `mask_to_copper_incomplete` at info, so zero findings no longer "
-        "read as a clean board. Whether the #8914 report's zero count was an "
-        "incomplete run or a measurement gap is still unresolved.",
+        "source. Observed 5 danger, all same-net: a track running beside, or "
+        "leaving and jogging beside, its own pad at 0-0.08 mm (#8914); those "
+        "shapes stay errors at the 0.09 mm band. Since #8858 a same-net "
+        "conductor joined to its pad whose exposure lies wholly on the pad's own "
+        "copper (an opening exposing no copper beyond the pad's land, measured on "
+        "the pinned KiCad plot) is `within_own_pad` at info, not an error: the "
+        "fab did not flag plain pad entries on the #8914 board, and on boards "
+        "00-07 (0 mm expansion) that was 1,292 of 1,542 errors. A positive "
+        "expansion's entry corridor, via-in-pad and pass-through copper keep the "
+        "old verdict. Since #8914 an assessment that could not complete reports "
+        "`mask_to_copper_incomplete` at info, so zero findings no longer read as a "
+        "clean board.",
     ),
     ParityRow(
         "tht_to_smd",

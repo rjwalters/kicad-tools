@@ -451,7 +451,11 @@ def test_final_native_intent_and_exposure_outcomes(tmp_path, native_options, cas
     path = _board(tmp_path / f"{case}.kicad_pcb", body, setup="(pad_to_mask_clearance .1)")
     result = check_mask_to_copper(path, POLICY, **native_options)
     assert result.coverage == "complete", result.reasons
-    assert result.passed is (case == "passing"), result.to_dict()
+    # Issue #8858: "overlapped" is a same-net track lying wholly on its own
+    # pad's land. It exposes no copper beyond the pad (asserted from the
+    # native plot below), so it is ``within_own_pad`` and passes; before #8858
+    # it was a violation for copper that was the pad's own exposed land.
+    assert result.passed is (case in ("passing", "overlapped")), result.to_dict()
     # Independent Gerbonara interpretation of actual native mask material,
     # intersected with this fixture's exact authored straight conductor capsule.
     mask = read_native_gerber(native_options["artifact_dir"] / f"{case}-F_Mask.gbr")
@@ -462,7 +466,17 @@ def test_final_native_intent_and_exposure_outcomes(tmp_path, native_options, cas
     else:
         measurement = next(m for m in result.measurements if m.conductor_uuid == trace_uuid)
         assert measurement.exposed_area_mm2 == pytest.approx(exposed, abs=0.000002)
-        assert measurement.disposition == "violation"
+        from shapely.geometry import box
+
+        beyond_pad = mask.intersection(conductor).difference(box(9.5, 9.5, 10.5, 10.5)).area
+        if case == "overlapped":
+            assert beyond_pad < 0.000002
+            assert measurement.disposition == "within_own_pad"
+        else:
+            # Copper visible outside the pad land (the 0.1 mm expansion ring
+            # or a neighbouring pass): still a violation.
+            assert beyond_pad > 0.001
+            assert measurement.disposition == "violation"
     if case == "connected":
         owner = "00000000-0000-0000-0000-000000000002"
         declaration = MaskEscapeIntent(
@@ -472,6 +486,46 @@ def test_final_native_intent_and_exposure_outcomes(tmp_path, native_options, cas
         assert intended.passed, intended.to_dict()
         assert intended.measurements[0].exposed_area_mm2 == pytest.approx(exposed, abs=0.000002)
         assert intended.measurements[0].disposition == "intentional"
+
+
+@pytest.mark.parametrize("conductor", ["track", "via"])
+def test_native_zero_expansion_own_pad_entry_exposes_only_the_pad(
+    tmp_path, native_options, conductor
+):
+    """Issue #8858: with a 0 mm expansion the opening is the pad itself.
+
+    KiCad's own plotted mask, read independently by Gerbonara, exposes none of
+    the same-net conductor's copper outside the pad's authored land, so the
+    measurement is ``within_own_pad`` (info) and the assessment passes. The
+    positive-expansion twin is the ``connected`` case above, which stays a
+    violation.
+    """
+    if conductor == "track":
+        start, end = (10.0, 10), (12, 10)
+        item = f'(segment (start {start[0]} {start[1]}) (end {end[0]} {end[1]}) (width .2) (layer "F.Cu") (net 1) (uuid "00000000-0000-0000-0000-000000000099"))'
+        copper = LineString([start, end]).buffer(0.1, quad_segs=4096)
+    else:
+        item = '(via (at 10.75 10) (size .6) (drill .3) (layers "F.Cu" "B.Cu") (net 1) (uuid "00000000-0000-0000-0000-000000000099"))'
+        copper = Point(10.75, 10).buffer(0.3, quad_segs=4096)
+    body = f"""(net 1 "N")
+      (footprint "P" (layer "F.Cu") (at 10 10)
+       (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask") (net 1 "N")))
+      {item}"""
+    path = _board(tmp_path / f"own-{conductor}.kicad_pcb", body, setup="(pad_to_mask_clearance 0)")
+    result = check_mask_to_copper(path, POLICY, **native_options)
+    assert result.coverage == "complete", result.reasons
+    measurement = next(
+        m for m in result.measurements if m.conductor_uuid == "00000000-0000-0000-0000-000000000099"
+    )
+    assert measurement.disposition == "within_own_pad", result.to_dict()
+    assert result.passed, result.to_dict()
+    mask = read_native_gerber(native_options["artifact_dir"] / f"own-{conductor}-F_Mask.gbr")
+    from shapely.geometry import box
+
+    pad = box(9.5, 9.5, 10.5, 10.5)
+    # Copper is exposed, but only where it lies on the pad's own land.
+    assert mask.intersection(copper).area > 0.01
+    assert mask.intersection(copper).difference(pad).area < 0.000002
 
 
 def test_native_merged_bridge_exposes_third_copper_with_multiple_contributors(

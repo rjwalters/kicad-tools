@@ -39,6 +39,22 @@ severity is capped at ``warning`` (never ``error``) and each message carries
 ``provisional: coverage incomplete``, so an incomplete run never inflates the
 error count. A closing ``mask_to_copper_openings`` info finding summarizes the
 measurements per opening, so one pad with many findings reads as one opening.
+
+Copper on the pad's own land (issue #8858)
+==========================================
+
+A same-net conductor joined to its pad lies partly *under* the pad, so the
+opening covers it -- but that copper is the pad's own exposed land, not exposed
+trace. When the conductor's exposure lies wholly on the owner pad's copper the
+measurement's disposition is ``within_own_pad`` and its finding is ``info``.
+All of these are required: a single pad owner (never a merged region); the
+same identified net; copper overlap with the pad beyond the construction
+budget (the ``MaskEscapeIntent`` direct-connection proof); no copper exposed
+beyond the pad wider than that budget; and, for a via, its authored drill
+wholly outside the opening. ``exposed_beyond_owner_mm2`` records the copper
+exposed beyond the pad. A positive mask expansion's entry corridor, a
+via-in-pad, a same-net track beside the pad, and any different-net copper
+keep their measured disposition. Evidence: ``docs/research/mask-to-copper-own-pad-8858.md``.
 """
 
 from __future__ import annotations
@@ -158,6 +174,10 @@ class MaskCopperMeasurement:
     same_net: bool | None = None
     own_pad_entry: bool | None = None
     owner_ref: str | None = None
+    # Issue #8858: copper exposed beyond the owner pad's own copper, mm²; None
+    # when there is no single pad owner or no overlap. Optional, like the
+    # #9038 fields, so a v1 payload without it loads unchanged.
+    exposed_beyond_owner_mm2: float | None = None
 
     def __post_init__(self):
         if self.disposition not in (
@@ -165,6 +185,7 @@ class MaskCopperMeasurement:
             "uncertain",
             "intentional",
             "warning",
+            "within_own_pad",
         ) or self.relation not in ("overlap", "touching", "disjoint"):
             raise ValueError("Invalid mask measurement disposition/relation")
         if self.mask_side not in (
@@ -184,6 +205,14 @@ class MaskCopperMeasurement:
         for flag in (self.same_net, self.own_pad_entry):
             if flag is not None and not isinstance(flag, bool):
                 raise ValueError("Invalid mask measurement triage metadata")
+        beyond = self.exposed_beyond_owner_mm2
+        if beyond is not None and (
+            isinstance(beyond, bool)
+            or not isinstance(beyond, (int, float))
+            or not math.isfinite(beyond)
+            or beyond < 0
+        ):
+            raise ValueError("Invalid mask measurement units/value")
 
     def to_dict(self):
         return asdict(self)
@@ -314,6 +343,37 @@ def _conductor_endpoints(copper):
                 best_square = square
                 best_pair = (first, second)
     return MultiPoint(best_pair)
+
+
+def _within_own_pad(opening, copper, owner_copper, item, uncertainty):
+    """True when a same-net conductor's exposure is wholly the owner pad's own land.
+
+    Issue #8858. Three conditions, all required:
+
+    1. Direct connection: the conductor's copper and the owner pad's copper
+       intersect beyond the construction budget on this layer (the same proof
+       ``MaskEscapeIntent`` audits use).
+    2. Nothing beyond the pad: the copper the opening exposes, minus the owner
+       pad's own copper, is empty once shrunk by the construction budget. Any
+       sliver wider than that budget -- e.g. a track crossing a positive mask
+       expansion between the pad edge and the opening edge -- keeps the
+       measurement as it was.
+    3. For a via, its authored drill lies wholly under mask (center at least a
+       drill radius outside the opening): a via-in-pad exposes its hole and is
+       not classified here. A via without a readable drill is not classified.
+    """
+    if owner_copper.buffer(-uncertainty).intersection(copper.buffer(-uncertainty)).area <= 0:
+        return False
+    residual = opening.intersection(copper).difference(owner_copper)
+    if not residual.is_empty and residual.buffer(-uncertainty).area > 0:
+        return False
+    if item["kind"] == "via":
+        drill = item.get("drill_mm")
+        if drill is None or drill <= 0:
+            return False
+        if opening.distance(copper.centroid) < drill / 2 + uncertainty:
+            return False
+    return True
 
 
 def assess_attributed_geometry(geometry, policy, intents=()):
@@ -511,13 +571,6 @@ def assess_attributed_geometry(geometry, policy, intents=()):
                     disposition = "warning"
                 else:
                     disposition = "uncertain"
-                intent = (
-                    approved.get((owners[0], identity, side))
-                    if len(owners) == 1 and kind != "merged_region"
-                    else None
-                )
-                if intent:
-                    disposition = "intentional"
                 # Triage metadata (issue #9038): who owns the opening, what
                 # copper is exposed, and whether the exposure is the pad's
                 # own escape or an unrelated crossing. Never gates the
@@ -537,6 +590,30 @@ def assess_attributed_geometry(geometry, policy, intents=()):
                     and len(owner_items) == 1
                     and owner_items[0]["kind"].startswith("pad:")
                 )
+                # Issue #8858: copper the opening exposes *beyond the owner
+                # pad's own copper*. A same-net conductor joined to the pad
+                # lies partly under the pad; that part is the pad's land, not
+                # exposed trace. Recorded for every single-pad-owner overlap.
+                beyond_owner = None
+                owner_copper = (
+                    owner_items[0]["layers_geometry"].get(layer) if single_pad_owner else None
+                )
+                if area > 0 and owner_copper is not None and not owner_copper.is_empty:
+                    beyond_owner = intersection.difference(owner_copper).area
+                if (
+                    disposition in ("violation", "uncertain")
+                    and same_net
+                    and owner_copper is not None
+                    and _within_own_pad(opening, copper, owner_copper, item, uncertainty)
+                ):
+                    disposition = "within_own_pad"
+                intent = (
+                    approved.get((owners[0], identity, side))
+                    if len(owners) == 1 and kind != "merged_region"
+                    else None
+                )
+                if intent:
+                    disposition = "intentional"
                 owner_ref = owner_items[0].get("pad_ref") if single_pad_owner else None
                 own_pad_entry = None
                 if same_net and single_pad_owner and item["kind"] in ("segment", "arc", "via"):
@@ -588,6 +665,7 @@ def assess_attributed_geometry(geometry, policy, intents=()):
                         same_net=same_net,
                         own_pad_entry=own_pad_entry,
                         owner_ref=owner_ref,
+                        exposed_beyond_owner_mm2=beyond_owner,
                     )
                 )
     return result
@@ -704,7 +782,10 @@ def assessment_results(assessment: MaskCopperAssessment) -> DRCResults:
     # the way the 1059-finding consumer report did.
     provisional = assessment.coverage != "complete"
     for index, measurement in enumerate(assessment.measurements):
-        if measurement.disposition == "intentional":
+        # ``within_own_pad`` (issue #8858): the opening exposes no copper
+        # beyond the owner pad's own land, so there is no exposed trace to
+        # report -- recorded at info, like a reviewed ``intentional`` escape.
+        if measurement.disposition in ("intentional", "within_own_pad"):
             severity = "info"
         # Warning-disposition measurements and provisional (incomplete-run)
         # findings share the warning ceiling: neither may read as an error.
@@ -716,6 +797,8 @@ def assessment_results(assessment: MaskCopperAssessment) -> DRCResults:
         if provisional:
             parts.append("provisional: coverage incomplete")
         parts.append(f"exposed area {measurement.exposed_area_mm2:.9g} mm²")
+        if measurement.exposed_beyond_owner_mm2 is not None:
+            parts.append(f"beyond owner pad copper {measurement.exposed_beyond_owner_mm2:.9g} mm²")
         parts.append(f"assessment measurement {index}")
         parts.append(f"opening {_opening_owner_label(measurement)}")
         copper_desc = measurement.conductor_kind or "unknown copper"
