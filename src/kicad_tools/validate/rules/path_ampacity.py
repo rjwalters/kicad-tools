@@ -187,7 +187,9 @@ class PathAmpacityRule(DRCRule):
             audit_current_paths,
         )
 
-        audit = audit_current_paths(pcb, self.specs)
+        # Thread the rules through so the packed tie-row grouping bound
+        # follows the placer's own spacing rule (#8992) on this audit path.
+        audit = audit_current_paths(pcb, self.specs, design_rules=design_rules)
         origin: tuple[float, float] = getattr(pcb, "board_origin", None) or (0.0, 0.0)
 
         for resolution in audit.resolutions:
