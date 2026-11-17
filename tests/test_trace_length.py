@@ -749,6 +749,48 @@ def path_base_pcb(tmp_path: Path) -> Path:
     return pcb_file
 
 
+def stepped_run_pcb(step_mm: float, tmp_path: Path) -> Path:
+    """Two-pin net whose middle run is encoded as sub-width segments.
+
+    Pads at (5, 15) and (45, 15) are joined by a 5 mm lead-in, a 30 mm
+    middle run split into ``step_mm`` collinear segments, and a 5 mm
+    lead-out, all width 0.2.  The copper is the same straight 40 mm run
+    for every step; only the segment encoding differs.  Steps below the
+    track width make consecutive non-adjacent segments bond through
+    capsule contact (Issue #9117 review: board 07's escape copper uses
+    0.1414 mm steps at width 0.2).
+    """
+    count = round(30.0 / step_mm)
+    xs = [10.0 + i * (30.0 / count) for i in range(count + 1)]
+    segments = ['(segment (start 5 15) (end 10 15) (width 0.2) (layer "F.Cu") (net 1))']
+    segments += [
+        f"(segment (start {xs[i]:.6f} 15) (end {xs[i + 1]:.6f} 15)"
+        f' (width 0.2) (layer "F.Cu") (net 1))'
+        for i in range(count)
+    ]
+    segments.append('(segment (start 40 15) (end 45 15) (width 0.2) (layer "F.Cu") (net 1))')
+    pcb_file = tmp_path / f"stepped-{step_mm:.4f}.kicad_pcb"
+    pcb_file.write_text(
+        "(kicad_pcb\n"
+        "  (version 20240108)\n"
+        '  (generator "test")\n'
+        "  (layers\n"
+        '    (0 "F.Cu" signal)\n'
+        '    (31 "B.Cu" signal)\n'
+        '    (44 "Edge.Cuts" user)\n'
+        "  )\n"
+        '  (net 0 "")\n'
+        '  (net 1 "STEPPED")\n'
+        '  (gr_rect (start 0 0) (end 50 60) (stroke (width 0.1)) (layer "Edge.Cuts"))\n'
+        '  (footprint "Test:Pads" (layer "F.Cu") (at 0 0)\n'
+        '    (property "Reference" "J1")\n'
+        '    (pad "1" smd rect (at 5 15) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 1 "STEPPED"))\n'
+        '    (pad "2" smd rect (at 45 15) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 1 "STEPPED"))\n'
+        "  )\n" + "\n".join(f"  {segment}" for segment in segments) + "\n)\n"
+    )
+    return pcb_file
+
+
 class TestMeasureNetPath:
     """Pad-to-pad path measurement through the copper-contact graph (#9117)."""
 
@@ -849,6 +891,27 @@ class TestMeasureNetPath:
         assert with_path.off_path_length_mm == pytest.approx(20.0, abs=0.05)
         assert with_path.to_dict()["path_length_mm"] == pytest.approx(20.0, abs=0.05)
         assert with_path.to_dict()["off_path_length_mm"] == pytest.approx(20.0, abs=0.05)
+
+    @pytest.mark.parametrize(
+        "step_mm",
+        [2.0, 0.5, 0.2, 30.0 / 212, 0.1],
+        ids=["step2.0", "step0.5", "step0.2", "step0.1415", "step0.1"],
+    )
+    def test_sub_width_segment_encoding_measures_full_run(self, tmp_path: Path, analyzer, step_mm):
+        """Segment encoding must not change the measured path (#9117 review).
+
+        Sub-width steps make non-adjacent segments bond through capsule
+        contact; the path must still pay the run's real length instead of
+        hopping the bonds for free.  With contact links weighted 0.0 the
+        0.1415 and 0.1 encodings measured ~0 mm of a 40 mm run.
+        """
+        pcb = PCB.load(str(stepped_run_pcb(step_mm, tmp_path)))
+
+        measurement = analyzer.measure_net_path(pcb, "STEPPED")
+
+        assert measurement.pad_count == 2
+        assert measurement.path_length_mm == pytest.approx(40.0, abs=0.05), step_mm
+        assert measurement.off_path_length_mm == pytest.approx(0.0, abs=0.05), step_mm
 
 
 class TestContactGraphBonds:

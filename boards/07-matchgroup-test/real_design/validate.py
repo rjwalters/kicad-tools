@@ -68,13 +68,14 @@ def via_travel_mm(via, segments, elevations: dict[str, float]) -> float:
 
 
 # Off-path copper above this does not count toward matched length and is an
-# error (Issue #9117).  Source of the margin: the Judge review behind #9117
-# measured ~1.7-2.0 mm of ordinary per-net difference between summed copper
-# and a pad-to-pad path (in-pad escape copper); the pad-centre path graph
-# used here keeps that copper on the path, and loop-free nets on this board
-# measure well below it (under 0.7 mm of residual barrel-overlap copper).
-# Anything beyond 2 mm is copper the signal never travels on the path: a
-# dead-end loop, an overlapping duplicate or a stub.
+# error (Issue #9117).  Source of the margin: with contact links charged
+# the distance they span (the #9117 review's weighting fix), loop-free
+# nets on this board measure under 1.6 mm of residual copper --
+# barrel-overlap under pads/vias and in-pad joints.  Beyond that is
+# copper the signal never travels on the path: a dead-end loop, an
+# overlapping duplicate or a stub.  On the committed copper this flags
+# DQ7 and LDQM (the issue's loop nets) and SDCKE1 (2.08 mm); tracked for
+# repair in #9118.
 OFF_PATH_TOLERANCE_MM = 2.0
 
 

@@ -221,9 +221,17 @@ def _build_pad_to_pad_graph(
     endpoints, and the projection of any bonded pad/via/track endpoint onto
     a track centreline (so a junction in the middle of a segment splits it
     instead of charging its full length).  Edges carry the centreline
-    length between consecutive meeting points; pad, via and fill nodes are
-    zero-cost joints (vertical via travel is the caller's accounting).
-    Contact decisions are the shared model's (``bonds``), never re-derived.
+    length between consecutive meeting points.  Track-to-track contact
+    links are charged the geometric distance between their meeting points,
+    so a chain of sub-width segment hops (bonded through capsule contact
+    without sharing endpoints) pays what it physically spans instead of
+    crossing copper at zero cost; a true junction merges into one node and
+    pays nothing.  Pad, via and fill nodes are zero-cost joints: in-pad /
+    in-annulus copper is a joint (it keeps in-pad escape copper on the
+    path; vertical via travel is the caller's accounting), and a fill is a
+    plane, so a path across a fill-bearing net measures the track hops
+    between contact points, not a physical copper length.  Contact
+    decisions are the shared model's (``bonds``), never re-derived.
     """
     from shapely.geometry import Point as _Point  # type: ignore[import-untyped]
     from shapely.ops import nearest_points as _nearest_points  # type: ignore[import-untyped]
@@ -246,6 +254,17 @@ def _build_pad_to_pad_graph(
         if a != b:
             adjacency.setdefault(a, []).append((b, weight))
             adjacency.setdefault(b, []).append((a, weight))
+
+    def link_geometric(a: int, b: int) -> None:
+        """Track-to-track contact link charged the distance it spans.
+
+        Two bonded capsules meet somewhere between their centrelines;
+        charging that distance keeps a chain of sub-width segment hops
+        from crossing real copper at zero cost (Issue #9117), while a
+        genuine end-to-end or mid-track junction merges into one node
+        and pays nothing.
+        """
+        link(a, b, math.dist(points[a], points[b]))
 
     pad_nodes: dict[int, int] = {}
     via_nodes: dict[int, int] = {}
@@ -299,13 +318,13 @@ def _build_pad_to_pad_graph(
                     if t_item.line.distance(_Point(endpoint)) <= (
                         t_item.half_width + o_item.half_width + 1e-9
                     ):
-                        link(ep_node, attach(t_index, endpoint), 0.0)
+                        link_geometric(ep_node, attach(t_index, endpoint))
                         linked = True
                 if not linked:
                     # Capsule contact with no endpoint involvement (an
                     # X crossing): bond at the closest centreline points.
                     p_t, p_o = _nearest_points(t_item.line, o_item.line)
-                    link(attach(t_index, (p_t.x, p_t.y)), attach(o_index, (p_o.x, p_o.y)), 0.0)
+                    link_geometric(attach(t_index, (p_t.x, p_t.y)), attach(o_index, (p_o.x, p_o.y)))
         elif ia.kind == TRACK or ib.kind == TRACK:
             t_index = a if ia.kind == TRACK else b
             o_index = b if ia.kind == TRACK else a
@@ -316,6 +335,8 @@ def _build_pad_to_pad_graph(
             elif o_item.center is not None:
                 joint = pad_nodes.get(o_index, via_nodes.get(o_index))
                 if joint is not None:
+                    # Deliberately zero-cost: in-pad / in-annulus copper is
+                    # a joint, which keeps in-pad escape copper on the path.
                     link(joint, attach(t_index, o_item.center), 0.0)
         elif FILL in (ia.kind, ib.kind):
             fill_index = a if ia.kind == FILL else b

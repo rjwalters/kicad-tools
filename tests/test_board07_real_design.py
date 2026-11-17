@@ -591,9 +591,11 @@ def test_match_lengths_measure_path_not_summed_copper():
 
     The reviewed-routing copper carries dead-end loops (DQ7, LDQM per the
     issue evidence) and, per the path graph, branch stubs on several byte
-    nets.  The physical path spreads of both bytes exceed the 5 mm budget
-    even though the summed-copper spread does not -- the exact blind spot
-    this validator change closes, tracked for copper repair in #9118.
+    nets.  On the corrected measurement (contact links charged the
+    distance they span) byte 0's physical spread exceeds the 5 mm budget
+    while its summed-copper spread hides the violation, and byte 1 stays
+    inside the budget once its dead copper is excluded.  Copper repair is
+    tracked in #9118.
     """
     from kicad_tools.analysis.trace_length import TraceLengthAnalyzer
     from kicad_tools.schema.pcb import PCB
@@ -635,7 +637,8 @@ def test_match_lengths_measure_path_not_summed_copper():
             assert board.vias[index].net_number == net.number, (name, index)
 
     # Nets whose copper the issue evidence calls loop-free stay clean;
-    # the measured residual is barrel-overlap copper under pads/vias.
+    # the measured residual is barrel-overlap copper under pads/vias and
+    # in-pad joints (every loop-free net on this board is under 1.6 mm).
     for name in ("DQ0", "DQ1", "DQ11"):
         assert off_paths[name] < 1.0, (name, off_paths[name])
 
@@ -643,9 +646,12 @@ def test_match_lengths_measure_path_not_summed_copper():
     assert off_paths["DQ7"] > 5.0
     assert off_paths["LDQM"] > 5.0
 
-    # Physical path spread exceeds the 5 mm group budget in both bytes,
-    # where the summed-copper spread stays inside it (SDRAM_BYTE1 2.817 mm
-    # on this copper) -- off-path copper hid the real skew.
+    # Byte 0's physical spread (LDQM 55.2 .. DQ2 63.4 mm) exceeds the
+    # 5 mm group budget while its summed-copper spread (0.63 mm) hides
+    # the violation -- the blind spot this validator change closes.
+    # Byte 1 stays inside the budget once its dead copper is excluded
+    # (3.28 mm physical vs 2.82 mm summed); the previously reported
+    # 10.9 mm byte-1 spread was the zero-weight contact-link artifact.
     constraints_path = ROOT.parent / "output/sdram_constraints.json"
     import json
 
@@ -657,4 +663,7 @@ def test_match_lengths_measure_path_not_summed_copper():
     ):
         values = [paths[name] for name in members if name in paths]
         spread = max(values) - min(values)
-        assert spread > limit, (byte, spread)
+        if byte == "SDRAM_BYTE0":
+            assert spread > limit, (byte, spread)
+        else:
+            assert spread < limit, (byte, spread)
