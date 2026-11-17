@@ -29,6 +29,10 @@ These tests pin:
   rules in one ascending-clearance emission after the floor; the
   ``KCT_PRESERVE_BOARD_RULES`` modes; zones without an explicit clearance;
   the template-Default relaxation (the case-2 candidate) keeps the zone arm.
+* **the class arm's per-layer floor** (#9015): a netclass authored between
+  the 2 oz profile's split floors is emitted scoped ``(layer inner)`` at
+  the authored value instead of being skipped against the outer floor;
+  unsplit profiles keep the single-floor, byte-identical emission.
 """
 
 from __future__ import annotations
@@ -332,6 +336,130 @@ def test_split_floor_emission_passes_the_fail_closed_gate() -> None:
     with pytest.raises(RuleLooseningError) as excinfo:
         merge_dru_floors(None, plain, authored=authored)
     assert "dru.resolved.pad_zone.In1.Cu.GND" in {item.path for item in excinfo.value.loosenings}
+
+
+# ---------------------------------------------------------------------------
+# Issue #9015: the class arm's skip predicate is per layer too
+# ---------------------------------------------------------------------------
+
+_REVIEWED_INNER = (
+    '\n(rule "Reviewed clearance - Default"\n'
+    "  (layer inner)\n"
+    "  (condition \"A.NetClass == 'Default' || B.NetClass == 'Default'\")\n"
+    "  (constraint clearance (min {value}mm)))\n"
+)
+_REVIEWED_GLOBAL = (
+    '\n(rule "Reviewed clearance - Default"\n'
+    "  (condition \"A.NetClass == 'Default' || B.NetClass == 'Default'\")\n"
+    "  (constraint clearance (min {value}mm)))\n"
+)
+
+
+def test_split_floor_profile_emits_inner_scoped_class_rules_between_the_floors() -> None:
+    """The class analog of the zone arm's between-the-floors case: a 0.12 mm
+    Default on the 2 oz profile (outer 0.15, inner 0.1016) used to be skipped
+    as redundant against the outer floor, leaving the class's inner-layer
+    pairs at the 0.1016 floor; the rule is now scoped ``(layer inner)`` at
+    the authored value, while the outer floor keeps binding outer pairs."""
+    text = _emitted(_project(default_clearance=0.12), zone_clearances=None, copper_oz=2.0)
+    assert _REVIEWED_INNER.format(value=0.12) in text
+    assert _REVIEWED_GLOBAL.format(value=0.12) not in text
+    # The split floors themselves are unchanged around the scoped rule.
+    assert '(rule "Clearance (outer)' in text
+    assert '(rule "Clearance (inner)' in text
+
+
+def test_split_floor_profile_still_skips_classes_at_or_below_the_inner_floor() -> None:
+    """Redundant means at-or-below the floor of the layers the rule would
+    govern: nothing is emitted for a class the inner floor already binds."""
+    at = _emitted(_project(default_clearance=0.1016), zone_clearances=None, copper_oz=2.0)
+    below = _emitted(_project(default_clearance=0.08), zone_clearances=None, copper_oz=2.0)
+    assert "Reviewed clearance" not in at
+    assert "Reviewed clearance" not in below
+
+
+def test_split_floor_class_at_the_outer_floor_binds_inner_layers_at_it() -> None:
+    """Edge: authored exactly at the outer floor.  The rule is redundant on
+    the outer layers, but the authored 0.15 still exceeds the 0.1016 inner
+    floor, so it is emitted inner-scoped at 0.15 (the native per-layer max)
+    where the outer-floor-only predicate used to skip it entirely."""
+    text = _emitted(_project(default_clearance=0.15), zone_clearances=None, copper_oz=2.0)
+    assert _REVIEWED_INNER.format(value=0.15) in text
+
+
+def test_above_floor_class_keeps_the_global_rule() -> None:
+    """A class above both floors keeps today's single unscoped rule: the
+    per-layer max(per-layer floor, authored) is the authored value on every
+    layer, so no layer scoping is needed."""
+    text = _emitted(_project(default_clearance=0.2), zone_clearances=None, copper_oz=2.0)
+    assert _REVIEWED_GLOBAL.format(value=0.2) in text
+
+
+def test_full_mode_emits_between_floor_classes_globally_like_before() -> None:
+    """Mode 1 keeps #5023's one-global-rule-per-class shape: a between-the-
+    floors class rides the outer floor at ``max(outer, authored)``, never
+    weaker than the stricter mode's per-layer emission."""
+    project = _project(default_clearance=0.12)
+    project.setdefault("text_variables", {})["KCT_PRESERVE_BOARD_RULES"] = "1"
+    text = _emitted(project, zone_clearances=None, copper_oz=2.0)
+    assert _REVIEWED_GLOBAL.format(value=0.15) in text
+
+
+def test_unsplit_profile_class_arm_is_byte_identical_with_an_equal_inner_floor() -> None:
+    """``min_inner_clearance_mm=None`` keeps the single floor (AC: unsplit
+    profiles are byte-identical): pinning the inner floor equal to the
+    outer one changes nothing, and the reviewed rule stays unscoped."""
+    from dataclasses import replace
+
+    rules = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=1.0)
+    assert rules.min_inner_clearance_mm is None
+    pinned = replace(rules, min_inner_clearance_mm=rules.min_clearance_mm)
+    project = _project(default_clearance=0.2)
+    single = generate_project_dru(rules, project, manufacturer_id="jlcpcb")
+    assert single == generate_project_dru(pinned, project, manufacturer_id="jlcpcb")
+    assert _REVIEWED_GLOBAL.format(value=0.2) in single
+
+
+def test_mode_off_emits_no_reviewed_class_rules_on_the_split_profile() -> None:
+    rules = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=2.0)
+    plain = generate_project_dru(
+        rules,
+        _project(default_clearance=0.12),
+        manufacturer_id="jlcpcb",
+        zone_clearances=None,
+        preserve_board_rules="0",
+    )
+    assert "Reviewed clearance" not in plain
+
+
+def test_split_floor_class_arm_passes_the_fail_closed_gate() -> None:
+    """The class analog of the zone arm's regression pin: with the
+    outer-floor-only predicate the between-the-floors rule was dropped and
+    the gate stayed green (the protection silently gone); with the per-layer
+    floor the emission holds the authored baselines, while the plain
+    mode-0 block resolves In1.Cu Default pairs at the 0.1016 inner floor --
+    refused."""
+    from kicad_tools.core.rule_loosening import RuleLooseningError
+    from kicad_tools.manufacturers.dru_generator import merge_dru_floors
+
+    authored = {"netclasses": {"Default": 0.12}, "zones": [["In1.Cu", "GND", 0.12]]}
+    project = _project(default_clearance=0.12)
+    text = _emitted(project, [("In1.Cu", "GND", 0.12)], copper_oz=2.0)
+    assert "Reviewed clearance - Default" in text
+    assert "Reviewed clearance - Default" in merge_dru_floors(None, text, authored=authored)
+
+    rules = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=2.0)
+    plain = generate_project_dru(
+        rules,
+        project,
+        manufacturer_id="jlcpcb",
+        zone_clearances=[("In1.Cu", "GND", 0.12)],
+        preserve_board_rules="0",
+    )
+    assert "Reviewed clearance" not in plain
+    with pytest.raises(RuleLooseningError) as excinfo:
+        merge_dru_floors(None, plain, authored=authored)
+    assert "dru.resolved.track_track" in {item.path for item in excinfo.value.loosenings}
 
 
 def test_zone_reader_skips_zones_without_an_authored_clearance(tmp_path) -> None:
