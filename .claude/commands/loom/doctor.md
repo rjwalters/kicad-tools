@@ -1458,6 +1458,16 @@ When you **only** resolve merge conflicts without making substantive code change
 - Whitespace-only changes from conflict markers
 - Import reordering due to merge
 - Auto-generated file updates (lock files, etc.)
+- **ID-only renumber in a single append-only file** (see the four conditions below)
+
+**ID-only renumber (append-only file) qualifies ONLY when ALL four hold** — any failed condition means it is NOT conflict-only (full review path, no marker):
+
+1. Exactly **one** path conflicts.
+2. The only differing hunk in that path — other than what the merge brought in from `main` — is a row-ID change to the **next free ID** (monotonic: one past the highest ID now on `main`). Row content is untouched, and the row stays inside the table.
+3. The only other edits in that path are references to that same ID in the PR's **own added lines** of the same file.
+4. **No other file** changes in your resolution edits — other than what the merge brought in from `main` (a merge commit legitimately changes many files relative to the prior head; only files *you* edited while resolving count).
+
+Before marking it, grep the PR body and sibling files for citations of the **old** ID (`gh pr view <N> --json body --jq .body`, `git grep -n '<OLD_ID>'`). A citation outside the one file means fixing it is an edit outside the file, so the PR is **not** conflict-only; fix or report it and take the full path. A PR body citation is fixed with `gh pr edit` and reported in the comment.
 
 **What does NOT qualify:**
 - Any logic changes, even if triggered by conflict
@@ -1482,6 +1492,8 @@ No substantive code changes made - only conflict resolution.
 EOF
 )"
 ```
+
+For an **ID-only renumber** the comment MUST also name the old ID, the new ID and the file, on one line, so Judge can verify it: `ID renumber: <OLD_ID> -> <NEW_ID> in <path>`. Without that line Judge treats the marker as unverifiable and runs the full evaluation.
 
 **Important**: The `<!-- loom:conflict-only -->` HTML comment is a machine-readable marker that enables Judge to perform a fast-track review instead of a full code review. Only add this marker when the changes are genuinely conflict-resolution-only.
 

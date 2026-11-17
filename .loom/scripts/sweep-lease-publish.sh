@@ -107,7 +107,8 @@
 #     form of this host's own identity (Issue #6322): the opaque id
 #     (`opaque_host_id`, mirroring `sweep_registry::opaque_host_id` byte for
 #     byte) of the raw identity `sweep_registry::host_identity()` resolves
-#     (`LOOM_HOST_ID` > `$HOSTNAME` > the `hostname` binary > `unknown-host`)
+#     (`LOOM_LEASE_HOST_ID` > `LOOM_HOST_ID` > `$HOSTNAME` > the `hostname`
+#     binary > `unknown-host`)
 #     -- unless `LOOM_LEASE_PUBLISH_HOSTNAME` opts into raw publishing, in
 #     which case the raw identity is used directly. An explicit --host is
 #     used verbatim (no transform applied). This is the same identity
@@ -203,7 +204,15 @@ lease_publish_raw_hostname() {
 }
 
 # --- Host identity, mirroring sweep_registry::host_identity()'s precedence -
+# `LOOM_LEASE_HOST_ID` is first, as in `host_identity::lease_host_identity`:
+# a dispatcher exports its own lease host id to the session it spawns, so a
+# session whose hostname differs (a Codex session container) still names the
+# host its lease was published under, not its container.
 resolve_host() {
+    if [[ -n "${LOOM_LEASE_HOST_ID:-}" ]]; then
+        printf '%s' "$LOOM_LEASE_HOST_ID"
+        return 0
+    fi
     if [[ -n "${LOOM_HOST_ID:-}" ]]; then
         printf '%s' "$LOOM_HOST_ID"
         return 0
