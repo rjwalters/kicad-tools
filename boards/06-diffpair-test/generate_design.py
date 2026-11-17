@@ -1913,6 +1913,7 @@ def _same_net_leg_band_ok(
     pad_bboxes: list[tuple[float, float, float, float]],
     pad_edge_mm: float,
     trace_edge_mm: float,
+    sibling_legs: list = (),
 ) -> bool:
     """True iff a connector leg ``p0 -> p1`` opens no same-net fab-view slit.
 
@@ -1940,6 +1941,17 @@ def _same_net_leg_band_ok(
     same pad the leg leaves) is **not** excluded: that parallel pair is a
     real slit.  An edge of ``0`` disables that population's test.
 
+    Issue #9186: ``sibling_legs`` are ``(geometry, half_width)`` entries of
+    the *same connector's* other legs.  They join ``segments`` before the
+    chain is grown, so a leg is graded exactly as its finished connector
+    looks: a bend notch the sibling fills (leg 1's tip versus the annulus
+    leg 2 lands on) is a union, matching the fab-view scan, which skips a
+    gap whose mouth a third shape bridges -- measured on constructed board
+    06 geometry, ``check_physical_copper_gap_fab_view`` reports no slit for
+    a 0.057 mm leg-tip-to-annulus notch that a touching sibling closes.  A
+    *detached* sibling (a parallel leg the graded one never touches) is
+    still graded: that pair is a real slit.
+
     Known, accepted residual (Issue #9187): the J1.B7 relocation leaves two
     same-net ``In1.Cu`` findings (0.0841 / 0.0664 mm) -- the 45-degree wedge
     between the leg and the old chain at the point they meet.  Narrowing the
@@ -1956,6 +1968,14 @@ def _same_net_leg_band_ok(
     # ``+ 1.5e-3`` covers both sides' 3-decimal write rounding (as #8975).
     pad_limit = pad_edge_mm + 1.5e-3
     trace_limit = trace_edge_mm + 1.5e-3
+    # Issue #9186: the connector's own sibling legs are chain candidates on
+    # exactly the terms of existing segments -- touching ones chain (the
+    # finished connector is one copper union at its bends), detached ones
+    # are graded.
+    segments = [
+        *segments,
+        *((geom, half_width) for geom, half_width in sibling_legs),
+    ]
 
     # Chain of segments grown from those the leg touches.
     sin45 = 0.7071
@@ -2114,7 +2134,9 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
 
     band_pad_edge, band_trace_edge = same_net_band_edges()
 
-    def _leg_ok(net, p0, p1, layer, width, vias, skip_uuids=frozenset(), clearance=CLEAR):
+    def _leg_ok(
+        net, p0, p1, layer, width, vias, skip_uuids=frozenset(), clearance=CLEAR, siblings=()
+    ):
         if math.hypot(p1[0] - p0[0], p1[1] - p0[1]) < EPS:
             return True
         path = LineString([p0, p1]).buffer(width / 2)
@@ -2167,6 +2189,18 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
             ],
             band_pad_edge,
             band_trace_edge,
+            # Issue #9186: grade the leg as its finished connector looks --
+            # the sibling legs it touches are a copper union at the bend.
+            # Callers pass the full leg list, so the graded leg itself is
+            # filtered: self-inclusion lands (p0, p1) in the initial chain,
+            # making both endpoints satisfy the joins test and widening the
+            # 45-degree notch reach unconditionally.
+            [
+                (LineString([a, b]).buffer(w / 2), w / 2)
+                for a, b, w in siblings
+                if math.hypot(b[0] - a[0], b[1] - a[1]) >= EPS
+                and (tuple(a), tuple(b)) != (tuple(p0), tuple(p1))
+            ],
         )
 
     def _band_ok(net, vx, vy, diameter, skip_uuid):
@@ -2365,7 +2399,26 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
                     lay = next(iter(other_layers))
                     width = max(s["w"] for s in other)
                     for legs in _dogleg((victim["x"], victim["y"]), (survivor["x"], survivor["y"])):
-                        if all(_leg_ok(net, p0, p1, lay, width, vias) for p0, p1 in legs):
+                        # Issue #9186: this branch deletes the victim via, so
+                        # the dogleg must not be graded against its annulus
+                        # (matching the other _leg_ok sites).  The chain
+                        # segments deleted below need no skip: they live on
+                        # ``chain_layer`` and _leg_ok only passes same-net
+                        # segments on ``lay``, which is != chain_layer by
+                        # construction.
+                        if all(
+                            _leg_ok(
+                                net,
+                                p0,
+                                p1,
+                                lay,
+                                width,
+                                vias,
+                                skip_uuids={victim["uuid"]},
+                                siblings=[(a, b, width) for a, b in legs],
+                            )
+                            for p0, p1 in legs
+                        ):
                             new_text = text
                             new_text = new_text.replace(victim["block"], "")
                             for s in chain:
@@ -2549,6 +2602,7 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
                             width,
                             vias,
                             skip_uuids={v["uuid"]},
+                            siblings=legs,
                         )
                         for lay, legs in connectors.items()
                         for a, b, width in legs
@@ -2663,6 +2717,7 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
                             vias,
                             skip_uuids={v["uuid"]},
                             clearance=rules.clearance,
+                            siblings=legs,
                         )
                         for lay, legs in connectors.items()
                         for a, b, width in legs
