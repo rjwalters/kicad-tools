@@ -15,14 +15,29 @@ from all of them:
 * probe searches run under ``wall_deadline.suspended()`` so an installed
   excursion deadline cannot clamp them into different probe rows.
 
-The identity tests below make the probe artificially slow (one real sleep
-per probed router -- the verdict depends only on sleep > timeout >> the
-tiny board's real runtime, never on machine speed) so that probe + real
-run exceeds the binding limit while the real run alone does not.
+Every slow-probe test below makes the probe artificially slow (one real
+sleep per probed router -- the verdict depends only on sleep > timeout >>
+the tiny board's real runtime, never on machine speed) so that probe +
+real run exceeds the binding limit while the real run alone does not.
+Each one also asserts the sleep actually fired -- a recorded probe-elapsed
+value, or the report sidecar's probed count -- because a slow-probe test
+whose injected sleep silently fails to apply passes as vacuous instead of
+failing (the CLI identity test once drove ``route_cmd.main``, whose
+supervisor runs any finite ``--timeout`` in a child process the
+parent-process patch cannot reach; its probe never slept and nothing
+noticed).
+
+Measured bite scope on this board (re-base neutralized at source): the
+plain ``route_all`` stage test and the in-process CLI test fail without
+the fix -- a spent budget changes their copper.  The negotiated stage
+test does NOT: iteration 0 completes and the issue-#3452 grace pass
+re-routes a spent stage with identical copper, so it pins the re-base's
+presence and the probe-fired guard rather than a behavioral bite.
 """
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -75,13 +90,20 @@ class TestStageTimeoutIdentity:
     def test_negotiated_stage_timeout_identity_with_slow_probe(
         self, board_path: Path, monkeypatch
     ) -> None:
-        """The bite test (issue #9244): fails while probe time counts.
+        """Negotiated driver: probe cost re-based out of the stage clock.
 
-        Probe sleep 5 s vs stage timeout 2 s: with the probe inside the
-        budget (pre-#9244 main) every between-nets check after the probe
-        sees a spent budget, nets are skipped and the copper differs from
-        the unflagged run.  With the re-based ``start_time`` both arms
-        route identically.
+        Identity + fired-sleep guard for the negotiated driver's
+        ``start_time`` delta re-base.  NOT a bite test, measured: with the
+        re-base neutralized at source the spent stage budget still leaves
+        identical copper on this board -- iteration 0 completes (all nets
+        routed, zero overflow) and the issue-#3452 grace pass re-routes
+        the starved tail inside its own fund, so the spent clock never
+        reaches the copper.  The behavioral bites live in
+        ``test_plain_route_all_stage_timeout_identity_with_slow_probe``
+        (whose initial-pass ``check_timeout`` does starve nets) and in the
+        CLI identity test below; this test pins that the negotiated
+        driver re-bases by the probe's real elapsed time (guard below)
+        and leaves the routed copper untouched.
         """
         from kicad_tools.router.io import load_pcb_for_routing
 
@@ -194,15 +216,44 @@ class TestCliDeadlinePath:
     def test_cli_run_output_bytes_identical_under_binding_timeout(
         self, board_path: Path, tmp_path: Path, monkeypatch
     ) -> None:
-        """End-to-end: ``--timeout`` binding, slow probe, same written bytes.
+        """End-to-end, IN-PROCESS: binding ``--timeout``, slow probe, same bytes.
 
-        Runs the in-process CLI twice with a fixed seed and ``--timeout 10``
-        (an unbounded run takes ~5 s wall; the routing deadline lands at
-        ~7 s); the flagged arm's probe sleeps 9 s -- past the routing
-        deadline.  Pre-#9244 main cuts the flagged run short mid-probe;
-        with the deadline shift both arms write byte-identical boards.
+        Drives ``route_deadline._in_process_main`` directly.  The public
+        ``route_cmd.main`` path supervises every finite positive
+        ``--timeout`` in a child process where this module's
+        parent-process patch cannot apply -- driving the supervisor's
+        in-process entry keeps the slow probe inside the very process
+        whose deadline stamps must absorb it.  The flagged arm's probe
+        sleeps ``_SLOW_PROBE_SLEEP_S`` vs ``--timeout _STAGE_TIMEOUT_S``:
+        on pre-#9244 main (no re-base, no hook) the sleep spends the
+        budget and the copper differs; with the shift both arms route
+        identically.  Measured limit: with the driver re-base in place,
+        neutralizing only the CLI hook does NOT change this board's
+        copper (a single-attempt basic run never consults the CLI stamps
+        for copper); the hook's shift mechanics are pinned by
+        ``test_apply_detour_ratio_report_shifts_deadlines_by_probe_elapsed``.
+
+        Guards, observable from the test process (a silently fast probe
+        would make the identity vacuous, not failing): exactly one probe
+        pre-pass runs, its recorded ``detour_probe_elapsed_s`` is at
+        least the injected sleep, and the flagged sidecar reports the
+        probed connections while the unflagged arm writes none.
         """
-        _slow_probe_route_net(monkeypatch, 9.0)
+        from kicad_tools.cli.route_cmd import _in_process_main
+
+        probe_elapsed_seen: list[float] = []
+        real_probe = Autorouter._probe_alone_on_empty_lengths
+
+        def probe_with_elapsed_capture(self, *args, **kwargs):
+            real_probe(self, *args, **kwargs)
+            # Only a completed pre-pass records (the flag-off arm early-
+            # returns with ``detour_probe_records`` still None).
+            if self.detour_probe_records is not None:
+                probe_elapsed_seen.append(self.detour_probe_elapsed_s)
+
+        monkeypatch.setattr(Autorouter, "_probe_alone_on_empty_lengths", probe_with_elapsed_capture)
+        _slow_probe_route_net(monkeypatch, _SLOW_PROBE_SLEEP_S)
+
         out_on = tmp_path / "on.kicad_pcb"
         out_off = tmp_path / "off.kicad_pcb"
         common = [
@@ -212,16 +263,29 @@ class TestCliDeadlinePath:
             "--seed",
             "7",
             "--timeout",
-            "10",
+            str(_STAGE_TIMEOUT_S),
         ]
 
-        rc_on = route_cmd.main(
+        rc_on = _in_process_main(
             [str(board_path), "-o", str(out_on), *common, "--report-detour-ratio"]
         )
-        rc_off = route_cmd.main([str(board_path), "-o", str(out_off), *common])
+
+        # Guard: the slow probe demonstrably fired in THIS process -- one
+        # pre-pass, measured elapsed >= the injected sleep.
+        assert len(probe_elapsed_seen) == 1
+        assert probe_elapsed_seen[0] >= _SLOW_PROBE_SLEEP_S
+
+        rc_off = _in_process_main([str(board_path), "-o", str(out_off), *common])
+
+        # The unflagged arm ran no probe pre-pass at all.
+        assert len(probe_elapsed_seen) == 1
         assert rc_on == rc_off == 0
 
         assert out_on.exists() and out_off.exists()
+        sidecar = tmp_path / "on.detour_ratio.json"
+        assert sidecar.exists() and not (tmp_path / "off.detour_ratio.json").exists()
+        payload = json.loads(sidecar.read_text())
+        assert payload["summary"]["probed"] >= 4
         assert out_on.read_bytes() == out_off.read_bytes()
 
 
