@@ -16,6 +16,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-16
 
+- **PR #9027**: build(deps): bump the uv-minor-patch group across 1 directory with 6 updates
+- **PR #9028**: build(deps): bump astral-sh/setup-uv from 10.3.2 to 10.3.3 in the github-actions group across 1 directory
+- **PR #9008**: chore(loom): resync installed Loom to v0.19.1302
 - **PR #9044**: fix: triageable mask_to_copper findings; incomplete runs cap severity at warning
 - **Issue #9038** (closed): mask_to_copper reports about 200 times JLCDFM's count on a consumer board, with messages that cannot be triaged
 - **PR #9046**: docs: correct board 07 finding count in 8974 changelog fragment to merged-tree delta
