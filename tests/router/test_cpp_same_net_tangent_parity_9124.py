@@ -102,6 +102,18 @@ def test_ring_form_agrees_with_point_predicate(x, y, accepted, why):
 @requires_cpp
 @pytest.mark.parametrize(("x", "y", "accepted", "why"), SEATS)
 def test_cpp_mirror_matches_python(x, y, accepted, why):
+    # Parity is exact on every seat above, but the two lower-edge epsilons
+    # DELIBERATELY differ: Python (float64) rejects ``gap > -1e-9`` (real
+    # overlap only), while the C++ mirror widens to ``kTangentEpsMm = 1e-4``
+    # because its pad box edges arrive as float32 (ulp ~1.5e-5 mm at
+    # 174 mm), so an exactly-tangent seat measures a few 1e-5 off 0 there.
+    # A seat with a real overlap in ``(-1e-4, -1e-9]`` is therefore
+    # Python-accepted and C++-rejected -- intended, erring conservative in
+    # the mirror (types.hpp, Issue #9124).  Do not "fix" the 1e-4 into 1e-9.
+    # Every SEATS row is dyadic so no row lands in that window, which is
+    # also why the divergence cannot be pinned as a row here: the C++ seat
+    # is rasterised to the grid (``RES``), which snaps any sub-1e-4 gap back
+    # onto the tangent locus both sides reject.
     pf_on = _cpp_pathfinder(EDGE)
     pf_off = _cpp_pathfinder(0.0)
     gx, gy = round(x / RES), round(y / RES)

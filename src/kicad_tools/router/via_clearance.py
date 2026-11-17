@@ -468,7 +468,11 @@ def same_net_segment_pad_gap_acceptable(
       leave ``[error_edge, detection_edge)`` gaps graded as warnings
       (issue #8976, ``## Verified corrections``).
 
-    and the band ``(0, min_gap_mm)`` in between is rejected.
+    and the band in between is rejected: ``(0, min_gap_mm)`` for a segment
+    (its ``gap == 0`` means the centerline reaches the rectangle, a genuine
+    overlap), ``[0, min_gap_mm)`` for a degenerate point/annulus seat, whose
+    tangent locus (``gap == 0``) is a one-point touch rather than a union
+    (Issue #9124).
 
     The gap is exact segment-vs-rectangle geometry: the copper-to-pad air
     gap is ``max(0, centerline-to-rect distance - half_width)``, computed
@@ -636,8 +640,9 @@ def same_net_pad_gap_acceptable(
       ``error_edge_mm`` here would leave ``[error_edge, detection_edge)``
       gaps graded as warnings by the fab-view checker.
 
-    and the band ``(0, min_gap_mm)`` in between is rejected -- the caller's
-    placement ladder goes on trying candidates.
+    and the band ``[0, min_gap_mm)`` in between is rejected, tangent locus
+    included (Issue #9124) -- the caller's placement ladder goes on trying
+    candidates.
 
     Args:
         x, y: Proposed via center (mm, world coordinates).
@@ -686,7 +691,8 @@ def same_net_pad_gap_band_ring(
     definition feeds both forms: a seat this ring covers is exactly a seat
     the predicate rejects.  The predicate's 1e-9 float-noise epsilon is
     finer than any rasteriser's cell, so the geometric boundary is the
-    shared band ``(0, min_gap_mm)``.
+    shared band ``[0, min_gap_mm)`` -- tangent locus included (Issue #9124,
+    the inner buffer's ``-1e-9`` keeps it inside the ring).
 
     Args:
         bbox: Same-net SMD pad bounding box ``(min_x, min_y, max_x, max_y)``.
@@ -794,8 +800,11 @@ def same_net_band_seat_ok(
     ``same_net_copper`` is an iterable of shapely geometries of the via's own
     net (the via being moved excluded by the caller); pads grade on the pad
     population's edge via :func:`same_net_pad_gap_acceptable`, everything else
-    on the trace population's via :func:`same_net_trace_band_clear`.  An edge
-    of ``0`` disables that test.
+    on the trace population's via :func:`same_net_trace_band_clear`.  For
+    pads the rejected band is ``[0, edge)``: a tangent seat (``gap == 0``,
+    Issue #9124) is a one-point touch, not a copper union, so it is
+    rejected; for trace copper overlap/touch is still one copper union (no
+    slit).  An edge of ``0`` disables that test.
     """
     if not same_net_pad_gap_acceptable(x, y, diameter, same_net_pad_bboxes, pad_edge_mm):
         return False
