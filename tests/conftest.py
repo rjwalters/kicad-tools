@@ -245,20 +245,28 @@ except (OSError, AttributeError):
 
 _rss_floor_mb = 0.0
 _RSS_GROWTH_TRIGGER_MB = 32.0
+# /proc/self/statm reports pages, not bytes (Issue #9148): convert with the
+# host's real page size so 16K/64K-page kernels (aarch64) are not under-counted.
+# os.sysconf is absent on Windows; the teardown hook is Linux-only anyway.
+_PAGE_SIZE = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
+
+
+def _statm_rss_mb() -> float:
+    """Resident set size of this process in MiB, from /proc/self/statm."""
+    with open("/proc/self/statm") as fh:
+        return int(fh.read().split()[1]) * _PAGE_SIZE / 1048576
 
 
 def pytest_runtest_teardown(item, nextitem):
     global _rss_floor_mb
     if _malloc_trim is None or sys.platform != "linux":
         return
-    with open("/proc/self/statm") as fh:
-        rss_mb = int(fh.read().split()[1]) * 4096 / 1048576
+    rss_mb = _statm_rss_mb()
     if rss_mb - _rss_floor_mb < _RSS_GROWTH_TRIGGER_MB:
         return
     gc.collect()
     _malloc_trim(0)
-    with open("/proc/self/statm") as fh:
-        _rss_floor_mb = int(fh.read().split()[1]) * 4096 / 1048576
+    _rss_floor_mb = _statm_rss_mb()
 
 
 @pytest.fixture(scope="session", autouse=True)
