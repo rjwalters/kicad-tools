@@ -404,6 +404,10 @@ private:
     // the ``(0, same_net_pad_gap_band_edge_mm)`` slit band.  Per-rail (own
     // net's pads only); inert when the caller resolved no stackup edge.
     bool same_net_pad_gap_in_band(int gx, int gy, int net) const;
+    // Issue #9208: the annulus leaves a gap strictly inside
+    // ``(0, same_net_trace_gap_band_edge_mm)`` to the same net's STORED trace
+    // copper (any layer).  Per-rail; inert when no trace edge was resolved.
+    bool same_net_trace_gap_in_band(int gx, int gy, int net) const;
 
     inline bool at_goal(int x, int y, int gx, int gy) const {
         return x == gx && y == gy;

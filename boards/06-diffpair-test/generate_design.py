@@ -1961,13 +1961,19 @@ def _same_net_leg_band_ok(
     """
     from shapely.geometry import LineString, Point, box
 
+    from kicad_tools.router.via_clearance import (
+        SAME_NET_BAND_UNION_EPS_MM,
+        SAME_NET_BAND_WRITE_SLACK_MM,
+    )
+
     if pad_edge_mm <= 0 and trace_edge_mm <= 0:
         return True
-    touch = 1e-6
+    touch = SAME_NET_BAND_UNION_EPS_MM
     leg = LineString([p0, p1]).buffer(width / 2)
-    # ``+ 1.5e-3`` covers both sides' 3-decimal write rounding (as #8975).
-    pad_limit = pad_edge_mm + 1.5e-3
-    trace_limit = trace_edge_mm + 1.5e-3
+    # ``+ SAME_NET_BAND_WRITE_SLACK_MM`` covers both sides' 3-decimal write
+    # rounding (as #8975).
+    pad_limit = pad_edge_mm + SAME_NET_BAND_WRITE_SLACK_MM
+    trace_limit = trace_edge_mm + SAME_NET_BAND_WRITE_SLACK_MM
     # Issue #9186: the connector's own sibling legs are chain candidates on
     # exactly the terms of existing segments -- touching ones chain (the
     # finished connector is one copper union at its bends), detached ones
@@ -3566,10 +3572,13 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # band guard (the drain for this board's via-banded population) is OFF.
     # Resolved from the profile table via the stitcher's helper, never a
     # literal, matching ``route_cmd``'s own resolution idiom.
-    from kicad_tools.cli.stitch_cmd import _resolve_mfr_pad_gap_edge
+    from kicad_tools.cli.stitch_cmd import _resolve_mfr_pad_gap_edge, _resolve_mfr_trace_gap_edge
     from kicad_tools.router import DesignRules, DifferentialPairConfig, load_pcb_for_routing
 
     _same_net_pad_gap_edge_mm = _resolve_mfr_pad_gap_edge("jlcpcb", 4, 1.0)
+    # Issue #9208: and the trace-population edge (jlcpcb 4-layer 1oz ->
+    # 0.1016 mm) for the via-annulus-vs-own-trace twin of that guard.
+    _same_net_trace_gap_edge_mm = _resolve_mfr_trace_gap_edge("jlcpcb", 4, 1.0)
     from kicad_tools.router.optimizer import (
         GridCollisionChecker,
         OptimizationConfig,
@@ -3628,6 +3637,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # jlcpcb 4-layer 1oz stackup, so the C++ pathfinder's via seats stay
         # out of the band ``kct check`` grades (``physical_copper_gap``).
         same_net_pad_gap_band_edge_mm=_same_net_pad_gap_edge_mm,
+        same_net_trace_gap_band_edge_mm=_same_net_trace_gap_edge_mm,
     )
 
     # Power and ground nets are handled via copper pours on the inner planes

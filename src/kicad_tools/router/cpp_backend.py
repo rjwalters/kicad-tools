@@ -142,7 +142,12 @@ STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
 # / ``set_airwire_cells`` verbs -- the prospective airwire-separation term
 # summed inside ``Grid3D::get_negotiated_cost``.  A v66 .so prices negotiated
 # cells without the term, silently breaking Python/C++ cost parity.
-_REQUIRED_CPP_BUILD_VERSION = 67
+# v69 (Issue #9208): ``DesignRules.same_net_trace_gap_band_edge_mm`` + the
+# same-net via-annulus-vs-own-trace slit-band refusal in both A* via checks.  A
+# v67 .so seats via annuli in the (0, edge) slit band beside their own net's
+# committed trace copper (board 06's USB2_D- annulus-vs-trace finding).  v68 is
+# reserved by the open #9124 / PR #9209 tangent fix.
+_REQUIRED_CPP_BUILD_VERSION = 69
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -1495,6 +1500,10 @@ class CppPathfinder:
         # single-ended via check (``None`` collapses to 0.0 = guard off).
         cpp_rules.same_net_pad_gap_band_edge_mm = float(
             getattr(rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0
+        )
+        # Issue #9208: the trace-population twin (``None`` -> 0.0 = guard off).
+        cpp_rules.same_net_trace_gap_band_edge_mm = float(
+            getattr(rules, "same_net_trace_gap_band_edge_mm", 0.0) or 0.0
         )
         cpp_rules.grid_resolution = rules.grid_resolution
         cpp_rules.cost_straight = rules.cost_straight
@@ -5825,6 +5834,10 @@ class CppCoupledPathfinder:
         # pads (``None`` collapses to 0.0 = guard off).
         cpp_rules.same_net_pad_gap_band_edge_mm = float(
             getattr(rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0
+        )
+        # Issue #9208: the trace-population twin (``None`` -> 0.0 = guard off).
+        cpp_rules.same_net_trace_gap_band_edge_mm = float(
+            getattr(rules, "same_net_trace_gap_band_edge_mm", 0.0) or 0.0
         )
         self._impl = router_cpp.CoupledPathfinder(
             cpp_grid._impl,
