@@ -400,6 +400,10 @@ private:
     // ``min_via_pad_edge_gap`` to it (no mask dam).  Applies even where
     // via-in-pad is allowed.
     bool via_drill_at_smd_pad_edge(int gx, int gy) const;
+    // Issue #8994: the annulus leaves a same-net SMD pad gap strictly inside
+    // the ``(0, same_net_pad_gap_band_edge_mm)`` slit band.  Per-rail (own
+    // net's pads only); inert when the caller resolved no stackup edge.
+    bool same_net_pad_gap_in_band(int gx, int gy, int net) const;
 
     inline bool at_goal(int x, int y, int gx, int gy) const {
         return x == gx && y == gy;
