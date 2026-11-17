@@ -16,6 +16,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-17
 
+- **PR #9230**: test: pin design-source archives byte-for-byte to live board recipes
+- **PR #9229**: fix: warn when same_net_band_edges() hits an unresolved stackup
+- **PR #9108**: fix(check): mask_to_copper stops reporting a pad's own land as exposed trace
+- **Issue #9228** (closed): design-source/ archive can silently drift from the live board recipe (measured: 11 lines stale on main)
+- **Issue #9226** (closed): same_net_band_edges(): a missing DFM entry disables the band with no warning, and copper_oz does not match the package's outer_oz vocabulary
 - **PR #9224**: refactor: use shared band constants in board 06 leg-band predicate
 - **PR #9222**: feat: add --order-method regret net ordering (biggest-loss nets first)
 - **PR #9219**: test: grade board07 byte spreads on the gate's matched length
