@@ -33,9 +33,11 @@ same-net pour) is also declarable through a ``MaskEscapeIntent``.
   passes or bends across the opening without terminating there.
 - ``different-net`` -- the conductor's identified net differs from the
   opening owner's.
-- (omitted) -- either net is unidentified, the opening is a merged region
-  with no single owner net, or the conductor is a ``zone`` (an area has no
-  terminating endpoint, so neither entry nor pass-through applies).
+- ``same-net`` -- same net, but the entry/pass-through distinction does not
+  apply: the conductor is an area (``zone``) or another pad, so it has no
+  terminating endpoint to test.
+- (omitted) -- either net is unidentified or the opening is a merged region
+  with no single owner net.
 
 While ``assessment.coverage != "complete"`` the findings are provisional:
 severity is capped at ``warning`` (never ``error``) and each message carries
