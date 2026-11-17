@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import subprocess
+import sys
 from itertools import combinations_with_replacement
 from pathlib import Path
 
@@ -228,17 +231,14 @@ def test_partial_does_not_trigger_incomplete():
 #: The pre-#8940 stanza shape, captured from ``origin/main`` @ 993d2d2ab
 #: before any edit to ``format_parity_stanza`` (the issue's Test Plan requires
 #: the baseline be captured first; AC 2 makes it the byte-identity contract).
-#: #8972 bumped the table version 6 -> 7 (row attribution change) and #9034
-#: 7 -> 8 (note-only row change), so only the header's digit moved -- rows,
-#: order and wording are unchanged. #8840 bumps it 8 -> 9 and flips the
-#: ``sharp_trace_corner`` / ``missing_plated_through_hole`` rows now that
-#: both rules ship. #9037 bumps it 9 -> 10 (``sharp_trace_corner`` row
-#: attribution narrows to the ``#bend`` population); again only the digit.
-#: #8858 bumps it 10 -> 11 (note-only change to the
-#: ``solder_mask_opening_exposing_trace`` row).
+#: The header's version token is interpolated from ``fdp.TABLE_VERSION`` (a
+#: content hash of the rows, issue #9242) rather than pinned, so a PR that
+#: edits a row no longer edits this constant.  Rows, order and wording are the
+#: byte-identity contract.
 EXPECTED_DEFAULT_STANZA = (
     "\n"
-    "Fab DFM parity (JLCDFM, table v11, 2026-11-12): 0 danger-capable categories not covered\n"
+    f"Fab DFM parity (JLCDFM, table v{fdp.TABLE_VERSION}, 2026-11-12): "
+    "0 danger-capable categories not covered\n"
     "  partial     trace_spacing [danger-capable]: clearance, physical_copper_gap\n"
     "  partial     pad_spacing [danger-capable]: clearance, physical_copper_gap\n"
     "  partial     solder_mask_opening_exposing_trace [danger-capable]: mask_to_copper\n"
@@ -812,3 +812,56 @@ def test_fab_danger_severity_fails_verdict_and_exit():
     v = evaluate_check_verdict(pcb, res, drc_only=True, manufacturer="jlcpcb")
     assert v.verdict == "fail"
     assert v.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# Issue #9242: TABLE_VERSION is content-derived, not hand-picked.
+# ---------------------------------------------------------------------------
+
+
+def test_table_version_is_short_hex_digest():
+    assert isinstance(fdp.TABLE_VERSION, str)
+    assert len(fdp.TABLE_VERSION) == 8
+    int(fdp.TABLE_VERSION, 16)  # raises if not hex
+
+
+def test_table_version_matches_helper_and_is_exposed_everywhere():
+    assert fdp.compute_table_version(fdp.PARITY_TABLE) == fdp.TABLE_VERSION
+    report = fdp.evaluate_parity("jlcpcb")
+    assert report.to_dict()["table_version"] == fdp.TABLE_VERSION
+    assert f"table v{fdp.TABLE_VERSION}," in fdp.format_parity_stanza(report)
+
+
+def test_table_version_is_stable_across_processes():
+    code = "from kicad_tools.validate import fab_dfm_parity as f; print(f.TABLE_VERSION)"
+    outs = {
+        subprocess.run(
+            [sys.executable, "-I", "-c", code], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        for _ in range(2)
+    }
+    assert outs == {fdp.TABLE_VERSION}
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("category", "renamed_category"),
+        ("kct_rules", ("extra_rule",)),
+        ("status", "not_covered"),
+        ("danger_capable", False),
+        ("count_rule_ids", ("extra_count_rule",)),
+        ("note", "a different note"),
+    ],
+)
+def test_table_version_changes_when_any_row_field_changes(field, value):
+    rows = list(fdp.PARITY_TABLE)
+    # Use the first row; make sure the replacement really differs.
+    assert getattr(rows[0], field) != value
+    rows[0] = dataclasses.replace(rows[0], **{field: value})
+    assert fdp.compute_table_version(rows) != fdp.TABLE_VERSION
+
+
+def test_table_version_unchanged_for_identical_rows():
+    assert fdp.compute_table_version(list(fdp.PARITY_TABLE)) == fdp.TABLE_VERSION
+    assert fdp.compute_table_version(tuple(fdp.PARITY_TABLE)) == fdp.TABLE_VERSION

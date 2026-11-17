@@ -35,8 +35,8 @@ Rules for editing the table:
   vertices are kct-only over-reporting under the #8848 operator ruling --
   the fab flagged none of them).
   ``count_rule_ids`` adds no parity *claim*; re-keying an existing row's
-  attribution (as #8972 did) does bump :data:`TABLE_VERSION`, which moves
-  the stanza header's version with it.
+  attribution (as #8972 did) changes the row's content, which moves
+  :data:`TABLE_VERSION` (and the stanza header) with it automatically.
 * Every rule named in ``kct_rules`` of a ``covered`` / ``partial`` row must be
   something ``kct check`` can actually emit -- a real category
   (``cli/check_categories.py``) or a finer rule id registered in
@@ -49,40 +49,22 @@ Rules for editing the table:
   so registering one fails the test until this row is flipped.  A rule PR that
   forgets its row therefore cannot merge green; add the new id to the mapping
   in the same PR.
-* Bump :data:`TABLE_VERSION` on any row change.
+* Do not hand-edit a version: :data:`TABLE_VERSION` is a content hash of the
+  rows (see :func:`compute_table_version`), so it changes by itself on any row
+  change and two PRs editing different rows cannot collide on it (issue #9242).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import json
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, Mapping, Sequence
 
 from .violations import DRCViolation
 
 Status = Literal["covered", "partial", "not_covered"]
-
-#: Version of the table below; bump on any row change.
-#: 6: #8938 -- fab-view gap bands come from the resolved stackup's
-#:    ``dfm_thresholds`` entry; same-net sub-danger pad gaps are errors;
-#:    zone-fill (pour) gaps report at info (not fab-judged).
-#: 7: #8972 -- trace-band vs pad-band ``physical_copper_gap`` findings are
-#:    attributed to their own rows (``trace_spacing`` / ``pad_spacing``) via
-#:    the ``rule_id#fab_band`` qualified key; the rule id itself is unchanged.
-#: 8: #9034 -- pad_spacing note records the issue-reported kct:fab ratio as
-#:    reported-not-reproduced and the measured per-pair counting
-#:    granularity; no threshold, severity or attribution change.
-#: 9: #8840 -- ``sharp_trace_corner`` and ``missing_plated_through_hole``
-#:    rows flip from ``not_covered`` now that both rules ship.
-#: 10: #9037 -- the ``sharp_trace_corner`` row attributes only the
-#:    two-segment bend population (``sharp_trace_corner#bend``) to JLCDFM's
-#:    category; the junction findings are kct-only and stay deliberately
-#:    unattributed, separable via ``DRCViolation.corner_class``.  No status
-#:    or severity change.
-#: 11: #8858 -- ``solder_mask_opening_exposing_trace`` note records the
-#:    ``within_own_pad`` class (a clean single entry) and what stays an
-#:    error; status, attribution and danger-capability unchanged.
-TABLE_VERSION = 11
 
 #: Where the observed categories/thresholds came from (counts are hand-recorded).
 SOURCE = "https://github.com/rjwalters/kicad-tools/issues/8838"
@@ -349,6 +331,25 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "checked; no finding on the board.",
     ),
 )
+
+
+def compute_table_version(rows: Sequence[ParityRow]) -> str:
+    """Content-derived identifier for a parity table (issue #9242).
+
+    The first 8 hex chars of the SHA-256 of the rows' canonical JSON.  Every
+    :class:`ParityRow` field is included (``dataclasses.asdict``, not
+    :meth:`ParityRow.to_dict`, which omits ``count_rule_ids``), keys are
+    sorted and tuples serialize as lists, so the value is identical across
+    runs, processes and Python versions and changes iff a row changes.
+    """
+    canonical = json.dumps([asdict(r) for r in rows], sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:8]
+
+
+#: Content hash of :data:`PARITY_TABLE`; derived, never hand-edited, so two PRs
+#: touching different rows cannot claim the same number.  Row history lives in
+#: git and ``changelog.d/``.
+TABLE_VERSION: str = compute_table_version(PARITY_TABLE)
 
 
 @dataclass(frozen=True)
