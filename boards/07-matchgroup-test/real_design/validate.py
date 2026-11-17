@@ -86,7 +86,8 @@ def via_travel_mm(via, segments, elevations: dict[str, float]) -> float:
 # staircase share grows ~0.0045 mm per step, so a denser or taller
 # staircase can push a defect-free net toward this limit: after
 # re-routing a matched net's staircase, re-run this script and re-check
-# the worst defect-free net's margin.  No per-link weighting removes the
+# the worst defect-free net's margin (each net's residual is reported as
+# off_path_mm in validation.json).  No per-link weighting removes the
 # staircase share -- the deficit is a property of the route picked
 # (skipped legs minus chords), not of any single link, and surcharging
 # links to zero it inflates matched length by the same copper (Issue
@@ -544,6 +545,7 @@ def check(candidate: Path, source: Path, evidence: Path) -> bool:
     analyzer = TraceLengthAnalyzer()
     vias_by_index = dict(enumerate(board.vias))
     lengths = {}
+    off_paths = {}
     impedance = {}
     trace_capacitance = {}
     external_loads = {}
@@ -577,6 +579,7 @@ def check(candidate: Path, source: Path, evidence: Path) -> bool:
             for index in measurement.path_via_indices
         )
         off_path = measurement.off_path_length_mm or 0.0
+        off_paths[name] = round(off_path, 4)
         if off_path > OFF_PATH_TOLERANCE_MM:
             errors.append(off_path_error(name, off_path))
         dimensions = {(s.layer, s.width) for s in segments}
@@ -727,6 +730,7 @@ def check(candidate: Path, source: Path, evidence: Path) -> bool:
         "status": "pass" if not errors else "blocked",
         "errors": errors,
         "lengths_including_vias_mm": lengths,
+        "off_path_mm": off_paths,
         "impedance": impedance,
         "trace_capacitance_pf": trace_capacitance,
         "external_load_estimates": external_loads,
