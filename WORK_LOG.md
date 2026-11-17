@@ -16,6 +16,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-17
 
+- **PR #9224**: refactor: use shared band constants in board 06 leg-band predicate
+- **PR #9222**: feat: add --order-method regret net ordering (biggest-loss nets first)
+- **PR #9219**: test: grade board07 byte spreads on the gate's matched length
+- **PR #9212**: fix: refuse C++ via seats whose annulus slits an own-net trace
+- **Issue #9217** (closed): Board 07: test_board07_real_design still grades byte spreads on raw copper, not the gate's matched length
+- **Issue #9208** (closed): Board 06 USB2_D- drain: C++ via-annulus vs own-net-trace slit-band check
+- **Issue #9204** (closed): Converge board 06's leg-band predicate on the shared band constants from #9150
+- **Issue #9001** (closed): Router: regret ordering as a net-order method (commit biggest-loss nets first)
 - **PR #9220**: test: pin sibling_legs contract on _same_net_leg_band_ok directly
 - **PR #9218**: docs: record trim-less detection margin and fix healthy-residual sign in RSS hook test
 - **PR #9207**: refactor: require stackup args on same_net_band_edges()
