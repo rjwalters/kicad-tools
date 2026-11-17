@@ -6563,10 +6563,71 @@ class DiffPairRouter:
         net: int,
         width: float,
     ) -> bool:
-        """True when a candidate span keeps foreign-pad clearance (#4571)."""
-        return (
-            self._span_pad_deficit(x1, y1, x2, y2, layer_idx, net, width) <= _SHADOW_PAD_DEFICIT_EPS
+        """True when a candidate span keeps foreign-pad clearance (#4571) and
+        stays out of the own-net pad slit band (#9140)."""
+        return self._span_pad_deficit(
+            x1, y1, x2, y2, layer_idx, net, width
+        ) <= _SHADOW_PAD_DEFICIT_EPS and self._span_own_net_pad_band_ok(
+            x1, y1, x2, y2, layer_idx, net, width
         )
+
+    def _span_own_net_pad_band_ok(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        layer_idx: int,
+        net: int,
+        width: float,
+    ) -> bool:
+        """True when a span keeps the fab slit band clear of its OWN-net SMD pads.
+
+        Issue #9140: :meth:`_span_pad_deficit` skips same-net pads, so the
+        coupled pose / trunk legs and the synthesized stub tail could skirt
+        their own pad inside the fab ``pad_spacing`` band (board 06 LVDS:
+        0.1275 mm < 0.15 mm, ``physical_copper_gap``).  This is the
+        two-region rule of
+        :func:`~kicad_tools.router.via_clearance.same_net_segment_pad_gap_acceptable`
+        -- union with the pad (``gap <= 0``) or clear of the detection edge --
+        measured with the kernel's true pad outline (rotated roundrects) so it
+        agrees with ``kct check``.  The edge is the caller-resolved
+        ``DesignRules.same_net_pad_gap_band_edge_mm`` (``None``/0 keeps the
+        guard off, as for the single-net A*, #9018).  Only own-net SMD pads on
+        the span's layer are consulted; foreign-pad logic is unchanged.
+        """
+        edge_mm = float(getattr(self.autorouter.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
+        if edge_mm <= 0.0:
+            return True
+        grid = self.autorouter.grid
+        layer = Layer(grid.index_to_layer(layer_idx))
+        probe = segment_shape(
+            Segment(
+                x1=x1,
+                y1=y1,
+                x2=x2,
+                y2=y2,
+                width=width,
+                layer=layer,
+                net=net,
+                net_name="",
+            )
+        )
+        reach = width / 2.0 + edge_mm + 0.5
+        lo_x, hi_x = min(x1, x2) - reach, max(x1, x2) + reach
+        lo_y, hi_y = min(y1, y2) - reach, max(y1, y2) + reach
+        for pad in grid.pads:
+            if pad.net != net or pad.through_hole or getattr(pad, "drill", 0.0) > 0.0:
+                continue
+            if pad.layer.value != layer.value:
+                continue
+            ext = max(pad.width, pad.height)  # conservative broad phase (rotation-safe)
+            if not (lo_x - ext <= pad.x <= hi_x + ext and lo_y - ext <= pad.y <= hi_y + ext):
+                continue
+            gap = copper_gap(probe, pad_shape(pad))
+            if _SHADOW_PAD_DEFICIT_EPS < gap < edge_mm - _SHADOW_PAD_DEFICIT_EPS:
+                return False
+        return True
 
     def _segment_pad_clear(self, seg: Segment) -> bool:
         """True when an assembled segment keeps foreign-pad clearance (#4571)."""
