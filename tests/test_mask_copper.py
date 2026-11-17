@@ -74,7 +74,7 @@ def test_actual_cli_missing_policy_never_prints_or_serializes_pass(tmp_path, cap
     )
 
 
-def toy_geometry(conductor_x=1.2, *, overlap_owner=False, merged=False):
+def toy_geometry(conductor_x=1.2, *, overlap_owner=False, merged=False, conductor_kind="segment"):
     from shapely.geometry import box
 
     from kicad_tools.validate.mask_copper_geometry import AttributedMaskGeometry
@@ -97,7 +97,7 @@ def toy_geometry(conductor_x=1.2, *, overlap_owner=False, merged=False):
                 "margin_mm": {"F.Mask": 0.1},
             },
             other: {
-                "kind": "segment",
+                "kind": conductor_kind,
                 "net": "N",
                 "layers_geometry": {"F.Cu": trace},
                 "margin_mm": {},
@@ -161,8 +161,15 @@ def test_same_net_conductor_inside_the_opening_is_flagged_without_overlapping(
     ]
 
 
-@pytest.mark.parametrize("mode", ["valid", "stale", "wrong_uuid", "wrong_layer", "disconnected"])
-def test_intent_requires_exact_binding_identity_layer_and_direct_connection(mode):
+@pytest.mark.parametrize(
+    "conductor_kind,mode",
+    [
+        (kind, mode)
+        for kind in ("segment", "zone")
+        for mode in ("valid", "stale", "wrong_uuid", "wrong_layer", "disconnected")
+    ],
+)
+def test_intent_requires_exact_binding_identity_layer_and_direct_connection(conductor_kind, mode):
     from dataclasses import replace
 
     from kicad_tools.validate.mask_copper import (
@@ -171,7 +178,9 @@ def test_intent_requires_exact_binding_identity_layer_and_direct_connection(mode
         source_binding,
     )
 
-    geometry, owner, other = toy_geometry(overlap_owner=mode != "disconnected", conductor_x=1.05)
+    geometry, owner, other = toy_geometry(
+        overlap_owner=mode != "disconnected", conductor_x=1.05, conductor_kind=conductor_kind
+    )
     binding = source_binding(geometry)
     if mode == "stale":
         binding = replace(binding, source_sha256="b" * 64)
@@ -187,7 +196,13 @@ def test_intent_requires_exact_binding_identity_layer_and_direct_connection(mode
     )
     assert result.passed is (mode == "valid")
     assert result.intent_audit[0]["accepted"] is (mode == "valid")
-    assert result.measurements
+    conductor_measurements = [m for m in result.measurements if m.conductor_uuid == other]
+    assert conductor_measurements
+    if mode == "valid":
+        assert conductor_measurements[0].disposition == "intentional"
+    else:
+        # A rejected declaration never suppresses the measurement it names.
+        assert conductor_measurements[0].disposition == "violation"
 
 
 @pytest.mark.parametrize(

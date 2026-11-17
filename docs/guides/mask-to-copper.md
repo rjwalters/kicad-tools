@@ -110,9 +110,13 @@ for a finding even when it has the same net or overlaps the owning pad. A pad
 number is not a unique source identity.
 
 An intentional escape declaration must identify one pad, one directly connected
-segment/arc/via, the mask side and a rationale. First run the check without intent,
-review its measurements and save its binding. Then add a declaration using that
-exact binding. For example, the Python API can construct and audit it:
+conductor (`segment`/`arc`/`via`/`zone`), the mask side and a rationale. A
+`zone` is declarable when it is the pad's own same-net pour: the direct
+connection is proven by the pad's copper overlapping the zone's fill region on
+the declared copper side, beyond the geometric uncertainty. First run the check
+without intent, review its measurements and save its binding. Then add a
+declaration using that exact binding. For example, the Python API can construct
+and audit it:
 
 ```python
 from kicad_tools.validate.mask_copper import (
