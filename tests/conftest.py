@@ -243,22 +243,48 @@ try:
 except (OSError, AttributeError):
     _malloc_trim = None
 
+# Issue #9154: /proc/self/statm reports RSS in pages, not bytes. Use the
+# kernel's real page size instead of a hard-coded 4096 so a 16K/64K-page
+# runner (aarch64, some container hosts) does not silently under-report
+# RSS 4x/16x, which would raise the effective trigger below just as
+# silently. The fallback keeps conftest importable where os.sysconf or
+# the name is unavailable.
+try:
+    _PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
+except (AttributeError, OSError, ValueError):
+    _PAGE_SIZE = 4096
+
 _rss_floor_mb = 0.0
 _RSS_GROWTH_TRIGGER_MB = 32.0
+
+
+def _statm_rss_mb():
+    """Return this process's RSS in MB, or None when statm is unreadable.
+
+    Issue #9154: /proc can be unmounted in stripped containers; an OSError
+    here must leave the hook inert rather than erroring every teardown.
+    """
+    try:
+        with open("/proc/self/statm") as fh:
+            return int(fh.read().split()[1]) * _PAGE_SIZE / 1048576
+    except OSError:
+        return None
 
 
 def pytest_runtest_teardown(item, nextitem):
     global _rss_floor_mb
     if _malloc_trim is None or sys.platform != "linux":
         return
-    with open("/proc/self/statm") as fh:
-        rss_mb = int(fh.read().split()[1]) * 4096 / 1048576
+    rss_mb = _statm_rss_mb()
+    if rss_mb is None:
+        return
     if rss_mb - _rss_floor_mb < _RSS_GROWTH_TRIGGER_MB:
         return
     gc.collect()
     _malloc_trim(0)
-    with open("/proc/self/statm") as fh:
-        _rss_floor_mb = int(fh.read().split()[1]) * 4096 / 1048576
+    rss_mb = _statm_rss_mb()
+    if rss_mb is not None:
+        _rss_floor_mb = rss_mb
 
 
 @pytest.fixture(scope="session", autouse=True)
