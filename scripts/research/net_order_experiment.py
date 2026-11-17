@@ -118,6 +118,7 @@ BOARDS: dict[str, Board] = {
 VARIANTS: dict[str, tuple[str, ...]] = {
     "default": (),
     "crossing": ("--order-method", "crossing"),
+    "regret": ("--order-method", "regret"),
     "greedy": ("--order-method", "greedy"),
     "critical_first": ("--order-method", "critical_first"),
     "congestion": ("--order-method", "congestion"),
