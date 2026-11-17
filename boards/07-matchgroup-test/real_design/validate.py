@@ -67,6 +67,27 @@ def via_travel_mm(via, segments, elevations: dict[str, float]) -> float:
     return max(depths) - min(depths)
 
 
+# Off-path copper above this does not count toward matched length and is an
+# error (Issue #9117).  Source of the margin: with contact links charged
+# the distance they span (the #9117 review's weighting fix), loop-free
+# nets on this board measure under 1.6 mm of residual copper --
+# barrel-overlap under pads/vias and in-pad joints.  Beyond that is
+# copper the signal never travels on the path: a dead-end loop, an
+# overlapping duplicate or a stub.  The DQ7/LDQM same-net loops the
+# issue evidence named were repaired in #9118 (PR #9139); on the
+# committed copper this flags SDCKE1 (2.08 mm).
+OFF_PATH_TOLERANCE_MM = 2.0
+
+
+def off_path_error(net_name: str, off_path_mm: float) -> str:
+    """Error for matched-net copper on no pad-to-pad path (Issue #9117)."""
+    return (
+        f"{net_name}: {off_path_mm:.3f} mm of copper lies off the pad-to-pad path "
+        f"(dead-end loop, duplicate or stub) and is excluded from match length; "
+        f"limit {OFF_PATH_TOLERANCE_MM:.1f} mm"
+    )
+
+
 def via_barrel_capacitance_pf(
     pad_diameter_mm: float,
     antipad_diameter_mm: float,
@@ -502,6 +523,7 @@ def check(candidate: Path, source: Path, evidence: Path) -> bool:
         if set(via.layers) != {"F.Cu", "B.Cu"} or via.via_type is not None:
             errors.append(f"Nonstandard via span/type at {via.position}: {via.layers}")
     analyzer = TraceLengthAnalyzer()
+    vias_by_index = dict(enumerate(board.vias))
     lengths = {}
     impedance = {}
     trace_capacitance = {}
@@ -522,9 +544,22 @@ def check(candidate: Path, source: Path, evidence: Path) -> bool:
                 errors.append(
                     f"{name}: trunk on {segment.layer} violates data/control layer separation"
                 )
-        lengths[name] = report.total_length_mm + sum(
-            via_travel_mm(via, segments, elevations) for via in board.vias_in_net(net.number)
+        # Matched length is the physical pad-to-pad copper path plus the
+        # vertical travel of the vias that path runs through -- never the
+        # sum of all copper on the net, which would count dead-end loops,
+        # overlapping duplicates and stubs the signal never travels as
+        # matched length and hide real skew (Issue #9117).
+        measurement = analyzer.measure_net_path(board, name)
+        if measurement.path_length_mm is None:
+            errors.append(f"{name}: no connected pad-to-pad copper path for match length")
+            continue
+        lengths[name] = measurement.path_length_mm + sum(
+            via_travel_mm(vias_by_index[index], segments, elevations)
+            for index in measurement.path_via_indices
         )
+        off_path = measurement.off_path_length_mm or 0.0
+        if off_path > OFF_PATH_TOLERANCE_MM:
+            errors.append(off_path_error(name, off_path))
         dimensions = {(s.layer, s.width) for s in segments}
         measured = []
         capacitance_pf = 0.0
