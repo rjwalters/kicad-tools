@@ -105,6 +105,69 @@ incomplete`, so an unfinished run never inflates the error count. A closing
 `mask_to_copper_openings` info finding counts the findings per opening, so one pad
 with many findings reads as one opening.
 
+### Copper on the pad's own land: `within_own_pad`
+
+A track that enters its own pad lies partly under it, so the pad's opening covers
+that part. That copper is the pad's own exposed land, and the one track width
+the track puts under mask where it leaves the pad is unavoidable; JLCDFM does not
+flag such an entry. Such a measurement reads `within_own_pad` at **info** (issue
+#8858):
+
+```text
+Mask-to-copper overlap: within_own_pad; exposed area 0.42 mm²; beyond owner pad
+copper 0 mm²; ...; opening pad:R1/1; exposed copper segment (net VOUT); same-net own-pad entry
+```
+
+The class is granted for what the copper does, not for touching the pad. All of
+these must hold, otherwise the measurement keeps its verdict:
+
+- the opening has one owner, a plain `rect`, `roundrect`, `circle` or `oval` pad
+  with a mask margin of 0 or more (custom, padstack, chamfered and
+  solder-mask-defined pads keep their verdict);
+- the copper is on the pad's identified net. That is the net pcbnew loads: a
+  floating stub touching only one pad loads with that pad's net. A pad with no
+  net never qualifies.
+- the copper overlaps the pad's copper by more than the construction budget `u`;
+- **nothing beyond the pad is exposed**. `u` is tolerated once at the pad edge,
+  so a track crossing any positive expansion ring wider than `u` (about 10 µm)
+  stays an error;
+- **nothing beside the pad beyond one clean entry**. The copper under mask within
+  the policy clearance (0.09 mm) of the opening may not exceed what one straight
+  crossing at 45° or steeper puts there (1.45 × track width × clearance). Only a
+  straight segment with exactly one end inside the pad gets that allowance. A
+  segment lying wholly on the pad gets none.
+
+So these stay errors:
+
+- a track that runs along or straddles the pad edge, or overlaps it by more than
+  the allowance above (JLCDFM danger, #8914). The allowance is an **area
+  budget**, not a ban on touching the edge: a straight entry may put up to
+  1.45 × track width × 0.09 mm of copper under mask within 0.09 mm of the
+  opening. A perpendicular entry uses 1.0 of that factor, so the rest can be
+  copper beside an adjacent pad side, and the finding stays info. Measured on
+  the pinned image (kicad-cli 10.0.6), 0 mm expansion: a 0.2 mm track entering
+  a 1 × 1 mm rect pad perpendicular, with its centreline 0.05 mm inside the
+  pad's side edge, 0.1 mm deep; a 0.4 mm track entering a 0.3 mm-wide pad
+  0.1 mm deep; and a 0.3 mm track entering a 0.25 mm-wide pin 0.2 mm deep are
+  all info, although the track's shoulder sits under mask against the pad's side
+  at 0 mm;
+- a straight **pass-through** with no end on the pad: it is not a clean entry,
+  and the fab evidence does not decide it;
+- an entry shallower than about 45°;
+- arcs;
+- vias touching the pad, because their ring leaves copper beside the opening;
+- pours under and around the pad (a reviewed pour can be declared instead, see
+  below).
+
+Same-net copper *beside* a pad without touching it is still measured at the
+policy clearance. Each measurement records `exposed_beyond_owner_mm2` (copper
+exposed beyond the pad) and `beside_owner_excess_mm2` (copper beside it in excess
+of one clean entry), so a verdict can be audited. The trailing `same-net own-pad
+entry` / `same-net pass-through` label is triage text from the copper outline
+and can differ from the class for very wide or very short tracks. The class uses
+the track's authored ends. Evidence and per-board counts:
+[mask-to-copper-own-pad-8858](../research/mask-to-copper-own-pad-8858.md).
+
 ## Declare a particular connected escape
 
 The owning pad is excluded only by its source UUID. Other copper remains eligible
@@ -170,7 +233,8 @@ owner. A single-pad escape declaration does not waive a merged-region finding.
 Measurements record location in millimetres, mask side, copper layer, opening and
 conductor UUIDs, clearance in millimetres and exposed area in square millimetres.
 Exposure area is not penetration depth. Relations are `disjoint`, `touching` or
-`overlap`; dispositions are `violation`, `uncertain` or `intentional`.
+`overlap`; dispositions are `violation`, `uncertain`, `warning`, `intentional` or
+`within_own_pad`.
 
 The comparison uses a recorded numerical construction budget, including native
 polygon approximation and Gerber reconstruction. A result at the threshold,

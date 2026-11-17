@@ -8,11 +8,11 @@
   "benchmark_command": "uv run --frozen --extra dev kct bench external --board beagleconnect_freedom --skip-fetch --output-dir /tmp/5348-beagle-0e8a9a9d -v",
   "artifacts": {
     "source": {
-      "path": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5348/.cache/kct-benchmarks/external/beagleconnect_freedom/BeagleConnect Freedom C7.kicad_pcb",
+      "path": ".loom/worktrees/issue-5348/.cache/kct-benchmarks/external/beagleconnect_freedom/BeagleConnect Freedom C7.kicad_pcb",
       "sha256": "2783997982826648c60f83042c0dde423db467ff65175b0203505af31c2689a9"
     },
     "normalized": {
-      "path": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5348/.cache/kct-benchmarks/external/normalized/beagleconnect_freedom.kicad_pcb",
+      "path": ".loom/worktrees/issue-5348/.cache/kct-benchmarks/external/normalized/beagleconnect_freedom.kicad_pcb",
       "sha256": "9747958c13a5c625ddd15df7afb3a5a100b6877c134e63c861a2a4c351312d9d"
     },
     "build_log": {
@@ -20,15 +20,15 @@
       "sha256": "482b7e260c6c253e2826fe2887ef5acdf3f51918baf03d87a661e54640d2ed89"
     },
     "router_extension": {
-      "path": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5348/src/kicad_tools/router/router_cpp.cpython-312-darwin.so",
+      "path": ".loom/worktrees/issue-5348/src/kicad_tools/router/router_cpp.cpython-312-darwin.so",
       "sha256": "1ae5da1b9b9375a97abf8620a0b76a069a168d38a867bcf25906f6f3db8289a4"
     },
     "placement_extension": {
-      "path": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5348/src/kicad_tools/placement/placement_cpp.cpython-312-darwin.so",
+      "path": ".loom/worktrees/issue-5348/src/kicad_tools/placement/placement_cpp.cpython-312-darwin.so",
       "sha256": "6cdb84fc4c820e6e8ec0815b494f3cc3a17de5b417db3dc1d1a6b4c1776bc953"
     },
     "drc_extension": {
-      "path": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5348/src/kicad_tools/drc/drc_cpp.cpython-312-darwin.so",
+      "path": ".loom/worktrees/issue-5348/src/kicad_tools/drc/drc_cpp.cpython-312-darwin.so",
       "sha256": "db06ef4b285a3678a351b7d961727116f38eefbeecd5347cfcea0e50192fbff4"
     },
     "beagleconnect_freedom.zero-touch.json": {

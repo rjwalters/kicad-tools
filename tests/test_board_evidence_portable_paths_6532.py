@@ -11,6 +11,10 @@ Two halves:
   leak are listed in ``KNOWN_OFFENDERS`` and each board's next gated re-pin
   drops its entries.  The list may only shrink: a new offender fails, and so
   does an allowlisted file that is now clean.
+* A scan (Issue #9238) of committed text under ``data/research/``,
+  ``docs/diagnostics/``, ``benchmarks/`` and ``boards/*/engineering/``.
+  Those files are not hash-bound, so there is no allowlist: any absolute
+  host path fails outright.
 """
 
 from __future__ import annotations
@@ -89,6 +93,53 @@ def test_known_offender_allowlist_only_shrinks():
     assert not cleaned, (
         "These files no longer contain an absolute host path; remove them from "
         "KNOWN_OFFENDERS so they cannot regress:\n  " + "\n  ".join(cleaned)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Research / benchmark / diagnostic evidence scan (Issue #9238)
+# ---------------------------------------------------------------------------
+
+# An absolute home-directory path embedded in any tracked text file.
+HOST_PATH_IN_TEXT = re.compile(r"/(?:Users|home)/[A-Za-z0-9._-]+/")
+
+#: Not hash-bound: unlike board evidence there is no allowlist, any hit fails.
+NON_BOARD_EVIDENCE_SCOPES = (
+    "data/research/**",
+    "docs/diagnostics/**",
+    "benchmarks/**",
+    "boards/*/engineering/**",
+)
+
+
+def _committed_non_board_evidence() -> list[str]:
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "-z", "--", *NON_BOARD_EVIDENCE_SCOPES],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("not a git checkout")
+    return sorted({p for p in out.decode().split("\0") if p})
+
+
+def test_committed_research_and_diagnostics_records_no_host_path():
+    offenders = []
+    for rel in _committed_non_board_evidence():
+        path = REPO_ROOT / rel
+        if not path.is_file():  # deleted in the working tree
+            continue
+        data = path.read_bytes()
+        if b"\0" in data:  # binary (e.g. images) is not text to scan
+            continue
+        if HOST_PATH_IN_TEXT.search(data.decode("utf-8", errors="replace")):
+            offenders.append(rel)
+    assert not offenders, (
+        "Committed research/benchmark/diagnostic evidence records an absolute "
+        "host path (Issue #9238). Record the path repo-relative or as a "
+        "placeholder (<repo>, <chorus>) instead:\n  " + "\n  ".join(offenders)
     )
 
 

@@ -342,7 +342,7 @@ Net MON_ALERT: C++ pathfinder gave up (post-route clearance validation failed; e
   Intra-IC route: Q1 pins 6->5 (1.27mm)
   Grace pass: 5/6 starved net(s) routed in 7.2s (0 skipped) (Issue #3452)
   Initial pass: 23/31 nets, overflow: 56
-/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 23 on F.Cu]: (174.6000, 103.5000) -> (176.4100, 104.0450) is 16.7573 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 23 on F.Cu]: (174.6000, 103.5000) -> (176.4100, 104.0450) is 16.7573 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
   verify_segment_45(
 
 === Two-Phase Routing Complete ===
