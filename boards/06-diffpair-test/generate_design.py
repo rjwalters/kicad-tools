@@ -1939,7 +1939,9 @@ def _same_net_band_seat_ok(
 
     Issue #9114 (the #8938/#8957/#8975 family).  The annulus exists on every
     layer, so same-net copper on any layer counts.  Overlap/touch is one
-    copper union (no slit); only the open band ``(0, edge)`` is rejected.
+    copper union (no slit); the band ``[0, edge)`` is rejected, a tangent
+    pad seat (``gap == 0``, Issue #9124) included -- a one-point touch is not
+    a union.
     ``same_net_copper`` holds shapely geometries (segment outlines and via
     circles) of the via's own net; the via being moved must be excluded by
     the caller.  Pads grade on the pad population's edge, everything else

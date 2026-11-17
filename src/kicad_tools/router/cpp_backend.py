@@ -142,7 +142,10 @@ STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
 # / ``set_airwire_cells`` verbs -- the prospective airwire-separation term
 # summed inside ``Grid3D::get_negotiated_cost``.  A v66 .so prices negotiated
 # cells without the term, silently breaking Python/C++ cost parity.
-_REQUIRED_CPP_BUILD_VERSION = 67
+# v68 (Issue #9124): the same-net pad slit-band predicate rejects the tangent
+# ``gap == 0`` seat (face-aligned corner wedge) it used to accept.  A v67 .so
+# still seats the PCIE_RX+ wedge, so it must be rejected.
+_REQUIRED_CPP_BUILD_VERSION = 68
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``

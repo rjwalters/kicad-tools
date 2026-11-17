@@ -500,8 +500,20 @@ def same_net_segment_pad_gap_acceptable(
         return True
     ax, ay = a
     bx, by = b
+    is_point = ax == bx and ay == by
+    # Issue #9124: the lower edge of the rejected band differs by primitive.
+    # A point (via annulus) gap is SIGNED -- ``hypot - r`` is negative on real
+    # overlap and exactly 0 on the tangent locus (centre exactly ``r`` from a
+    # pad face or corner), where the disc touches the rectangle only at one
+    # point and the receding arc leaves a wedge the fab-view checker grades
+    # (touch-at-a-point is not a copper union).  So the point branch rejects
+    # from ``-1e-9`` up, accepting only real overlap (``gap <= -1e-9``) or
+    # clearance.  The segment gap is ``max(0, ...)``: ``0`` there means the
+    # centerline REACHES the rectangle (genuine overlap), so that branch
+    # must keep accepting ``gap == 0``.
+    lower = -1e-9 if is_point else 1e-9
     for bbox in same_net_pad_bboxes:
-        if ax == bx and ay == by:
+        if is_point:
             # Point primitive: the annulus form's arithmetic exactly.
             dx = max(0.0, bbox[0] - ax, ax - bbox[2])
             dy = max(0.0, bbox[1] - ay, ay - bbox[3])
@@ -511,7 +523,7 @@ def same_net_segment_pad_gap_acceptable(
         # The two acceptable regions: unioned with the pad, or clear of the
         # fab detection edge.  The 1e-9 slack mirrors _pad_conflict's
         # float-noise tolerance for a gap computed as exactly ``min_gap_mm``.
-        if 1e-9 < gap < min_gap_mm - 1e-9:
+        if lower < gap < min_gap_mm - 1e-9:
             return False
     return True
 
@@ -608,9 +620,12 @@ def same_net_pad_gap_acceptable(
 
     The constraint is two acceptable regions, not one floor:
 
-    * ``gap <= 0`` -- the annulus touches or overlaps its own pad, so the
-      copper is one union and there is no slit (the drill must still clear
-      the pad bbox, which is what ``--avoid-pad-overlap`` enforces);
+    * ``gap < 0`` -- the annulus overlaps its own pad, so the copper is one
+      union and there is no slit (the drill must still clear the pad bbox,
+      which is what ``--avoid-pad-overlap`` enforces).  Issue #9124: a
+      TANGENT seat (``gap == 0``: centre exactly one radius from a pad face
+      or corner) is NOT a union -- the disc touches the pad at one point and
+      the receding arc leaves a sub-edge wedge -- so it is rejected;
     * ``gap >= min_gap_mm`` -- the fab's detection edge for the pad
       population, read from the resolved stackup (the ``pad_spacing`` dfm
       entry's ``GapBand.detection_edge_mm``; e.g. 0.15 mm on the jlcpcb
@@ -692,8 +707,14 @@ def same_net_pad_gap_band_ring(
     # true disk, so the ring agrees with the point predicate finer than any
     # rasterised mask can resolve (the default 8 segments sag ~1.5e-3 mm at
     # the corners, which IS visible at mask resolution).
+    #
+    # Issue #9124: the inner boundary sits ``1e-9`` INSIDE the radius so the
+    # ring covers the tangent locus (``gap == 0``, centre exactly one radius
+    # from a pad face) the point predicate now rejects -- the ring's
+    # difference would otherwise leave that one-point-wide locus on the
+    # inner polygon's boundary, where a mask can read it either way.
     return pad.buffer(radius + min_gap_mm, quad_segs=64).difference(
-        pad.buffer(radius, quad_segs=64)
+        pad.buffer(radius - 1e-9, quad_segs=64)
     )
 
 

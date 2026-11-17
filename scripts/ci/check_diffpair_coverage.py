@@ -232,10 +232,18 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # fire (0 unallowed, 0 stale), reach 21/21, pour audit OK.  CI's
 # regeneration remains the authority on the final counts (host-sensitive
 # board).
+# Issue #9124 (fresh seed-42 regen, 2026-11-17): the slit-band predicate no
+# longer accepts a TANGENT seat (``gap == 0``, centre exactly one annulus
+# radius from a pad face or corner) as a union -- touch-at-a-point leaves a
+# wedge -- in the Python point predicate, the ring form and the C++ mirror
+# (BUILD_VERSION 68).  The PCIE_RX+ face-aligned corner wedge is gone and its
+# entry is deleted.  14 findings remain (MIPI_CLK+ 11, GND 2, USB2_D- 1); the
+# USB2_D- one is the 0.0413 mm annulus-vs-own-net-TRACE slit at via
+# (114.15, 56.05) against the vertical trace at x = 113.703, which needs a
+# C++ via-vs-own-segment band check and is split out of #9124.
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("physical_copper_gap", "GND"): 8962,
     ("physical_copper_gap", "MIPI_CLK+"): 8962,
-    ("physical_copper_gap", "PCIE_RX+"): 8962,
     ("physical_copper_gap", "USB2_D-"): 8962,
 }
 
