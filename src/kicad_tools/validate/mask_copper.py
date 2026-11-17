@@ -39,8 +39,8 @@ same-net pour) is also declarable through a ``MaskEscapeIntent``.
   owner pad (a ``merged_region``), so there is no pad to test an endpoint
   against -- a ``segment``/``arc``/``via`` over such an opening has endpoints,
   but they are not judged.
-- (omitted) -- either net is unidentified or the opening is a merged region
-  with no single owner net.
+- (omitted) -- the conductor's net is unidentified, or none of the opening's
+  contributors has an identified net.
 
 While ``assessment.coverage != "complete"`` the findings are provisional:
 severity is capped at ``warning`` (never ``error``) and each message carries

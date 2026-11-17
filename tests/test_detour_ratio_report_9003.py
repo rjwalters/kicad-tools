@@ -446,6 +446,10 @@ class TestSidecarContract:
             "StubRouter",
             (),
             {
+                # Issue #9013: the report is flag-gated -- a probe that ran
+                # for --detour-repair alone must not print/write it.  This
+                # stub exercises the report path, so it opts in.
+                "report_detour_ratio": True,
                 "detour_probe_records": [
                     DetourConnectionRecord(net_name="N1", connection_index=0, alone_mm=10.0)
                 ],

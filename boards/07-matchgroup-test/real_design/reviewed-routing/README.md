@@ -64,18 +64,23 @@ DQ7 (U2.13) and LDQM (U1.141) had the byte-1 defect from #9091: each trunk ran
 through its own pad and on past it, and the authored escape doubled back along
 the trunk. That is 6–7 mm of copper per net the signal never travels, but
 `validate.py` sums it as matched length. Measured as the shortest path through
-the copper (`../physical_path.py`), the real byte-0 spread was 7.51 mm against
-`group_skew_mm` 5.0. `../repair_byte0_loops_9118.py` is the complete record of
-the fix.
+the copper, the real byte-0 spread was 7.51 mm against `group_skew_mm` 5.0 as
+filed (the board-local model #9118 was filed with; removed by #9176). The
+shared contact model, `TraceLengthAnalyzer.measure_net_path`, reads 8.16 mm on
+the same stripped copper. `../repair_byte0_loops_9118.py` is the complete
+record of the fix.
 - It removes the loop copper, so each trunk ends inside its own pad.
 - It restores the length as real series length: two `SerpentineGenerator`
   trombones, 5.93 mm on DQ7 and 6.98 mm on LDQM, on free F.Cu.
 - It changes no tolerance and not `authored-source`, which never held the loops
   in this form. Only this directory's manifest is re-pinned.
 
-Physical byte-0 spread is now 0.92 mm (DQ6 62.60 to DQ0 63.52 mm). Run the
-script with `--verify-from-git c694302cd` to reproduce the PCB byte for byte,
-and `physical_path.py` to print the per-net lengths.
+Physical byte-0 spread is now 1.18 mm through `TraceLengthAnalyzer
+.measure_net_path` (canonical since #9176: DQ5 62.20 to DQ2 63.37 mm; the
+removed board-local model read 0.92 mm). Run the script with
+`--verify-from-git c694302cd` to reproduce the PCB byte for byte, and print
+the per-net lengths by measuring each with `measure_net_path` the way
+`tests/test_board07_byte0_physical_spread.py` pins them.
 
 `build.py` still reaches the same end state as after #9091: 0 native DRC
 violations, 0 unconnected items, clean label and copper LVS, and only its full

@@ -217,6 +217,21 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # The entries therefore STAY until the trace-population / corner-wedge
 # guard exists; deleting them here fails the gate on the still-firing
 # identities.
+# Issue #9140 (re-measured 2026-11-17, fresh seed-42 regen judged by this
+# gate): the coupled-leg gates drained the remaining population to 15
+# blocking physical_copper_gap findings -- MIPI_CLK+ 11, GND 2, USB2_D- 1,
+# PCIE_RX+ 1 (was 21: MIPI_CLK+ 11, GND 6, USB2_D- 3, PCIE_RX+ 1).  The
+# pose/trunk and stub-tail spans have been re-verified through the
+# slit-band predicate since #9156, and the joint-search candidate plus the
+# Phase-B fine-grid repair are swept through it before commit (#9140), so
+# the LVDS1_P..4_P own-pad population the issue filed is at 0 and the
+# GND / USB2_D- remainder drained with the changed coupled-vs-fallback
+# mix.  Both sibling via populations persist, one finding each: the
+# PCIE_RX+ 0.0011 mm face-aligned corner wedge and a USB2_D- 0.0413 mm
+# annulus-vs-own-net-TRACE slit (0.1016 edge).  All four entries still
+# fire (0 unallowed, 0 stale), reach 21/21, pour audit OK.  CI's
+# regeneration remains the authority on the final counts (host-sensitive
+# board).
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("physical_copper_gap", "GND"): 8962,
     ("physical_copper_gap", "MIPI_CLK+"): 8962,

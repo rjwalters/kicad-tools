@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from kicad_tools.router import via_clearance
 from kicad_tools.router.quantize import segment_angle_census
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.validate.rules.via_in_pad import ViaInPadRule
@@ -129,14 +130,14 @@ def _via_pad_gap(path, pad_size=2):
 
 def test_relocation_walks_out_of_same_net_slit_band(tmp_path, recipe, monkeypatch):
     """Issue #9114: a relocated via must not open a (0, edge) same-net slit."""
-    pad_edge, _trace_edge = recipe._same_net_band_edges()
+    pad_edge, _trace_edge = via_clearance.same_net_band_edges()
     assert pad_edge > 0  # jlcpcb 4layer_1oz resolves a pad_spacing edge
 
     # Control: with the band disabled the ring seats the via at +0.9 mm east,
     # an annulus gap of ~0.05 mm to its own pad -- inside (0, edge).
     control = tmp_path / "control.kicad_pcb"
     write_overlap_board(control, count=1, pad_size=2, via_dx=0.45)
-    monkeypatch.setattr(recipe, "_same_net_band_edges", lambda: (0.0, 0.0))
+    monkeypatch.setattr(via_clearance, "same_net_band_edges", lambda: (0.0, 0.0))
     assert recipe._legalize_signal_vias(control) == 1
     assert 0 < _via_pad_gap(control) < pad_edge
 
@@ -153,24 +154,24 @@ def test_relocation_walks_out_of_same_net_slit_band(tmp_path, recipe, monkeypatc
     )
 
 
-def test_grid_escape_seat_is_graded_through_the_band(recipe):
+def test_grid_escape_seat_is_graded_through_the_band():
     """Issue #9114: the same predicate rejects in-band seats, accepts both sides."""
     from shapely.geometry import LineString, Point
 
     pad = [(-1.0, -1.0, 1.0, 1.0)]
     dia = 0.5
     # Annulus edge 0.05 from the pad (in band) / touching / clear of the band.
-    assert not recipe._same_net_band_seat_ok(1.3, 0, dia, [], pad, 0.15, 0.15)
-    assert recipe._same_net_band_seat_ok(1.25, 0, dia, [], pad, 0.15, 0.15)
-    assert recipe._same_net_band_seat_ok(1.5, 0, dia, [], pad, 0.15, 0.15)
+    assert not via_clearance.same_net_band_seat_ok(1.3, 0, dia, [], pad, 0.15, 0.15)
+    assert via_clearance.same_net_band_seat_ok(1.25, 0, dia, [], pad, 0.15, 0.15)
+    assert via_clearance.same_net_band_seat_ok(1.5, 0, dia, [], pad, 0.15, 0.15)
     # Same-net segment / via copper grade on the trace edge.
     seg = LineString([(0, 1.65), (3, 1.65)]).buffer(0.075)
-    assert not recipe._same_net_band_seat_ok(1.3, 2.0, dia, [seg], [], 0.15, 0.15)
-    assert not recipe._same_net_band_seat_ok(
+    assert not via_clearance.same_net_band_seat_ok(1.3, 2.0, dia, [seg], [], 0.15, 0.15)
+    assert not via_clearance.same_net_band_seat_ok(
         0, 0, dia, [Point(0.65, 0).buffer(0.3)], [], 0.15, 0.15
     )
     # Edge 0 (profile without pad_spacing) leaves behavior unchanged.
-    assert recipe._same_net_band_seat_ok(1.3, 0, dia, [seg], pad, 0.0, 0.0)
+    assert via_clearance.same_net_band_seat_ok(1.3, 0, dia, [seg], pad, 0.0, 0.0)
 
 
 def _write_stub_board(path, stubs):
@@ -265,6 +266,44 @@ def test_leg_band_predicate_grades_slits_but_not_unions_or_bends(recipe):
     assert ok(*leg, [seg(0.2, 0.2, 0.6, 0.2)], [], [(1.0, 0.125, 1.5, 0.6)], 0.0, 0.0)
 
 
+def test_fixture_relocation_same_net_slit_residual_is_the_accepted_one(tmp_path, recipe):
+    """Issue #9187: the one same-net slit family the leg check lets through.
+
+    Measured on the committed fixture (jlcpcb ``4layer_1oz``): the J1.B7
+    relocation ``(113.00, 57.90) -> (113.530, 58.430)`` writes a 0.15 mm
+    ``In1.Cu`` leg at 45 degrees out of the exact point where the old via's
+    0.25 mm vertical chain ends.  Chain and leg form a 45-degree same-net
+    wedge whose first non-touching chain pieces sit 0.0841 / 0.0664 mm from
+    the leg (trace band ``(0, 0.1016)``).  It is accepted, not drained:
+
+    * same net -- no short, only the fab-view notch warning, and
+      ``(physical_copper_gap, USB2_D-)`` is already an acknowledged identity
+      in ``DIFFPAIR_FIXTURE_ALLOWED_FINDINGS``;
+    * the notch is the junction itself: halving the chain reach in
+      ``_same_net_leg_band_ok`` leaves it (0.0945 / 0.0768 mm), and a reach
+      of 0 leaves two vias unrepairable (``RuntimeError``), so no cheap
+      predicate removes it without the over-rejection of #9186.
+
+    This pins the acceptance: any *other* new same-net finding from the
+    legalizer, or a changed repair count, fails here.
+    """
+    fixture = ROOT / "regression-fixture/diffpair_test_routed.kicad_pcb"
+    path = tmp_path / "fixture.kicad_pcb"
+    shutil.copy(fixture, path)
+    before = {(v.layer, v.key) for v in _same_net_slits(path)}
+
+    assert recipe._legalize_signal_vias(path) == 7
+
+    new = [v for v in _same_net_slits(path) if (v.layer, v.key) not in before]
+    # F.Cu rows re-keyed by the pad-population findings' boundary order are
+    # not new copper: they pair with an equal-gap row that disappeared.
+    in1 = sorted(round(v.actual_value, 4) for v in new if v.layer == "In1.Cu")
+    assert in1 == [0.0664, 0.0841]
+    assert {v.nets for v in new if v.layer == "In1.Cu"} == {("USB2_D-",)}
+    after = {(v.layer, v.key) for v in _same_net_slits(path)}
+    assert len(before) == 29 and len(after) == 31
+
+
 def write_drill_pair_slide_board(path):
     """Two same-net vias 0.25 mm drill-edge apart, joined by one F.Cu stub.
 
@@ -317,12 +356,12 @@ def test_drill_pair_slide_walks_out_of_same_net_slit_band(tmp_path, recipe, monk
     slide keeps the victim's chain and only adds connectors, so the only
     exclusion the check needs is the victim via itself.
     """
-    pad_edge, _trace_edge = recipe._same_net_band_edges()
+    pad_edge, _trace_edge = via_clearance.same_net_band_edges()
     assert pad_edge > 0
 
     control = tmp_path / "control.kicad_pcb"
     write_drill_pair_slide_board(control)
-    monkeypatch.setattr(recipe, "_same_net_band_edges", lambda: (0.0, 0.0))
+    monkeypatch.setattr(via_clearance, "same_net_band_edges", lambda: (0.0, 0.0))
     assert recipe._legalize_signal_vias(control) == 1
     assert 0 < _slid_via_pad_gap(control) < pad_edge
 

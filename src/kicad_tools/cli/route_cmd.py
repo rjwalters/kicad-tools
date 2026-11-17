@@ -8701,6 +8701,37 @@ def _apply_detour_ratio_report(router: "Autorouter", args) -> None:
         router.report_detour_ratio = True
 
 
+def _apply_detour_repair(router: "Autorouter", args) -> None:
+    """Enable the ``--detour-repair`` post-settle pass (issue #9013).
+
+    Off by default (mirrors the ``_ripup_strategy`` attribute-on-router
+    pattern): without the flag no probe pre-pass and no repair pass run
+    and routed output is byte-identical.  When passed, sets
+    ``router.detour_repair``: ``route_all_negotiated`` runs the
+    alone-on-empty probe pre-pass (its offender list) and, after the
+    loop settles, the transactional repair pass
+    (``router/detour_repair.py``).  A no-op when the flag is absent, so
+    every attempt helper can call it unconditionally.
+    """
+    if getattr(args, "detour_repair", False):
+        from kicad_tools.cli.progress import flush_print
+
+        strategy = getattr(args, "strategy", "negotiated")
+        if strategy != "negotiated":
+            # Issue #9013 / #5908 lesson: the repair pass settles after the
+            # negotiated loop (or the escape/two-phase detailed loop whose
+            # no-blocks fallback lands there).  ``route_all`` (basic) and the
+            # multistart strategies never reach those hooks, so the flag
+            # would silently do nothing -- say so and ignore it instead.
+            flush_print(
+                f"  --detour-repair: not available with --strategy {strategy} "
+                "(the repair pass settles after the negotiated/escape drivers); "
+                "flag ignored"
+            )
+            return
+        router.detour_repair = True
+
+
 def _apply_airwire_separation(router: "Autorouter", args) -> None:
     """Set the ``--airwire-separation-weight`` on the router (Issue #8999).
 
@@ -8723,14 +8754,17 @@ def _apply_airwire_separation(router: "Autorouter", args) -> None:
 def _report_detour_ratio(output_path: Path, router: object | None) -> None:
     """Print the detour-ratio report and write its sidecar (#9003).
 
-    A no-op unless the router ran the probe (flag off, or a mesh/lattice
-    run that never reaches the grid-engine pre-pass).  Like
-    ``--report-stage-quality``, printing is NOT cancelled by ``--quiet``:
-    a non-empty ``detour_probe_records`` means the user opted in
-    explicitly.  The sidecar write is best-effort on the established
-    post-route sidecar contract -- a blocked write warns and never fails
-    the route.
+    A no-op unless ``--report-detour-ratio`` was passed AND the router ran
+    the probe (a ``--detour-repair``-only run also probes, but it consumes
+    the records as its offender list and does not opt into this report --
+    issue #9013).  Like ``--report-stage-quality``, printing is NOT
+    cancelled by ``--quiet``: a non-empty ``detour_probe_records`` means
+    the user opted in explicitly.  The sidecar write is best-effort on the
+    established post-route sidecar contract -- a blocked write warns and
+    never fails the route.
     """
+    if not getattr(router, "report_detour_ratio", False):
+        return
     records = getattr(router, "detour_probe_records", None)
     if not records:
         return
@@ -13109,6 +13143,7 @@ def route_with_layer_escalation(
         _apply_pad_access_invariant(router, args)
         _apply_ripup_strategy(router, args)
         _apply_detour_ratio_report(router, args)
+        _apply_detour_repair(router, args)
         _apply_airwire_separation(router, args)
         # Issue #6401: reserve pour-pad via sites before signal routing.
         _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
@@ -14322,6 +14357,7 @@ def route_with_rule_relaxation(
         _apply_pad_access_invariant(router, args)
         _apply_ripup_strategy(router, args)
         _apply_detour_ratio_report(router, args)
+        _apply_detour_repair(router, args)
         _apply_airwire_separation(router, args)
         # Issue #6401: reserve pour-pad via sites before signal routing.
         _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
@@ -16829,6 +16865,7 @@ def route_with_combined_escalation(
             _apply_pad_access_invariant(router, args)
             _apply_ripup_strategy(router, args)
             _apply_detour_ratio_report(router, args)
+            _apply_detour_repair(router, args)
             _apply_airwire_separation(router, args)
             # Issue #6401: reserve pour-pad via sites before signal routing.
             _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
@@ -21414,6 +21451,24 @@ def _route_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--detour-repair",
+        action="store_true",
+        help=(
+            "After the negotiated loop settles, run ONE targeted repair pass "
+            "over the connections the detour probe flags (above ~1.25x their "
+            "alone-on-empty cost, worst first): lift the few nets blocking "
+            "the offender's short corridor, re-route the offender the short "
+            "way, re-land the lifted nets, and keep the rearrangement only "
+            "if the whole-board score is strictly better (nothing unrouted, "
+            "less copper). One attempt per offender; a losing attempt is "
+            "rolled back exactly. Implies the #9003 probe pre-pass but NOT "
+            "its report/sidecar -- pass --report-detour-ratio for that. "
+            "Off by default: without the flag routed output is byte-identical "
+            "(issue #9013). Grid engine only; a no-op on the mesh/lattice "
+            "engines."
+        ),
+    )
+    parser.add_argument(
         "--auto-pour",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -23938,6 +23993,7 @@ def _run_main_impl(args, parser, argv) -> int:
     _apply_pad_access_invariant(router, args)
     _apply_ripup_strategy(router, args)
     _apply_detour_ratio_report(router, args)
+    _apply_detour_repair(router, args)
     _apply_airwire_separation(router, args)
     # Issue #6401: reserve pour-pad via sites before signal routing.
     _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
