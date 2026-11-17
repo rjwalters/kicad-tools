@@ -33,6 +33,14 @@ Human-approved issues ready for implementation (`loom:issue`).
 - **#9031**: tests: nested pytest.approx() at test_expand_route_experiment.py:166 blocks any pytest >= 9.2 bump
 - **#9140**: Coupled-pair pose/stub-tail legs: keep own-net pad legs out of the slit band (#9011, board 06 LVDS)
 - **#9210**: acute_foldback: cross-net clearance veto keeps copper a later same-group repair removed
+- **#9231**: design-source.zip recipe sources are unguarded; 3 are drifted from live (boards 05, 07)
+- **#9236**: Escape router's same-net pad slit check builds pad boxes from raw width/height, ignoring rotation
+- **#9241**: mypy reports 8 errors in optional-extra modules that the CI Type Check never sees
+- **#9242**: fab parity TABLE_VERSION is a merge-conflict hotspot: concurrent PRs keep claiming the same number
+- **#9243**: No test runs a board's package producer, so a textually clean merge can leave it refusing
+- **#9244**: kct route --report-detour-ratio: the alone-on-empty probe spends the real run's --timeout and wall-deadline budget
+- **#9245**: ci flake: 'Detect Changes' paths-filter fails on GitHub 'diff temporarily unavailable' listFiles error
+- **#9246**: ci flake: 'Changelog Fragment Check' cancelled by its 5-minute job timeout inside actions/checkout, reported as a fragment failure
 
 ## In Progress
 
@@ -41,7 +49,6 @@ Issues currently being built (`loom:building`).
 - **#8858**: Verify default-on mask_to_copper on native KiCad 10.0.5 and baseline 543/670 board findings (PR #8849)
 - **#8979**: CI red on main: Routed PCB DRC Check fails on boards 01/02 physical_copper_gap (2 + 14 blocking errors)
 - **#9000**: Router: barrier-closure diagnostic (predict severed nets when a routing loop closes)
-- **#9001**: Router: regret ordering as a net-order method (commit biggest-loss nets first)
 - **#9019**: Grid router (Python + C++): keep own-net pad-vs-trace legs and neck-down taper out of the slit band (#9011, board 06)
 - **#9033**: Silkscreen-to-hole: kct reports far fewer findings than the fab DFM, and only as warnings
 - **#9065**: Wire the silk-vs-drill tools into board 03's recipe and gate silk_hole_overlap = 0 in CI
@@ -50,27 +57,32 @@ Issues currently being built (`loom:building`).
 - **#9120**: CI: native-diagnostics opt-in is a substring match on the PR body, so a PR that merely mentions the marker inherits the native-workload audit gate
 - **#9124**: Board 06 drain remainder: same-net via-vs-trace slits and the face-aligned corner-wedge seat the slit-band predicate accepts
 - **#9138**: Match-group skew producer measures summed PCB copper: dead-end loops and duplicates mask real skew
-- **#9143**: Board 03: fiducial keepouts collide with the native_clearance contract and the #8838 mask policy
 - **#9182**: off_path_length_mm charges length-matching staircase copper, so OFF_PATH_TOLERANCE_MM tracks staircase density rather than defect presence
-- **#9188**: same_net_band_edges() hardcodes the jlcpcb 4L/1oz stackup inside a shared library module
-- **#9196**: Board 06 leg band check: pin the `sibling_legs` contract at the predicate level (and tidy its signature)
-- **#9204**: Converge board 06's leg-band predicate on the shared band constants from #9150
 - **#9208**: Board 06 USB2_D- drain: C++ via-annulus vs own-net-trace slit-band check
-- **#9214**: Record the trim-less detection margin that `_straddle_slack_mb` trades away on large-page hosts
 - **#9217**: Board 07: test_board07_real_design still grades byte spreads on raw copper, not the gate's matched length
+- **#9226**: same_net_band_edges(): a missing DFM entry disables the band with no warning, and copper_oz does not match the package's outer_oz vocabulary
+- **#9228**: design-source/ archive can silently drift from the live board recipe (measured: 11 lines stale on main)
+- **#9232**: test oracle drops round/oval Gerber flashes plotted as zero-length lines (native mask comparisons can pass vacuously)
+- **#9234**: mask_to_copper stays incomplete on a footprint-embedded keepout rule area (missing/ambiguous native object)
+- **#9235**: Slow-suite test test_armc_route_gives_usb_d_equal_vias_with_every_gate fails on main (USB_D+ 2 vias, USB_D- 3)
+- **#9237**: 62 open Dependabot alerts with no open fix PR (Pillow, filelock, soupsieve, dnspython, fast-uri)
+- **#9238**: 22 tracked files contain an absolute local home-directory path
+- **#9239**: Board 04 repair_sharp_corners: clearance check ignores board edge and keepouts, and can fall back to a narrower trace
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#9083**: fix(board03): clip silk off drilled holes in the recipe and gate silk_hole_overlap = 0
-- **#9177**: fix(board03): land fiducials and board ID past the native_clearance contract
-- **#9207**: refactor: require stackup args on same_net_band_edges()
+- **#9108**: fix(check): mask_to_copper stops reporting a pad's own land as exposed trace
+- **#9209**: fix(router): reject tangent via seats in the same-net pad slit-band guard
 - **#9212**: fix: refuse C++ via seats whose annulus slits an own-net trace
-- **#9218**: docs: record trim-less detection margin and fix healthy-residual sign in RSS hook test
 - **#9219**: test: grade board07 byte spreads on the gate's matched length
-- **#9222**: feat: add --order-method regret net ordering (biggest-loss nets first)
-- **#9224**: refactor: use shared band constants in board 06 leg-band predicate
+- **#9229**: fix: warn when same_net_band_edges() hits an unresolved stackup
+- **#9230**: test: pin design-source archives byte-for-byte to live board recipes
+- **#9248**: fix: rewrite absolute host paths in committed evidence to repo-relative
+- **#9249**: chore(deps): bump pillow, filelock, soupsieve, dnspython, fast-uri to patched versions
+- **#9250**: fix: keep keepout rule areas from blocking mask-to-copper attribution
 
 ## Approved (Awaiting Merge)
 
@@ -79,7 +91,6 @@ PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 - **#8623**: build(deps-dev): bump @astrojs/check from 0.9.11 to 0.9.12 in /site
 - **#9123**: ci: anchor native-diagnostics opt-in to its own line and state the audit tolerance
 - **#9194**: docs: record measured off-path decomposition at board-07's OFF_PATH_TOLERANCE_MM
-- **#9220**: test: pin sibling_legs contract on _same_net_leg_band_ok directly
 
 ## Proposed
 
@@ -104,7 +115,6 @@ Issues carrying `loom:curated`.
 - **#8962**: Same-net slit population on fresh regens: repair-pass + route-side producers (stale fixture attribution from #8957) *(curated)*
 - **#8979**: CI red on main: Routed PCB DRC Check fails on boards 01/02 physical_copper_gap (2 + 14 blocking errors) *(curated)*
 - **#9000**: Router: barrier-closure diagnostic (predict severed nets when a routing loop closes) *(curated)*
-- **#9001**: Router: regret ordering as a net-order method (commit biggest-loss nets first) *(curated)*
 - **#9019**: Grid router (Python + C++): keep own-net pad-vs-trace legs and neck-down taper out of the slit band (#9011, board 06) *(curated)*
 - **#9031**: tests: nested pytest.approx() at test_expand_route_experiment.py:166 blocks any pytest >= 9.2 bump *(curated)*
 - **#9033**: Silkscreen-to-hole: kct reports far fewer findings than the fab DFM, and only as warnings *(curated)*
@@ -118,15 +128,26 @@ Issues carrying `loom:curated`.
 - **#9124**: Board 06 drain remainder: same-net via-vs-trace slits and the face-aligned corner-wedge seat the slit-band predicate accepts *(curated)*
 - **#9138**: Match-group skew producer measures summed PCB copper: dead-end loops and duplicates mask real skew *(curated)*
 - **#9140**: Coupled-pair pose/stub-tail legs: keep own-net pad legs out of the slit band (#9011, board 06 LVDS) *(curated)*
-- **#9143**: Board 03: fiducial keepouts collide with the native_clearance contract and the #8838 mask policy *(curated)*
 - **#9182**: off_path_length_mm charges length-matching staircase copper, so OFF_PATH_TOLERANCE_MM tracks staircase density rather than defect presence *(curated)*
-- **#9188**: same_net_band_edges() hardcodes the jlcpcb 4L/1oz stackup inside a shared library module *(curated)*
-- **#9196**: Board 06 leg band check: pin the `sibling_legs` contract at the predicate level (and tidy its signature) *(curated)*
-- **#9204**: Converge board 06's leg-band predicate on the shared band constants from #9150 *(curated)*
 - **#9208**: Board 06 USB2_D- drain: C++ via-annulus vs own-net-trace slit-band check *(curated)*
 - **#9210**: acute_foldback: cross-net clearance veto keeps copper a later same-group repair removed *(curated)*
-- **#9214**: Record the trim-less detection margin that `_straddle_slack_mb` trades away on large-page hosts *(curated)*
 - **#9217**: Board 07: test_board07_real_design still grades byte spreads on raw copper, not the gate's matched length *(curated)*
+- **#9226**: same_net_band_edges(): a missing DFM entry disables the band with no warning, and copper_oz does not match the package's outer_oz vocabulary *(curated)*
+- **#9228**: design-source/ archive can silently drift from the live board recipe (measured: 11 lines stale on main) *(curated)*
+- **#9231**: design-source.zip recipe sources are unguarded; 3 are drifted from live (boards 05, 07) *(curated)*
+- **#9232**: test oracle drops round/oval Gerber flashes plotted as zero-length lines (native mask comparisons can pass vacuously) *(curated)*
+- **#9234**: mask_to_copper stays incomplete on a footprint-embedded keepout rule area (missing/ambiguous native object) *(curated)*
+- **#9235**: Slow-suite test test_armc_route_gives_usb_d_equal_vias_with_every_gate fails on main (USB_D+ 2 vias, USB_D- 3) *(curated)*
+- **#9236**: Escape router's same-net pad slit check builds pad boxes from raw width/height, ignoring rotation *(curated)*
+- **#9237**: 62 open Dependabot alerts with no open fix PR (Pillow, filelock, soupsieve, dnspython, fast-uri) *(curated)*
+- **#9238**: 22 tracked files contain an absolute local home-directory path *(curated)*
+- **#9239**: Board 04 repair_sharp_corners: clearance check ignores board edge and keepouts, and can fall back to a narrower trace *(curated)*
+- **#9241**: mypy reports 8 errors in optional-extra modules that the CI Type Check never sees *(curated)*
+- **#9242**: fab parity TABLE_VERSION is a merge-conflict hotspot: concurrent PRs keep claiming the same number *(curated)*
+- **#9243**: No test runs a board's package producer, so a textually clean merge can leave it refusing *(curated)*
+- **#9244**: kct route --report-detour-ratio: the alone-on-empty probe spends the real run's --timeout and wall-deadline budget *(curated)*
+- **#9245**: ci flake: 'Detect Changes' paths-filter fails on GitHub 'diff temporarily unavailable' listFiles error *(curated)*
+- **#9246**: ci flake: 'Changelog Fragment Check' cancelled by its 5-minute job timeout inside actions/checkout, reported as a fragment failure *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -146,11 +167,11 @@ _None._
 | Operator merge-risk holds | 2 |
 | Very important | 1 |
 | Important | 1 |
-| Ready (`loom:issue`) | 3 |
-| In Progress (`loom:building`) | 20 |
-| PRs awaiting review | 8 |
-| Approved PRs awaiting merge | 4 |
-| Curated | 42 |
+| Ready (`loom:issue`) | 11 |
+| In Progress (`loom:building`) | 22 |
+| PRs awaiting review | 10 |
+| Approved PRs awaiting merge | 3 |
+| Curated | 52 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->
