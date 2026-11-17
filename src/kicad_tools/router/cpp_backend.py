@@ -92,6 +92,10 @@ STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
 # diff-pair partner no longer relaxes a barrel, ``route_via_geometry_clear``
 # gained ``trace_clearance`` and ``router_cpp.trace_via_clearance`` is bound.
 # A v48 .so would let a trace land inside an earlier via's floor.
+# v66 (Issue #9019): ``Pathfinder.set_search_own_net_band`` /
+# ``own_net_band_step_ok`` -- the A* refuses a planar step whose swept copper
+# parks in the fab ``pad_spacing`` slit band beside an own-net SMD pad (twin of
+# ``PathFinder._own_net_band_step_ok``).  A v65 .so has no such gate.
 # v51 (Issue #6375): ``Pathfinder.set_search_own_pad_gate`` /
 # ``own_pad_step_clear`` and ``Grid3D.segment_pads_clear`` -- the A* holds
 # steps on the routing net's own pad cells to the validator's seg-vs-pad
@@ -134,7 +138,7 @@ STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
 # v65 (Issue #7887): the own-pad step gate attributes a refusal decided by the
 # pairwise (HV) floor alone, so an HV pad walled in by LV pads drains as
 # ``FAILURE_PAIRWISE_BLOCKED``.  A v64 .so still reports a bare NO_PATH.
-_REQUIRED_CPP_BUILD_VERSION = 65
+_REQUIRED_CPP_BUILD_VERSION = 66
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -2792,6 +2796,16 @@ class CppPathfinder:
                     self._narrowest_emit_width(start, end, net_trace_width),
                 )
 
+            if hasattr(self._impl, "set_search_own_net_band"):
+                # Issue #9019: own-net pad slit-band step gate -- the fab
+                # detection edge the caller resolved (0 = off; relief probes
+                # skip it, as the Python search does).
+                self._impl.set_search_own_net_band(
+                    0.0
+                    if self._relief_mode
+                    else float(getattr(self._rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
+                )
+
             if self._grid._py_grid is not None:
                 self._sync_stored_routes(self._grid._py_grid)
                 sync_authored_floors(self._grid, self._grid._py_grid)
@@ -3525,6 +3539,33 @@ class CppPathfinder:
                 )
             return min_width
 
+        # Issue #9019: the own-net pad slit-band edge (0 = guard off) and the
+        # net's own SMD pad boxes per layer (built lazily, once per route).
+        band_edge_mm = float(getattr(self._rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
+        _band_cache: dict[int, list[tuple[float, float, float, float]]] = {}
+
+        def _own_net_band_bboxes(
+            net: int, layer_value: int
+        ) -> list[tuple[float, float, float, float]]:
+            hit = _band_cache.get(layer_value)
+            if hit is None:
+                py_grid = getattr(self._grid, "_py_grid", None)
+                hit = [
+                    (
+                        p.x - p.width / 2.0,
+                        p.y - p.height / 2.0,
+                        p.x + p.width / 2.0,
+                        p.y + p.height / 2.0,
+                    )
+                    for p in (py_grid._pads if py_grid is not None else ())
+                    if p.net == net
+                    and not p.through_hole
+                    and not getattr(p, "drill", 0.0) > 0
+                    and p.layer.value == layer_value
+                ]
+                _band_cache[layer_value] = hit
+            return hit
+
         for cpp_seg in result.segments:
             layer_enum_value = self._grid.index_to_layer(cpp_seg.layer)
             # Issue #3532: the C++ ``reconstruct_path`` connects the
@@ -3540,7 +3581,7 @@ class CppPathfinder:
                 float(cpp_seg.x2),
                 float(cpp_seg.y2),
             )
-            from .neck_down import taper_points
+            from .neck_down import band_safe_width, taper_points
 
             centers = []
             if start_needs_neckdown:
@@ -3558,8 +3599,24 @@ class CppPathfinder:
                         self._rules.grid_resolution,
                     )[1:]
                 )
+            # Issue #9019: mirror ``PathFinder._convert_path_to_route`` -- a
+            # taper must not open an air gap beside the net's own pad.
+            band_bboxes = (
+                _own_net_band_bboxes(start.net, layer_enum_value)
+                if band_edge_mm > 0.0 and (start_needs_neckdown or end_needs_neckdown)
+                else None
+            )
             for (sx, sy), (ex, ey) in zip(split_points, split_points[1:], strict=False):
                 seg_width = _segment_width(sx, sy, ex, ey)
+                if band_bboxes:
+                    seg_width = band_safe_width(
+                        (sx, sy),
+                        (ex, ey),
+                        seg_width,
+                        base_trace_width,
+                        band_bboxes,
+                        band_edge_mm,
+                    )
                 if sx == ex and sy == ey:
                     continue
                 seg = Segment(

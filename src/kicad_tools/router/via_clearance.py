@@ -442,6 +442,16 @@ def point_clear_of_copper(
 # ---------------------------------------------------------------------------
 
 
+#: Float-noise slack (mm) of the grid-A* own-net slit-band step gate (#9019).
+#: The native search measures a step from float32 grid coordinates (ulp
+#: ~1.5e-5 mm at board scale) while the Python search uses float64; a gap that
+#: sits exactly on a band edge (``0`` for a pad-touching leg, ``edge`` for a
+#: leg parked at the detection edge) must get the same verdict in both, so both
+#: gates treat ``gap <= TOL`` as unioned and ``gap >= edge - TOL`` as clear.
+#: Far below the 0.05 mm grid pitch, so no grid-reachable position is affected.
+OWN_NET_BAND_STEP_TOL_MM = 5e-5
+
+
 def same_net_segment_pad_gap_acceptable(
     a: tuple[float, float],
     b: tuple[float, float],

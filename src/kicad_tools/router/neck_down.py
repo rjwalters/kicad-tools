@@ -39,3 +39,38 @@ def taper_points(
         count = max(1, math.ceil((hi - lo) * length / max(resolution, 1e-6)))
         cuts.update(lo + (hi - lo) * i / count for i in range(count + 1))
     return [(p0[0] + t * dx, p0[1] + t * dy) for t in sorted(cuts)]
+
+
+def band_safe_width(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    width: float,
+    base_width: float,
+    own_net_bboxes: list[tuple[float, float, float, float]] | None,
+    edge_mm: float,
+) -> float:
+    """Keep a tapered sub-segment out of the own-net pad slit band (#9019).
+
+    The #1018 taper only ever NARROWS copper, and narrowing a leg that the
+    search certified at ``base_width`` (touching its own pad, or clear of the
+    fab ``pad_spacing`` detection edge) opens an air gap between the leg's
+    edge and the pad: a leg that unioned with the pad corner at 0.2 mm lands
+    in the ``(0, edge_mm)`` band at 0.1 mm -- the staircase of fab-view
+    ``physical_copper_gap`` slits hugging a fine-pitch pad's corner.  When
+    ``width`` leaves the segment in the band but ``base_width`` does not,
+    keep ``base_width``; otherwise the taper width stands.
+
+    Pure and backend-agnostic: the Python grid router and the C++ backend's
+    route conversion both call it, so the two emit identical widths.
+    ``own_net_bboxes`` are the segment's own-net, own-layer SMD pad boxes;
+    ``edge_mm <= 0`` (stackup unresolved) or no pads leaves ``width`` as is.
+    """
+    if edge_mm <= 0 or not own_net_bboxes or width >= base_width:
+        return width
+    from .via_clearance import same_net_segment_pad_gap_acceptable
+
+    if same_net_segment_pad_gap_acceptable(a, b, width / 2, own_net_bboxes, edge_mm):
+        return width
+    if same_net_segment_pad_gap_acceptable(a, b, base_width / 2, own_net_bboxes, edge_mm):
+        return base_width
+    return width

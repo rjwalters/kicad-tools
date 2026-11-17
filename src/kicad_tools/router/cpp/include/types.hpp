@@ -356,7 +356,12 @@ namespace router {
 // pads drains as FAILURE_PAIRWISE_BLOCKED instead of a bare NO_PATH
 // (``Grid3D::segment_pads_pairwise_blocker`` is new).  A v64 .so cannot emit
 // that attribution, so it must be rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 65;
+// v66 (Issue #9019): ``Pathfinder::set_search_own_net_band`` /
+// ``own_net_band_step_ok`` are new -- the A* refuses a planar step whose swept
+// copper parks in the fab ``pad_spacing`` slit band beside an own-net SMD pad.
+// A v65 .so has no such gate, so Python and native searches would route
+// divergent bytes on a board that resolves a band edge.
+constexpr int ROUTER_CPP_BUILD_VERSION = 66;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor

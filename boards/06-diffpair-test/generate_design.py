@@ -3342,6 +3342,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         DETERMINISTIC_BUDGET_MAX_SEARCH_ITERATIONS,
         DETERMINISTIC_BUDGET_PER_NET_ITERATIONS,
     )
+    from kicad_tools.cli.stitch_cmd import _resolve_mfr_pad_gap_edge
     from kicad_tools.router import DesignRules, DifferentialPairConfig, load_pcb_for_routing
     from kicad_tools.router.optimizer import (
         GridCollisionChecker,
@@ -3394,6 +3395,13 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         min_trace_width=0.1016,
         neck_down_distance=1.0,
         neck_down_threshold=0.8,
+        # Issue #9019: the fab ``pad_spacing`` detection edge of this board's
+        # stackup (jlcpcb 4-layer 1oz), resolved from the profile table the way
+        # ``kct route`` does (#9017) -- never a literal.  The grid A* (Python
+        # and C++) and the #1018 taper hold own-net copper out of the
+        # ``(0, edge)`` slit band beside the net's own pads.  ``None`` (no
+        # table entry) leaves the guard off.
+        same_net_pad_gap_band_edge_mm=_resolve_mfr_pad_gap_edge("jlcpcb", 4, 1.0),
         # Issue #7908: hard-block the inner layers for the classes that
         # declare ``avoid_layers`` (MIPI_CLK).
         strict_layers=True,
