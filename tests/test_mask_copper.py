@@ -75,7 +75,13 @@ def test_actual_cli_missing_policy_never_prints_or_serializes_pass(tmp_path, cap
 
 
 def toy_geometry(
-    conductor_x=1.2, *, overlap_owner=False, merged=False, owner_net="N", conductor_net="N"
+    conductor_x=1.2,
+    *,
+    overlap_owner=False,
+    merged=False,
+    conductor_kind="segment",
+    owner_net="N",
+    conductor_net="N",
 ):
     from shapely.geometry import box
 
@@ -99,7 +105,7 @@ def toy_geometry(
                 "margin_mm": {"F.Mask": 0.1},
             },
             other: {
-                "kind": "segment",
+                "kind": conductor_kind,
                 "net": conductor_net,
                 "layers_geometry": {"F.Cu": trace},
                 "margin_mm": {},
@@ -164,19 +170,23 @@ def test_same_net_conductor_inside_the_opening_is_flagged_without_overlapping(
 
 
 @pytest.mark.parametrize(
-    "mode",
+    "conductor_kind,mode",
     [
-        "valid",
-        "stale",
-        "wrong_uuid",
-        "wrong_layer",
-        "disconnected",
-        "different_net",
-        "unidentified_owner_net_none",
-        "unidentified_owner_net_empty",
+        (kind, mode)
+        for kind in ("segment", "zone")
+        for mode in (
+            "valid",
+            "stale",
+            "wrong_uuid",
+            "wrong_layer",
+            "disconnected",
+            "different_net",
+            "unidentified_owner_net_none",
+            "unidentified_owner_net_empty",
+        )
     ],
 )
-def test_intent_requires_exact_binding_identity_layer_and_direct_connection(mode):
+def test_intent_requires_exact_binding_identity_layer_and_direct_connection(conductor_kind, mode):
     from dataclasses import replace
 
     from kicad_tools.validate.mask_copper import (
@@ -193,7 +203,10 @@ def test_intent_requires_exact_binding_identity_layer_and_direct_connection(mode
         "unidentified_owner_net_empty": {"owner_net": ""},
     }.get(mode, {})
     geometry, owner, other = toy_geometry(
-        overlap_owner=mode != "disconnected", conductor_x=1.05, **net_kwargs
+        overlap_owner=mode != "disconnected",
+        conductor_x=1.05,
+        conductor_kind=conductor_kind,
+        **net_kwargs,
     )
     binding = source_binding(geometry)
     if mode == "stale":
@@ -210,11 +223,17 @@ def test_intent_requires_exact_binding_identity_layer_and_direct_connection(mode
     )
     assert result.passed is (mode == "valid")
     assert result.intent_audit[0]["accepted"] is (mode == "valid")
+    conductor_measurements = [m for m in result.measurements if m.conductor_uuid == other]
+    assert conductor_measurements
+    if mode == "valid":
+        assert conductor_measurements[0].disposition == "intentional"
+    else:
+        # A rejected declaration never suppresses the measurement it names.
+        assert conductor_measurements[0].disposition == "violation"
     if net_kwargs:
         assert result.intent_audit[0]["reason"] == "connection must share an identified net"
         # A rejected declaration must not suppress the exposure it names.
         assert [m.disposition for m in result.measurements] == ["violation"]
-    assert result.measurements
 
 
 @pytest.mark.parametrize(
