@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-11-17T03:35:30+00:00",
+  "checked_at": "2026-11-17T08:07:57.577233+00:00",
   "mode": "assembly",
   "status": "blocked",
   "blockers": [
-    "kct check coverage is unknown for blocking check(s) (mask_to_copper (assessment incomplete (Native per-object geometry unavailable: no Python interpreter with pcbnew was found. Install KiCad (its bundled python3 provides pcbnew), set KCT_KICAD_DOCKER=1 to run the worker in the pinned kicad/kicad image (docker required), or set an explicit native_python_command in the kct.mask-copper-request.v1 request.; F.Mask: unattributed native mask region; B.Mask: unattributed native mask region))); unknown is not pass -- supply the missing input. [invocation: kct check <pcb> --mfr jlcpcb-tier1]",
+    "kct check reports 385 error(s); failed sub-checks: drc. [invocation: kct check <pcb> --mfr jlcpcb-tier1]",
     "Unacknowledged assembly-affecting warnings (board_id_missing=1, fiducials_missing=1); acknowledge with --ack-warnings or fix them."
   ],
   "checks": [
@@ -15,8 +15,8 @@
     },
     {
       "name": "kct_check",
-      "status": "not_run",
-      "detail": "0 errors, but blocking check(s) could not evaluate the board: mask_to_copper (assessment incomplete (Native per-object geometry unavailable: no Python interpreter with pcbnew was found. Install KiCad (its bundled python3 provides pcbnew), set KCT_KICAD_DOCKER=1 to run the worker in the pinned kicad/kicad image (docker required), or set an explicit native_python_command in the kct.mask-copper-request.v1 request.; F.Mask: unattributed native mask region; B.Mask: unattributed native mask region)); warning counts: board_id_missing=1, fiducials_missing=1, pour_slot=39, redundant_copper_covered=52, redundant_copper_detour=2, redundant_copper_duplicate=134, redundant_copper_staircase=43, silk_pad_clearance=21. [invocation: kct check <pcb> --mfr jlcpcb-tier1]"
+      "status": "failed",
+      "detail": "385 electrical/manufacturing error(s); failed sub-checks: drc; warning counts: board_id_missing=1, fiducials_missing=1, mask_to_copper=76, pour_slot=39, redundant_copper_covered=52, redundant_copper_detour=2, redundant_copper_duplicate=134, redundant_copper_staircase=43, silk_pad_clearance=21. [invocation: kct check <pcb> --mfr jlcpcb-tier1]"
     },
     {
       "name": "native_drc",
@@ -36,7 +36,7 @@
     {
       "name": "warning_review",
       "status": "failed",
-      "detail": "Unacknowledged assembly-affecting warnings: board_id_missing=1, fiducials_missing=1. Table: board_id_missing=1, fiducials_missing=1, pour_slot=39, redundant_copper_covered=52, redundant_copper_detour=2, redundant_copper_duplicate=134, redundant_copper_staircase=43, silk_pad_clearance=21."
+      "detail": "Unacknowledged assembly-affecting warnings: board_id_missing=1, fiducials_missing=1. Table: board_id_missing=1, fiducials_missing=1, mask_to_copper=76, pour_slot=39, redundant_copper_covered=52, redundant_copper_detour=2, redundant_copper_duplicate=134, redundant_copper_staircase=43, silk_pad_clearance=21."
     },
     {
       "name": "artifacts",
@@ -53,7 +53,7 @@
     "kicad_tools_version": "0.29.0",
     "dirty": true,
     "manufacturer": "jlcpcb-tier1",
-    "commit": "02874339ef6360ad97a047382d61432ec3f70e37",
+    "commit": "de0f17df6b59b8a254f9be0798f5630d18892a84",
     "source_digest": "73e5839488d0542f3517f8ae689ad8d008429ceea3da85a6cec7e494048d3e6f",
     "kicad_cli_version": "10.0.6",
     "rules_digest": "7794b59b72faaa9ba65cc62c26a37972f8146e2660589d34caa3bdda4bd4cd90"
@@ -86,7 +86,7 @@
       "message": "Stock not verified: 17 assigned LCSC number(s) found in neither the parts cache nor the offline catalog",
       "details": "C105580, C114765, C126817, C21285200, C22548, C2442665, C265104, C2886898, C44854, C45000"
     },
-    "drc_violations": 0,
+    "drc_violations": 385,
     "nets_routed_pct": 100.0
   },
   "inputs": {
@@ -188,10 +188,10 @@
     "output/readiness-verification/fill-saved/usb_joystick_routed.kicad_dru": "a0fff7260014fd241ca7e42b5a789964bda7b8dd13691c6ac4409c8605e40ee5",
     "output/readiness-verification/fill-saved/usb_joystick_routed.kicad_pcb": "26e212a7dd934c916893f5df00f46115a822f0b8cf8a01b6372d81a521d2c766",
     "output/readiness-verification/fill-saved/usb_joystick_routed.kicad_pro": "e1b779bc9454f7e182c9f507a78162bc3e5b96e7cb9fc9231fb9bbabc046db00",
-    "output/readiness-verification/kct-check.json": "5a6b574b7f126633ff8973bfbdf0da7bc339f2fe11a0931cc31ff283341cc67f",
-    "output/readiness-verification/native-drc-raw.json": "e83b126b1b407833bab29c7df34570011d600a0fe8689dd212fd1277a2d2a2d0",
+    "output/readiness-verification/kct-check.json": "15a6ce8eddc44352de75d051017aff3f2af7f0b4240b96ba41252e4c1b307c2f",
+    "output/readiness-verification/native-drc-raw.json": "283b4e81b382215482cad55fbd37fb3ea2ab5258c372e0f745df661d72eab8da",
     "output/readiness-verification/native-drc.json": "7823d36007b5fa787010958cdaeb8ca69a82fefc7844e948c730d0959b317b76",
-    "output/readiness-verification/refilled-native/native-drc-raw.json": "e83b126b1b407833bab29c7df34570011d600a0fe8689dd212fd1277a2d2a2d0",
+    "output/readiness-verification/refilled-native/native-drc-raw.json": "283b4e81b382215482cad55fbd37fb3ea2ab5258c372e0f745df661d72eab8da",
     "output/readiness-verification/refilled-native/native-drc.json": "7989399d817ad2706d0e461e61d3de26dd84b7fea113c13a7961a7a3e587495d",
     "output/usb_joystick.kicad_pro": "09c8746ffab5b0449d13f3b777d87c4786c2abc2cfa2df7eb796e12f83822c05",
     "output/usb_joystick.kicad_sch": "f5e844b79f26bad1174a406b5fc51b35303fc44bd2a20806a47d5aeb62ba5e30",
@@ -213,6 +213,6 @@
   "supplemental_factory_evidence": {
     "source_commit": "63813f418c55b68f53a31aaa6c80037563c6d5bf",
     "report": "output/manufacturing/check-report.json",
-    "binding_note": "Additive bindings for exact-source factory/process inputs. This file is the kct readiness --verify receipt plus these bindings; the receipt itself (output/readiness-verification/readiness.json) is a local diagnostic and is not committed (Issue #7536). Verdict and all verifier checks are unchanged."
+    "binding_note": "Additive bindings for exact-source factory/process inputs. This file is the kct readiness --verify receipt plus these bindings; the receipt itself (output/readiness-verification/readiness.json) is a local diagnostic and is not committed (Issue #7536). Verdict and all verifier checks are unchanged. output/readiness-verification/kct-check.json is re-bound post-strip: its mask_copper_assessments[*].geometry_provenance introspection payload (#5255, ~21 MB) is dropped after verification, and the hash here matches the stripped bytes that are committed."
   }
 }

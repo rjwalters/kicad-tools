@@ -220,6 +220,10 @@ SUPPLEMENTAL_BINDINGS = (
     "generate_design.py",
     "check_manufacturing.py",
     "routing_plan.py",
+    # Stripped after the verifier wrote and hashed it (#9065 regen): the
+    # promoted receipt must record the stripped bytes that are committed,
+    # so its hash is re-bound here like the exact-source inputs above.
+    "output/readiness-verification/kct-check.json",
 )
 
 
@@ -282,20 +286,18 @@ def board03_receipt(base_commit: str, checked_at: str | None, known: tuple[str, 
     # mask_copper_assessments[*].geometry_provenance (#5255) is per-object
     # introspection payload (~21 MB on this board) that nothing downstream of
     # the committed evidence reads; the verdict, coverage, policy and binding
-    # stay (#9065 regen).  verify re-runs kct check fresh, so this strip never
-    # invalidates a recorded hash.
+    # stay (#9065 regen).  The verifier records the hash of the file as it
+    # wrote it, so this strip runs AFTER the receipt is produced and MUST be
+    # followed by the re-binding below -- kct-check.json's entry in
+    # SUPPLEMENTAL_BINDINGS re-binds the receipt's input hash to the stripped
+    # bytes that are actually committed (#9083 review).
     kct_check_report = out / "readiness-verification/kct-check.json"
     if kct_check_report.is_file():
-        data = json.loads(kct_check_report.read_text())
-        changed = False
-        for assessment in data.get("mask_copper_assessments") or []:
-            if (
-                isinstance(assessment, dict)
-                and assessment.pop("geometry_provenance", None) is not None
-            ):
-                changed = True
-        if changed:
-            kct_check_report.write_text(json.dumps(data) + "\n")
+        # Single source of truth: the recipe's own strip helper, the same one
+        # its run_drc hook applies to drc_report.json -- not a second
+        # hand-rolled copy here, so the two cannot drift (#9083 review).
+        recipe = _load("board03_generate_design_strip", board / "generate_design.py")
+        recipe._strip_mask_geometry_provenance(kct_check_report)
     receipt = json.loads((out / "readiness-verification/readiness.json").read_text())
     for rel in SUPPLEMENTAL_BINDINGS:
         receipt["inputs"][rel] = sha256(board / rel)
@@ -306,7 +308,11 @@ def board03_receipt(base_commit: str, checked_at: str | None, known: tuple[str, 
             "Additive bindings for exact-source factory/process inputs. This file is the "
             "kct readiness --verify receipt plus these bindings; the receipt itself "
             "(output/readiness-verification/readiness.json) is a local diagnostic and is "
-            "not committed (Issue #7536). Verdict and all verifier checks are unchanged."
+            "not committed (Issue #7536). Verdict and all verifier checks are unchanged. "
+            "output/readiness-verification/kct-check.json is re-bound post-strip: its "
+            "mask_copper_assessments[*].geometry_provenance introspection payload "
+            "(#5255, ~21 MB) is dropped after verification, and the hash here matches "
+            "the stripped bytes that are committed."
         ),
     }
     (out / "readiness.json").write_text(json.dumps(receipt, indent=2) + "\n")
