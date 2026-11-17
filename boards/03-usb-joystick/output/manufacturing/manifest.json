@@ -1,7 +1,7 @@
 {
   "version": "1.0",
-  "kicad_tools_version": "0.24.0",
-  "generated_at": "2026-10-21T23:33:17.626506+00:00",
+  "kicad_tools_version": "0.29.0",
+  "generated_at": "2026-11-17T12:02:59.022207+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -29,8 +29,8 @@
       "size": 1033
     },
     "check-report.json": {
-      "sha256": "accf4f4023cfe839d2619b14717839a925eaccc1afebe20324bb308df3177abd",
-      "size": 9337
+      "sha256": "13e5210cab2f073af8d90acc2dfd91cf285c9a2101d78a8c41b6934a32b26585",
+      "size": 353277
     },
     "cpl_jlcpcb.csv": {
       "sha256": "213c62a3a2c9292f5c3845b76f4b447141a2206a83043afddd2a42a4c3064b05",
@@ -49,12 +49,12 @@
       "size": 6324
     },
     "design-source/generate_design.py": {
-      "sha256": "e9879386ab0a92f227a62446317452b9d216f819167915e4db8e6843dc3eafa8",
-      "size": 60362
+      "sha256": "a4a7687ac5898519005373c3c60e1cdb019521828bb3faa2609047faedb72456",
+      "size": 61604
     },
     "design-source/generate_pcb.py": {
-      "sha256": "36afb9c6a8b81878b88b3cf38b91da058c7a281f706d1a16451622e07cc32104",
-      "size": 7988
+      "sha256": "e8afbf5a81849a25f7f0673cffb9ab3d5eb683562a572d96892e5b13d1fd8b1d",
+      "size": 8080
     },
     "design-source/generate_schematic.py": {
       "sha256": "f509834c144b688688971cfc0ea7614977457f4f56e402dcc569551fa909c464",
@@ -73,16 +73,16 @@
       "size": 7474
     },
     "design-source/route_demo.py": {
-      "sha256": "0fca0042fac91f385db16120c90cf8f12332d1f463e9ff336417c8d0649b56c6",
-      "size": 10794
+      "sha256": "a6d1a6f968942dbd62507f3040a37b0fade17932c781422142a033cc8665056f",
+      "size": 11487
     },
     "design-source/routing-plan.json": {
       "sha256": "e52f9b5f9eea819f788803737ea18960bd87c65be0057fe834fe29e570415dce",
       "size": 184248
     },
     "design-source/routing_plan.py": {
-      "sha256": "0ccf452d67c5f37549f7bae2924627616aec7daa78e820e9db293338113543bf",
-      "size": 21528
+      "sha256": "518e638438f7dd0cda4a45dea985a3f596339189bfd2dada5119cedf93ef36d2",
+      "size": 22037
     },
     "firmware/.gitignore": {
       "sha256": "692b1af4436043e2e965c8d563bbf90d648cda3a6afa9bba38e1c38af1d38919",
@@ -169,20 +169,20 @@
       "size": 2192
     },
     "gerbers/gerbers.zip": {
-      "sha256": "43326efe5fa8c89ef40e7785e5794d06d3622b3af45b74c45dc067e91f2a9339",
-      "size": 125040
+      "sha256": "42982cb157dd483dca861e11eea6c75c4d2697f4b6f2cbe02b7a60e3beafc953",
+      "size": 129877
     },
     "images/assembly.png": {
-      "sha256": "7925c40f66ff300e3f02aa17cb06df0abf8b042f36ffbdd250c4eeed06771d94",
-      "size": 451332
+      "sha256": "4f5c9a430492430a27ac95f343c45b58a2d01e49278223f3987144d53b4d159d",
+      "size": 486912
     },
     "images/layer_B_Cu.png": {
       "sha256": "f8f83dd8d3f9d9388cc48e70d27d367a2528b912af0d0674b935959a166934df",
       "size": 250072
     },
     "images/layer_F_Cu.png": {
-      "sha256": "315e30aed3b66e74c10a9f5653c13de9e15ad609edb3d8a8aff25e77074a8c2f",
-      "size": 339967
+      "sha256": "be261054093227f9aa09be9db3732f55d310423810962e6a3d25dd8d907d1abe",
+      "size": 348737
     },
     "images/layer_In1_Cu.png": {
       "sha256": "439a86628959a8f1e29618dcef009ad5a7c578e615cbd177a102abe935582674",
@@ -201,16 +201,16 @@
       "size": 343939
     },
     "images/pcb_front.png": {
-      "sha256": "722ce2ab52c21f84685ccaebc937de4cc6748a2a7119a011c8aa13583a621cc2",
-      "size": 463889
+      "sha256": "a85c224d6f8f4f2814b7a0085e65203a0ada9f51d616b5e1b912f7cbadc3e6b4",
+      "size": 513556
     },
     "images/schematic_usb_joystick.png": {
-      "sha256": "435c684096c4c22d4f460823a2584c6e3f09f6663b89176976bbbaec2728eea2",
-      "size": 486460
+      "sha256": "c0a3950fda2f26c18ad6359ba1ccd02e953d67c0be8d2b40d3d8553de7445c79",
+      "size": 486466
     },
     "kicad_project.zip": {
-      "sha256": "66d00eacf748adfafeea34347ba5552b1275c1c744e14262a21cf86c1d3a65db",
-      "size": 187659
+      "sha256": "4a812bf29228d2f3997d149570c762448d61ac748e1fb944a2765598ea036a16",
+      "size": 189069
     },
     "manufacturing-requirements.json": {
       "sha256": "48470a554e39b289ba0c079833a439c65dbc3611b505f7dd978552d25d13d37b",
@@ -309,12 +309,12 @@
       "size": 3153
     },
     "report.md": {
-      "sha256": "fc11b2776382ebc2f512c6d3b9d82407ef23dd1f05861c299b87c5883e8123cf",
-      "size": 4605
+      "sha256": "614dbb5db495344e1abd33baeeb1a44a7e766ba00de4c020f3434c428289f949",
+      "size": 4820
     },
     "report.pdf": {
-      "sha256": "e2541af02eecb74e9aad15be0768748ed627bc19b5691a9e3a65651b0625c017",
-      "size": 3056313
+      "sha256": "12f02c9a5861a073a42b1ad5576f7379443bcc59c042a55109c55fc8c10d30fa",
+      "size": 3228100
     },
     "schematic.pdf": {
       "sha256": "6fe021a9ea56eb056b2fc6dc24e3fee47c4f6555c6141a4ad1ec755b51aa0d98",
@@ -330,7 +330,7 @@
       "name": "pcb_file",
       "status": "OK",
       "message": "PCB file parsed successfully",
-      "details": "Footprints: 38"
+      "details": "Footprints: 41"
     },
     {
       "name": "schematic_file",
@@ -350,7 +350,7 @@
     {
       "name": "footprints",
       "status": "OK",
-      "message": "All 38 footprints have library footprint names"
+      "message": "All 41 footprints have library footprint names"
     },
     {
       "name": "board_dimensions",
@@ -392,8 +392,39 @@
     {
       "name": "bom_lcsc_values",
       "status": "WARN",
-      "message": "2 of 38 assigned item(s) verified (parts cache); 36 unverifiable (not in parts cache or offline catalog)",
-      "details": "unverified: U1 -> C44854, J1 -> C7095263, U2 -> C7519, F1 -> C126817, Y1 -> C2442665, J2 -> C265104, J3 -> C21285200, R1 -> C105580 (and 28 more)"
+      "message": "0 of 38 assigned item(s) verified (no source); 38 unverifiable (not in parts cache or offline catalog)",
+      "details": "unverified: U1 -> C44854, J1 -> C7095263, U2 -> C7519, F1 -> C126817, Y1 -> C2442665, J2 -> C265104, J3 -> C21285200, R1 -> C105580 (and 30 more)"
+    },
+    {
+      "name": "bom_lcsc_stock",
+      "status": "WARN",
+      "message": "Stock not verified: 17 assigned LCSC number(s) found in neither the parts cache nor the offline catalog",
+      "details": "C105580, C114765, C126817, C21285200, C22548, C2442665, C265104, C2886898, C44854, C45000",
+      "data": {
+        "order_boards": 5,
+        "inventory_covered": [],
+        "strict": false,
+        "parts": [],
+        "unresolved": [
+          "C105580",
+          "C114765",
+          "C126817",
+          "C21285200",
+          "C22548",
+          "C2442665",
+          "C265104",
+          "C2886898",
+          "C44854",
+          "C45000",
+          "C7095263",
+          "C71633",
+          "C71651",
+          "C7519",
+          "C77053",
+          "C97888",
+          "C98220"
+        ]
+      }
     },
     {
       "name": "bom_pcb_match",
@@ -408,7 +439,7 @@
     {
       "name": "drc",
       "status": "WARN",
-      "message": "DRC passed with 10 warning(s)"
+      "message": "DRC passed with 309 warning(s)"
     },
     {
       "name": "erc",

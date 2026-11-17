@@ -14,6 +14,164 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-17
+
+- **PR #9224**: refactor: use shared band constants in board 06 leg-band predicate
+- **PR #9222**: feat: add --order-method regret net ordering (biggest-loss nets first)
+- **PR #9219**: test: grade board07 byte spreads on the gate's matched length
+- **PR #9212**: fix: refuse C++ via seats whose annulus slits an own-net trace
+- **Issue #9217** (closed): Board 07: test_board07_real_design still grades byte spreads on raw copper, not the gate's matched length
+- **Issue #9208** (closed): Board 06 USB2_D- drain: C++ via-annulus vs own-net-trace slit-band check
+- **Issue #9204** (closed): Converge board 06's leg-band predicate on the shared band constants from #9150
+- **Issue #9001** (closed): Router: regret ordering as a net-order method (commit biggest-loss nets first)
+- **PR #9220**: test: pin sibling_legs contract on _same_net_leg_band_ok directly
+- **PR #9218**: docs: record trim-less detection margin and fix healthy-residual sign in RSS hook test
+- **PR #9207**: refactor: require stackup args on same_net_band_edges()
+- **PR #9177**: fix(board03): land fiducials and board ID past the native_clearance contract
+- **Issue #9214** (closed): Record the trim-less detection margin that `_straddle_slack_mb` trades away on large-page hosts
+- **Issue #9196** (closed): Board 06 leg band check: pin the `sibling_legs` contract at the predicate level (and tidy its signature)
+- **Issue #9188** (closed): same_net_band_edges() hardcodes the jlcpcb 4L/1oz stackup inside a shared library module
+- **Issue #9143** (closed): Board 03: fiducial keepouts collide with the native_clearance contract and the #8838 mask policy
+- **Issue #9206** (closed): Stale module docstring: test_board07_byte0_physical_spread says validate.py 'sums every copper segment'
+- **PR #9213**: docs: reword board07 byte0 spread docstring's stale sum-all-segments claim as history
+- **Issue #9186** (closed): Board 06 legalizer: the new same-net leg band check grades against copper the same repair deletes (staple-collapse site)
+- **PR #9192**: fix: grade board 06 staple-collapse doglegs against post-repair copper
+- **Issue #8957** (closed): Router leaves same-net sub-danger copper slits on regenerated synthetic boards (physical_copper_gap, boards 06/07)
+- **Issue #9198** (closed): Board 07 byte-0: the spread test and validate.py aggregate the same shared-model path differently (via barrel travel)
+- **PR #9205**: refactor: share one matched-length function between board 07 gate and spread test
+- **Issue #9201** (closed): RSS teardown guard: _TRIM_SLACK_MB is page-size-blind, may go red on a healthy hook at 16K/64K pages
+- **PR #9203**: test: derive RSS teardown ceiling slack from host page size
+- **PR #9106**: chore(loom): resync installed Loom to v0.19.1306
+- **Issue #9185** (closed): Two cosmetic defects left by PR #9126 (airwire-separation term)
+- **PR #9211**: fix: restore corrupted deterministic_rescue docstring; wire _VARIANT_LOG_MARKERS
+- **Issue #9197** (closed): Detour repair pass runs after _finalize_routing(), leaving the skew trackers describing pre-repair copper
+- **PR #9200**: fix(router): refresh skew trackers after a kept detour repair
+- **Issue #8930** (closed): Assert acute_foldback's detector parity against the real sharp_trace_corner rule once #8848 lands
+- **PR #9199**: fix(router): check fold-back repairs against each other; pin detector parity with sharp_trace_corner
+- **Issue #9189** (closed): Pin _check_directory's locked() call site (follow-up from PR #9161)
+- **PR #9193**: test: pin _check_directory's locked() call site with a symlinked-directory refusal
+- **Issue #9150** (closed): Converge boards 06/07 on the pure same-net slit-band predicate PR #9122 introduced
+- **PR #9169**: refactor: share the same-net slit-band predicate across boards 06/07
+- **Issue #9184** (closed): RSS teardown-hook guard does not go red when malloc_trim(0) is removed from the hook
+- **PR #9190**: test: make RSS teardown-hook guard go red when malloc_trim(0) is deleted
+- **Issue #9187** (closed): Board 06 legalizer: the J1.B7 relocation still writes two same-net In1.Cu slits (0.084 / 0.066 mm) its own leg check accepts
+- **PR #9191**: test: pin accepted J1.B7 same-net In1.Cu slit residual on board 06
+- **PR #9195**: fix(router): hold joint coupled candidates to the own-net pad slit band
+- **Issue #9176** (closed): Two pad-to-pad path implementations now coexist: board-07 physical_path.py re-decides copper contact outside the shared model
+- **PR #9183**: refactor: measure board-07 byte-0 spread through the shared copper-contact model
+- **Issue #9013** (closed): Router: targeted post-settle detour repair pass (baseline measured, tail is fat)
+- **PR #9153**: router: opt-in targeted post-settle detour repair pass (#9013)
+- **Issue #9166** (closed): mask_copper docstring: the `(omitted)` relation bullet states the wrong condition (contradicted by the merged-region same-net path)
+- **PR #9171**: docs: state the real omission condition for the mask_copper (omitted) net-relation bullet
+- **Issue #9175** (closed): Board 07: SDCKE1 carries 2.08 mm of off-path copper, failing validate.py's new off-path check
+- **PR #9180**: fix(boards): restate board 07 off-path tolerance at 2.5 mm on measured no-defect basis
+- **Issue #9151** (closed): Checkout ledger hardening follow-ups from PR #9101 review (non-money)
+- **PR #9161**: fix: harden the JLC checkout ledger guards and report the checkout outcome first
+- **Issue #9174** (closed): Own-net pad slit-band guard (PR #9156, #9140 AC3): board 06 +3V3 pour breaks post-legalize -- J1.B8 stranded
+- **PR #9156**: fix(router): hold coupled diff-pair legs out of the own-net pad slit band
+- **Issue #9167** (closed): Board 06 legalizer grades via seats against the same-net slit band but never the connector legs it writes
+- **PR #9172**: fix: grade board 06 repair connector legs against the same-net fab band
+- **Issue #8999** (closed): Router: airwire-separation cost term (prefer routes that keep other nets' desire-lines intact)
+- **PR #9126**: feat: add opt-in airwire-separation cost term to negotiated router (measured: no win)
+- **Issue #9164** (closed): RSS teardown-hook guard can go red on a healthy hook when _rss_floor_mb starts stale-high
+- **PR #9173**: test: pin RSS floor in teardown-hook guard so it ignores stale session state
+- **Issue #9170** (closed): changelog.d/9113.upgrade.md describes a crash that never shipped
+- **PR #9178**: docs(changelog): lead 9113 upgrade fragment with the inner-clearance behavior change
+- **Issue #9149** (closed): mask-to-copper bare `same-net` bullet explains only the conductor-kind path, not the no-single-pad-owner path
+- **PR #9165**: docs: cover the no-single-owner-pad path in the bare same-net relation wording
+- **Issue #9116** (closed): silk_over_copper treats a blind/buried via's mask aperture as present on both sides
+- **PR #9168**: fix: yield silk_over_copper via mask apertures only on the sides a via reaches
+- **Issue #9117** (closed): Match-group length checks count dead-end and duplicate same-net copper as matched length
+- **PR #9142**: Measure match-group length from the pad-to-pad copper path
+- **Issue #9148** (closed): tests/conftest.py RSS trigger hard-codes a 4096-byte page size instead of os.sysconf("SC_PAGE_SIZE")
+- **Issue #9113** (closed): Class-arm per-layer floor assumes inner floor <= outer floor; an inverted profile would silently drop outer-layer protection
+- **PR #9136**: fix: enforce inner clearance floor <= outer floor on DesignRules
+- **Issue #9127** (closed): Board 06's class-1 drill-pair victim slide seats vias with no same-net fab band check
+- **PR #9157**: fix: grade board 06 drill-pair victim slide through the same-net slit band
+- **Issue #9130** (closed): No test covers the `MaskEscapeIntent` different-net reject branch
+- **PR #9132**: test: cover mask-escape intent different-net and unidentified-net rejects
+- **Issue #9154** (closed): Harden the #9089 RSS-growth teardown hook: real page size, a regression guard, and a guarded /proc read
+- **PR #9162**: test: use real page size and guard statm reads in RSS teardown hook
+- **Issue #9160** (closed): changelog.d/9062.fixed.md overstates incomplete_categories exhaustiveness for explicitly requested mask checks
+- **PR #9163**: docs: qualify incomplete_categories exhaustiveness claim in changelog fragment
+- **Issue #9155** (closed): changelog.d/9062.fixed.md describes the rejected predicate for meta_checks.incomplete_categories
+- **PR #9159**: docs: key 9062 mask_to_copper incompleteness note on 'did not complete'
+- **Issue #9110** (closed): nanobind binding leaks native wrapper objects into cyclic garbage on every coupled-search replay
+- **PR #9146**: fix(router): make coupled replay cycle-free so refcounting frees native results
+- **Issue #9118** (closed): Board 07: DQ7 and LDQM carry same-net loops through their own pads; real SDRAM_BYTE0 spread ~7.5 mm exceeds 5 mm
+- **PR #9139**: fix(board-07): remove DQ7/LDQM same-net loops and restore byte-0 length as series length
+- **Issue #9075** (closed): pairplan _DECLINES fixture no longer lists every lattice decline reason
+- **PR #9137**: test: add pair-leg-own-net-pad-band and via-pair declines to outcome fixture
+- **Issue #9128** (closed): CI observer: the native flock gate misses shell-launched kicad-cli, so KCT_NATIVE_MAX_CONCURRENCY is unenforced for those launches
+- **PR #9145**: test: charge sign-off e2e bash gate runs against the native concurrency cap
+- **Issue #9089** (closed): test flake: test_failing_control_endpoint_radius_variants_do_not_couple[MIPI_DAT0] fails as an xdist worker 'gw0' crash on the Test job
+- **PR #9109**: fix: reclaim cyclic native-replay garbage and trim freed heap between tests
+- **Issue #9062** (closed): kct check: incomplete_categories does not name a category whose check did not complete on this run
+- **PR #9069**: fix: serialize kct check's runtime incomplete_categories in meta_checks
+- **Issue #9076** (closed): silk hole tools treat blind/buried via drills as piercing both silk sides
+- **PR #9104**: fix: silk hole tools honour the sides a blind/buried via drill pierces
+- **Issue #9085** (closed): mask_to_copper: allow MaskEscapeIntent to declare zone conductors (board 01 own-pour exposures undeclarable)
+- **PR #9100**: fix: accept zone conductors in MaskEscapeIntent audit
+- **Issue #9115** (closed): test flake: test_stranded_pour_unknown_ignored_when_pads_are_advisory times out (>60s) on Test
+- **PR #9121**: test: size a 180s pytest-timeout override for the advisory stranded-pour test from phase measurements
+- **PR #9101**: feat: add opt-in attended exact-total checkout leg to submit-jlcpcb
+- **Issue #8994** (closed): C++ pathfinder via placement: keep via annuli out of the same-net pad slit band (board 06 producer, #8962 producer 2b)
+- **Issue #9114** (closed): Board 06's pad-edge via relocation escape grades no same-net fab band
+- **PR #9122**: fix(board06): grade same-net fab band at via-in-pad relocation seats
+- **PR #9125**: feat: mirror the same-net pad slit-band guard into the C++ pathfinders
+- **Issue #9129** (closed): mask-to-copper guide's relation list omits the bare `same-net` class
+- **PR #9147**: docs: list bare same-net class in mask-to-copper guide relations
+- **Issue #9037** (closed): sharp_trace_corner reports junctions and in-pad vertices that JLCDFM does not (52 vs 3 on a consumer board)
+- **PR #9096**: feat: tag sharp_trace_corner junction findings so the fab-equivalent bend subset is gateable
+- **Issue #9086** (closed): find_kicad_python: uv-venv symlink dedup skips /usr/bin/python3, so pcbnew discovery fails on apt-KiCad hosts
+- **PR #9095**: fix: probe differently-named links to one interpreter in find_kicad_python
+- **Issue #9015** (closed): Reviewed clearance class arm uses the outer floor only: net classes authored between the split inner/outer floors are unprotected on inner layers
+- **PR #9092**: fix: scope between-floor class clearance rules to inner layers
+- **Issue #9078** (closed): Board 04 fresh regen has 5 SHORT findings (nets '5'/'6'/'7' vs OSC_OUT/SWDIO/SWCLK); test_fresh_regen_is_tier1_hole_to_hole_clean red on main
+- **PR #9099**: fix: resolve int net refs in PCB.add_trace/add_via through the net table
+- **Issue #9007** (closed): Board 06 escape-via seat predicate carries only the same-net pad band, not the trace band
+- **PR #9088**: fix: grade board 06 escape-via seats against the same-net trace band
+- **Issue #9002** (closed): Zones/router: pour-skeleton fit experiment — predict refills cut into islands before refill
+- **PR #9111**: feat: pour-skeleton fit experiment — fleet null result, no router-reservation follow-up
+- **Issue #9080** (closed): portable_native_command mistakes a long-form docker flag's value for the image, re-leaking a host path
+- **PR #9105**: fix: allowlist docker run flags in portable_native_command to stop path leaks
+- **Issue #9119** (closed): Board 07 release (output/, readiness.json, evidence/) has described pre-prune copper since PR #8711, and no test catches readiness input-hash drift
+- **Issue #9077** (closed): fix-silkscreen --clip-to-holes should report a pin-1/polarity marker it removes
+- **PR #9082**: feat: report a pin-1 marker that --clip-to-holes erases
+- **PR #9098**: chore: ship $schema in opencode.json so OpenCode stops dirtying the checkout
+- **PR #9102**: fix(board-07): repair 25 same-net copper slits in the reviewed copper (#9091)
+- **Issue #8992** (closed): Tie-row grouping bound is independent of the spacing the placer uses: rows at min_clearance_mm >= 0.5 mm place but do not count
+- **PR #9090**: fix: derive the tie-row grouping bound from the placer's own spacing rule
+- **Issue #9072** (closed): Board 05: triage and clear the 348 provisional mask_to_copper findings
+- **PR #9084**: test: pin that a pinched refilled zone fill repairs instead of dropping the zone
+- **Issue #9071** (closed): Board 05: fix the 13 silk_hole_overlap warnings in hardware.py
+- **PR #9081**: fix: clear board 05 silkscreen from routed via drills at the source
+- **Issue #9087** (closed): silk_hole_overlap has no clearance margin: silk ink 0.005 mm from a via drill edge passes
+- **Issue #8840** (closed): Sharp trace corner and missing plated through-hole rules; fiducial parity check
+- **PR #8848**: feat(check): add sharp_trace_corner and missing_plated_hole rules
+- **Issue #9030** (closed): test_stitch_same_net_pad_gap_8957.py module docstring still names GapBand.error_edge_mm as the stitcher's edge
+- **PR #9079**: docs: say detection edge, not error edge, in stitch pad-gap test docstring
+- **Issue #9055** (closed): Readiness kct-check.json records absolute host paths and per-run temp names when mask_to_copper runs, so the re-pin cannot be committed
+- **PR #9066**: fix: record portable native commands in mask_to_copper evidence
+- **Issue #8998** (closed): Router: joint per-net candidate selection before commit (negotiated driver)
+- **PR #9067**: docs: joint candidate selection measured refutation — kill criterion fires (#8998)
+- **Issue #9057** (closed): Board 05: fix the three sharp_trace_corner wedges (RESET, HALL_B, HALL_C) in the reviewed recipe
+- **PR #9070**: fix(board05): straighten the RESET/HALL_B/HALL_C wedges in the reviewed recipe; add #8532 fiducials and board-ID silk to the rebuild
+- **Issue #9063** (closed): Board 01 package_release.py always fails artifacts: procurement-review.md no longer in the committed package
+- **PR #9074**: fix(boards): restore board 01's procurement review dropped by the 8f0591c7c package regen
+- **Issue #9018** (closed): Lattice router: keep own-net pad-vs-trace legs out of the fab slit band (#9011, board 07)
+- **PR #9060**: feat: enforce the same-net pad slit band on lattice route legs
+- **Issue #9054** (closed): Silk tools cannot clear silk_hole_overlap over filled/capped via drills: place-silk-refs ignores them and nothing clips outline graphics against drills
+- **PR #9061**: fix(silk): clear silk_hole_overlap over filled/capped via drills (#9054)
+- **Issue #9009** (closed): mask_to_copper still cannot complete after #8946: export/object KiCad version mismatch under KCT_KICAD_DOCKER=1, and no remediation for an unqualified host KiCad
+- **PR #9064**: fix(mask): run both native mask passes on one KiCad and repair fractured zone fills
+- **Issue #9025** (closed): Add a repin_staged regression test for the waivers-sidecar inputs binding
+- **PR #9059**: test: cover the repin_staged waivers-sidecar inputs binding
+- **Issue #9047** (closed): kct route --report-detour-ratio prints its report twice on the default (DRC) path
+- **PR #9056**: fix: report detour ratio once on the default DRC route path
+- **Issue #9034** (closed): Pad spacing: physical_copper_gap errors outnumber the fab DFM's danger items about 3 to 1
+- **PR #9043**: test: pin pad_spacing fab-band severities on a committed five-case fixture
+
 ### 2026-11-16
 
 - **PR #9027**: build(deps): bump the uv-minor-patch group across 1 directory with 6 updates
@@ -3269,20 +3427,6 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - **PR #5524**: ci: bound native KiCad subprocess concurrency from measured attribution
 - **Issue #5523** (closed): loom-fleet-dispatch auto-relabels draft PRs to loom:review-requested
 - **Issue #5501** (closed): CI: bound remaining native subprocess concurrency after confirmed Test cgroup OOM
-
-### 2026-09-17
-
-- **PR #5543**: fix(judge): exclude draft PRs from fallback-mode evaluation
-- **Issue #5535** (closed): judge-fallback-guard.sh does not exclude draft PRs from fallback-mode evaluation
-- **PR #5532**: test(conformance): kicad-cli clearance oracle harness + named fixtures (Epic #5509 Phase 1a)
-- **PR #5531**: perf(analysis): spatially prune net-status segment-adjacency scan
-- **PR #5528**: feat(router): emit RoutingPlan sidecar from two-phase global pass (#5519)
-- **PR #5527**: perf(router): vectorize diff-pair corridor mask dilation
-- **PR #5526**: feat(router): declared swap groups + crossing-minimising pin assignment
-- **PR #5525**: feat(router): pad access sets + Kelvin/competing-net fixture (Epic #5508 Phase 1a)
-- **Issue #5522** (closed): [Epic #5511] Declared swap groups + crossing-minimising pin assignment (report-only)
-- **Issue #5519** (closed): [Epic #5510] router: emit RoutingPlan sidecar from the existing two-phase global pass (report-only, byte-identical copper)
-- **Issue #5516** (closed): [Epic #5508] Phase 1a: `router/pad_access.py` access-set computation + 4-pad Kelvin/competing-net fixture
 
 ### 2026-07-20 (evening)
 

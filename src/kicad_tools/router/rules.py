@@ -174,6 +174,15 @@ class DesignRules:
     # than guessing an edge.
     same_net_pad_gap_band_edge_mm: float | None = None
 
+    # The fab-view same-net via-annulus-vs-own-TRACE slit-band edge for the
+    # board's actual stackup (Issue #9208): the ``GapBand.detection_edge_mm``
+    # of the resolved ``trace_spacing`` dfm entry (``cli.stitch_cmd.
+    # _resolve_mfr_trace_gap_edge``; 0.1016 mm on jlcpcb ``4layer_1oz``) --
+    # the population ``kct check --mfr`` reports as ``fab_band: trace``.
+    # Caller-resolved like :attr:`same_net_pad_gap_band_edge_mm`; consumed by
+    # the C++ pathfinders' via checks.  ``None`` (default) keeps it OFF.
+    same_net_trace_gap_band_edge_mm: float | None = None
+
     # Fab minimum trace width for the effective layers/copper key (Issue #4700)
     # The SAME ``get_design_rules(layers, copper_oz).min_trace_width_mm`` that
     # ``kct check --mfr`` enforces -- NOT the layer/copper-agnostic

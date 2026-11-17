@@ -126,10 +126,10 @@ def with_board07_synthetic(gate):
 # exactly the tangent seats #9124 rejects, so none is pending re-baselining.
 BOARD07_GAP_NETS: tuple[str, ...] = ()
 
-# Issue #9124 drained the PCIE_RX+ face-aligned corner wedge (a tangent via
-# seat) alongside board 07's six; the USB2_D- annulus-vs-own-net-TRACE slit
-# needs a C++ via-vs-own-segment band check and stays (#9124, split out).
-BOARD06_GAP_NETS = ("GND", "MIPI_CLK+", "USB2_D-")
+# #9124 drained the PCIE_RX+ face-aligned corner wedge (a tangent via seat)
+# alongside board 07's six; #9208 drained the USB2_D- annulus-vs-own-net-TRACE
+# slit (via re-seated 0.1 mm further out, C++ own-net-trace band check).
+BOARD06_GAP_NETS = ("GND", "MIPI_CLK+")
 
 
 def fab_gap_allowance(nets: tuple[str, ...]) -> dict:
@@ -285,10 +285,10 @@ def test_board06_committed_allowance():
     """Issue #7548 emptied the skew entry: board 06's allowance holds only
     the #8957 fab-view ``physical_copper_gap`` nets (net-signature keyed --
     the board is regenerated each CI run, so geometry-keyed identities are
-    ephemeral).  Issue #9124's tangent-seat rejection drained the PCIE_RX+
-    face-aligned corner wedge (its entry is deleted); the USB2_D-
-    annulus-vs-own-net-TRACE slit survives pending the C++ via-vs-own-segment
-    band check (see the allowance comment in check_diffpair_coverage.py)."""
+    ephemeral).  #9124's tangent-seat rejection drained the PCIE_RX+
+    face-aligned corner wedge and #9208's C++ own-net-trace slit refusal
+    drained the USB2_D- trace-population finding (both entries deleted; see
+    the allowance comment in check_diffpair_coverage.py)."""
     gate = load("check_diffpair_coverage")
     assert fab_gap_allowance(BOARD06_GAP_NETS) == gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
     assert not hasattr(gate, "DIFFPAIR_SKEW_TRACKER")

@@ -235,16 +235,23 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # Issue #9124 (fresh seed-42 regen, 2026-11-17): the slit-band predicate no
 # longer accepts a TANGENT seat (``gap == 0``, centre exactly one annulus
 # radius from a pad face or corner) as a union -- touch-at-a-point leaves a
-# wedge -- in the Python point predicate, the ring form and the C++ mirror
-# (BUILD_VERSION 68).  The PCIE_RX+ face-aligned corner wedge is gone and its
-# entry is deleted.  14 findings remain (MIPI_CLK+ 11, GND 2, USB2_D- 1); the
-# USB2_D- one is the 0.0413 mm annulus-vs-own-net-TRACE slit at via
-# (114.15, 56.05) against the vertical trace at x = 113.703, which needs a
-# C++ via-vs-own-segment band check and is split out of #9124.
+# wedge -- in the Python point predicate, the ring form and the C++ mirror.
+# The PCIE_RX+ face-aligned corner wedge is gone and its entry is deleted.
+# Issue #9208 (measured 2026-11-17, fresh seed-42 regen): the USB2_D-
+# annulus-vs-own-net-TRACE slit is drained -- ``DesignRules.
+# same_net_trace_gap_band_edge_mm`` (the ``trace_spacing`` detection edge,
+# 0.1016 on jlcpcb 4-layer 1oz) is threaded into both C++ via checks, which
+# now refuse a via annulus whose gap to its own net's committed trace copper
+# falls in ``(0, edge)``.  The offending via (114.15, 56.05; trace-then-via:
+# the pair's trunk at x=113.7025 is already stored when the leg seats it)
+# re-seats at (114.25, 56.05), 0.1 mm further out, and the USB2_D- entry is
+# deleted.  Merged (Doctor, PR #9209 onto #9208): both drains apply, so both
+# entries are gone -- 13 findings remain (MIPI_CLK+ 11, GND 2); CI's
+# regeneration remains the authority on the final counts (host-sensitive
+# board).  The C++ mirror ships both fixes as BUILD_VERSION 70.
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("physical_copper_gap", "GND"): 8962,
     ("physical_copper_gap", "MIPI_CLK+"): 8962,
-    ("physical_copper_gap", "USB2_D-"): 8962,
 }
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key
