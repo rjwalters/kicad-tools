@@ -22056,6 +22056,12 @@ def _chain_complete_argv(
     * ``--auto-layers``, ``--route-engine``, ``--grid`` and the grid-engine
       search/strategy flags -- ``--complete`` picks its own engine (lattice),
       lattice and single-attempt path.
+    * ``--airwire-separation-weight`` (Issue #8999) -- the term is priced
+      only by the negotiated grid A* (``get_negotiated_cost`` and the C++
+      cost sites fed by ``refresh_airwire_cost``), reached from
+      ``_route_net_negotiated`` / ``_route_net_with_corridor`` -- paths the
+      lattice netset negotiation (``LatticePathfinder.route_netset``) never
+      takes, so the inner pass could not honour it.
     * ``-o``, ``--complete-report``, ``--checkpoint``, ``--timeout`` and the
       other per-invocation I/O and budget flags -- the pass has its own staged
       output, and the ``--timeout`` deadline reaches it through the environment.

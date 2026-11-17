@@ -57,6 +57,7 @@ Measured experiments on `kct route`; several record negative results.
 |------|-------------|
 | [Escape-flow assignment](kct-route-escape-flow-experiment.md) | Joint min-cost-flow escape assignment: no gain |
 | [Net ordering](kct-route-net-order-experiment.md) | Crossing-aware net ordering: no gain |
+| [Airwire separation](kct-route-airwire-separation-experiment.md) | Prospective airwire-crossing cost term for the negotiated router: no gain, flag stays opt-in (Issue #8999) |
 | [Nogood cache](kct-route-nogood-cache-experiment.md) | Validity-aware nogood cache for negotiated retries |
 | [Phase profile](kct-route-phase-profile.md) | Where `kct route` time goes on boards 02 and 03 |
 | [GPU / batched routing design](gpu-routing-design.md) | Profile-first GPU routing go/no-go: don't build (Amdahl ceilings below 2x) |
