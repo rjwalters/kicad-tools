@@ -121,6 +121,18 @@ def build(output):
     shutil.copy2(output / "bldc_controller.kicad_pro", routed.with_suffix(".kicad_pro"))
     fingerprint = apply_routing(routed)
     declare_router_netclasses(routed)
+    # Issue #8532: every board carries global fiducials and a board-ID
+    # silkscreen.  Added after the reviewed copper recipe is applied (the
+    # recipe's pad/placement fingerprint is checked before this) and before
+    # stitching, copper cleanup and the native refill, so every downstream
+    # gate sees the final geometry (#9057).  Fixed here, never acknowledged.
+    from kicad_tools.cli.pcb_add_board_info import run_add_board_info
+    from kicad_tools.cli.pcb_add_fiducials import run_add_fiducials
+
+    if run_add_fiducials(routed, sides="populated") != 0:
+        raise RuntimeError("pcb add-fiducials failed")
+    if run_add_board_info(routed, auto=True) != 0:
+        raise RuntimeError("pcb add-board-info failed")
     evidence = output / "readiness"
     evidence.mkdir(exist_ok=True)
     cli = [sys.executable, "-m", "kicad_tools.cli"]

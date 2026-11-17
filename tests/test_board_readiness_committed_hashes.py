@@ -36,11 +36,22 @@ EXPECTED_STALE: dict[str, str] = {
     # flood board 07's entry cites (the #8399/#8938-era stalemate,
     # reproduced with main's code on pristine main boards).  That work owns
     # the re-pin; remove the entry when it lands.
+    #
+    # Since #9057 the recipe itself is also ahead of the committed copper:
+    # the three sharp_trace_corner wedges (RESET, HALL_B, HALL_C) are fixed
+    # in ``redesign/routing.json`` and ``redesign/build.py`` now adds the
+    # #8532 fiducials + board-ID silk, but the committed routed PCB and
+    # ``readiness.json`` predate both (the strict gate still refuses on the
+    # physical_copper_gap/silk_hole_overlap/mask_to_copper flood, so
+    # ``build.py`` cannot publish).  Issue #9068 (the gate-pass split of
+    # #9057) owns the rebuild + re-pin; remove the entry when it lands.
     "05-bldc-motor-controller": (
         "Issue #8937/#8399: PR #8955 re-emitted the routed .kicad_dru "
         "(zone-clearance rules); `refresh_readiness.py` refuses to re-pin while "
         "physical_copper_gap/redundant-copper/silk warnings remain unaccepted. "
-        "The #8399 warning-flood work owns the re-pin."
+        "The #8399 warning-flood work owns the re-pin. Since #9057 the recipe "
+        "(wedge fix + #8532 fiducials/board-ID) is ahead of the committed "
+        "copper too; the gate-pass rebuild owns the re-pin."
     ),
     "07-matchgroup-test": (
         "Issue #8399: the #8602 copper prune changed board 07's authored/reviewed "
