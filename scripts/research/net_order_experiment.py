@@ -270,16 +270,25 @@ def _log_lines(profile: dict) -> list[str]:
     return out
 
 
-def _order_applied(profile: dict) -> bool:
-    """Did the run actually install a ``--order-method`` order?
+def _treatment_applied(profile: dict, variant: str) -> bool | None:
+    """Did the run log the marker ``variant`` must produce?
 
     Guard against the silent no-op this experiment first hit: ``kct route``
     defaults to ``--auto-layers``, whose escalation path did not call
     ``_apply_order_method`` at all, so every ordering flag was discarded and
     both arms produced byte-identical copper. An A/B whose treatment arm never
     applied the treatment is worse than no measurement, so assert it per run.
+    Each variant's marker lives in ``_VARIANT_LOG_MARKERS`` -- adding a
+    variant to ``VARIANTS`` plus a marker there is all the wiring needed, so
+    the table cannot drift from the enforcement. Variants with no marker
+    (``default``, ``monotone``, ``bundle-river``, and the injected
+    ``nogood-*`` arms) have no single line to check and return ``None``:
+    no guard, and a ``--`` cell in the report.
     """
-    return any("Net order: --order-method" in line for line in _log_lines(profile))
+    marker = _VARIANT_LOG_MARKERS.get(variant)
+    if marker is None:
+        return None
+    return any(marker in line for line in _log_lines(profile))
 
 
 def _negotiation_trajectory(profile: dict) -> dict:
@@ -317,17 +326,6 @@ def grade(routed: Path) -> dict:
         "wirelength_mm": round(cop["wirelength_mm"], 2),
         "segment_count": cop["segment_count"],
     }
-
-
-def _airwire_applied(profile: dict) -> bool:
-    """Did the run actually install the airwire-separation term (#8999)?
-
-    Same guard as ``_order_applied``: ``route_all_negotiated`` logs one
-    line when a nonzero weight reaches the negotiated loop, so an arm
-    whose flag was silently dropped on the way in is flagged instead of
-    being read as a (null) measurement.
-    """
-    return any("Airwire separation cost:" in line for line in _log_lines(profile))
 
 
 def _nogood_stats(path: Path) -> dict:
@@ -415,8 +413,7 @@ def run_one(
             "routing_loop_s": _routing_loop_seconds(profile),
             "astar_s": _astar_seconds(profile),
             "astar_calls": _astar_calls(profile),
-            "order_applied": _order_applied(profile),
-            "airwire_applied": _airwire_applied(profile),
+            "treatment_applied": _treatment_applied(profile, variant),
             "loadavg_start": profile["host"].get("loadavg"),
             "loadavg_end": profile["host"].get("loadavg_end"),
             **_negotiation_trajectory(profile),
@@ -427,18 +424,14 @@ def run_one(
         lookups = int(ng.get("hits", 0)) + int(ng.get("misses", 0))
         row["nogood"] = ng
         row["nogood_hit_rate"] = round(int(ng.get("hits", 0)) / lookups, 3) if lookups else None
-    # An ordering arm that did not install an order is not a measurement.
-    if "--order-method" in VARIANTS[variant] and not row["order_applied"]:
+    # A treatment arm that never applied its treatment is not a measurement
+    # (#5787's silent no-op lesson, generalised in #8999): the marker check
+    # above is the enforcement, ``_VARIANT_LOG_MARKERS`` the single table.
+    if row.get("treatment_applied") is False:
         row["warning"] = (
-            f"variant {variant!r} did not log a 'Net order:' line -- the ordering "
-            "flag may be a no-op on this code path; do not read this row as an A/B"
-        )
-    # Same guard for the airwire arm (#8999).
-    if variant == "airwire" and not row.get("airwire_applied", True):
-        row["warning"] = (
-            "variant 'airwire' did not log an 'Airwire separation cost:' line -- "
-            "the weight never reached the negotiated loop; do not read this row "
-            "as an A/B"
+            f"variant {variant!r} did not log its marker "
+            f"({_VARIANT_LOG_MARKERS[variant]!r}) -- the treatment flag may be "
+            "a no-op on this code path; do not read this row as an A/B"
         )
     routed = run_dir / f"{Path(board.src).stem}_routed.kicad_pcb"
     if routed.exists():
@@ -462,14 +455,14 @@ def render(rows: list[dict]) -> str:
                 f"| -- | -- | -- | {r.get('subprocess_wall_s', '--')} |"
             )
             continue
-        # Order arms report the order line, the airwire arm the cost line.
-        applied = r.get("order_applied")
-        if r["variant"] == "airwire":
-            applied = r.get("airwire_applied")
+        # The variant's own marker decides the cell; no marker registered
+        # (default / monotone / bundle-river / injected arms) renders ``--``.
+        applied = r.get("treatment_applied")
+        applied_cell = "--" if applied is None else str(applied)
         nogood = r.get("nogood_hit_rate")
         nogood_cell = "--" if nogood is None else f"{nogood:.3f}"
         out.append(
-            f"| {r['board']} | {r['variant']} | {applied} "
+            f"| {r['board']} | {r['variant']} | {applied_cell} "
             f"| {r['nets_complete']}/{r['nets_total']} "
             f"| {r['connections_routed']}/{r['connections_total']} "
             f"| {r['via_count']} | {r['wirelength_mm']} "
