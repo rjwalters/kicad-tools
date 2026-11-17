@@ -323,7 +323,8 @@ def _site_section(site: Mapping[str, Any] | None) -> list[str]:
         return []
     lines = [
         "## Website cart hand-off (attended driver)",
-        f'State: {site.get("state", "unknown")} ("ordered" is only ever set by the human)',
+        f'State: {site.get("state", "unknown")} ("ordered" is set only by you, or by the '
+        "opt-in --checkout leg from JLC's confirmation page)",
         f"Driver: {site.get('driver_version')}",
         f"Cart URL: {site.get('cart_url')}",
         f"Quote as displayed: {site.get('quote_total')}",

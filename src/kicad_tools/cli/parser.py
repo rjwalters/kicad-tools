@@ -7397,7 +7397,7 @@ def _add_submit_jlcpcb_parser(subparsers) -> None:
     add_arguments(
         subparsers.add_parser(
             "submit-jlcpcb",
-            help="Prepare a JLCPCB PCBA submission from a tapeout bundle (never orders)",
+            help="Prepare a JLCPCB PCBA submission from a tapeout bundle (orders only via the opt-in, attended --checkout leg)",
         )
     )
 
