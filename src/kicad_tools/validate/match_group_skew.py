@@ -16,10 +16,16 @@ This module provides the producer side -- a thin shim that:
 
 1. Detects match groups on a routed PCB using the same layered
    detector the router uses (:func:`match_group_detection.detect_match_groups`).
-2. Sums per-net length from PCB-side segments + vias (via
-   :meth:`MatchGroupTracker.measure_net_from_pcb`, a thin forwarder to
-   :meth:`DiffPairLengthTracker.measure_net_from_pcb`) for every
-   declared member of each detected group.
+2. Measures each declared member's length from the PCB.  The primary
+   measurement is the physical pad-to-pad copper path
+   (:meth:`TraceLengthAnalyzer.measure_net_path`) plus the stackup height
+   of the vias that path runs through; copper the signal never travels
+   (dead-end loops, overlapping duplicates, stubs) is reported but not
+   counted (Issue #9138).  When no pad-to-pad path exists (open net,
+   fewer than two pads, no shapely, a PCB stand-in without a net table)
+   it falls back to the summed kicad-cli length
+   (:meth:`MatchGroupTracker.measure_net_from_pcb`, a thin forwarder to
+   :meth:`DiffPairLengthTracker.measure_net_from_pcb`).
 3. Builds the ``group_skew_data`` (``max(L) - min(L)`` across the
    group), the detected ``tracker_match_groups`` list, and the per-group
    ``threshold_map`` from each group's net class
@@ -84,6 +90,12 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+# Off-path copper at or below this is not reported (Issue #9138).  Same
+# margin as board 07's validator (``OFF_PATH_TOLERANCE_MM``, Issue #9117):
+# loop-free nets there carry up to ~1.6 mm of residual copper from barrel
+# overlap under pads/vias and in-pad joints, which is not a routing defect.
+OFF_PATH_REPORT_THRESHOLD_MM = 2.0
 
 
 def derive_group_skew_data(
@@ -155,6 +167,9 @@ def derive_group_skew_data(
         :meth:`MatchGroupTracker.get_all_skews` for routes recorded
         via :meth:`MatchGroupTracker.record_routes`.  This is the
         property tested in ``tests/test_validate_match_group_skew.py``.
+        It holds for nets without off-path copper; a net with a dead-end
+        loop, duplicate or stub measures shorter here than the summed
+        router-side figure by design (Issue #9138).
 
         Suffix inference is OFF here (``enable_suffix_inference=False``,
         the detector's default).  Standalone ``kct check`` follows the
@@ -170,7 +185,6 @@ def derive_group_skew_data(
     # is the validate-side dependency on the router's match-group
     # primitives.  See module docstring.
     from kicad_tools.router.match_group_detection import detect_match_groups
-    from kicad_tools.router.match_group_length import MatchGroupTracker
 
     # Build the {net_id: net_name} map the detector expects.
     net_names: dict[int, str] = {}
@@ -251,9 +265,11 @@ def derive_group_skew_data(
             if not _net_has_geometry(pcb, net_id):
                 any_unrouted = True
                 break
-            length = MatchGroupTracker.measure_net_from_pcb(
+            length = _measure_member_mm(
                 pcb,
                 net_id,
+                net_names,
+                grp.name,
                 board_thickness_mm=board_thickness_mm,
                 num_copper_layers=num_copper_layers,
                 blind_buried_supported=blind_buried_supported,
@@ -273,16 +289,20 @@ def derive_group_skew_data(
                 if not _net_has_geometry(pcb, p_id) or not _net_has_geometry(pcb, n_id):
                     any_unrouted = True
                     break
-                l_p = MatchGroupTracker.measure_net_from_pcb(
+                l_p = _measure_member_mm(
                     pcb,
                     p_id,
+                    net_names,
+                    grp.name,
                     board_thickness_mm=board_thickness_mm,
                     num_copper_layers=num_copper_layers,
                     blind_buried_supported=blind_buried_supported,
                 )
-                l_n = MatchGroupTracker.measure_net_from_pcb(
+                l_n = _measure_member_mm(
                     pcb,
                     n_id,
+                    net_names,
+                    grp.name,
                     board_thickness_mm=board_thickness_mm,
                     num_copper_layers=num_copper_layers,
                     blind_buried_supported=blind_buried_supported,
@@ -356,6 +376,107 @@ def resolve_group_tolerance_mm(
             default=DEFAULT_MATCH_GROUP_TOLERANCE_MM,
         )
     return DEFAULT_MATCH_GROUP_TOLERANCE_MM
+
+
+def _measure_member_mm(
+    pcb: PCB,
+    net_id: int,
+    net_names: dict[int, str],
+    group_name: str,
+    *,
+    board_thickness_mm: float | None,
+    num_copper_layers: int,
+    blind_buried_supported: bool,
+) -> float:
+    """Length of one group member in mm (Issue #9138).
+
+    Pad-to-pad path length plus the stackup height of the vias on that
+    path; off-path copper above :data:`OFF_PATH_REPORT_THRESHOLD_MM` is
+    logged as a warning.  Falls back to the summed kicad-cli length when
+    the path is unavailable (see :func:`_measure_path_length_mm`).
+    """
+    net_name = net_names.get(net_id, f"net {net_id}")
+    path = _measure_path_length_mm(pcb, net_id, net_names.get(net_id), num_copper_layers)
+    if path is not None:
+        length_mm, off_path_mm = path
+        if off_path_mm > OFF_PATH_REPORT_THRESHOLD_MM:
+            logger.warning(
+                "[match-group-skew] %s: net %s carries %.3f mm of off-path copper "
+                "(dead-end loop, duplicate or stub) excluded from its length",
+                group_name,
+                net_name,
+                off_path_mm,
+            )
+        return length_mm
+
+    from kicad_tools.router.match_group_length import MatchGroupTracker
+
+    return MatchGroupTracker.measure_net_from_pcb(
+        pcb,
+        net_id,
+        board_thickness_mm=board_thickness_mm,
+        num_copper_layers=num_copper_layers,
+        blind_buried_supported=blind_buried_supported,
+    )
+
+
+def _measure_path_length_mm(
+    pcb: PCB,
+    net_id: int,
+    net_name: str | None,
+    num_copper_layers: int,
+) -> tuple[float, float] | None:
+    """Return ``(path_length_mm, off_path_mm)`` for a net, or ``None``.
+
+    ``path_length_mm`` is :meth:`TraceLengthAnalyzer.measure_net_path`'s
+    pad-to-pad length plus the kicad-cli stackup height of each via on that
+    path, so a clean net equals its summed kicad-cli length.  For a net with
+    more than two pads the path is the longest pairwise pad path (the
+    binding length), and the other branches count as off-path copper.
+
+    ``None`` means "no path-based figure" -- the caller falls back to the
+    summed length: unnamed net, a PCB stand-in without ``get_net_by_name``,
+    no shapely, an open net, fewer than two pads, or any inconsistency
+    between the path's via indices and the net's vias.
+    """
+    if not net_name or not callable(getattr(pcb, "get_net_by_name", None)):
+        return None
+
+    try:
+        from kicad_tools.analysis.trace_length import TraceLengthAnalyzer
+        from kicad_tools.router.kicad_length import measure_pcb_net_parts
+
+        measurement = TraceLengthAnalyzer().measure_net_path(pcb, net_name)
+        if measurement.path_length_mm is None:
+            return None
+
+        # ``path_via_indices`` index ``pcb.vias``; ``NetLengthParts.vias``
+        # follows ``pcb_net_geometry`` order (this net's vias, skipping any
+        # with fewer than two layers).  Map one to the other.
+        board_indices = [
+            index
+            for index, via in enumerate(pcb.vias)
+            if via.net_number == net_id and via.layers and len(via.layers) >= 2
+        ]
+        heights = measure_pcb_net_parts(pcb, net_id, num_copper_hint=num_copper_layers).vias
+        if len(heights) != len(board_indices):
+            return None
+        height_by_index = dict(zip(board_indices, heights, strict=True))
+        if any(index not in height_by_index for index in measurement.path_via_indices):
+            return None
+
+        via_mm = sum(height_by_index[index] for index in measurement.path_via_indices)
+        return (
+            measurement.path_length_mm + via_mm,
+            measurement.off_path_length_mm or 0.0,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "[match-group-skew] path measurement of net %s raised %s; using summed length",
+            net_name,
+            exc,
+        )
+        return None
 
 
 def _net_has_geometry(pcb: PCB, net_id: int) -> bool:
