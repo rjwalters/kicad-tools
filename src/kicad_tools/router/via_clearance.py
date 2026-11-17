@@ -451,6 +451,8 @@ def same_net_segment_pad_gap_acceptable(
     half_width: float,
     same_net_pad_bboxes: list[tuple[float, float, float, float]] | None,
     min_gap_mm: float,
+    *,
+    tangent_is_union: bool = False,
 ) -> bool:
     """True iff a trace segment from ``a`` to ``b`` keeps the fab-view copper
     gap to every same-net SMD pad out of the slit band.
@@ -475,7 +477,9 @@ def same_net_segment_pad_gap_acceptable(
     (its ``gap == 0`` means the centerline reaches the rectangle, a genuine
     overlap), ``[0, min_gap_mm)`` for a degenerate point/annulus seat, whose
     tangent locus (``gap == 0``) is a one-point touch rather than a union
-    (Issue #9124).
+    (Issue #9124).  The tangent-union exception of the trace population
+    (Issue #9208) is opt-in via ``tangent_is_union`` -- see
+    :func:`same_net_segment_trace_gap_acceptable`.
 
     The gap is exact segment-vs-rectangle geometry: the copper-to-pad air
     gap is ``max(0, centerline-to-rect distance - half_width)``, computed
@@ -498,6 +502,14 @@ def same_net_segment_pad_gap_acceptable(
             must not include them; ``None`` or empty disables the test.
         min_gap_mm: The fab-view pad-population detection edge in mm.
             ``<= 0`` disables the test (every position acceptable).
+        tangent_is_union: Accept the tangent seat (``gap == 0``) of a
+            degenerate point as a copper union.  ``False`` (default) is the
+            pad population's contract (Issue #9124); ``True`` mirrors the
+            trace population's C++ band ``same_net_segment_gap_in_band``
+            (Issue #9208), where an annulus tangent to its own trace is one
+            copper piece.  Only the degenerate-point branch is affected: a
+            segment's ``gap == 0`` is a centerline-reaches-rectangle
+            overlap, a union for both populations.
 
     Returns:
         True when the segment's gap is acceptable for every pad (union or
@@ -508,17 +520,22 @@ def same_net_segment_pad_gap_acceptable(
     ax, ay = a
     bx, by = b
     is_point = ax == bx and ay == by
-    # Issue #9124: the lower edge of the rejected band differs by primitive.
-    # A point (via annulus) gap is SIGNED -- ``hypot - r`` is negative on real
-    # overlap and exactly 0 on the tangent locus (centre exactly ``r`` from a
-    # pad face or corner), where the disc touches the rectangle only at one
+    # The band's lower edge is a property of the copper POPULATION, not of
+    # the primitive.  Pad population (default, Issue #9124): a point (via
+    # annulus) gap is SIGNED -- ``hypot - r`` is negative on real overlap
+    # and exactly 0 on the tangent locus (centre exactly ``r`` from a pad
+    # face or corner), where the disc touches the rectangle only at one
     # point and the receding arc leaves a wedge the fab-view checker grades
-    # (touch-at-a-point is not a copper union).  So the point branch rejects
+    # (touch-at-a-point is not a copper union), so the point branch rejects
     # from ``-1e-9`` up, accepting only real overlap (``gap <= -1e-9``) or
-    # clearance.  The segment gap is ``max(0, ...)``: ``0`` there means the
-    # centerline REACHES the rectangle (genuine overlap), so that branch
-    # must keep accepting ``gap == 0``.
-    lower = -1e-9 if is_point else 1e-9
+    # clearance.  Trace population (``tangent_is_union=True``, Issue #9208):
+    # the C++ band ``same_net_segment_gap_in_band`` measures the same signed
+    # point gap and still treats ``gap == 0`` as a copper union, so it keeps
+    # the ``1e-9`` float-noise edge.  The segment gap is ``max(0, ...)``:
+    # ``0`` there means the centerline REACHES the rectangle (genuine
+    # overlap, a union for both populations), so the segment branch always
+    # keeps ``1e-9``.
+    lower = 1e-9 if (tangent_is_union or not is_point) else -1e-9
     for bbox in same_net_pad_bboxes:
         if is_point:
             # Point primitive: the annulus form's arithmetic exactly.
@@ -533,6 +550,30 @@ def same_net_segment_pad_gap_acceptable(
         if lower < gap < min_gap_mm - 1e-9:
             return False
     return True
+
+
+def same_net_segment_trace_gap_acceptable(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    half_width: float,
+    same_net_seg_bboxes: list[tuple[float, float, float, float]] | None,
+    min_gap_mm: float,
+) -> bool:
+    """True iff a seat keeps the copper gap to every same-net TRACE out of
+    the trace population's slit band (Issue #9208).
+
+    The Python mirror of the C++ ``same_net_segment_gap_in_band`` band
+    (``DesignRules.same_net_trace_gap_band_edge_mm``): unlike the pad
+    population, the trace population accepts a tangent seat -- ``gap == 0``
+    (e.g. a via annulus whose centre sits exactly one radius from the
+    trace's swept edge) is one copper union, matching the C++ band's
+    ``1e-9 < gap`` lower edge.  Same geometry and acceptable regions as
+    :func:`same_net_segment_pad_gap_acceptable`, called with
+    ``tangent_is_union=True``.
+    """
+    return same_net_segment_pad_gap_acceptable(
+        a, b, half_width, same_net_seg_bboxes, min_gap_mm, tangent_is_union=True
+    )
 
 
 def _segment_box_gap_mm(
