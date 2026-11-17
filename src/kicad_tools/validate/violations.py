@@ -58,12 +58,14 @@ class DRCViolation:
         fab_band: The fab band the finding was graded against, ``"trace"`` or
             ``"pad"``, on a fab-band-graded ``physical_copper_gap`` finding
             (Issue #8972).  ``None`` when the emitting site has no band
-            concept.
+            concept.  Labels the population only -- it never enters
+            :attr:`key`, so waiver identity is band-independent.
         corner_class: The population of the ``sharp_trace_corner`` rule a
             finding belongs to, ``"bend"`` (two segments meet at the vertex)
             or ``"junction"`` (three or more do) (Issue #9037).  ``None``
-            when the emitting rule does not classify.  Labels the population only -- it never enters
-            :attr:`key`, so waiver identity is band-independent.
+            when the emitting rule does not classify.  Labels the population
+            only -- it never enters :attr:`key`, so waiver identity is
+            class-independent.
     """
 
     rule_id: str
@@ -181,6 +183,11 @@ class DRCViolation:
             # Issue #8972: labels the fab band the finding was graded against
             # (stays None for bandless emit sites); never part of ``key``.
             "fab_band": self.fab_band,
+            # Issue #9037: labels the ``sharp_trace_corner`` population
+            # (``"bend"``/``"junction"``; stays None for rules that do not
+            # classify); never part of ``key`` -- this is the machine handle
+            # a consumer gates the fab-equivalent bend subset on.
+            "corner_class": self.corner_class,
             # Status distinguishes a waived finding from an active one at a
             # glance for JSON consumers.  Waived findings render as
             # ``"waived"`` regardless of their underlying ``severity`` (Issue

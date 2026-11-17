@@ -205,6 +205,20 @@ def test_inner_layer_junction_still_reported(tmp_path):
     assert v[0].layer == "B.Cu" and v[0].corner_class == "junction"
 
 
+def test_corner_class_survives_serialization(tmp_path):
+    # Issue #9037 review: ``corner_class`` must reach ``kct check --json``
+    # (``DRCViolation.to_dict()``) or no machine consumer can gate the
+    # fab-equivalent bend subset -- the in-process attribute alone is not a
+    # contract.
+    bend = _check(tmp_path, _seg((0, 0), (10, 0)), _seg((10, 0), (0, 3)))[0]
+    assert bend.to_dict()["corner_class"] == "bend"
+    junction = _check(tmp_path, *_junction_segs())[0]
+    assert junction.to_dict()["corner_class"] == "junction"
+    # Attribution-only, in the serialized form too: waiver identity never
+    # moves.
+    assert "corner_class" not in bend.key
+
+
 def test_junction_vertex_inside_pad_not_flagged(tmp_path):
     # The table's "junction of 3 or more segments, vertex inside a pad"
     # class: pad copper fills the wedge, no acid trap (#8848 containment,
