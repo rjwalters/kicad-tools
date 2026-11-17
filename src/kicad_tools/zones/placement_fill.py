@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -59,7 +60,9 @@ def find_kicad_python(probe: str = _SELECTIVE_FILL_PROBE) -> Path | None:
     Python.framework on darwin, ``PROGRAMFILES`` KiCad installs on win32,
     ``/usr/bin/python3``, then ``python3`` from ``PATH``. A probe that times
     out is retried once (cold-start tolerance) before the candidate is given
-    up on.
+    up on. Only exact repeated paths are skipped: differently-named links to
+    one interpreter are each probed, because a failing link (a venv) says
+    nothing about the interpreter it points to.
     """
     candidates = [Path(sys.executable)]
     if sys.platform == "darwin":
@@ -69,8 +72,6 @@ def find_kicad_python(probe: str = _SELECTIVE_FILL_PROBE) -> Path | None:
             )
         )
     elif sys.platform == "win32":
-        import os
-
         for location in (os.environ.get("PROGRAMFILES"), os.environ.get("PROGRAMFILES(X86)")):
             if location:
                 candidates.extend(
@@ -82,9 +83,14 @@ def find_kicad_python(probe: str = _SELECTIVE_FILL_PROBE) -> Path | None:
         candidates.append(Path(located))
     seen = set()
     for candidate in candidates:
-        if not candidate.is_file() or candidate.resolve() in seen:
+        # Dedup on the path as listed, never its symlink target: a venv
+        # interpreter and the system interpreter it links to share a real
+        # path but not a site-packages, so a failed venv probe says nothing
+        # about the system python (Issue #9086).
+        key = os.path.abspath(candidate)
+        if not candidate.is_file() or key in seen:
             continue
-        seen.add(candidate.resolve())
+        seen.add(key)
         result = None
         for _attempt in range(_PROBE_ATTEMPTS):
             try:

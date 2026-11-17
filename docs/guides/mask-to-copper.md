@@ -92,6 +92,9 @@ the opening. The trailing relation distinguishes the classes a fab report uses:
   via, its center does): the pad's own escape, not a defect neighbour.
 - `same-net pass-through` — same net, but the track merely passes or bends across
   the opening without terminating there.
+- `same-net` — same net, but the entry/pass-through distinction does not apply: the
+  conductor is an area (a zone pour) or another pad, so it has no terminating
+  endpoint to test.
 - `different-net` — the copper belongs to another net.
 
 While the assessment's coverage is incomplete, its findings are provisional: they
