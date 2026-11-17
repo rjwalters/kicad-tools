@@ -14,7 +14,7 @@
 # measurement instrument the verdict rests on, kept for any future
 # re-evaluation).
 #
-# Usage: scripts/bench_candidate_selection_8998.sh <out-dir> [board...]
+# Usage: scripts/research/joint_candidate_selection_experiment.sh <out-dir> [board...]
 # Boards default to: 02 03 04 mains
 #
 # The selection feature is intentionally flag-less (Issue #8998
@@ -23,9 +23,9 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-OUT_DIR="${1:?usage: bench_candidate_selection_8998.sh <out-dir> [board...]}"
+OUT_DIR="${1:?usage: scripts/research/joint_candidate_selection_experiment.sh <out-dir> [board...]}"
 shift || true
-BOARDS=("${@:-02 03 04 mains}")
+if [[ $# -eq 0 ]]; then BOARDS=(02 03 04 mains); else BOARDS=("$@"); fi
 export PYTHONHASHSEED=42
 
 cd "$REPO_ROOT" || exit 1
@@ -84,7 +84,7 @@ route_board() {
         unset KCT_JOINT_CANDIDATE_SELECTION
     fi
     {
-        echo "--- $board $MODE start $(date -u +%H:%M:%S)"
+        echo "--- $board $mode start $(date -u +%H:%M:%S)"
         nice -n 10 uv run kct route "${flags[@]}" -o "$OUT_DIR/${board}-${mode}.kicad_pcb"
         echo "rc=$?"
     } >> "$log" 2>&1
@@ -93,7 +93,6 @@ route_board() {
 mkdir -p "$OUT_DIR"
 for board in "${BOARDS[@]}"; do
     for mode in OFF ON; do
-        MODE="$mode"
         log="$OUT_DIR/${board}-${mode}.log"
         echo "=== board $board mode $mode"
         route_board "$board" "$mode" "$log"
@@ -111,8 +110,7 @@ for board in "${BOARDS[@]}"; do
         final=$(grep -o 'overflow: [0-9]*' "$log" | tail -1 | awk '{print $2}')
         routed=$(grep 'Routed .*/.* nets' "$log" | tail -1 |
             sed -n 's/.*Routed \([0-9]*\/[0-9]*\) nets.*/\1/p')
-        verdict=$(grep -cE 'routing complete|No conflicts' "$log" >/dev/null &&
-            grep -oE 'routing complete|No conflicts - routing complete|ROUTING [A-Z ]+' "$log" | tail -1)
+        verdict=$(grep -oE 'No conflicts - routing complete|routing complete|ROUTING [A-Z ]+' "$log" | tail -1)
         sel=$(grep -c 'Joint candidate selection:' "$log")
         printf "%-6s %-4s %-10s %-10s %-14s %s (sel-lines=%s)\n" \
             "$board" "$mode" "${ripup:-?}" "${final:-?}" "${routed:-?}" "${verdict:-?}" "$sel"
