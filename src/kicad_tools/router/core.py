@@ -13193,7 +13193,7 @@ class Autorouter:
                 and 20/21 on a slow one at the same commit, because the
                 10 s wall clock straddles the measured 8-12 s natural
                 re-land time on CI runners.  Defaults to
-            deterministic_rescue: :data:`DETERMINISTIC_RESCUE_DEFAULT` (``False``): #4730
+                :data:`DETERMINISTIC_RESCUE_DEFAULT` (``False``): #4730
                 measured a board-07 regression on this entry point with
                 it on, so it stays opt-in.  See that constant and
                 :meth:`_relief_subsearch_budget`.
