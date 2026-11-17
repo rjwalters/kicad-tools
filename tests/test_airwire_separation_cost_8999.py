@@ -298,11 +298,11 @@ class TestFallbackMemoStamp:
 class TestStaleSoRejected:
     """(e) A stale .so (any version below the required one) is rejected by the import-time guard."""
 
-    def test_required_version_is_67(self):
+    def test_required_version_is_68(self):
         from kicad_tools.router import router_cpp
 
-        assert cpp_backend._REQUIRED_CPP_BUILD_VERSION == 67
-        assert router_cpp.BUILD_VERSION == 67
+        assert cpp_backend._REQUIRED_CPP_BUILD_VERSION == 68
+        assert router_cpp.BUILD_VERSION == 68
 
     def test_stale_v66_module_disables_backend(self):
         script = (
