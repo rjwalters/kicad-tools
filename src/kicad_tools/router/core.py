@@ -3201,6 +3201,68 @@ class Autorouter:
             self.router.update_layer_fill_ratios()
         return True
 
+    def _barrier_closure_commit(self, route: Route) -> None:
+        """Report-only barrier-closure hook for a negotiated commit (Issue #9000).
+
+        Off unless ``KCT_BARRIER_CLOSURE`` is truthy, in which case the only
+        cost is the environment read.  When on it feeds the committed route to
+        :class:`~kicad_tools.router.barrier_closure.BarrierClosureTracker`,
+        which logs a closed barrier loop and the unrouted nets it severs.  It
+        reads the grid's committed routes and writes nothing the router
+        consults, and every failure is swallowed: routing is byte-identical
+        with the hook on or off.
+        """
+        from .barrier_closure import ENV_FLAG
+
+        if os.environ.get(ENV_FLAG, "").strip().lower() not in ("1", "true", "yes", "on"):
+            return
+        try:
+            tracker = getattr(self, "_barrier_closure_tracker", None)
+            grid = self.grid
+            if tracker is None or tracker.owner is not grid:
+                from . import barrier_closure
+                from .barrier_closure import BarrierClosureTracker
+                from .region_graph import RegionGraph
+
+                tile_mm = barrier_closure.DEFAULT_TILE_MM
+                graph = RegionGraph(
+                    board_width=grid.width,
+                    board_height=grid.height,
+                    origin_x=grid.origin_x,
+                    origin_y=grid.origin_y,
+                    num_cols=max(1, min(60, int(grid.width / tile_mm))),
+                    num_rows=max(1, min(60, int(grid.height / tile_mm))),
+                )
+
+                def region_of(x: float, y: float) -> int | None:
+                    region = graph.get_region_at(x, y)
+                    return None if region is None else region.id
+
+                def layer_of(layer: object) -> int | None:
+                    try:
+                        return grid.layer_to_index(layer.value)  # type: ignore[attr-defined]
+                    except Exception:
+                        return None
+
+                routable = [i for i in grid.get_routable_indices() if not grid.is_plane_layer(i)]
+                net_pads = {
+                    net: [(self.pads[k].x, self.pads[k].y) for k in keys if k in self.pads]
+                    for net, keys in self.nets.items()
+                }
+                journal = self._commit_journal
+                tracker = BarrierClosureTracker(
+                    region_of,
+                    layer_of,
+                    routable or grid.get_routable_indices(),
+                    net_pads,
+                    stage=lambda: f"{journal.pass_name}[{journal.iteration}]",
+                )
+                tracker.owner = grid
+                self._barrier_closure_tracker = tracker
+            tracker.on_commit(route, list(grid.routes))
+        except Exception:  # diagnostic only: never alter routing
+            logger.debug("barrier closure hook failed", exc_info=True)
+
     def restore_route_snapshot(
         self, routes: list[Route], *, replaced_routes: list[Route] | None = None
     ) -> None:
@@ -18910,7 +18972,11 @@ class Autorouter:
             # connection and fires its ``failure_callback``, so a refusal feeds
             # the existing targeted rip-up machinery rather than silently
             # dropping copper.
-            return self._mark_route(route, enforce_pad_access=True)
+            committed = self._mark_route(route, enforce_pad_access=True)
+            if committed:
+                # Issue #9000: report-only barrier-closure diagnostic (env-gated).
+                self._barrier_closure_commit(route)
+            return committed
 
         # Issue #6353 (experiment, default OFF): validity-aware nogood cache.
         # Everything below is skipped when the cache is disabled, so the
