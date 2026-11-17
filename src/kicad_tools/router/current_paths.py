@@ -227,6 +227,7 @@ from kicad_tools.core.layers import COPPER_LAYER_ORDER, via_spans_layer
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from kicad_tools.manufacturers import DesignRules
     from kicad_tools.schema.pcb import PCB, Footprint, Net, Pad, Segment, Via, Zone
     from kicad_tools.sexp.parser import SExp
 
@@ -886,13 +887,21 @@ class LayerChange:
 
 
 #: Clearance allowance (mm) in the packed tie-row gap bound of
-#: :func:`_layer_changes` (#8950): two neighbouring row vias may sit at most
-#: an average pad diameter plus this apart. Rows are placed by ``reinforce``
-#: at the same-net minimum centre spacing (pad + clearance, floored by
-#: hole-to-hole), so any real clearance value fits under this bound, while
-#: the distributed stitching pitch of ``STITCH_PITCH_MM = 5.0`` mm stays
-#: well outside it.
+#: :func:`_layer_changes` (#8950), used only when no ``design_rules`` reach
+#: that function: two neighbouring row vias may sit at most an average pad
+#: diameter plus this apart. When rules are supplied (#8992) the bound is
+#: derived from the placer's own same-net spacing rule instead, so a
+#: widened ``min_clearance_mm`` can no longer place a row that then fails
+#: to group. Both bounds sit well under the distributed stitching pitch of
+#: ``STITCH_PITCH_MM = 5.0`` mm.
 _TIE_ROW_GAP_CLEARANCE_MM = 0.5
+
+#: Slack (mm) on top of the derived packed-row gap bound (#8992): the
+#: placer rounds both via centres to the 0.01 mm write grid, so a written
+#: pair's gap can drift up to 0.01 mm past the nominal spacing. Five times
+#: that absorbs the drift while staying negligible against the 5.0 mm
+#: distributed-stitch pitch the bound must never reach.
+_TIE_ROW_GAP_TOLERANCE_MM = 0.05
 
 
 def _layer_changes(
@@ -900,6 +909,7 @@ def _layer_changes(
     net_name: str,
     segments: Sequence[Segment],
     arrays: Sequence[_ViaArray] = (),
+    design_rules: DesignRules | None = None,
 ) -> tuple[LayerChange, ...]:
     """Layer changes on a resolved path, ordered along ``segments``.
 
@@ -914,6 +924,12 @@ def _layer_changes(
     transfer is distributed across the barrels, not series through one.
     Every other layer-change via is its own change, in path order -- vias in
     series each carry the full path current, however close together they sit.
+
+    When ``design_rules`` is given, the packed-row gap bound is the same
+    same-net via spacing rule ``reinforce`` places rows by (#8992), plus
+    :data:`_TIE_ROW_GAP_TOLERANCE_MM` and capped at half the distributed
+    stitch pitch, so vias at ``STITCH_PITCH_MM`` never group. Without it,
+    the historical :data:`_TIE_ROW_GAP_CLEARANCE_MM` bound applies.
     """
     net = pcb.get_net_by_name(net_name)
     array_of: dict[tuple[float, float], int] = {
@@ -958,19 +974,49 @@ def _layer_changes(
             next(layer for layer in layers if layer not in ending), False
         )
 
+    def _row_gap_bound(a: tuple[int, Via, str, str], b: tuple[int, Via, str, str]) -> float:
+        """Max centre distance for vias ``a``/``b`` to share one packed row.
+
+        Rules-free callers keep the historical average-pad-plus-allowance
+        bound (#8950). With ``design_rules`` (#8992) the bound is the same
+        same-net via spacing rule the placer uses (copper clearance floored
+        by hole-to-hole, plus the write guard), so a row placed at that
+        spacing always groups however wide the clearance is; the cap keeps
+        distributed stitches at ``STITCH_PITCH_MM`` out even for rule sets
+        wide enough to push the spacing toward the pitch.
+        """
+        if design_rules is None:
+            return (a[1].size + b[1].size) / 2.0 + _TIE_ROW_GAP_CLEARANCE_MM
+        from kicad_tools.cli.stitch_cmd import _same_net_via_spacing
+        from kicad_tools.pcb.reinforce import STITCH_PITCH_MM
+
+        spacing = max(
+            _same_net_via_spacing(
+                a[1].size,
+                design_rules.min_clearance_mm,
+                a[1].drill,
+                design_rules.min_hole_to_hole_mm,
+            ),
+            _same_net_via_spacing(
+                b[1].size,
+                design_rules.min_clearance_mm,
+                b[1].drill,
+                design_rules.min_hole_to_hole_mm,
+            ),
+        )
+        return min(spacing + _TIE_ROW_GAP_TOLERANCE_MM, STITCH_PITCH_MM / 2.0)
+
     def _row_link(a: tuple[int, Via, str, str], b: tuple[int, Via, str, str]) -> bool:
         """True when vias ``a``/``b`` could sit in one packed tie row.
 
-        Same layer pair, centres within the packed-row gap bound (an average
-        pad plus a clearance allowance -- well under the distributed stitch
+        Same layer pair, centres within the packed-row gap bound (see
+        :func:`_row_gap_bound` -- always well under the distributed stitch
         pitch), and one path segment on each joined layer touching both vias,
         so both layers' copper runs continuously between them.
         """
         if {a[2], a[3]} != {b[2], b[3]}:
             return False
-        if math.dist(a[1].position, b[1].position) > (
-            (a[1].size + b[1].size) / 2.0 + _TIE_ROW_GAP_CLEARANCE_MM
-        ):
+        if math.dist(a[1].position, b[1].position) > _row_gap_bound(a, b):
             return False
         return all(
             any(
@@ -2150,7 +2196,9 @@ def _resolve_endpoint(
     )
 
 
-def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
+def resolve_current_path(
+    pcb: PCB, spec: CurrentPathSpec, *, design_rules: DesignRules | None = None
+) -> PathResolution:
     """Resolve one declared current-path spec against a loaded board.
 
     Fails closed at every step: a missing/replaced/off-net pad, a pad with
@@ -2161,6 +2209,14 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
     Args:
         pcb: A loaded :class:`~kicad_tools.schema.pcb.PCB`.
         spec: The declared current-path intent to resolve.
+        design_rules: Optional design rules of the board's manufacturer
+            profile. When given, the packed tie-row grouping behind
+            :attr:`PathResolution.layer_changes` bounds row gaps by the same
+            same-net via spacing rule ``reinforce`` places rows by (#8992),
+            so a widened ``min_clearance_mm`` cannot place a row that then
+            fails to group. Without it the historical constant bound
+            applies. The parameter is additive and optional: the
+            rules-free call sites keep today's behaviour.
 
     Returns:
         A :class:`PathResolution` describing the outcome.
@@ -2400,7 +2456,7 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
         sink=sink,
         segments=tuple(path_segments),
         length_mm=sum(_seg_length(s) for s in path_segments),
-        layer_changes=_layer_changes(pcb, spec.net_name, path_segments, arrays),
+        layer_changes=_layer_changes(pcb, spec.net_name, path_segments, arrays, design_rules),
         sense_taps=tuple({id(seg): seg for seg in sense_taps}.values()),
         parallel_groups=tuple(parallel_groups),
     )
@@ -2452,7 +2508,9 @@ class CurrentPathAudit:
         return not any(self.uncovered.values())
 
 
-def audit_current_paths(pcb: PCB, specs: Sequence[CurrentPathSpec]) -> CurrentPathAudit:
+def audit_current_paths(
+    pcb: PCB, specs: Sequence[CurrentPathSpec], *, design_rules: DesignRules | None = None
+) -> CurrentPathAudit:
     """Resolve every declared path and report unmodeled/uncovered copper.
 
     This is the "independent final-copper audit" the issue requires:
@@ -2466,11 +2524,14 @@ def audit_current_paths(pcb: PCB, specs: Sequence[CurrentPathSpec]) -> CurrentPa
     Args:
         pcb: A loaded :class:`~kicad_tools.schema.pcb.PCB`.
         specs: Declared current-path intents to audit.
+        design_rules: Optional design rules threaded through to
+            :func:`resolve_current_path` (#8992), where they set the packed
+            tie-row grouping bound.
 
     Returns:
         A :class:`CurrentPathAudit`.
     """
-    resolutions = [resolve_current_path(pcb, spec) for spec in specs]
+    resolutions = [resolve_current_path(pcb, spec, design_rules=design_rules) for spec in specs]
 
     covered_ids: dict[str, set[int]] = {}
     for resolution in resolutions:
