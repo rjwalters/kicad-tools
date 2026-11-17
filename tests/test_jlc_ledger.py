@@ -132,15 +132,22 @@ def test_default_ledger_lives_under_home(monkeypatch, tmp_path):
 def test_ledger_and_lock_owner_is_checked(tmp_path, monkeypatch):
     import os
 
-    ledger = OrderLedger(tmp_path)
+    orders = tmp_path / "orders"
+    orders.mkdir(mode=0o700)  # passes _check_directory under the real uid
+    ledger = OrderLedger(orders)
     ledger.append("payment-attempted", A)
     with ledger.locked():
         pass  # creates the lock file
     real = os.getuid()
     monkeypatch.setattr(os, "getuid", lambda: real + 1)
-    with pytest.raises(LedgerError, match="not owned"):
+    # The patched getuid would trip _check_directory first with the same text;
+    # stub it so this test pins the file-level ownership branch, and anchor
+    # each match on the exact file that branch refuses.
+    monkeypatch.setattr(OrderLedger, "_check_directory", lambda self: None)
+    with pytest.raises(LedgerError, match=rf"{re.escape(str(ledger.path))} is not owned"):
         ledger.plan_status(A)
-    with pytest.raises(LedgerError, match="not owned"):
+    lock_path = ledger.directory / "jlc-orders.lock"
+    with pytest.raises(LedgerError, match=rf"{re.escape(str(lock_path))} is not owned"):
         with ledger.locked():
             pass
 
