@@ -265,6 +265,44 @@ def test_leg_band_predicate_grades_slits_but_not_unions_or_bends(recipe):
     assert ok(*leg, [seg(0.2, 0.2, 0.6, 0.2)], [], [(1.0, 0.125, 1.5, 0.6)], 0.0, 0.0)
 
 
+def test_fixture_relocation_same_net_slit_residual_is_the_accepted_one(tmp_path, recipe):
+    """Issue #9187: the one same-net slit family the leg check lets through.
+
+    Measured on the committed fixture (jlcpcb ``4layer_1oz``): the J1.B7
+    relocation ``(113.00, 57.90) -> (113.530, 58.430)`` writes a 0.15 mm
+    ``In1.Cu`` leg at 45 degrees out of the exact point where the old via's
+    0.25 mm vertical chain ends.  Chain and leg form a 45-degree same-net
+    wedge whose first non-touching chain pieces sit 0.0841 / 0.0664 mm from
+    the leg (trace band ``(0, 0.1016)``).  It is accepted, not drained:
+
+    * same net -- no short, only the fab-view notch warning, and
+      ``(physical_copper_gap, USB2_D-)`` is already an acknowledged identity
+      in ``DIFFPAIR_FIXTURE_ALLOWED_FINDINGS``;
+    * the notch is the junction itself: halving the chain reach in
+      ``_same_net_leg_band_ok`` leaves it (0.0945 / 0.0768 mm), and a reach
+      of 0 leaves two vias unrepairable (``RuntimeError``), so no cheap
+      predicate removes it without the over-rejection of #9186.
+
+    This pins the acceptance: any *other* new same-net finding from the
+    legalizer, or a changed repair count, fails here.
+    """
+    fixture = ROOT / "regression-fixture/diffpair_test_routed.kicad_pcb"
+    path = tmp_path / "fixture.kicad_pcb"
+    shutil.copy(fixture, path)
+    before = {(v.layer, v.key) for v in _same_net_slits(path)}
+
+    assert recipe._legalize_signal_vias(path) == 7
+
+    new = [v for v in _same_net_slits(path) if (v.layer, v.key) not in before]
+    # F.Cu rows re-keyed by the pad-population findings' boundary order are
+    # not new copper: they pair with an equal-gap row that disappeared.
+    in1 = sorted(round(v.actual_value, 4) for v in new if v.layer == "In1.Cu")
+    assert in1 == [0.0664, 0.0841]
+    assert {v.nets for v in new if v.layer == "In1.Cu"} == {("USB2_D-",)}
+    after = {(v.layer, v.key) for v in _same_net_slits(path)}
+    assert len(before) == 29 and len(after) == 31
+
+
 def write_drill_pair_slide_board(path):
     """Two same-net vias 0.25 mm drill-edge apart, joined by one F.Cu stub.
 

@@ -1995,6 +1995,13 @@ def _same_net_leg_band_ok(
     Copper reachable only *through a pad* (a sibling escape stub from the
     same pad the leg leaves) is **not** excluded: that parallel pair is a
     real slit.  An edge of ``0`` disables that population's test.
+
+    Known, accepted residual (Issue #9187): the J1.B7 relocation leaves two
+    same-net ``In1.Cu`` findings (0.0841 / 0.0664 mm) -- the 45-degree wedge
+    between the leg and the old chain at the point they meet.  Narrowing the
+    chain reach does not remove it (0x leaves two vias unrepairable), so it
+    is accepted; ``test_fixture_relocation_same_net_slit_residual_is_the_accepted_one``
+    pins it.
     """
     from shapely.geometry import LineString, Point, box
 
