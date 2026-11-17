@@ -347,6 +347,12 @@ class ParityReport:
 
     manufacturer: str
     rows: tuple[ParityRow, ...]
+    #: Issue #9062: TABLE-ONLY -- the JLCDFM parity categories that are
+    #: danger-capable and ``not_covered`` by this static table, whatever
+    #: happened on any given run.  It never reflects run-time state; the
+    #: categories whose check did not complete *this* run are serialized as
+    #: ``meta_checks.incomplete_categories`` in the ``kct check`` JSON
+    #: report.
     incomplete_categories: tuple[str, ...]
     #: Per-category kct-vs-fab counts; ``None`` unless a recorded result was
     #: supplied (issue #8940).

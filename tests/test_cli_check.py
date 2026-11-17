@@ -727,6 +727,7 @@ class TestCheckMetaCheck:
             "manifest",
             "overall",
             "schematic_missing",
+            "incomplete_categories",
         }
         for name in ("drc", "erc", "lvs", "manifest"):
             assert "status" in meta[name]
@@ -734,6 +735,8 @@ class TestCheckMetaCheck:
         assert meta["overall"] == "PASSED"
         # Schematic was present in this fixture, so the LVS gate was not skipped.
         assert meta["schematic_missing"] is False
+        # A clean run names no incomplete category (issue #9062).
+        assert meta["incomplete_categories"] == []
 
     def test_meta_checks_omitted_under_drc_only_in_json(self, drc_clean_pcb: Path, capsys):
         """--drc-only must NOT add meta_checks to the JSON envelope."""
@@ -876,7 +879,9 @@ class TestOverallMatchesExitCode:
         The ``overall`` *value* becomes honest (INCOMPLETE) -- that is the
         fix -- but the structure machine consumers parse is byte-compatible:
         no new keys, no schema bump.  The remediation hint deliberately
-        never enters ``MaskCopperAssessment.to_dict()``.
+        never enters ``MaskCopperAssessment.to_dict()``.  (Issue #9062
+        later added the additive ``incomplete_categories`` key; every other
+        key is unchanged.)
         """
         from kicad_tools.cli.check_cmd import main
 
@@ -899,8 +904,10 @@ class TestOverallMatchesExitCode:
             "manifest",
             "overall",
             "schematic_missing",
+            "incomplete_categories",
         }
         assert meta["overall"] == "INCOMPLETE"
+        assert meta["incomplete_categories"] == ["mask_to_copper"]
 
         assessment = data["mask_copper_assessments"][0]
         assert set(assessment.keys()) == {
@@ -958,13 +965,20 @@ class TestMetaCheckResultCoverageIncomplete:
 
     def test_flag_not_serialized_into_json(self):
         result = self._result(coverage_incomplete=True, incomplete_categories=("mask_to_copper",))
-        assert set(result.to_dict().keys()) == {
+        data = result.to_dict()
+        # Issue #9062: the category NAME list is serialized (additive key);
+        # the ``coverage_incomplete`` flag itself is not -- machine
+        # consumers read ``overall``.
+        assert "coverage_incomplete" not in data
+        assert data["incomplete_categories"] == ["mask_to_copper"]
+        assert set(data.keys()) == {
             "drc",
             "erc",
             "lvs",
             "manifest",
             "overall",
             "schematic_missing",
+            "incomplete_categories",
         }
 
 
@@ -989,6 +1003,84 @@ def test_several_incomplete_assessments_roll_up_to_one_incomplete(tmp_path):
     assert verdict.exit_code == 2
     assert verdict.meta.coverage_incomplete is True
     assert verdict.meta.incomplete_categories == ("mask_to_copper",)
+
+
+def test_explicit_mask_check_that_cannot_run_is_failed_and_not_named(tmp_path):
+    """Edge case (issue #9062): an explicitly requested mask check stays FAILED.
+
+    The #8949 boundary is unchanged: the wider ``incomplete_categories`` list
+    only names a *default-applied* mask assessment.  An explicit request that
+    cannot run is a failed check (the user asked for it), so the verdict is
+    ``fail`` and the category is not listed as incomplete.
+    """
+    from kicad_tools.cli.check_cmd import DRCResults, evaluate_check_verdict
+    from kicad_tools.validate.mask_copper import MaskCopperAssessment
+
+    results = DRCResults(
+        mask_copper_assessments=[
+            MaskCopperAssessment(coverage="not_run", reasons=["no native geometry"]),
+        ],
+        rules_checked=1,
+    )
+    verdict = evaluate_check_verdict(tmp_path / "x.kicad_pcb", results, mask_copper_default=False)
+    assert verdict.verdict == "fail"
+    assert verdict.exit_code == 2
+    assert verdict.meta is not None
+    assert verdict.meta.coverage_incomplete is False
+    assert verdict.meta.incomplete_categories == ()
+    assert verdict.meta.to_dict()["incomplete_categories"] == []
+
+
+def test_incomplete_mask_with_provisional_findings_is_named_and_stays_fail(
+    tmp_path: Path, capsys, monkeypatch
+):
+    """Issue #9062 AC 5: provisional findings must not un-name the category.
+
+    A default-applied mask assessment that did not pass *with* a
+    ``violation``/``uncertain`` measurement goes to ``mask_failed`` (verdict
+    ``fail``), so the #8949 flag stays unset -- but the check still did not
+    complete (``coverage.mask_to_copper`` is ``unknown``) and must be named
+    in the serialized ``meta_checks.incomplete_categories``.
+    """
+    from kicad_tools.cli.check_cmd import main
+    from kicad_tools.validate.mask_copper import MaskCopperMeasurement
+
+    pcb = _stage_board00_for_mask(tmp_path)
+    provisional = MaskCopperMeasurement(
+        opening_uuids=("00000000-0000-0000-0000-000000000001",),
+        conductor_uuid="00000000-0000-0000-0000-000000000002",
+        mask_side="F.Mask",
+        copper_layer="F.Cu",
+        location_mm=(1.0, 2.0),
+        clearance_mm=0.01,
+        exposed_area_mm2=0.5,
+        relation="overlap",
+        disposition="uncertain",
+        uncertainty_mm=0.02,
+        opening_kind="pad:rect",
+        mask_defined=False,
+        margin_provenance="native",
+    )
+    _patch_mask_assessment(
+        monkeypatch,
+        coverage="incomplete",
+        reasons=["F.Mask: unattributed native mask region"],
+        measurements=[provisional],
+    )
+
+    result = main([str(pcb), "--mfr", "jlcpcb", "--format", "json"])
+    assert result == 2
+    data = json.loads(capsys.readouterr().out)
+
+    # The verdict stays fail: provisional findings still drive FAILED.
+    assert data["verdict"] == "fail"
+    assert data["exit_code"] == 2
+    meta = data["meta_checks"]
+    assert meta["overall"] == "FAILED"
+    # ...but the category is named as not completed, agreeing with coverage.
+    assert meta["incomplete_categories"] == ["mask_to_copper"]
+    assert data["coverage"]["mask_to_copper"]["state"] == "unknown"
+    assert "mask_to_copper" in data["summary"]["coverage_blocking_unknown"]
 
 
 # ---------------------------------------------------------------------------
