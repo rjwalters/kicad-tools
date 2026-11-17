@@ -2,7 +2,7 @@
   "rows": [
     {
       "board": "03",
-      "input": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-6312/boards/03-usb-joystick/output/usb_joystick.kicad_pcb",
+      "input": ".loom/worktrees/issue-6312/boards/03-usb-joystick/output/usb_joystick.kicad_pcb",
       "rule": {
         "anchor_min_pads": 3,
         "satellite_max_pads": 2,
@@ -169,7 +169,7 @@
     },
     {
       "board": "05",
-      "input": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-6312/boards/05-bldc-motor-controller/output/bldc_controller.kicad_pcb",
+      "input": ".loom/worktrees/issue-6312/boards/05-bldc-motor-controller/output/bldc_controller.kicad_pcb",
       "rule": {
         "anchor_min_pads": 3,
         "satellite_max_pads": 2,
@@ -299,7 +299,7 @@
     },
     {
       "board": "chorus",
-      "input": "/Users/rwalters/GitHub/chorus/hardware/chorus-test-revA/kicad/chorus-test-revA_v21_stripped.kicad_pcb",
+      "input": "<chorus>/hardware/chorus-test-revA/kicad/chorus-test-revA_v21_stripped.kicad_pcb",
       "rule": {
         "anchor_min_pads": 3,
         "satellite_max_pads": 2,

@@ -8,6 +8,7 @@ shared form to that expression so a band-semantics change lands in one place.
 from __future__ import annotations
 
 import itertools
+import logging
 
 import pytest
 
@@ -44,6 +45,29 @@ def test_band_edges_resolve_from_the_jlcpcb_profile():
 def test_missing_stackup_entry_disables_the_band():
     """A stackup the fab profile has no entry for yields (0.0, 0.0), not a guess (#9188)."""
     assert same_net_band_edges("jlcpcb", 3, 1.0, 0.5) == (0.0, 0.0)
+
+
+def test_missing_stackup_entry_logs_a_warning(caplog):
+    """The disabled band is visible: the unresolved stackup is named in a warning (#9226)."""
+    with caplog.at_level(logging.WARNING, logger=via_clearance.__name__):
+        assert same_net_band_edges("jlcpcb", 3, 1.0, 0.5) == (0.0, 0.0)
+    warned = [rec.getMessage() for rec in caplog.records]
+    assert any(
+        "profile='jlcpcb'" in msg
+        and "layers=3" in msg
+        and "outer_oz=1.0" in msg
+        and "inner_oz=0.5" in msg
+        for msg in warned
+    )
+
+
+def test_resolved_stackup_entry_logs_no_warning(caplog):
+    """A stackup the profile resolves emits nothing (#9226)."""
+    with caplog.at_level(logging.WARNING, logger=via_clearance.__name__):
+        pad_edge, trace_edge = same_net_band_edges("jlcpcb", 4, 1.0, 0.5)
+    assert pad_edge > 0
+    assert trace_edge > 0
+    assert not [rec for rec in caplog.records if rec.levelno >= logging.WARNING]
 
 
 @pytest.mark.parametrize(
