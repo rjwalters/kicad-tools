@@ -173,6 +173,82 @@ def test_grid_escape_seat_is_graded_through_the_band(recipe):
     assert recipe._same_net_band_seat_ok(1.3, 0, dia, [seg], pad, 0.0, 0.0)
 
 
+def write_drill_pair_slide_board(path):
+    """Two same-net vias 0.25 mm drill-edge apart, joined by one F.Cu stub.
+
+    The victim (``B``, ``(120.5, 70)``) has a single attached layer, so the
+    staple collapse is skipped and the class-1 *slide* runs.  The first ring
+    seat is ``+0.25 mm`` east, ``(120.75, 70)``; an own-net 0.5 mm SMD pad
+    sits so that seat's 0.45 mm annulus is 0.1 mm from the pad edge -- inside
+    the ``(0, 0.15)`` pad-population slit band (Issue #9127).
+    """
+    nodes = [
+        "(kicad_pcb (version 20240108) (generator pcbnew)",
+        '(general (thickness 1.6)) (layers (0 "F.Cu" signal) (31 "B.Cu" signal))',
+        "(gr_rect (start 98.5 47.5) (end 198.5 127.5) "
+        '(stroke (width .1) (type default)) (fill none) (layer "Edge.Cuts"))',
+        '(net 1 "N1")',
+        '(footprint "test" (layer "F.Cu") (at 121.325 70) '
+        '(property "Reference" "R1") '
+        '(pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu" "F.Mask") '
+        '(net 1 "N1")))',
+        '(via (at 120 70) (size .45) (drill .25) (layers "F.Cu" "B.Cu") (net 1) '
+        '(uuid "00000000-0000-4000-8000-00000000000a"))',
+        '(via (at 120.5 70) (size .45) (drill .25) (layers "F.Cu" "B.Cu") (net 1) '
+        '(uuid "00000000-0000-4000-8000-00000000000b"))',
+        "(segment (start 120 70) (end 120.5 70) (width .2) "
+        '(layer "F.Cu") (net 1) (uuid "00000000-0000-4000-8000-00000000000c"))',
+    ]
+    path.write_text("\n".join(nodes) + "\n)\n")
+
+
+def _slid_via_pad_gap(path):
+    """Annulus gap (mm) from the slid victim via to the own-net pad."""
+    from shapely.geometry import Point, box
+
+    pad = box(121.075, 69.75, 121.575, 70.25)
+    gaps = []
+    for x, y, size in re.findall(
+        r"\(via \(at ([\d.]+) ([\d.]+)\) \(size ([\d.]+)\)", path.read_text()
+    ):
+        if (float(x), float(y)) != (120.0, 70.0):
+            gaps.append(Point(float(x), float(y)).buffer(float(size) / 2).distance(pad))
+    assert len(gaps) == 1
+    return gaps[0]
+
+
+def test_drill_pair_slide_walks_out_of_same_net_slit_band(tmp_path, recipe, monkeypatch):
+    """Issue #9127: the class-1 victim slide must not open a (0, edge) slit.
+
+    Measured: with the band disabled the first ring seat (+0.25 mm east)
+    lands 0.1 mm from the victim's own-net pad, inside ``(0, 0.15)``.  The
+    slide keeps the victim's chain and only adds connectors, so the only
+    exclusion the check needs is the victim via itself.
+    """
+    pad_edge, _trace_edge = recipe._same_net_band_edges()
+    assert pad_edge > 0
+
+    control = tmp_path / "control.kicad_pcb"
+    write_drill_pair_slide_board(control)
+    monkeypatch.setattr(recipe, "_same_net_band_edges", lambda: (0.0, 0.0))
+    assert recipe._legalize_signal_vias(control) == 1
+    assert 0 < _slid_via_pad_gap(control) < pad_edge
+
+    monkeypatch.undo()
+    path = tmp_path / "band.kicad_pcb"
+    write_drill_pair_slide_board(path)
+    assert recipe._legalize_signal_vias(path) == 1
+    gap = _slid_via_pad_gap(path)
+    assert gap <= 1e-6 or gap >= pad_edge
+    # The drill pair itself is still repaired (>= 0.5 mm edge to edge).
+    ((bx, by),) = [
+        (float(x), float(y))
+        for x, y in re.findall(r"\(via \(at ([\d.]+) ([\d.]+)\)", path.read_text())
+        if (float(x), float(y)) != (120.0, 70.0)
+    ]
+    assert ((bx - 120.0) ** 2 + (by - 70.0) ** 2) ** 0.5 - 0.25 >= 0.5 - 1e-3
+
+
 def test_legalizer_reports_overlap_without_a_legal_escape(tmp_path, recipe):
     path = tmp_path / "blocked.kicad_pcb"
     # A broad SMT land surrounds every candidate in the bounded search.
