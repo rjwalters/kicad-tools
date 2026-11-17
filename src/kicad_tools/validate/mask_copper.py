@@ -19,7 +19,9 @@ Each ``mask_to_copper`` finding reads::
 identified from the source footprint reference and pad number, otherwise the
 opening's inventory kind with an eight-character UUID prefix (``pad:rect[4f2c1a9b]``,
 ``merged_region[...]``). ``<kind>`` is the exposed conductor's inventory kind
-(``segment``, ``arc``, ``via``, ``pad:...``). ``<net relation>`` is one of
+(``segment``, ``arc``, ``via``, ``zone``, ``pad:...``); a ``zone`` (a pad's own
+same-net pour) is also declarable through a ``MaskEscapeIntent``.
+``<net relation>`` is one of
 
 - ``same-net own-pad entry`` -- the conductor shares the opening owner's net
   and terminates inside the opening: for ``segment``/``arc`` conductors one of
@@ -31,8 +33,9 @@ opening's inventory kind with an eight-character UUID prefix (``pad:rect[4f2c1a9
   passes or bends across the opening without terminating there.
 - ``different-net`` -- the conductor's identified net differs from the
   opening owner's.
-- (omitted) -- either net is unidentified or the opening is a merged region
-  with no single owner net.
+- (omitted) -- either net is unidentified, the opening is a merged region
+  with no single owner net, or the conductor is a ``zone`` (an area has no
+  terminating endpoint, so neither entry nor pass-through applies).
 
 While ``assessment.coverage != "complete"`` the findings are provisional:
 severity is capped at ``warning`` (never ``error``) and each message carries
@@ -367,8 +370,9 @@ def assess_attributed_geometry(geometry, policy, intents=()):
             "segment",
             "arc",
             "via",
+            "zone",
         ):
-            reason = "intent is limited to a pad and its particular escape conductor"
+            reason = "intent is limited to a pad and a directly connected conductor"
         elif (
             intent.mask_side not in owner["layers_geometry"]
             or layer not in conductor["layers_geometry"]
