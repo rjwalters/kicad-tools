@@ -1071,6 +1071,36 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             return False
         return copper_gap(kshape, entry[8]) < required - CLEARANCE_EPSILON_MM
 
+    # Issue #9007: the #8975 same-net fab-view slit band, one definition for
+    # every via seat this pass grades -- the repair ladder's ``_via_ok`` and
+    # the grid escape's through vias alike.  The annulus diameter is an
+    # explicit argument because the two populations differ (0.45 mm repair
+    # vias vs the ``EscapeRules`` diameter at the escape, 0.5 mm here):
+    # sharing the checks while hardcoding one via's geometry is exactly the
+    # drift that let the escape ship the pad band alone (#9007).
+    def _same_net_band_ok(net: str, vx: float, vy: float, diameter: float) -> bool:
+        """Same-net fab-view slit band for an annulus of ``diameter`` (#8975, #9007)."""
+        vgeom = Point(vx, vy).buffer(diameter / 2)
+        for seg_i in seg_tree.candidates(vgeom.bounds, MAX_CLEAR):
+            geom, snet, _lay = seg_index[seg_i]
+            # The annulus exists on every layer, so any-layer same-net
+            # copper counts; overlap is one copper union.  ``+ 1.5e-3``
+            # covers both sides' 3-decimal write rounding so a seat
+            # accepted here cannot land a hair under the edge on disk.
+            if snet == net and 1e-6 < vgeom.distance(geom) < SAME_NET_TRACE_GAP_MM + 1.5e-3:
+                return False
+        for pt, vnet, radius, _drill in via_index:
+            if (
+                vnet == net
+                and 1e-6 < vgeom.distance(pt.buffer(radius)) < SAME_NET_TRACE_GAP_MM + 1.5e-3
+            ):
+                return False
+        # The pad population's edge (#8957); no-op when the profile ships
+        # no ``pad_spacing`` entry (edge 0).
+        return same_net_pad_gap_acceptable(
+            vx, vy, diameter, smd_bboxes_by_net.get(net), SAME_NET_PAD_GAP_MM
+        )
+
     def _via_ok(net: str, vx: float, vy: float) -> bool:
         if not (min_x <= vx <= max_x and min_y <= vy <= max_y):
             return False
@@ -1097,13 +1127,6 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             geom, snet, _lay = seg_index[seg_i]
             if snet != net and vgeom.distance(geom) < _pair_clear(net, snet):
                 return False
-            # Issue #8975: same-net slit band (the annulus exists on every
-            # layer, so any-layer same-net copper counts), graded on the
-            # trace population's edge; overlap is one copper union.
-            # ``+ 1.5e-3`` covers both sides' 3-decimal write rounding so a
-            # seat accepted here cannot land a hair under the edge on disk.
-            if snet == net and 1e-6 < vgeom.distance(geom) < SAME_NET_TRACE_GAP_MM + 1.5e-3:
-                return False
         for pt, vnet, radius, drill in via_index:
             # Issue #3855: drill hole-to-hole vs existing repair vias
             # using actual drill sizes, edge-to-edge against the 0.5 mm floor.
@@ -1111,27 +1134,11 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 return False
             if vnet != net and vgeom.distance(pt.buffer(radius)) < _pair_clear(net, vnet):
                 return False
-            # Issue #8975: same-net annulus-to-annulus slit band.
-            if (
-                vnet == net
-                and 1e-6 < vgeom.distance(pt.buffer(radius)) < SAME_NET_TRACE_GAP_MM + 1.5e-3
-            ):
-                return False
-        # Issue #8975: fab-view slit band vs same-net SMD pads.  A via seated
-        # a hair outside its own pad leaves two wedge-shaped notches of air
-        # beside the connecting stub, which the fab-view
-        # ``physical_copper_gap`` grading reports as errors regardless of
-        # nets (#8938).  Reject the (0, edge) band; touching/overlapping
-        # would be one copper union and at/beyond the edge is not a finding,
-        # but the annulus-level via-in-pad ban above already rejects every
-        # overlapping seat at this site, so in practice the ladder walks
-        # outward to the first rung at/beyond the fab error edge.  No-op
-        # when the resolved edge is 0 (fab ships no pad_spacing table).
-        if not same_net_pad_gap_acceptable(
-            vx, vy, 2 * VIA_R, smd_bboxes_by_net.get(net), SAME_NET_PAD_GAP_MM
-        ):
-            return False
-        return True
+        # Issue #8975 / #9007: all three same-net fab-view slit-band
+        # families (segment, annulus, SMD pad) live in the shared
+        # diameter-parameterised helper above, graded on the repair via's
+        # own 0.45 mm annulus.
+        return _same_net_band_ok(net, vx, vy, 2 * VIA_R)
 
     def _path_ok(
         net: str,
@@ -1632,16 +1639,15 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                         [own[i] for i in primary],
                         (min_x, min_y, max_x, max_y),
                         escape_rules,
-                        # Issue #8975: the escape's own seat validation knows
-                        # foreign-net copper but not same-net fab-view
-                        # grading -- reject through-via nodes whose annulus
-                        # gap to a same-net SMD pad falls in the slit band,
-                        # same contract ``_via_ok`` enforces for the other
-                        # sub-stages.
-                        via_ok=lambda p, _net=net, _dia=escape_rules.diameter: (
-                            same_net_pad_gap_acceptable(
-                                p[0], p[1], _dia, smd_bboxes_by_net.get(_net), SAME_NET_PAD_GAP_MM
-                            )
+                        # Issue #8975 / #9007: the escape's own seat
+                        # validation knows foreign-net copper but not
+                        # same-net fab-view grading -- reject through-via
+                        # nodes in the same-net slit band, the same three
+                        # families (segment, annulus, SMD pad) and contract
+                        # ``_via_ok`` enforces for the other sub-stages,
+                        # graded on the escape via's own diameter.
+                        via_ok=lambda p, _net=net, _dia=escape_rules.diameter: _same_net_band_ok(
+                            _net, p[0], p[1], _dia
                         ),
                     )
                     if escape is None:
