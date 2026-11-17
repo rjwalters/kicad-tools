@@ -287,7 +287,10 @@ class MoneyError(ValueError):
 #: sign-like characters fall outside both categories and are listed explicitly.
 _EXTRA_SIGNS = ("\u2796", "\u02d7")  # HEAVY MINUS SIGN (So), MODIFIER LETTER MINUS (Sk)
 _PREFIXED_DOLLAR = re.compile(r"([A-Za-z]+)\$")
-_CREDIT_MARK = re.compile(r"\b(?:CR|DR)\b|%")
+# "CR"/"DR" must be refused glued to the amount ("12.34CR") as well as standalone,
+# and the words CREDIT/DEBIT are marks too. The other direction over-refuses on
+# purpose: HK$/C$/A$/NT$… dollar prefixes all fail closed (see _PREFIXED_DOLLAR).
+_CREDIT_MARK = re.compile(r"\b(?:CR|DR)\b|(?<=\d)(?:CR|DR)\b|\b(?:CREDIT|DEBIT)\b|%")
 
 
 def _amount(text: str) -> Decimal:

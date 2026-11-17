@@ -107,16 +107,49 @@ class OrderLedger:
             raise LedgerError(f"cannot stat {path}: {exc.strerror}") from None
         self._check_info(path, info)
 
-    def _open_checked(self, path: Path, flags: int) -> int:
-        """Open without following a symlink, then re-check what was actually opened.
+    def _check_directory(self) -> None:
+        """Refuse a pre-existing ledger directory that is a symlink, not ours, or not private.
 
-        ``open_nofollow`` uses ``O_NOFOLLOW`` where it exists and otherwise
-        refuses a link before opening; the ``fstat`` afterwards closes the
-        remaining gap either way (fail closed).
+        ``mkdir(mode=0o700)`` sets the mode only when it creates the directory.
+        Someone who can write to this directory can delete the ledger, and the
+        ledger is what stops a second order.
         """
+        try:
+            info = self.directory.lstat()
+        except (FileNotFoundError, NotADirectoryError):
+            return  # nothing there yet: the mkdir below creates it (failures wrapped there)
+        except OSError as exc:
+            raise LedgerError(f"cannot stat {self.directory}: {exc.strerror}") from None
+        if not stat.S_ISDIR(info.st_mode):
+            raise LedgerError(f"{self.directory} is not a real directory; refusing it")
+        getuid = getattr(os, "getuid", None)
+        if getuid is None:
+            raise LedgerError("the order ledger needs a POSIX system (owner checks)")
+        if info.st_uid != getuid():
+            raise LedgerError(f"{self.directory} is not owned by you; refusing it")
+        if stat.S_IMODE(info.st_mode) & 0o022:
+            raise LedgerError(
+                f"{self.directory} is writable by group or others "
+                f"({stat.S_IMODE(info.st_mode):03o}); refusing it"
+            )
+
+    def _open_checked(self, path: Path, flags: int) -> int:
+        """Open the ledger file without following a symlink, then re-check the descriptor.
+
+        ``os.O_NOFOLLOW`` is required: a platform without it is refused outright,
+        because its check-then-open window could follow a symlink swapped in
+        between. The ``fstat`` afterwards re-checks the descriptor that was
+        opened, so a file swapped in after the pre-open ``lstat`` is still
+        caught. ``O_NONBLOCK`` is added so a FIFO swapped in cannot hang the
+        open; the ``fstat`` check refuses it.
+        """
+        if not getattr(os, "O_NOFOLLOW", 0):
+            raise LedgerError(
+                "the order ledger requires os.O_NOFOLLOW; refusing it on this platform"
+            )
         self._check_file(path)
         try:
-            fd = open_nofollow(path, flags, 0o600)
+            fd = open_nofollow(path, flags | getattr(os, "O_NONBLOCK", 0), 0o600)
         except OSError as exc:
             raise LedgerError(f"cannot open {path}: {exc.strerror}") from None
         try:
@@ -145,7 +178,11 @@ class OrderLedger:
         """Exclusive lock across "check status, then append". Never waits: a held lock fails."""
         if fcntl is None:
             raise LedgerError("no file locking on this platform; the checkout is refused")
-        self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._check_directory()
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        except OSError as exc:
+            raise LedgerError(f"cannot create {self.directory}: {exc.strerror}") from None
         lock_path = self.directory / LOCK_NAME
         fd = self._open_checked(lock_path, os.O_RDWR | os.O_CREAT)
         try:
@@ -168,6 +205,7 @@ class OrderLedger:
             os.close(fd)
 
     def events(self) -> Iterator[dict[str, Any]]:
+        self._check_directory()
         if not self.path.exists():
             return
         self._check_file(self.path)
@@ -209,6 +247,7 @@ class OrderLedger:
         if unknown:
             raise LedgerError(f"refusing unknown ledger keys: {sorted(unknown)}")
         line = json.dumps(record, sort_keys=True) + "\n"
+        self._check_directory()
         try:
             self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         except OSError as exc:

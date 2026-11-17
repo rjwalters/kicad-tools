@@ -792,7 +792,7 @@ def test_a_concurrent_run_holding_the_ledger_lock_stops_this_one(tmp_path):
     import fcntl
 
     ledger = OrderLedger(tmp_path / "ledger")
-    ledger.directory.mkdir(parents=True)
+    ledger.directory.mkdir(parents=True, mode=0o700)
     lock = ledger.directory / "jlc-orders.lock"
     fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
     fcntl.flock(fd, fcntl.LOCK_EX)
@@ -1020,6 +1020,8 @@ def test_ledger_write_failure_after_a_confirmed_order_names_the_order(tmp_path, 
         ("A$5.00", "USD"),
         ("$5.00 CR", "USD"),
         ("USD 123.45%", ""),
+        ("$12.34CR", "USD"),
+        ("USD 12.34 CREDIT", ""),
     ],
 )
 def test_money_residuals_are_refused(text, indicator):
