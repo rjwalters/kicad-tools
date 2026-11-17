@@ -144,6 +144,33 @@ def test_obsolete_back_escape_trim_requires_free_endpoint(process, repaired, bon
     from kicad_tools.validate.rules.dangling_copper import DanglingCopperRule
 
     doc = parse_file(repaired)
+    # The recipe runs this trim before ``repair_sharp_corners`` (#8840), so it
+    # sees the router's NRST B.Cu run through the old via site (145.8375,
+    # 89.75), not the committed repaired diagonal.  Restore that run here.
+    repaired_run = {((147.15, 89.75), (151.2, 93.8)), ((151.2, 93.8), (153.2, 93.8))}
+    removed = 0
+    for node in list(doc.find_children("segment")):
+        start, end = node.find("start"), node.find("end")
+        ends = (
+            (start.get_float(0), start.get_float(1)),
+            (end.get_float(0), end.get_float(1)),
+        )
+        if node.find("layer").get_string(0) == "B.Cu" and (
+            ends in repaired_run or ends[::-1] in repaired_run
+        ):
+            doc.children.remove(node)
+            removed += 1
+    assert removed == 2, "committed NRST B.Cu run changed; update this fixture"
+    for start, end, width in (
+        ("149.8875 93.8", "153.2 93.8", 0.2),
+        ("145.8375 89.75", "147.15 89.75", 0.15),
+        ("145.8375 89.75", "149.8875 93.8", 0.2),
+    ):
+        doc.add(
+            parse_string(
+                f'(segment (start {start}) (end {end}) (width {width}) (layer "B.Cu") (net "NRST"))'
+            )
+        )
     # Linux router variant retains this B.Cu copy of the SMT pad escape.
     tail_id = "00000000-0000-4000-8000-000000005044"
     doc.add(

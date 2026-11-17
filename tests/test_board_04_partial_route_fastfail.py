@@ -130,6 +130,8 @@ class TestBoard04PartialRouteFastFail:
         # Issue #8844: the staircase compression reads the routed PCB, which
         # route_pcb's stub never wrote -- stub it like every other copper step.
         monkeypatch.setattr(module, "compress_staircases", lambda *a, **k: True)
+        # Issue #8840: so does the sharp-corner repair.
+        monkeypatch.setattr(module, "repair_sharp_corners", lambda *a, **k: True)
         monkeypatch.setattr(module, "fill_zones", lambda *a, **k: True)
         monkeypatch.setattr(module, "run_drc", lambda *a, **k: True)
         monkeypatch.setattr(module, "generate_manufacturing", lambda *a, **k: True)
