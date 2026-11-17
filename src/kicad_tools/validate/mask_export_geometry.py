@@ -206,6 +206,33 @@ def _inventory(tree):
     return result
 
 
+def _resolve_native_kicad_cli_command(scratch_dir: str | Path | None) -> list[str] | None:
+    """The pinned image's kicad-cli when the Docker fallback is enabled (#9009).
+
+    Mirrors ``_resolve_native_python_command`` in ``mask_copper_geometry``: with
+    ``KCT_KICAD_DOCKER=1`` and docker on PATH, the per-object worker already
+    runs in the pinned image, so the full-layer export must run there too --
+    otherwise a host kicad-cli of a different release plots the layers and the
+    two halves can never agree (``Native object/export versions differ``).
+    The temporary root the export stages under is bind-mounted at its own
+    path, so the staged board and the Gerber output directory are visible to
+    the container. ``None`` means "not in Docker mode": the caller falls back
+    to host discovery, as before.
+    """
+    import shutil
+
+    from kicad_tools.cli.kicad_toolchain import (
+        docker_fallback_enabled,
+        docker_kicad_cli_prefix,
+        process_config_home,
+    )
+
+    if not (docker_fallback_enabled() and shutil.which("docker")):
+        return None
+    root = Path(scratch_dir) if scratch_dir is not None else Path(tempfile.gettempdir())
+    return docker_kicad_cli_prefix([root], process_config_home())
+
+
 def inspect_exported_mask_geometry(
     pcb_path: str | Path,
     *,
@@ -227,6 +254,8 @@ def inspect_exported_mask_geometry(
     options = options or MaskExportOptions()
     if not math.isfinite(options.timeout_seconds) or options.timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
+    if native_command is None:
+        native_command = _resolve_native_kicad_cli_command(scratch_dir)
     if native_command is None:
         executable = find_kicad_cli()
         if executable is None:
