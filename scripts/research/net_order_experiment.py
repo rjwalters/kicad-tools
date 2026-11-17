@@ -110,6 +110,32 @@ BOARDS: dict[str, Board] = {
         layers=4,
         note="LVDS pairs arrive pre-routed; routes the 8 LVTTL nets",
     ),
+    # Issue #8999: the public stand-in for the private #8610 dense mains
+    # board (its own body says the board can't be checked in) -- the
+    # checked-in fixture distilled from it under #8605.  Recipe args are
+    # the documented ones from boards/synthetic-mains-complete/README.md.
+    "mains": Board(
+        "mains",
+        "boards/synthetic-mains-complete/mains_fixture.kicad_pcb",
+        kct_args=(
+            "--net-class-map",
+            str(REPO / "boards/synthetic-mains-complete/net_class_map.json"),
+            "--voltage-map",
+            str(REPO / "boards/synthetic-mains-complete/voltage_map.json"),
+            "--creepage-standard",
+            "iec60664",
+            "--pollution-degree",
+            "2",
+            "--material-group",
+            "IIIa",
+            "--hv-threshold",
+            "0",
+            "--skip-drc",
+            "--no-auto-pour",
+        ),
+        layers=2,
+        note="synthetic mains wall (#8605); crossing pressure between LV links",
+    ),
 }
 
 # Variant name -> extra ``kct route`` arguments. ``default`` is the documented
@@ -123,6 +149,21 @@ VARIANTS: dict[str, tuple[str, ...]] = {
     "congestion": ("--order-method", "congestion"),
     "monotone": ("--monotone-certificate-order",),
     "bundle-river": ("--bundle-river-planner",),
+    # Issue #8999: the airwire-separation cost term (prospective per-cell
+    # desire-line crossing count) at the reference weight.  Same seed as
+    # every arm, so the only difference is the cost model, not the RNG.
+    "airwire": ("--airwire-separation-weight", "1.0"),
+}
+
+# Log marker each variant must produce for its row to count as a
+# measurement (the #5787 silent no-op lesson, generalised in #8999): a
+# treatment arm that never applied its treatment is worse than no data.
+_VARIANT_LOG_MARKERS: dict[str, str] = {
+    "crossing": "Net order: --order-method crossing",
+    "greedy": "Net order: --order-method greedy",
+    "critical_first": "Net order: --order-method critical_first",
+    "congestion": "Net order: --order-method congestion",
+    "airwire": "Airwire separation cost:",
 }
 
 # Stage markers that constitute "routing proper". Everything else recorded by
@@ -278,13 +319,56 @@ def grade(routed: Path) -> dict:
     }
 
 
-def run_one(board: Board, variant: str, work_dir: Path, seed: int, timeout: float) -> dict:
+def _airwire_applied(profile: dict) -> bool:
+    """Did the run actually install the airwire-separation term (#8999)?
+
+    Same guard as ``_order_applied``: ``route_all_negotiated`` logs one
+    line when a nonzero weight reaches the negotiated loop, so an arm
+    whose flag was silently dropped on the way in is flagged instead of
+    being read as a (null) measurement.
+    """
+    return any("Airwire separation cost:" in line for line in _log_lines(profile))
+
+
+def _nogood_stats(path: Path) -> dict:
+    """Read the ``KCT_NOGOOD_CACHE_STATS_FILE`` dump (#8999 A/B).
+
+    The cache's atexit hook appends one ``NogoodStats.as_dict()`` JSON line
+    per process.  Returns ``{}`` when the file is absent (cache disabled or
+    the process died before exit); the caller reports the hit rate only
+    when the last snapshot has lookups.
+    """
+    if not path.exists():
+        return {}
+    stats: dict = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line:
+            try:
+                stats = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+    return stats
+
+
+def run_one(
+    board: Board,
+    variant: str,
+    work_dir: Path,
+    seed: int,
+    timeout: float,
+    *,
+    nogood: bool = False,
+) -> dict:
     """Profile one (board, variant) pair in a subprocess and grade the output."""
+    import os
+
     run_dir = work_dir / f"{board.key}-{variant}"
     if run_dir.exists():
         shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True)
     profile_json = run_dir / "profile.json"
+    nogood_jsonl = run_dir / "nogood.jsonl"
     extra = [*board.kct_args, "--seed", str(seed), *VARIANTS[variant]]
 
     cmd = [
@@ -298,8 +382,18 @@ def run_one(board: Board, variant: str, work_dir: Path, seed: int, timeout: floa
         "--extra",
         " ".join(extra),
     ]
+    env = dict(os.environ)
+    if nogood:
+        # Issue #8999: the airwire plane refresh invalidates nogood entries
+        # on every commit (the cache fingerprints every grid ndarray), so
+        # the hit-rate delta between arms is part of the measurement.
+        # Applied to BOTH arms so the A/B stays internally comparable.
+        env["KCT_NOGOOD_CACHE"] = "1"
+        env["KCT_NOGOOD_CACHE_STATS_FILE"] = str(nogood_jsonl)
     started = time.time()
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=timeout, check=False, env=env
+    )
     elapsed = round(time.time() - started, 1)
 
     row: dict = {
@@ -322,16 +416,29 @@ def run_one(board: Board, variant: str, work_dir: Path, seed: int, timeout: floa
             "astar_s": _astar_seconds(profile),
             "astar_calls": _astar_calls(profile),
             "order_applied": _order_applied(profile),
+            "airwire_applied": _airwire_applied(profile),
             "loadavg_start": profile["host"].get("loadavg"),
             "loadavg_end": profile["host"].get("loadavg_end"),
             **_negotiation_trajectory(profile),
         }
     )
+    if nogood:
+        ng = _nogood_stats(nogood_jsonl)
+        lookups = int(ng.get("hits", 0)) + int(ng.get("misses", 0))
+        row["nogood"] = ng
+        row["nogood_hit_rate"] = round(int(ng.get("hits", 0)) / lookups, 3) if lookups else None
     # An ordering arm that did not install an order is not a measurement.
     if "--order-method" in VARIANTS[variant] and not row["order_applied"]:
         row["warning"] = (
             f"variant {variant!r} did not log a 'Net order:' line -- the ordering "
             "flag may be a no-op on this code path; do not read this row as an A/B"
+        )
+    # Same guard for the airwire arm (#8999).
+    if variant == "airwire" and not row.get("airwire_applied", True):
+        row["warning"] = (
+            "variant 'airwire' did not log an 'Airwire separation cost:' line -- "
+            "the weight never reached the negotiated loop; do not read this row "
+            "as an A/B"
         )
     routed = run_dir / f"{Path(board.src).stem}_routed.kicad_pcb"
     if routed.exists():
@@ -343,23 +450,31 @@ def run_one(board: Board, variant: str, work_dir: Path, seed: int, timeout: floa
 
 def render(rows: list[dict]) -> str:
     out = [
-        "| Board | Variant | Order applied | Nets complete | Connections | Vias "
-        "| Wirelength mm | Iters | A* calls | Routing-loop s | A* s | Wall s |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| Board | Variant | Flag applied | Nets complete | Connections | Vias "
+        "| Wirelength mm | Iters | A* calls | Nogood hit rate | Routing-loop s "
+        "| A* s | Wall s |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
         if "nets_complete" not in r:
             out.append(
                 f"| {r['board']} | {r['variant']} | -- | ERROR | -- | -- | -- | -- | -- "
-                f"| -- | -- | {r.get('subprocess_wall_s', '--')} |"
+                f"| -- | -- | -- | {r.get('subprocess_wall_s', '--')} |"
             )
             continue
+        # Order arms report the order line, the airwire arm the cost line.
+        applied = r.get("order_applied")
+        if r["variant"] == "airwire":
+            applied = r.get("airwire_applied")
+        nogood = r.get("nogood_hit_rate")
+        nogood_cell = "--" if nogood is None else f"{nogood:.3f}"
         out.append(
-            f"| {r['board']} | {r['variant']} | {r.get('order_applied')} "
+            f"| {r['board']} | {r['variant']} | {applied} "
             f"| {r['nets_complete']}/{r['nets_total']} "
             f"| {r['connections_routed']}/{r['connections_total']} "
             f"| {r['via_count']} | {r['wirelength_mm']} "
             f"| {r.get('negotiated_iterations', '--')} | {r.get('astar_calls', '--')} "
+            f"| {nogood_cell} "
             f"| {r['routing_loop_s']:.2f} | {r['astar_s']:.2f} | {r['wall_s']:.1f} |"
         )
     return "\n".join(out)
@@ -380,6 +495,16 @@ def main() -> int:
     rt.add_argument("--json", type=Path)
     rt.add_argument("--seed", type=int, default=42, help="same seed in every arm")
     rt.add_argument("--timeout", type=float, default=1800.0, help="per board+variant cap, s")
+    rt.add_argument(
+        "--nogood",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "enable the KCT_NOGOOD_CACHE experiment cache in BOTH arms and "
+            "report the hit rate (#8999: the airwire plane refresh invalidates "
+            "entries on every commit, so the delta is part of the measurement)"
+        ),
+    )
 
     args = ap.parse_args()
     keys = [k.strip() for k in args.boards.split(",") if k.strip()]
@@ -416,7 +541,14 @@ def main() -> int:
         for variant in variants:
             print(f"==> board {key}, variant {variant}", flush=True)
             try:
-                row = run_one(BOARDS[key], variant, args.work_dir, args.seed, args.timeout)
+                row = run_one(
+                    BOARDS[key],
+                    variant,
+                    args.work_dir,
+                    args.seed,
+                    args.timeout,
+                    nogood=args.nogood,
+                )
             except subprocess.TimeoutExpired:
                 row = {"board": key, "variant": variant, "error": "TIMEOUT"}
             rows.append(row)

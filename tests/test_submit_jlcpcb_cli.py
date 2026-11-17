@@ -533,6 +533,62 @@ def test_outcome_is_printed_before_the_receipt_and_survives_its_failure(
     assert "could not write the checkout receipt" in cap.err and "write it down" in cap.err
 
 
+def test_checkout_outcome_prints_before_teardown_failures(env, monkeypatch, tmp_path, capsys):
+    """Issue #9151: a failure in close()/render_review_page must not hide the outcome."""
+    from kicad_tools.export import submission_review
+    from kicad_tools.manufacturers import jlc_payment as pay
+
+    args = _site_harness(env, monkeypatch, tmp_path)
+    monkeypatch.setattr(pay, "require_attended_checkout", lambda **k: None)
+    done = pay.CheckoutResult("ordered", "p" * 64, "USD 1.00", "Y2-1234567A", "USD 1.00")
+    monkeypatch.setattr(pay, "run_checkout", lambda *a, **k: done)
+
+    def boom(*a, **k):
+        raise RuntimeError("teardown failed")
+
+    monkeypatch.setattr(drv, "connect_attended_page", lambda port: (object(), boom))
+    monkeypatch.setattr(submission_review, "render_review_page", boom)
+    with pytest.raises(RuntimeError, match="teardown failed"):
+        cmd.main(_argv(env, *args, "--checkout", "--approve-total", "USD 1.00", "--pay"))
+    out = capsys.readouterr().out
+    assert "ORDERED: order Y2-1234567A" in out
+    assert "checkout receipt" in out
+
+
+def test_run_dir_failure_aborts_before_any_click(env, monkeypatch, tmp_path, capsys):
+    """Mutant K10: a _checkout_run_dir failure must abort before run_checkout runs."""
+    from kicad_tools.manufacturers import jlc_payment as pay
+
+    args = _site_harness(env, monkeypatch, tmp_path)
+    monkeypatch.setattr(pay, "require_attended_checkout", lambda **k: None)
+
+    def no_run_dir(plan_sha256):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(cmd, "_checkout_run_dir", no_run_dir)
+
+    def no_checkout(*a, **k):
+        pytest.fail("run_checkout ran after a run-directory failure")
+
+    monkeypatch.setattr(pay, "run_checkout", no_checkout)
+    assert cmd.main(_argv(env, *args, "--checkout", "--auto")) == 2
+    cap = capsys.readouterr()
+    assert "CHECKOUT STOPPED at run-dir" in cap.err
+    assert "Permission denied" in cap.err
+
+
+def test_receipt_write_refuses_a_symlink(tmp_path):
+    """Mutant K11: _write_private must open with open_nofollow, not a plain os.open."""
+    target = tmp_path / "elsewhere.json"
+    target.write_text("")
+    target.chmod(0o600)
+    receipt = tmp_path / "checkout-receipt.json"
+    receipt.symlink_to(target)
+    with pytest.raises(OSError):
+        cmd._write_private(receipt, {"state": "ordered"})
+    assert target.read_text() == ""
+
+
 def test_existing_run_dir_is_made_private(monkeypatch, tmp_path):
     import time as _time
 

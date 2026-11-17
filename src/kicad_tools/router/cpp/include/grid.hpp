@@ -229,6 +229,16 @@ public:
                            int radius_cells, float amount);
     void clear_avoidance_costs();
 
+    // Airwire-separation cost plane (Issue #8999).  ``set_airwire_cells``
+    // writes the weighted sparse plane (same count column on every layer
+    // -- a desire line is layer-less) in one call; a full
+    // clear-then-rewrite per refresh keeps the native plane a pure
+    // function of the committed set, mirroring
+    // ``kicad_tools.router.airwire_cost.refresh_airwire_cost``.
+    void clear_airwire_costs();
+    void set_airwire_cells(const std::vector<int>& xs, const std::vector<int>& ys,
+                           const std::vector<float>& costs);
+
     // Negotiated routing support
     void reset_usage();
     void increment_usage(int x, int y, int layer);

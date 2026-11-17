@@ -2136,6 +2136,15 @@ class Autorouter:
         self._stub_region_world: tuple[float, float, float, float] | None = None
         self.net_names: dict[int, str] = {}
         self.routes: list[Route] = []
+        # Issue #8999: airwire-separation state (owned by
+        # :mod:`kicad_tools.router.airwire_cost`; weight 0.0 = flag off =
+        # byte-identical cost model).
+        self._airwire_separation_weight = 0.0
+        self._airwire_skeleton_cache: dict[
+            int, list[tuple[tuple[float, float], tuple[float, float]]]
+        ] = {}
+        self._airwire_log_printed = False
+        self._airwire_cost_pushed = False
         # Issue #3002 (PR #3006 perf): single-slot cache for the
         # ``vias_by_net`` index used by
         # :meth:`_update_router_segment_foreign_context`.  Stores
@@ -12989,6 +12998,7 @@ class Autorouter:
         best_stall_min_iterations: int = 2,
         early_bail_terminal_stall: bool = True,
         deterministic_rescue: bool = DETERMINISTIC_RESCUE_DEFAULT,
+        airwire_weight: float | None = None,
     ) -> list[Route]:
         """Route all nets using PathFinder-style negotiated congestion.
 
@@ -13152,10 +13162,23 @@ class Autorouter:
                 and 20/21 on a slow one at the same commit, because the
                 10 s wall clock straddles the measured 8-12 s natural
                 re-land time on CI runners.  Defaults to
-                :data:`DETERMINISTIC_RESCUE_DEFAULT` (``False``): #4730
+            deterministic_rescue: :data:`DETERMINISTIC_RESCUE_DEFAULT` (``False``): #4730
                 measured a board-07 regression on this entry point with
                 it on, so it stays opt-in.  See that constant and
                 :meth:`_relief_subsearch_budget`.
+            airwire_weight: Issue #8999 -- weight of the prospective
+                airwire-separation cost term.  ``None`` (the default) keeps
+                any instance-level weight (``kct route
+                --airwire-separation-weight`` sets it on the router before
+                dispatch, so paths that reach this method bare -- the
+                adaptive multi-resolution and sub-grid drivers -- inherit
+                it too); ``0.0`` never builds the crossing-count plane and
+                is byte-identical to the historical cost model; ``> 0``
+                prices each cell by how many *still-unrouted* nets'
+                straight-line desire lines cover it (the current net's own
+                desire lines excluded), so candidate paths that slip around
+                other nets' pending flight lines are preferred to ones that
+                cut across them.
 
         Returns:
             List of routes (may be partial if timeout reached)
@@ -13164,6 +13187,17 @@ class Autorouter:
         import time
 
         start_time = time.time()
+
+        # Issue #8999: publish the airwire-separation weight on the instance
+        # BEFORE any per-net search runs -- every path that reaches the
+        # negotiated per-net funnel (``_route_net_negotiated`` and the
+        # two-phase ``_route_net_with_corridor``, including the relief probe
+        # and the rip-up re-land) reads it there to refresh the
+        # crossing-count plane from the current committed set.  ``None``
+        # (a bare call from an internal driver) leaves the CLI-set instance
+        # weight in place.
+        if airwire_weight is not None:
+            self._airwire_separation_weight = float(airwire_weight)
 
         # Issue #4463: the corridor-yield recovery re-runs the caller's
         # strategy a SECOND time after ripping the coupled bodies that sealed
@@ -18700,6 +18734,21 @@ class Autorouter:
         if net not in self.nets and not stub_targets:
             return []
 
+        # Issue #8999: refresh the airwire-separation plane before the
+        # search.  This is the single negotiated per-net funnel (the initial
+        # pass, every rip-up iteration, the relief probe and the re-land
+        # paths all reach the search through it), so one hook covers every
+        # negotiated search with a plane recomputed from the CURRENT
+        # committed set -- the net being routed is excluded (its own desire
+        # lines must not price its own straight path).  A no-op returning 0
+        # when the flag is off (weight 0.0), keeping that path
+        # byte-identical.
+        from .airwire_cost import refresh_airwire_cost
+
+        refresh_airwire_cost(
+            self, weight=getattr(self, "_airwire_separation_weight", 0.0), current_net=net
+        )
+
         pads = self._region_filtered_pad_keys(net, self.nets.get(net, []))
         if len(pads) + len(stub_targets) < 2:
             return []
@@ -20309,6 +20358,18 @@ class Autorouter:
         pads = self.nets[net]
         if len(pads) < 2:
             return []
+
+        # Issue #8999: same airwire-separation refresh as the plain
+        # negotiated funnel -- the two-phase detailed loop (and the escape
+        # pre-phase's Phase 2) routes every net through HERE, so without
+        # this hook the crossing-count plane stays all-zero on every board
+        # dispatched to two-phase (board 03's escape+two-phase path is the
+        # measured example) and the term silently no-ops.
+        from .airwire_cost import refresh_airwire_cost
+
+        refresh_airwire_cost(
+            self, weight=getattr(self, "_airwire_separation_weight", 0.0), current_net=net
+        )
 
         _dbg = bool(os.environ.get("KCT_DEBUG_PNT"))
         _t0 = time.monotonic() if _dbg else 0.0

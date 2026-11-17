@@ -162,7 +162,7 @@ def _website_leg(args: argparse.Namespace, result, out: Path) -> int:
         path = input("Download JLC's part-matching export, then enter its path: ").strip()
         return Path(path).read_bytes()
 
-    checkout_outcome: tuple[str, object, Path | None] | None = None
+    checkout_rc: int | None = None
     try:
         drv.require_attended()
         lock_dir = Path(args.lock_dir) if args.lock_dir else None
@@ -180,7 +180,11 @@ def _website_leg(args: argparse.Namespace, result, out: Path) -> int:
                     fab_review_signed=result.fab_review_signoff is not None,
                 )
                 if getattr(args, "checkout", False):
-                    checkout_outcome = _checkout_leg(args, plan, page, out)
+                    # Issue #9151: report the outcome before close() and
+                    # render_review_page can fail -- after a payment the
+                    # ORDERED line (or the unconfirmed instruction) must not
+                    # be hidden by a teardown error.
+                    checkout_rc = _report_checkout(_checkout_leg(args, plan, page, out))
             finally:
                 close()
     except drv.DriverAbort as exc:
@@ -201,9 +205,7 @@ def _website_leg(args: argparse.Namespace, result, out: Path) -> int:
     )
     print(f"cart: {drv.printable(site.cart_url)}  (state: {site.state})")
     print(f"review page: {page_out.directory}")
-    if checkout_outcome is not None:
-        return _report_checkout(checkout_outcome)
-    return 0
+    return 0 if checkout_rc is None else checkout_rc
 
 
 def _checkout_run_dir(plan_sha256: str) -> Path:
