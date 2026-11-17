@@ -65,7 +65,10 @@ Status = Literal["covered", "partial", "not_covered"]
 #: 7: #8972 -- trace-band vs pad-band ``physical_copper_gap`` findings are
 #:    attributed to their own rows (``trace_spacing`` / ``pad_spacing``) via
 #:    the ``rule_id#fab_band`` qualified key; the rule id itself is unchanged.
-TABLE_VERSION = 7
+#: 8: #9034 -- pad_spacing note records the issue-reported kct:fab ratio as
+#:    reported-not-reproduced and the measured per-pair counting
+#:    granularity; no threshold, severity or attribution change.
+TABLE_VERSION = 8
 
 #: Where the observed categories/thresholds came from (counts are hand-recorded).
 SOURCE = "https://github.com/rjwalters/kicad-tools/issues/8838"
@@ -157,7 +160,14 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "edge is an ERROR -- the fab cannot see nets and flags it regardless "
         "(the 4-layer 1 oz board's 6 danger are same-net via/track at "
         "0.065-0.099 mm from a pad edge); the finding is labelled `same_net` "
-        "so the class can be waived deliberately. Zone-fill (pour) gaps are "
+        "so the class can be waived deliberately. Reported, not reproduced "
+        "(#9034): on one further 4-layer board (not committed) kct reported "
+        "19 errors against the fab's 6 danger + 1 warning; the surplus cause "
+        "is unmeasured, but kct emits at most one finding per copper-source "
+        "pair per layer (closest measurement wins -- measured on the #9034 "
+        "fixture), so it cannot come from per-edge inflation within a pair. "
+        "No fab-sourced edge justifies a threshold change, so the stricter "
+        "same-net error stays (#8938). Zone-fill (pour) gaps are "
         "kct's own advisory only and report at info, not tiered: JLCDFM does "
         "not judge pour clearance -- 1,516 pour-to-pad gaps at 0.10-0.13 mm "
         "went unflagged on the #8938 board -- so kct's warning count for this "
