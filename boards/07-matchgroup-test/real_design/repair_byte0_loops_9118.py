@@ -27,10 +27,13 @@ Loops
     ``RESHAPES`` ends each trunk inside its own pad on the pad's long axis.
 
 Series length
-    Measured as the shortest path through the copper
-    (``physical_path.py``), the loop-free nets are 6-7 mm shorter than their
-    byte-0 siblings: DQ7 57.07 mm and LDQM 56.02 mm against 62.60-63.52 mm,
-    a spread of 7.51 mm against ``group_skew_mm`` 5.0.  ``TROMBONES`` restores
+    Measured as the shortest path through the copper, the loop-free nets are
+    6-7 mm shorter than their byte-0 siblings: DQ7 57.07 mm and LDQM 56.02 mm
+    against 62.60-63.52 mm, a spread of 7.51 mm against ``group_skew_mm`` 5.0
+    -- figures from the board-local path model that existed at repair time.
+    ``TraceLengthAnalyzer.measure_net_path``, the shared contact model that
+    #9176 made canonical when it removed that duplicate, reads 57.02/55.21 mm
+    (spread 8.16 mm) on the same stripped copper.  ``TROMBONES`` restores
     that length as real series length, two loops each, laid by the repo's
     ``SerpentineGenerator.generate_trombone`` (the generator the board's
     original tuning used) with ``min_spacing=0.72``, ``gap_factor=1`` and
