@@ -79,7 +79,10 @@ Status = Literal["covered", "partial", "not_covered"]
 #:    category; the junction findings are kct-only and stay deliberately
 #:    unattributed, separable via ``DRCViolation.corner_class``.  No status
 #:    or severity change.
-TABLE_VERSION = 10
+#: 11: #8858 -- ``solder_mask_opening_exposing_trace`` note records the
+#:    ``within_own_pad`` class (a clean single entry) and what stays an
+#:    error; status, attribution and danger-capability unchanged.
+TABLE_VERSION = 11
 
 #: Where the observed categories/thresholds came from (counts are hand-recorded).
 SOURCE = "https://github.com/rjwalters/kicad-tools/issues/8838"
@@ -193,12 +196,20 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "`mask_to_copper` is default-on for an explicit --mfr `jlcpcb*` since #8842 "
         "(interim 0.09 mm danger / 0.15 mm warning); a bare `kct check` with no "
         "--mfr does not engage it, and the native path needs an unmodified saved "
-        "source. Observed 5 danger. The rule has no same-net exclusion and traces "
-        "are in its comparison set, so the fab's same-net track-in-pad-opening "
-        "items are in scope; since #8914 an assessment that could not complete "
-        "reports `mask_to_copper_incomplete` at info, so zero findings no longer "
-        "read as a clean board. Whether the #8914 report's zero count was an "
-        "incomplete run or a measurement gap is still unresolved.",
+        "source. Observed 5 danger, all same-net: a track running beside, along, or "
+        "leaving and jogging beside its own pad at 0-0.08 mm (#8914); those shapes "
+        "stay errors at the 0.09 mm band. Since #8858 one shape is `within_own_pad` "
+        "at info: a straight track entering its own plain pad once, at 45 degrees or "
+        "steeper, exposing nothing beyond the pad and leaving no more copper under "
+        "mask beside the opening than that one crossing (or a track lying wholly on "
+        "the pad). The fab did not flag plain entries (#8914; 655 entries on the "
+        "consumer board, 0 flagged). On boards 00-07 (0 mm expansion) that was 963 "
+        "of 1,542 errors. Pass-through, along-edge and straddling tracks, shallow "
+        "entries, arcs, vias and pours touching the pad, expansion rings wider than "
+        "the construction budget, and different-net copper keep their verdict. "
+        "Since #8914 an assessment that could not complete reports "
+        "`mask_to_copper_incomplete` at info, so zero findings no longer read as a "
+        "clean board.",
     ),
     ParityRow(
         "tht_to_smd",

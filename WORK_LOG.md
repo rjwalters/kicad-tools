@@ -16,6 +16,22 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-17
 
+- **PR #9224**: refactor: use shared band constants in board 06 leg-band predicate
+- **PR #9222**: feat: add --order-method regret net ordering (biggest-loss nets first)
+- **PR #9219**: test: grade board07 byte spreads on the gate's matched length
+- **PR #9212**: fix: refuse C++ via seats whose annulus slits an own-net trace
+- **Issue #9217** (closed): Board 07: test_board07_real_design still grades byte spreads on raw copper, not the gate's matched length
+- **Issue #9208** (closed): Board 06 USB2_D- drain: C++ via-annulus vs own-net-trace slit-band check
+- **Issue #9204** (closed): Converge board 06's leg-band predicate on the shared band constants from #9150
+- **Issue #9001** (closed): Router: regret ordering as a net-order method (commit biggest-loss nets first)
+- **PR #9220**: test: pin sibling_legs contract on _same_net_leg_band_ok directly
+- **PR #9218**: docs: record trim-less detection margin and fix healthy-residual sign in RSS hook test
+- **PR #9207**: refactor: require stackup args on same_net_band_edges()
+- **PR #9177**: fix(board03): land fiducials and board ID past the native_clearance contract
+- **Issue #9214** (closed): Record the trim-less detection margin that `_straddle_slack_mb` trades away on large-page hosts
+- **Issue #9196** (closed): Board 06 leg band check: pin the `sibling_legs` contract at the predicate level (and tidy its signature)
+- **Issue #9188** (closed): same_net_band_edges() hardcodes the jlcpcb 4L/1oz stackup inside a shared library module
+- **Issue #9143** (closed): Board 03: fiducial keepouts collide with the native_clearance contract and the #8838 mask policy
 - **Issue #9206** (closed): Stale module docstring: test_board07_byte0_physical_spread says validate.py 'sums every copper segment'
 - **PR #9213**: docs: reword board07 byte0 spread docstring's stale sum-all-segments claim as history
 - **Issue #9186** (closed): Board 06 legalizer: the new same-net leg band check grades against copper the same repair deletes (staple-collapse site)
