@@ -17,8 +17,9 @@ tracks away from pads and vias.  The rule reports all three (pinned in
 ``tests/test_validate_sharp_trace_corner.py``).  On that board JLC flagged none
 of the 95 joints that were branch points, at vias or inside pads; vertices
 under same-net pad/via copper are skipped here for that reason, and because
-there is no open wedge in the copper.  Branch junctions with an open wedge are
-still reported (operator ruling on PR #8848, 2026-11-12): this is stricter than
+there is no open wedge in the copper.  "Under" means inside the pad's real
+copper outline, not just its inscribed circle (issue #9037).  Branch
+junctions with an open wedge are still reported (operator ruling on PR #8848, 2026-11-12): this is stricter than
 the observed fab behaviour, not looser.  Eight unflagged two-segment bends on
 that board look like the flagged three; they are unknown, not negatives, so
 they were not used to narrow the rule.  The angle threshold was not changed.
@@ -31,7 +32,7 @@ Rule ID generated:
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..violations import DRCResults, DRCViolation
 from .base import DRCRule
@@ -43,18 +44,29 @@ if TYPE_CHECKING:
 SHARP_TRACE_CORNER_RULE_ID = "sharp_trace_corner"
 
 
-def _copper_discs(pcb: PCB) -> list[tuple[str, tuple[str, ...], float, float, float]]:
-    """``(net_name, layers, x, y, radius)`` of pad/via copper that can bury a vertex.
+def _copper_discs(pcb: PCB) -> list[tuple[str, tuple[str, ...], float, float, float, Any]]:
+    """``(net_name, layers, x, y, radius, outline)`` of pad/via copper that can bury a vertex.
 
-    Pads use the inscribed circle (half the smaller dimension), so a vertex is
-    only treated as buried when it is certainly under copper.
+    A pad's ``outline`` is its true copper shape (the clearance kernel's
+    polygon, roundrect/oval honoured), so a vertex anywhere inside the pad
+    counts, not only one inside its inscribed circle (issue #9037: a vertex
+    inside an elongated pad but off its centre was reported).  When no outline
+    is available the inscribed circle (half the smaller dimension) is the
+    fallback, so a vertex is only treated as buried when it is certainly
+    under copper.  Vias are discs (``outline`` is ``None``).
     """
     from kicad_tools.core.geometry import rotate_pad_offset
 
-    discs = []
+    from .clearance import CopperElement
+
+    discs: list[tuple[str, tuple[str, ...], float, float, float, Any]] = []
     for fp in pcb.footprints:
         for pad in fp.pads:
             dx, dy = rotate_pad_offset(pad.position[0], pad.position[1], fp.rotation)
+            try:
+                outline = CopperElement.from_pad(pad, fp).polygon
+            except Exception:  # unmodelled pad shape: inscribed circle only
+                outline = None
             discs.append(
                 (
                     pad.net_name,
@@ -62,11 +74,12 @@ def _copper_discs(pcb: PCB) -> list[tuple[str, tuple[str, ...], float, float, fl
                     fp.position[0] + dx,
                     fp.position[1] + dy,
                     min(pad.size) / 2,
+                    outline,
                 )
             )
     for via in pcb.vias:
         discs.append(
-            (via.net_name, tuple(via.layers), via.position[0], via.position[1], via.size / 2)
+            (via.net_name, tuple(via.layers), via.position[0], via.position[1], via.size / 2, None)
         )
     return discs
 
@@ -83,13 +96,21 @@ def _covers_layer(d_layers: tuple[str, ...], layer: str) -> bool:
 
 
 def _is_buried(discs, net_name: str, layer: str, point: tuple[float, float]) -> bool:
-    for d_net, d_layers, x, y, r in discs:
+    candidate = None
+    for d_net, d_layers, x, y, r, outline in discs:
         if d_net != net_name:
             continue
         if not _covers_layer(d_layers, layer):
             continue
         if math.dist(point, (x, y)) <= r:
             return True
+        if outline is not None and not outline.is_empty:
+            if candidate is None:
+                from shapely.geometry import Point  # type: ignore[import-untyped]
+
+                candidate = Point(point)
+            if outline.covers(candidate):
+                return True
     return False
 
 

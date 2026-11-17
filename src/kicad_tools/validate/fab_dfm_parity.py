@@ -271,7 +271,8 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         ("sharp_trace_corner",),
         "`sharp_trace_corner` (#8840) reports all 3 observed vertices (pinned in its "
         "tests). It is stricter than JLCDFM was observed to be: it also reports "
-        "branch junctions with an open wedge, which JLCDFM did not flag on that board.",
+        "branch junctions with an open wedge, which JLCDFM did not flag on that board "
+        "(over-reporting tracked in #9037).",
     ),
     ParityRow(
         "missing_plated_through_hole",
