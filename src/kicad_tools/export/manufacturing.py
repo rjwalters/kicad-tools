@@ -998,13 +998,18 @@ class ManufacturingPackage:
 
         The layer count is read from the PCB so the DRC rules selected
         from the manufacturer profile match the board (a 4-layer board
-        uses finer via/drill minimums than a 2-layer board).  Copper
-        weight is not encoded in the board file, so it defaults to 1oz.
+        uses finer via/drill minimums than a 2-layer board).  The copper
+        weight is the outer copper declared in the board's stackup -- the
+        same rule ``kct check`` uses to pick its preset (#8836), so the
+        clearance/width floors written to the ``.kicad_dru`` match the ones
+        ``kct check`` enforces (Issue #9422).  A board with no declared
+        stackup copper keeps the historical 1oz.
 
         Returns:
             ``(layers, copper_oz)`` -- falls back to ``(2, 1.0)`` when the
             board cannot be parsed.
         """
+        copper_oz = 1.0
         try:
             from ..schema.pcb import PCB
 
@@ -1014,10 +1019,18 @@ class ManufacturingPackage:
                 layers = 2
         except Exception as e:
             logger.debug("Could not detect layer count from %s: %s", self.pcb_path, e)
-            layers = 2
-        return layers, 1.0
+            return 2, copper_oz
+        try:
+            from ..physics.stackup import Stackup
 
-    def _write_drc_constraints(self, result: ManufacturingResult) -> None:
+            derived = Stackup.from_pcb(pcb).outer_inner_copper_oz()
+            if derived is not None and derived[0]:
+                copper_oz = float(derived[0])
+        except Exception as e:  # noqa: BLE001 - undeclared/odd stackup keeps 1oz
+            logger.debug("Could not read stackup copper from %s: %s", self.pcb_path, e)
+        return layers, copper_oz
+
+    def _write_drc_constraints(self, result: ManufacturingResult, *, dry_run: bool = False) -> None:
         """Emit sibling .kicad_pro / .kicad_dru from the manufacturer profile.
 
         Populates the project file's ``board.design_settings.rules`` block
@@ -1036,6 +1049,10 @@ class ManufacturingPackage:
         stage a scratch copy first (see ``tests/test_board_05_export.py``)
         or the #3580 committed-artifact guard will fire whenever the
         generated rules change.
+
+        With ``dry_run`` the merge runs against scratch copies of the
+        sidecars, so a refusal (``RuleLooseningError``) surfaces exactly as
+        in the real run while nothing is written next to the board (#9422).
         """
         try:
             from ..manufacturers import (
@@ -1101,6 +1118,18 @@ class ManufacturingPackage:
                 if net_classes and max_width_mm is not None:
                     self._warn_oversize_ampacity(net_classes, rules, max_width_mm, result)
 
+        if dry_run:
+            self._dry_run_write_drc_constraints(
+                write_drc_constraints,
+                rules,
+                profile_id=profile.id,
+                layers=layers,
+                copper_oz=copper_oz,
+                net_classes=net_classes,
+                max_width_mm=max_width_mm,
+            )
+            return
+
         try:
             written = write_drc_constraints(
                 self.pcb_path,
@@ -1143,6 +1172,42 @@ class ManufacturingPackage:
             note = f"Export modified {dru_path.name} (generated DRC rules)."
             logger.info(note)
             result.warnings.append(note)
+
+    def _dry_run_write_drc_constraints(
+        self,
+        write_drc_constraints,
+        rules,
+        *,
+        profile_id: str,
+        layers: int,
+        copper_oz: float,
+        net_classes,
+        max_width_mm: float | None,
+    ) -> None:
+        """Run the sidecar merge on scratch copies; discard the output (#9422)."""
+        import shutil
+        import tempfile
+
+        pcb_path = Path(self.pcb_path)
+        with tempfile.TemporaryDirectory(prefix="kct-export-dry-run-") as tmp:
+            staged = Path(tmp) / pcb_path.name
+            for suffix in (".kicad_pro", ".kicad_dru"):
+                source = pcb_path.with_suffix(suffix)
+                if source.is_file():
+                    shutil.copyfile(source, staged.with_suffix(suffix))
+            try:
+                write_drc_constraints(
+                    staged,
+                    rules,
+                    manufacturer_id=profile_id,
+                    layers=layers,
+                    copper_oz=copper_oz,
+                    net_classes=net_classes,
+                    max_ampacity_width_mm=max_width_mm,
+                    _board_path=pcb_path,
+                )
+            except OSError as e:
+                logger.debug("Dry-run DRC-constraint merge skipped: %s", e)
 
     def _largest_board_dimension(self) -> float | None:
         """Largest Edge.Cuts extent in mm, or None when it cannot be determined."""
@@ -1367,6 +1432,11 @@ class ManufacturingPackage:
 
     def _dry_run(self, out_dir: Path, result: ManufacturingResult) -> ManufacturingResult:
         """Populate result with what *would* be generated."""
+        # Issue #9422: a real run refuses (RuleLooseningError) when the DRU
+        # merge would loosen an authored rule; surface the same refusal here,
+        # without writing the sidecars.
+        if self.config.emit_drc_constraints:
+            self._write_drc_constraints(result, dry_run=True)
         bom_name = self.config.bom_filename.format(manufacturer=self.manufacturer)
         pnp_name = self.config.pnp_filename.format(manufacturer=self.manufacturer)
 
