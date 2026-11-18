@@ -325,9 +325,13 @@ def test_fixture_relocation_same_net_slit_residual_is_the_accepted_one(tmp_path,
     wedge whose first non-touching chain pieces sit 0.0841 / 0.0664 mm from
     the leg (trace band ``(0, 0.1016)``).  It is accepted, not drained:
 
-    * same net -- no short, only the fab-view notch warning, and
-      ``(physical_copper_gap, USB2_D-)`` is already an acknowledged identity
-      in ``DIFFPAIR_FIXTURE_ALLOWED_FINDINGS``;
+    * same net -- no short, and it needs no allowance route either: #9212
+      deleted the last USB2_D- ``physical_copper_gap`` identity (the
+      annulus-vs-own-net-TRACE slit #9208 drained), and on the seed-42 regen
+      the CI gate judges, ``USB2_D-`` now carries no ``physical_copper_gap``
+      finding at any severity (re-measured 2026-11-18, 0 unallowed /
+      0 stale) -- this wedge is a committed-fixture geometry the gate's
+      regen does not reproduce;
     * the notch is the junction itself: halving the chain reach in
       ``_same_net_leg_band_ok`` leaves it (0.0945 / 0.0768 mm), and a reach
       of 0 leaves two vias unrepairable (``RuntimeError``), so no cheap
