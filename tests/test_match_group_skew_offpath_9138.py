@@ -1,10 +1,15 @@
-"""Off-path copper must not count toward match-group skew (Issue #9138).
+"""Off-path copper is reported alongside the derived match-group skew (#9138).
 
-``derive_group_skew_data`` used to sum every segment and via on a net, so a
-same-net dead-end loop, an overlapping duplicate or a stub inflated that
-net's "length" and masked real skew.  It now measures the pad-to-pad copper
-path (Issue #9117's ``TraceLengthAnalyzer.measure_net_path``) plus the
-height of the vias on that path, and reports off-path copper.
+``derive_group_skew_data`` sums every segment and via on a member net, so a
+same-net dead-end loop, an overlapping duplicate or a stub inflates that
+net's "length" and can mask real skew.  The producer keeps the summed
+kicad-cli figure -- the one ruler the router's match-group tuner
+length-matches against; both ways of shedding off-path copper measurably
+manufacture skew on this repo's boards -- and reports any net whose
+off-path copper (Issue #9117's ``TraceLengthAnalyzer.measure_net_path``)
+exceeds ``OFF_PATH_REPORT_EPSILON_MM``, so the inflation is loud instead of
+silent.  Deciding which copper is truly defect and excluding exactly that
+is split out of Issue #9138 (see the constant's rationale).
 """
 
 from __future__ import annotations
@@ -74,8 +79,10 @@ def _loop_board(tmp_path: Path) -> PCB:
     """DQ0/DQ1/DQ2 are 20.0 / 20.0 / 20.5 mm pad-to-pad.
 
     DQ0 additionally carries a 20 mm same-net loop that leaves its far pad
-    and returns to it (the loop-through-own-pad case).  Summed, DQ0 would
-    measure 40 mm; on the path it is 20 mm.
+    and returns to it (the loop-through-own-pad case).  Summed, DQ0
+    measures 40 mm, so the group's derived skew is 20.0 mm -- the loop
+    masks nothing here, but on a group where every member carries a
+    similar loop it would.
     """
     rows = {1: ("DQ0", 10.0, 25.0), 2: ("DQ1", 20.0, 25.0), 3: ("DQ2", 30.0, 25.5)}
     body = (
@@ -88,23 +95,16 @@ def _loop_board(tmp_path: Path) -> PCB:
     return _write(tmp_path, body, rows)
 
 
-def test_loop_through_own_pad_is_not_counted(tmp_path: Path):
+def test_loop_is_reported_and_summed_figure_kept(tmp_path: Path, caplog):
+    """AC 2: the loop is reported; the figure stays the summed semantics."""
     pcb = _loop_board(tmp_path)
-    # Premise: the summed kicad-cli measurement (the pre-#9138 source) does
-    # see the loop, so the old producer reported ~20 mm of skew.
-    assert measure_pcb_net(pcb, 1) == pytest.approx(40.0, abs=0.05)
-
-    skew_data, _groups, _thresholds = derive_group_skew_data(pcb, NET_CLASS_MAP)
-
-    assert skew_data["DDR_DATA"] == pytest.approx(0.5, abs=0.05)
-
-
-def test_off_path_copper_is_reported(tmp_path: Path, caplog):
-    pcb = _loop_board(tmp_path)
+    lengths = [measure_pcb_net(pcb, n) for n in (1, 2, 3)]
 
     with caplog.at_level(logging.WARNING, logger="kicad_tools.validate.match_group_skew"):
-        derive_group_skew_data(pcb, NET_CLASS_MAP)
+        skew_data, _groups, _thresholds = derive_group_skew_data(pcb, NET_CLASS_MAP)
 
+    assert skew_data["DDR_DATA"] == pytest.approx(max(lengths) - min(lengths), abs=1e-6)
+    assert skew_data["DDR_DATA"] == pytest.approx(20.0, abs=0.05)
     messages = [r.getMessage() for r in caplog.records if "off-path" in r.getMessage()]
     assert len(messages) == 1
     assert "DQ0" in messages[0]
@@ -124,11 +124,63 @@ def test_clean_nets_match_summed_length_and_stay_silent(tmp_path: Path, caplog):
     assert not [r for r in caplog.records if "off-path" in r.getMessage()]
 
 
-def test_via_on_path_keeps_its_stackup_height(tmp_path: Path):
-    """A clean layer-changing net measures as before: path + via height."""
+def test_sub_epsilon_off_path_stays_silent(tmp_path: Path, caplog):
+    """Off-path copper at or below the epsilon is neither reported nor special."""
+    rows = {1: ("DQ0", 10.0, 25.0), 2: ("DQ1", 20.0, 25.0), 3: ("DQ2", 30.0, 25.5)}
+    # DQ0 carries a 0.2 mm dead-end stub: real off-path copper, below the
+    # reporting epsilon, so derivation is log-silent.
+    body = (
+        _seg(5, 10, 25, 10, 1)
+        + _seg(15, 10, 15.2, 10, 1)
+        + _seg(5, 20, 25, 20, 2)
+        + _seg(5, 30, 25.5, 30, 3)
+    )
+    pcb = _write(tmp_path, body, rows)
+    lengths = [measure_pcb_net(pcb, n) for n in (1, 2, 3)]
+    assert lengths[0] == pytest.approx(lengths[1] + 0.2, abs=0.05)  # premise
+
+    with caplog.at_level(logging.WARNING, logger="kicad_tools.validate.match_group_skew"):
+        skew_data, _g, _t = derive_group_skew_data(pcb, NET_CLASS_MAP)
+
+    assert skew_data["DDR_DATA"] == pytest.approx(max(lengths) - min(lengths), abs=1e-6)
+    assert not [r for r in caplog.records if "off-path" in r.getMessage()]
+
+
+def test_member_above_old_threshold_measured_by_same_ruler_as_siblings(tmp_path: Path, caplog):
+    """The review's cliff regression: no ruler switch at any off-path amount.
+
+    One member carries 2.5 mm of dead-end stub (above the 2.0 mm cutoff an
+    earlier iteration of this change switched rulers at), a sibling 1.0 mm,
+    the third is clean.  Every member is measured with the same summed
+    ruler, so the group's skew is exactly the summed spread -- the 2 mm
+    step an earlier per-member threshold injected into ``max - min`` is
+    gone -- and both stubs are reported.
+    """
+    rows = {1: ("DQ0", 10.0, 25.0), 2: ("DQ1", 20.0, 25.0), 3: ("DQ2", 30.0, 25.5)}
+    body = (
+        _seg(5, 10, 25, 10, 1)
+        + _seg(15, 10, 17.5, 10, 1)  # 2.5 mm stub on DQ0
+        + _seg(5, 20, 25, 20, 2)
+        + _seg(15, 20, 16, 20, 2)  # 1.0 mm stub on DQ1
+        + _seg(5, 30, 25.5, 30, 3)
+    )
+    pcb = _write(tmp_path, body, rows)
+    lengths = [measure_pcb_net(pcb, n) for n in (1, 2, 3)]
+
+    with caplog.at_level(logging.WARNING, logger="kicad_tools.validate.match_group_skew"):
+        skew_data, _g, _t = derive_group_skew_data(pcb, NET_CLASS_MAP)
+
+    assert skew_data["DDR_DATA"] == pytest.approx(max(lengths) - min(lengths), abs=1e-6)
+    assert skew_data["DDR_DATA"] == pytest.approx(2.0, abs=0.05)
+    messages = [r.getMessage() for r in caplog.records if "off-path" in r.getMessage()]
+    assert len(messages) == 2
+    assert any("DQ0" in m and "2.5" in m for m in messages)
+    assert any("DQ1" in m and "1.0" in m for m in messages)
+
+
+def test_via_net_keeps_summed_accounting_and_stays_silent(tmp_path: Path, caplog):
+    """A clean layer-changing net measures as before: every barrel charged."""
     rows = {1: ("DQ0", 10.0, 25.0), 2: ("DQ1", 20.0, 25.0), 3: ("DQ2", 30.0, 25.0)}
-    # DQ0 runs 10 mm on F.Cu, drops through a via, runs 10 mm on B.Cu to a
-    # B.Cu... pad is F.Cu-only, so return through a second via instead.
     body = (
         _seg(5, 10, 10, 10, 1)
         + '  (via (at 10 10) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))\n'
@@ -142,59 +194,34 @@ def test_via_on_path_keeps_its_stackup_height(tmp_path: Path):
     summed = [measure_pcb_net(pcb, n) for n in (1, 2, 3)]
     assert summed[0] > summed[1] + 1.0  # two 1.58 mm barrels charged
 
-    skew_data, _g, _t = derive_group_skew_data(pcb, NET_CLASS_MAP)
+    with caplog.at_level(logging.WARNING, logger="kicad_tools.validate.match_group_skew"):
+        skew_data, _g, _t = derive_group_skew_data(pcb, NET_CLASS_MAP)
 
-    assert skew_data["DDR_DATA"] == pytest.approx(max(summed) - min(summed), abs=0.05)
+    assert skew_data["DDR_DATA"] == pytest.approx(max(summed) - min(summed), abs=1e-6)
+    assert not [r for r in caplog.records if "off-path" in r.getMessage()]
 
 
-def test_sub_threshold_off_path_keeps_summed_length(tmp_path: Path, caplog):
-    """AC 4 (Issue #9138 review): a clean real-board net keeps its summed length.
-
-    Real loop-free nets carry up to ~1.6 mm of residual copper the path
-    decomposition reports as off-path (#9117: barrel overlap under
-    pads/vias, in-pad joints).  That residual differs per net, so
-    excluding it per member would manufacture group skew out of clean
-    copper: on board 07 it turned ADDR_BUS's 0.0169 mm kicad-cli-verified
-    skew into 0.3743 mm.  Off-path copper within
-    ``OFF_PATH_REPORT_THRESHOLD_MM`` therefore keeps the summed
-    kicad-cli figure, and the loop exclusion only applies above it.
-    """
-    rows = {1: ("DQ0", 10.0, 25.0), 2: ("DQ1", 20.0, 25.0), 3: ("DQ2", 30.0, 25.5)}
-    # DQ0 carries a 1 mm dead-end stub: real off-path copper, but below
-    # the 2 mm threshold, so the summed measurement stands.
-    body = (
-        _seg(5, 10, 25, 10, 1)
-        + _seg(15, 10, 16, 10, 1)
-        + _seg(5, 20, 25, 20, 2)
-        + _seg(5, 30, 25.5, 30, 3)
-    )
-    pcb = _write(tmp_path, body, rows)
-    lengths = [measure_pcb_net(pcb, n) for n in (1, 2, 3)]
-    assert lengths[0] == pytest.approx(lengths[1] + 1.0, abs=0.05)  # premise
+def test_without_shapely_nothing_is_reported_and_summed_stands(tmp_path: Path, monkeypatch, caplog):
+    pcb = _loop_board(tmp_path)
+    monkeypatch.setattr("kicad_tools._shapely.has_shapely", lambda: False)
 
     with caplog.at_level(logging.WARNING, logger="kicad_tools.validate.match_group_skew"):
         skew_data, _g, _t = derive_group_skew_data(pcb, NET_CLASS_MAP)
 
-    assert skew_data["DDR_DATA"] == pytest.approx(max(lengths) - min(lengths), abs=1e-6)
+    # No path-based figure -> nothing to report; the summed measurement
+    # (loop included) is the figure, as on every environment without shapely.
+    assert skew_data["DDR_DATA"] == pytest.approx(20.0, abs=0.05)
     assert not [r for r in caplog.records if "off-path" in r.getMessage()]
 
 
-def test_falls_back_to_summed_length_without_shapely(tmp_path: Path, monkeypatch):
-    pcb = _loop_board(tmp_path)
-    monkeypatch.setattr("kicad_tools._shapely.has_shapely", lambda: False)
-
-    skew_data, _g, _t = derive_group_skew_data(pcb, NET_CLASS_MAP)
-
-    # No path available -> the legacy summed measurement (loop counted).
-    assert skew_data["DDR_DATA"] == pytest.approx(20.0, abs=0.05)
-
-
-def test_open_net_falls_back_to_summed_length(tmp_path: Path):
+def test_open_net_keeps_summed_length_and_reports_nothing(tmp_path: Path, caplog):
     """DQ0's trace stops short of its far pad: no pad-to-pad path."""
     rows = {1: ("DQ0", 10.0, 25.0), 2: ("DQ1", 20.0, 25.0), 3: ("DQ2", 30.0, 25.0)}
     body = _seg(5, 10, 15, 10, 1) + _seg(5, 20, 25, 20, 2) + _seg(5, 30, 25, 30, 3)
     pcb = _write(tmp_path, body, rows)
 
-    skew_data, _g, _t = derive_group_skew_data(pcb, NET_CLASS_MAP)
+    with caplog.at_level(logging.WARNING, logger="kicad_tools.validate.match_group_skew"):
+        skew_data, _g, _t = derive_group_skew_data(pcb, NET_CLASS_MAP)
 
     assert skew_data["DDR_DATA"] == pytest.approx(10.0, abs=0.05)
+    assert not [r for r in caplog.records if "off-path" in r.getMessage()]
