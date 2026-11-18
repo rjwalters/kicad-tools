@@ -128,9 +128,13 @@ def _iter_drill_obstacles(pcb: PCB):
     :func:`iter_drill_holes`, so the placer and the check share one
     definition; through-via and pad drills pierce the board so both silk
     sides get them, while a blind/micro via reaches only the outer side its
-    layers name and a buried via neither (#9076).
+    layers name and a buried via neither (#9076).  Labels are sheet-absolute
+    like the other aperture sources: pass the board origin so the drill
+    coordinates match the text positions the report prints (#9327).
     """
-    for geom, label, sides in iter_drill_holes(pcb.vias, pcb.footprints):
+    for geom, label, sides in iter_drill_holes(
+        pcb.vias, pcb.footprints, getattr(pcb, "_board_origin", (0.0, 0.0))
+    ):
         label = f"drill {label}"
         for side in ("F", "B"):
             if side in sides:

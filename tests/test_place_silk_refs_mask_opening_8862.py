@@ -146,3 +146,32 @@ def test_text_output_uses_named_sheet_frame_on_offset_board(tmp_path: Path, caps
     # the opening label is quoted in the same (sheet) frame
     assert "(130.000, 80.000)" in c.opening
     assert "candidate clear positions [sheet coords]" in out
+
+
+def test_drill_hit_label_uses_named_sheet_frame_on_offset_board(tmp_path: Path, capsys):
+    # A *drill* hit (tented via, issue #9054 set) under board text: its label
+    # must name the same sheet point as the text position, not the
+    # board-relative frame (#9327 judge follow-up).
+    from kicad_tools.cli.place_silk_refs_cmd import _print_fixed_text_conflicts
+
+    ox, oy = 100.0, 50.0
+    head = _HEAD.replace(
+        "(start 0 0) (end 60 60)", f"(start {ox} {oy}) (end {ox + 60} {oy + 60})"
+    ).replace(
+        "(pad_to_mask_clearance 0)",
+        '(pad_to_mask_clearance 0) (tenting (front yes) (back yes)) (net 1 "N1")',
+    )
+    body = (
+        f'  (via (at {ox + 30} {oy + 30}) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu")'
+        " (net 1))\n" + _gr_text_at("NOTE", ox + 30, oy + 30)
+    )
+    path = tmp_path / "drill.kicad_pcb"
+    path.write_text(head + body + ")\n")
+    result = SilkRefPlacer(path).plan(clearance_mm=0.15)
+    (c,) = result.fixed_text_conflicts
+    # tented via: the only aperture under the text is the drill itself
+    assert c.opening.startswith("drill via at ")
+    assert "(130.000, 80.000)" in c.opening
+    _print_fixed_text_conflicts(result)
+    out = capsys.readouterr().out
+    assert "'NOTE' at (130.000, 80.000) [sheet coords] over drill via at (130.000, 80.000)" in out
