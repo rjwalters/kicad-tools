@@ -2823,6 +2823,15 @@ text envelopes; review it and use native DRC before relying on the placement.
 Footprint references must be unique, including hidden references. Duplicate
 references are rejected before planning; assign unique references first.
 
+Coordinate frames: reported positions (`old/new_position_mm` in JSON, the
+moved positions in the text report) are board-relative, while a `reason`
+obstacle label quotes sheet-absolute coordinates — the frame the KiCad
+editor shows — when it carries any, e.g. `pad aperture drill via at
+(130.000, 80.000)` (#9364). The text report labels each frame
+(`[board-relative]` / `[sheet coords]`), and the JSON output carries `frame`
+plus `origin_mm`, so `origin_mm + position_mm` recovers the sheet point a
+reason quotes.
+
 Search spacing must be finite and positive, distances finite and nonnegative,
 and the search is limited to 4096 rings. An explicit `--output` is written even
 when no reference needs to move. `--verify-drc` prints the native result (also
