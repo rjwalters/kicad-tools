@@ -3333,7 +3333,13 @@ def _add_pcb_parser(subparsers) -> None:
         dest="batch_map",
         help="JSON map for batch moves; x/y are board-relative by default "
         "(or absolute page coords with --absolute), "
-        'e.g. \'{"J2": {"x": 10, "y": 10}}\'',
+        'e.g. \'{"J2": {"x": 10, "y": 10}}\'. '
+        'An entry may add "side": "front"|"back": a part not already on that '
+        "side is flipped about its anchor first, then x/y/rotation are applied. "
+        "With a side change, rotation is the stored KiCad angle written AFTER "
+        "the flip (omitted: the flip's 180 - theta), not a front-view angle; "
+        "pad 2 of an anchor-at-pad-1 part lands on the opposite side of the "
+        "anchor from the unflipped part at the same stored angle",
     )
     pcb_move_fp.add_argument(
         "-o",

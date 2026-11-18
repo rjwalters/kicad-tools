@@ -218,6 +218,35 @@ kct pcb <subcommand> <pcb_file> [options]
 | `diff` | Geometric diff of two boards: which tracks, vias, pads, zones and outline changed (see below) |
 | `reinforce` | Place same-net PTH buttress-wire anchors on a routed net: by default two per single-layer wire leg, at its ends (see below) |
 
+**`move-footprint --map` and the `side` key.** A batch entry takes `x`, `y`,
+optional `rotation` and optional `"side": "front" | "back"`. A part not already
+on the requested side is flipped first (the same transform as `pcb-modify flip`,
+about the footprint anchor), then `x`/`y`/`rotation` are applied; the board is
+loaded and saved once. A part already on that side is not touched, an entry
+without `side` never flips, and any other value (or a footprint on a
+non-`F.*`/`B.*` layer) is rejected before anything is changed. `--dry-run` and
+`--format json` report `old_side` / `new_side` / `side_changed` per reference.
+`--drag-endpoints` is skipped (with a warning) for a footprint whose side
+changes, as for a rotation change.
+
+`rotation` is the **stored KiCad footprint angle written after the flip**, which
+is what KiCad's Properties dialog shows for the back-side part. It is not an
+angle as seen from the front. The flip mirrors about the footprint anchor, not
+the part's centre, and rewrites the stored angle `theta -> 180 - theta`. So a
+two-pad through-hole part whose anchor is pad 1 (pad 2 at local `+7.62, 0`) has
+pad 2 land on the opposite side of the anchor from where the unflipped part
+puts it, unless you say otherwise:
+
+```bash
+# D1: anchor = pad 1, pad 2 at local (7.62, 0); currently on F.Cu at angle 0.
+# rotation omitted -> flip leaves angle 180: pad 1 at (50, 40), pad 2 at (42.38, 40)
+kct pcb move-footprint board.kicad_pcb --map '{"D1": {"x": 50, "y": 40, "side": "back"}}'
+# rotation 0 -> pad 1 at (50, 40), pad 2 at (57.62, 40), the same pad layout as on the front
+kct pcb move-footprint board.kicad_pcb --map '{"D1": {"x": 50, "y": 40, "rotation": 0, "side": "back"}}'
+```
+
+Read pad positions back (`kct pcb footprints`) to confirm a polarised part.
+
 **`add-zone` output-path behavior:** `-o`/`--output` is optional and
 **defaults to overwriting the input in place** — consistent with `zones add`,
 `zones fill`, and `optimize-placement`. Because each in-place `add-zone` reads
