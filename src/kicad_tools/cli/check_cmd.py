@@ -1446,6 +1446,37 @@ def _resolve_check_scope(args: argparse.Namespace, parser: argparse.ArgumentPars
     return scope
 
 
+def _run_waiver_migration(
+    results: Any,
+    pcb: Any,
+    waivers_path: Path | None,
+    *,
+    write: bool,
+) -> int:
+    """Run ``--migrate-waivers`` (Issue #9454) and print its report."""
+    from kicad_tools import __version__
+    from kicad_tools.validate.evidence import PRIOR_EVIDENCE_HASH_VERSION, EvidenceContext
+    from kicad_tools.validate.rules.waivers import format_waiver_migration, migrate_evidence_waivers
+
+    if waivers_path is None or not waivers_path.is_file():
+        where = f" {waivers_path}" if waivers_path is not None else ""
+        print(f"Error: no waivers file to migrate{where}; pass --waivers PATH.", file=sys.stderr)
+        return 1
+    try:
+        report = migrate_evidence_waivers(
+            waivers_path,
+            results.violations,
+            EvidenceContext(pcb, recipe=PRIOR_EVIDENCE_HASH_VERSION),
+            write=write,
+            tool_version=__version__,
+        )
+    except (OSError, ValueError) as e:
+        print(f"Error: cannot migrate waivers in {waivers_path}: {e}", file=sys.stderr)
+        return 1
+    print("\n".join(format_waiver_migration(report, waivers_path, write=write)))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for kct check command."""
     parser = argparse.ArgumentParser(
@@ -1514,6 +1545,28 @@ def main(argv: list[str] | None = None) -> int:
             "--waivers PATH, else the discovered sidecar, else "
             "<board>.kct-waivers.json next to the board (Issue #5946)."
         ),
+    )
+    parser.add_argument(
+        "--migrate-waivers",
+        dest="migrate_waivers",
+        action="store_true",
+        help=(
+            "Re-bind evidence-bound waivers recorded under the previous "
+            "evidence version (ev3) to the current one (ev4) without "
+            "re-recording them (Issue #9454). For each ev3 entry the ev3 "
+            "digest is recomputed on this board; on a match the entry takes "
+            "the ev4 hash and keeps reviewer, date, reason and issue (adding "
+            "rebound_at / rebound_from / rebound_by); a mismatch stays stale "
+            "and a key that names no finding is reported as an orphan. "
+            "Previews by default; add --write to apply. Never runs during a "
+            "normal check; run it without --only/--skip."
+        ),
+    )
+    parser.add_argument(
+        "--write",
+        dest="migrate_write",
+        action="store_true",
+        help="With --migrate-waivers: apply the migration to the waivers file",
     )
     parser.add_argument(
         "--waive-reason",
@@ -1969,6 +2022,15 @@ def main(argv: list[str] | None = None) -> int:
         (args.waive_reason or "").strip() and (args.waive_reviewer or "").strip()
     ):
         parser.error("--waive requires --waive-reason and --waive-reviewer")
+    if args.migrate_write and not args.migrate_waivers:
+        parser.error("--write only applies to --migrate-waivers")
+    if args.migrate_waivers and (
+        args.waive or args.only_checks or args.skip_checks or args.diff is not None
+    ):
+        parser.error(
+            "--migrate-waivers cannot be combined with --waive, --only, --skip or --diff "
+            "(it needs the board's complete finding set)"
+        )
 
     # Issue #4651: validate the routing-quality ceilings up front.  The
     # metrics are fractions in [0, 1], so anything outside that range is a
@@ -2764,6 +2826,11 @@ def main(argv: list[str] | None = None) -> int:
     from kicad_tools.validate.evidence import annotate_evidence
 
     annotate_evidence(results, pcb)
+
+    # Issue #9454: ``--migrate-waivers`` re-binds ev3 waivers to ev4 (previewing
+    # unless ``--write``) and stops; a normal check never rewrites a waiver.
+    if args.migrate_waivers:
+        return _run_waiver_migration(results, pcb, gw_path, write=args.migrate_write)
 
     # Issue #5946: ``--waive KEY`` records reviewed, evidence-bound waivers for
     # the current findings with that key, then applies them below.
