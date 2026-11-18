@@ -160,9 +160,18 @@ def _wedge_is_open(seg1, seg2, junction: tuple[float, float], angle_deg: float) 
     the legs only separate at ``s0 = (w1 + w2) / (4 sin(theta / 2))`` along the
     legs, so a leg shorter than that (a width-filled hairpin) leaves solid
     copper, and a thin leg lying entirely inside a wider one adds no notch.
+
+    The router's ``acute_foldback.wedge_is_open`` is a second copy of this
+    predicate; ``tests/router/test_acute_foldback_parity_8930.py`` drives both
+    over one shared geometry table, so a change to either exemption fails there.
     """
     half = math.radians(angle_deg) / 2
-    s0 = (seg1.width + seg2.width) / (4 * math.sin(half))
+    sin_half = math.sin(half)
+    if sin_half <= 0.0:
+        # Collinear doubling-back: no wedge to be open.  Matches
+        # ``acute_foldback.wedge_is_open`` (Issue #8930).
+        return False
+    s0 = (seg1.width + seg2.width) / (4 * sin_half)
     p1, p2 = _far_end(seg1, junction), _far_end(seg2, junction)
     if min(math.dist(junction, p1), math.dist(junction, p2)) <= s0:
         return False

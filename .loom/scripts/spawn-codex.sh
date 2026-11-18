@@ -1147,7 +1147,21 @@ if [[ "$CODEX_SESSION_EXEC" == "true" ]]; then
     # provider credentials are deliberately NOT forwarded — the container
     # owns its own CODEX_HOME (ADR-0017 Decision 1).
     CODEX_INVOKE=("${LOOM_DAEMON_SELF_BIN:-loom-daemon}" session-exec host --container "$CODEX_SESSION_CONTAINER" --workdir "$PWD" --env "LOOM_WORKSPACE=$WORKSPACE" --env CARGO_INCREMENTAL=0 ${SESSION_EXTRA_ENV[@]+"${SESSION_EXTRA_ENV[@]}"} --owner-pid "$PPID")
-    for _v in LOOM_ROLE LOOM_RUNTIME LOOM_TERMINAL_ID LOOM_SWEEP_ID LOOM_WORKTREE_PATH LOOM_WORKTREE_ROOT LOOM_PROJECT_ROOT LOOM_SWEEP_CLAIM_OWNED LOOM_ACCOUNT_NAME LOOM_ACCOUNT_PROVIDER LOOM_DAEMON_ITEM_ID LOOM_HOST_ID LOOM_LEASE_HOST_ID LOOM_ROLE_PR_LEASE_FILE LOOM_PICK_JOURNAL LOOM_ROLL_PAUSE_DIR LOOM_ROLL_PAUSE_BIN CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG; do [[ -n "${!_v:-}" ]] && CODEX_INVOKE+=(--env "$_v=${!_v}"); done
+    # Commit identity: the session image has no global git config, so without
+    # one `git commit` in the container fails ("Author identity unknown"). Carry
+    # the identity git resolves HERE (what a Claude worker on this host commits
+    # under) as GIT_AUTHOR_*/GIT_COMMITTER_*; a value already exported wins,
+    # and with none configured nothing is forwarded (the commit still refuses).
+    if _git_ident_name="$(git config --get user.name 2>/dev/null)" && [[ -n "$_git_ident_name" ]]; then
+        : "${GIT_AUTHOR_NAME:=$_git_ident_name}" "${GIT_COMMITTER_NAME:=$_git_ident_name}"
+    fi
+    if _git_ident_email="$(git config --get user.email 2>/dev/null)" && [[ -n "$_git_ident_email" ]]; then
+        : "${GIT_AUTHOR_EMAIL:=$_git_ident_email}" "${GIT_COMMITTER_EMAIL:=$_git_ident_email}"
+    fi
+    # LOOM_SWEEP_LEASE_RENEW_DISPATCHED and LOOM_LEASE_HOST_ID travel with
+    # LOOM_SWEEP_CLAIM_OWNED: together they let the session recognise the lease
+    # its dispatcher published as its own (`lease ensure`, sweep-lease-fence.sh).
+    for _v in LOOM_ROLE LOOM_RUNTIME LOOM_TERMINAL_ID LOOM_SWEEP_ID LOOM_WORKTREE_PATH LOOM_WORKTREE_ROOT LOOM_PROJECT_ROOT LOOM_SWEEP_CLAIM_OWNED LOOM_SWEEP_LEASE_RENEW_DISPATCHED GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL LOOM_ACCOUNT_NAME LOOM_ACCOUNT_PROVIDER LOOM_DAEMON_ITEM_ID LOOM_HOST_ID LOOM_LEASE_HOST_ID LOOM_ROLE_PR_LEASE_FILE LOOM_PICK_JOURNAL LOOM_ROLL_PAUSE_DIR LOOM_ROLL_PAUSE_BIN CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG; do [[ -n "${!_v:-}" ]] && CODEX_INVOKE+=(--env "$_v=${!_v}"); done
     CODEX_INVOKE+=(--)
 fi
 CODEX_INVOKE+=(codex ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"})

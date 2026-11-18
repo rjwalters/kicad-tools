@@ -3,7 +3,7 @@
   "board": "07",
   "runs": {
     "run1": {
-      "out_dir": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/07-run1",
+      "out_dir": ".loom/worktrees/issue-5518/5508-1c-scratch/out/07-run1",
       "present": true,
       "times": [
         "START 2026-09-21T07:57:40Z",
@@ -16,7 +16,7 @@
       "net_status_why": {
         "source": "captured:board07-run1-timeout.json",
         "payload": {
-          "pcb": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/07-run1/matchgroup_test_routed_timeout_unverified_u4m68ps_.kicad_pcb",
+          "pcb": ".loom/worktrees/issue-5518/5508-1c-scratch/out/07-run1/matchgroup_test_routed_timeout_unverified_u4m68ps_.kicad_pcb",
           "connectivity_model": "strict",
           "summary": {
             "stuck_nets": 34,
@@ -938,7 +938,7 @@
       "kct_route_sidecar_note": "no <stem>.access_witness.json written for this run"
     },
     "run2": {
-      "out_dir": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/07-run2",
+      "out_dir": ".loom/worktrees/issue-5518/5508-1c-scratch/out/07-run2",
       "present": true,
       "times": [
         "START 2026-09-21T08:39:04Z harness=on targets=U4.C2,U1.28,U2.4",

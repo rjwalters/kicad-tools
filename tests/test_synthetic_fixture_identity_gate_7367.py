@@ -117,19 +117,19 @@ def with_board07_synthetic(gate):
     return gate
 
 
-# Issue #9018: the leg-side band guard drained the pad-vs-trace population
-# (MIPI_*_N out); the six TMDS survivors are the re-sited gateway fan vias'
-# tangency wedges, re-pointed under the #8962 via-population child.
-BOARD07_GAP_NETS = (
-    "TMDS_D0_N",
-    "TMDS_D0_P",
-    "TMDS_D1_N",
-    "TMDS_D1_P",
-    "TMDS_D2_N",
-    "TMDS_D2_P",
-)
+# Issue #9018 drained the pad-vs-trace population (MIPI_*_N out); the six
+# TMDS entries it left were the re-sited gateway fan vias' tangency wedges.
+# Issue #9124: the same-net slit-band guard no longer seats a TANGENT via
+# (touch-at-a-point leaves a wedge), so those findings stopped firing on the
+# seed-42 regen and their entries are deleted -- the allowance is empty.  The
+# #8962 via-population re-baseline note is retired with them: the wedges were
+# exactly the tangent seats #9124 rejects, so none is pending re-baselining.
+BOARD07_GAP_NETS: tuple[str, ...] = ()
 
-BOARD06_GAP_NETS = ("GND", "MIPI_CLK+", "PCIE_RX+", "USB2_D-")
+# #9124 drained the PCIE_RX+ face-aligned corner wedge (a tangent via seat)
+# alongside board 07's six; #9208 drained the USB2_D- annulus-vs-own-net-TRACE
+# slit (via re-seated 0.1 mm further out, C++ own-net-trace band check).
+BOARD06_GAP_NETS = ("GND", "MIPI_CLK+")
 
 
 def fab_gap_allowance(nets: tuple[str, ...]) -> dict:
@@ -139,10 +139,11 @@ def fab_gap_allowance(nets: tuple[str, ...]) -> dict:
 
 
 def test_board07_committed_allowance():
-    """Issues #5333/#6448 emptied the pair/group/skew entries: board 07's
-    allowance holds only the #8957 fab-view ``physical_copper_gap`` nets
-    (net-signature keyed -- the board is regenerated each CI run, so
-    geometry-keyed identities are ephemeral)."""
+    """Issues #5333/#6448 emptied the pair/group/skew entries and issue
+    #9124's tangent-seat rejection drained the last six fab-view
+    ``physical_copper_gap`` entries (the re-sited gateway fan vias'
+    tangency wedges): board 07's allowance is empty, so every blocking
+    finding counts."""
     gate = load("check_matchgroup_coverage")
     assert fab_gap_allowance(BOARD07_GAP_NETS) == gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
     assert gate.board_allowance(BOARD07_KEY) == gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
@@ -284,10 +285,10 @@ def test_board06_committed_allowance():
     """Issue #7548 emptied the skew entry: board 06's allowance holds only
     the #8957 fab-view ``physical_copper_gap`` nets (net-signature keyed --
     the board is regenerated each CI run, so geometry-keyed identities are
-    ephemeral).  Issue #8994's C++ mirror landed but the PCIE_RX+/USB2_D-
-    findings survive (corner-wedge + trace-population pairs, see the
-    allowance comment in check_diffpair_coverage.py), so their entries
-    stay."""
+    ephemeral).  #9124's tangent-seat rejection drained the PCIE_RX+
+    face-aligned corner wedge and #9208's C++ own-net-trace slit refusal
+    drained the USB2_D- trace-population finding (both entries deleted; see
+    the allowance comment in check_diffpair_coverage.py)."""
     gate = load("check_diffpair_coverage")
     assert fab_gap_allowance(BOARD06_GAP_NETS) == gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
     assert not hasattr(gate, "DIFFPAIR_SKEW_TRACKER")
@@ -415,9 +416,12 @@ def test_physical_gap_identity_is_the_net_signature():
 
 def test_regenerated_population_passes_and_a_new_net_fails():
     """Two runs with disjoint geometry but identical net signatures both
-    match the #8962-re-pointed fab-gap allowance; a NEW net's slits are
-    unallowed, and a net that stops carrying slits goes stale."""
-    gate = load("check_matchgroup_coverage")
+    match a fab-gap allowance keyed by net signature; a NEW net's slits are
+    unallowed, and a net that stops carrying slits goes stale.  (#9124
+    drained the committed board 07 allowance, so the TMDS entries this
+    exercises are installed synthetically on the freshly loaded gate.)"""
+    gate = with_board07_synthetic(load("check_matchgroup_coverage"))
+    gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS.update(fab_gap_allowance(("TMDS_D0_N", "TMDS_D0_P")))
     run_a = [gap_violation(("TMDS_D0_N",)) for _ in range(3)] + [gap_violation(("TMDS_D0_P",))]
     run_b = [
         gap_violation(("TMDS_D0_N",), items=("Via@1.1/1.1:F.Cu-B.Cu:d0.3/s0.6",)) for _ in range(2)

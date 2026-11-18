@@ -129,6 +129,15 @@ COMPLETE_PICKS_ITS_OWN = {
     "--no-placement-delta-feedback",
     "--placement-delta-feedback-budget",
     "--placement-delta-feedback-timeout",
+    # Post-settle repair pass the chain cannot run: --complete dispatches the
+    # lattice engine (_apply_complete_mode_defaults) with --strategy coerced to
+    # basic by the #4280 gate, while --detour-repair settles only after the
+    # negotiated/escape drivers (_apply_detour_repair refuses the flag on any
+    # other strategy) and is a documented no-op on the lattice engine, so it
+    # could never fire in the chained pass.  It lifts, re-routes and re-lands
+    # nets, so unlike the #9003 detour report this places copper and is NOT a
+    # NOT_COPPER entry.
+    "--detour-repair",
 }
 
 # Reporting, diagnostics and exit-code policy: none of these places copper.
@@ -239,7 +248,6 @@ NOT_FORWARDED_UNREVIEWED = {
     "--plan-gate",
     "--no-cache",
     "--cache-only",
-    # Post-route passes.
 }
 
 EXCLUSION_GROUPS = {

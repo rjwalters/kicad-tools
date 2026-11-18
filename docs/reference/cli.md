@@ -648,7 +648,10 @@ to full agreement (#8949): an *explicitly requested* mask check that cannot run 
 FAILED, so `coverage.mask_to_copper` is `unknown` (and in
 `summary.coverage_blocking_unknown`) while the list does not name it — the list is
 exhaustive only for default-applied checks. `fab_dfm_parity.incomplete_categories`
-is table-only (static JLCDFM parity coverage, run-independent).
+names the danger-capable JLCDFM categories with no kct rule (static table data)
+plus, since #9234, the categories whose kct check did not complete this run
+(`solder_mask_opening_exposing_trace` whenever a default-applied
+`mask_to_copper` assessment is incomplete).
 
 Exit codes: `0` pass (or `incomplete` with `--allow-incomplete`); `2` the check
 ran and the board fails (DRC errors, warnings with `--strict`, an ERC/LVS/manifest

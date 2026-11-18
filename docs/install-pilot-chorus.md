@@ -9,7 +9,7 @@ plus vendored `kct` skills and portable CI gates.
 
 **Date:** 2026-07-12
 **kicad-tools:** v0.14.0 (installer sourced from worktree `feature/issue-4058`;
-`--path` dep points at the durable main checkout `/Users/rwalters/GitHub/kicad-tools`, commit `612cf1fa`)
+`--path` dep points at the durable main checkout `<repo>`, commit `612cf1fa`)
 **Chorus pilot branch:** `pilot/kct-install-4058` (commit `1e3267c`, **local only — NOT pushed**)
 **Chorus board under test:** `hardware/chorus-test-revA/kicad/chorus-test-revA_v22_mfg.kicad_pcb` @ `--mfr jlcpcb-tier1`
 
@@ -88,7 +88,7 @@ non-packaged workspace root — chorus is a board-design repo with no importable
 ### Step 2 — installer, first run (`--path` mode, network-free)
 
 ```
-scripts/install-kct.sh --path /Users/rwalters/GitHub/kicad-tools /Users/rwalters/GitHub/chorus
+scripts/install-kct.sh --path <repo> <chorus>
 ```
 
 Clean run. All eight stages OK. Wrote:
@@ -99,7 +99,7 @@ Clean run. All eight stages OK. Wrote:
 - `.kct/install-metadata.json`
 
 The `--path` dep deliberately points at the **durable main checkout**
-(`/Users/rwalters/GitHub/kicad-tools`), not the transient worktree, so the
+(`<repo>`), not the transient worktree, so the
 owner's ongoing use survives worktree cleanup. The *installer binary itself* was
 run from the worktree so the fix in this PR (see Finding 4) is what got tested.
 
@@ -331,8 +331,8 @@ this gate performs a genuine copper-LVS assertion.
 To inspect:
 
 ```
-git -C /Users/rwalters/GitHub/chorus log --oneline main..pilot/kct-install-4058
-git -C /Users/rwalters/GitHub/chorus diff --stat main pilot/kct-install-4058
+git -C <chorus> log --oneline main..pilot/kct-install-4058
+git -C <chorus> diff --stat main pilot/kct-install-4058
 ```
 
 ---

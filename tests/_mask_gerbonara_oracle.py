@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 def read_native_gerber(path: Path, *, chord_error_mm: float = 0.000001):
-    from gerbonara.graphic_primitives import Rectangle
+    from gerbonara.graphic_primitives import Line, Rectangle
     from gerbonara.rs274x import GerberFile
     from gerbonara.utils import MM
     from shapely import make_valid
@@ -25,7 +25,17 @@ def read_native_gerber(path: Path, *, chord_error_mm: float = 0.000001):
         # aperture, not an instruction to erase earlier objects on the layer.
         aperture = GeometryCollection()
         for primitive in obj.to_primitives(unit=MM):
-            if primitive.is_zero_size():
+            # Skip only primitives that really have zero area. Gerbonara's
+            # is_zero_size() compares a Line's endpoints and ignores its
+            # width, but KiCad 10.0.6 plots round pads -- an obround with
+            # equal width and height -- as a zero-length line with a width,
+            # which renders as a disk of that diameter (issue #9232). A Line
+            # has zero area exactly when its width is zero; for every other
+            # primitive type the zero-size check does mean zero area.
+            if isinstance(primitive, Line):
+                if primitive.width <= 0:
+                    continue
+            elif primitive.is_zero_size():
                 continue
             if isinstance(primitive, Rectangle):
                 # Gerbonara 1.6.3 Rectangle.to_arc_poly returns an axis-aligned

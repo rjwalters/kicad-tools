@@ -222,6 +222,50 @@ def test_partial_does_not_trigger_incomplete():
 
 
 # ---------------------------------------------------------------------------
+# Issue #9234: a kct rule that did not complete this run names its rows.
+# ---------------------------------------------------------------------------
+
+
+def test_run_incomplete_rule_names_only_its_danger_rows():
+    plain = fdp.evaluate_parity("jlcpcb")
+    assert "solder_mask_opening_exposing_trace" not in plain.incomplete_categories
+    assert plain.run_incomplete_categories == ()
+    report = fdp.evaluate_parity("jlcpcb", incomplete_rules=("mask_to_copper",))
+    assert "solder_mask_opening_exposing_trace" in report.incomplete_categories
+    assert report.run_incomplete_categories == ("solder_mask_opening_exposing_trace",)
+    # The static table subset -- what meta_checks and the verdict key on
+    # (#9062) -- is unchanged by run state.
+    assert report.table_incomplete_categories == plain.table_incomplete_categories
+    assert not report.table_incomplete
+    assert report.to_dict()["incomplete_categories"] == list(report.incomplete_categories)
+
+
+def test_run_incomplete_rule_splits_band_qualified_attribution_keys():
+    """``physical_copper_gap`` feeds two banded rows; both are named (#9234).
+
+    The ``#trace``/``#pad`` qualifiers are attribution-only, so a rule that
+    did not complete names every danger-capable row counting its findings.
+    """
+    report = fdp.evaluate_parity("jlcpcb", incomplete_rules=("physical_copper_gap",))
+    assert report.run_incomplete_categories == ("trace_spacing", "pad_spacing")
+
+
+def test_stanza_separates_run_state_from_table_gaps():
+    plain = fdp.format_parity_stanza(fdp.evaluate_parity("jlcpcb"))
+    run_state = fdp.format_parity_stanza(
+        fdp.evaluate_parity("jlcpcb", incomplete_rules=("mask_to_copper",))
+    )
+    # A run with no rule gaps gains exactly one line naming the category.
+    assert "INCOMPLETE (this run)" not in plain
+    line = next(ln for ln in run_state.splitlines() if "INCOMPLETE (this run)" in ln)
+    assert "solder_mask_opening_exposing_trace" in line
+    # Every danger row in the shipped table is covered/partial, so neither
+    # stanza claims a static gap: "kct has no rule" stays a table-only claim.
+    assert "kct has no rule for the categories above" not in plain
+    assert "kct has no rule for the categories above" not in run_state
+
+
+# ---------------------------------------------------------------------------
 # Issue #8940: kct-vs-fab count comparison in the parity stanza.
 # ---------------------------------------------------------------------------
 
@@ -234,9 +278,11 @@ def test_partial_does_not_trigger_incomplete():
 #: ``sharp_trace_corner`` / ``missing_plated_through_hole`` rows now that
 #: both rules ship. #9037 bumps it 9 -> 10 (``sharp_trace_corner`` row
 #: attribution narrows to the ``#bend`` population); again only the digit.
+#: #8858 bumps it 10 -> 11 (note-only change to the
+#: ``solder_mask_opening_exposing_trace`` row).
 EXPECTED_DEFAULT_STANZA = (
     "\n"
-    "Fab DFM parity (JLCDFM, table v10, 2026-11-12): 0 danger-capable categories not covered\n"
+    "Fab DFM parity (JLCDFM, table v11, 2026-11-12): 0 danger-capable categories not covered\n"
     "  partial     trace_spacing [danger-capable]: clearance, physical_copper_gap\n"
     "  partial     pad_spacing [danger-capable]: clearance, physical_copper_gap\n"
     "  partial     solder_mask_opening_exposing_trace [danger-capable]: mask_to_copper\n"

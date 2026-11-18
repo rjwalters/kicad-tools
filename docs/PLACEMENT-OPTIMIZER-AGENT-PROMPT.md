@@ -176,7 +176,7 @@ opt = PlacementOptimizer(board, config)
 
 ## Repository
 
-- Main repo: `/Users/rwalters/GitHub/kicad-tools`
+- Main repo: `<repo>`
 - This is a PyPI package (`kicad-tools`) for KiCad automation
 - Uses S-expression parsing via `kicad_tools.sexp` module
 - Follow existing code style (dataclasses, type hints, docstrings)

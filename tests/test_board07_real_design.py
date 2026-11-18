@@ -593,7 +593,8 @@ def test_match_lengths_measure_path_not_summed_copper():
     on main (#9118, PR #9139) after this measurement landed, so on the
     committed copper their off-path residual sits inside the tolerance
     like every other defect-free net (they measure up to 2.08 mm, #9175)
-    and both byte groups' physical spreads stay inside the 5 mm budget.
+    and both byte groups' matched-length spreads stay inside the 5 mm
+    budget (Issue #9217).
     The regression the loops anchored -- summed copper counting a loop
     the signal never travels as matched length -- is covered where a
     board repair cannot remove it: on reconstructed pre-repair copper in
@@ -607,14 +608,19 @@ def test_match_lengths_measure_path_not_summed_copper():
     nets.
     """
     from kicad_tools.analysis.trace_length import TraceLengthAnalyzer
+    from kicad_tools.physics import Stackup
     from kicad_tools.schema.pcb import PCB
 
     board = PCB.load(ROOT / "reviewed-routing/sdram_demo.kicad_pcb")
     analyzer = TraceLengthAnalyzer()
-    tolerance = load("validate").OFF_PATH_TOLERANCE_MM
+    validate = load("validate")
+    tolerance = validate.OFF_PATH_TOLERANCE_MM
+    elevations = validate.copper_elevations(Stackup.from_pcb(board))
+    vias_by_index = dict(enumerate(board.vias))
 
     paths = {}
     off_paths = {}
+    matched = {}
     for name in (
         "DQ0",
         "DQ1",
@@ -646,6 +652,12 @@ def test_match_lengths_measure_path_not_summed_copper():
         net = board.get_net_by_name(name)
         for index in measurement.path_via_indices:
             assert board.vias[index].net_number == net.number, (name, index)
+        # The gate's quantity, not raw copper: pad-to-pad path plus the
+        # via travel of every path via (Issue #9217), so the byte-spread
+        # assertion below grades the same length validate.timing_errors
+        # and test_board07_byte0_physical_spread do.
+        segments = list(board.segments_in_net(net.number))
+        matched[name] = validate.matched_length_mm(measurement, segments, vias_by_index, elevations)
 
     # Nets whose copper the issue evidence calls loop-free stay clean;
     # the measured residual is barrel-overlap copper under pads/vias,
@@ -667,9 +679,17 @@ def test_match_lengths_measure_path_not_summed_copper():
     # every other defect-free net instead of raising the off-path error.
     assert off_paths["SDCKE1"] < tolerance, ("SDCKE1", off_paths["SDCKE1"])
 
-    # Both byte groups' physical spreads stay inside the 5 mm budget on
-    # the repaired copper (byte 0: 1.18 mm, byte 1: 3.28 mm), matching
-    # test_board07_byte0_physical_spread's post-#9118 expectation; the
+    # Both byte groups' matched-length spreads -- per-net pad-to-pad
+    # copper path plus via travel, built with validate.matched_length_mm,
+    # the same quantity the gate's timing_errors and
+    # test_board07_byte0_physical_spread grade (Issue #9217) -- stay
+    # inside the 5 mm budget on the repaired copper (byte 0: 1.65 mm,
+    # byte 1: 3.38 mm; before #9217 this block graded the raw copper
+    # path only, 1.18 mm and 3.28 mm, and via travel does not cancel
+    # within a group, so each spread moves by its own amount: in byte 0
+    # DQ2 and LDQM carry no path vias against 0.573 mm for the other
+    # seven, and in byte 1 DQ15 and UDQM carry one path via, 0.287 mm,
+    # against 0.573 mm for the other seven). The
     # pre-repair byte-0 violation (> 5 mm physical while summed copper
     # hid it) is asserted there against reconstructed pre-repair copper,
     # and the 10.9 mm byte-1 spread once reported here was the
@@ -683,6 +703,6 @@ def test_match_lengths_measure_path_not_summed_copper():
         ("SDRAM_BYTE0", constraints["groups"]["SDRAM_BYTE0"]),
         ("SDRAM_BYTE1", constraints["groups"]["SDRAM_BYTE1"]),
     ):
-        values = [paths[name] for name in members if name in paths]
+        values = [matched[name] for name in members if name in matched]
         spread = max(values) - min(values)
-        assert spread < limit, (byte, spread)
+        assert spread < limit, (byte, spread, values)

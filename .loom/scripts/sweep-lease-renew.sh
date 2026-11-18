@@ -407,8 +407,12 @@ lease_publish_raw_hostname() {
     esac
 }
 
+# `LOOM_LEASE_HOST_ID` is first, as in `host_identity::lease_host_identity`:
+# a dispatcher exports its own lease host id to the session it spawns, so a
+# session whose hostname differs (a Codex session container) still names the
+# host its lease was published under, not its container.
 resolve_host() {
-    local h="${LOOM_HOST_ID:-${HOSTNAME:-}}"
+    local h="${LOOM_LEASE_HOST_ID:-${LOOM_HOST_ID:-${HOSTNAME:-}}}"
     [[ -n "$h" ]] || h="$(hostname 2> /dev/null || true)"
     printf '%s' "${h:-unknown-host}"
 }

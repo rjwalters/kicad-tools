@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import shutil
 import subprocess
 import tempfile
@@ -99,8 +100,58 @@ class AttributedMaskGeometry:
     provenance: dict[str, Any] = field(default_factory=dict)
 
 
+def _finite_mm(node, index):
+    """A finite number at *index* of an s-expression node, or None.
+
+    ``.3`` (no leading zero) parses as a string atom and ``0.3`` as a float, so
+    the value is read through its string form.
+    """
+    value = node.get_string(index) if node is not None else None
+    try:
+        parsed = float(value) if value is not None else None
+    except ValueError:
+        return None
+    return parsed if parsed is not None and math.isfinite(parsed) else None
+
+
+def _positive_mm(node, index):
+    value = _finite_mm(node, index)
+    return value if value is not None and value > 0 else None
+
+
 def _digest(raw):
     return hashlib.sha256(raw).hexdigest()
+
+
+def _footprint_reference(parent_node):
+    """The footprint's Reference designator: KiCad 8+ property, else fp_text."""
+    for child in parent_node.iter_children():
+        if child.name == "property" and child.get_string(0) == "Reference":
+            return child.get_string(1)
+        if child.name == "fp_text" and child.get_string(0) == "reference":
+            return child.get_string(1)
+    return None
+
+
+def _source_descriptions(inventory, parents):
+    """Map each inventoried source uuid to ``kind`` plus parent footprint (#9234).
+
+    A missing/ambiguous-native-object reason must name the object's type and
+    parent (e.g. ``zone in footprint U1``), never only a uuid, so the next
+    attempt can find the object without decoding identities by hand.
+    Board-level objects carry their kind alone.
+    """
+    descriptions = {}
+    for feature in inventory:
+        parent_node = parents.get(feature["parent_uuid"])
+        if parent_node is None:
+            descriptions[feature["source_uuid"]] = feature["kind"]
+            continue
+        reference = _footprint_reference(parent_node)
+        descriptions[feature["source_uuid"]] = "{} in footprint {}".format(
+            feature["kind"], reference or feature["parent_uuid"]
+        )
+    return descriptions
 
 
 #: The native per-object worker needs pcbnew only -- unlike the selective
@@ -274,6 +325,9 @@ def inspect_attributed_mask_geometry(
             field = parent.find_child("uuid")
             if field:
                 parents[field.get_string(0)] = parent
+        # Suffixes for missing/ambiguous-object reasons, from the same
+        # inventory the request below is built from (#9234).
+        descriptions = _source_descriptions(inventory, parents)
         setup = tree.find_child("setup")
         board_margin = setup.find_child("pad_to_mask_clearance") if setup else None
         if options.board_plot_params:
@@ -331,7 +385,9 @@ def inspect_attributed_mask_geometry(
                 "Native per-object geometry unavailable: " + process.stderr.strip()
             )
             return result
-        data = _read_worker_output(output.read_text(), {f["source_uuid"] for f in inventory})
+        data = _read_worker_output(
+            output.read_text(), {f["source_uuid"] for f in inventory}, descriptions
+        )
         if data.get("source_sha256") != exported.source_sha256:
             result.errors.append("Native object/source binding mismatch")
             return result
@@ -411,6 +467,29 @@ def inspect_attributed_mask_geometry(
                     )
                 if reference and number:
                     pad_ref = f"{reference}/{number}"
+            # Authored via drill (issue #8858). The native via copper is a solid
+            # disk, so the hole is not in its geometry; the within-own-pad
+            # classification needs it to keep a via-in-pad (drill inside the
+            # opening) out of that class. None when absent or unreadable.
+            drill_mm = None
+            if feature["kind"] == "via":
+                drill_mm = _positive_mm(feature["node"].find_child("drill"), 0)
+            # Authored straight-track centreline and width (issue #8858): the
+            # within-own-pad class grants a track one pad-edge crossing, which
+            # needs to know where the track ends and how wide it is. The native
+            # copper is a capsule that does not carry either. None when absent.
+            width_mm = None
+            endpoints_mm = None
+            if feature["kind"] == "segment":
+                width_mm = _positive_mm(feature["node"].find_child("width"), 0)
+                ends = []
+                for tag in ("start", "end"):
+                    child = feature["node"].find_child(tag)
+                    x = _finite_mm(child, 0)
+                    y = _finite_mm(child, 1)
+                    if x is not None and y is not None:
+                        ends.append((x, y))
+                endpoints_mm = tuple(ends) if len(ends) == 2 else None
             result.objects[identity] = {
                 **{k: v for k, v in feature.items() if k != "node"},
                 "net": item["net"],
@@ -418,6 +497,9 @@ def inspect_attributed_mask_geometry(
                 "margin_mm": item["margin_mm"],
                 "margin_source": margin_source,
                 "pad_ref": pad_ref,
+                "drill_mm": drill_mm,
+                "width_mm": width_mm,
+                "endpoints_mm": endpoints_mm,
             }
         # Verify source and all sidecar bytes (including their absence) after
         # both native operations. The author files themselves were never passed.
@@ -459,8 +541,20 @@ def inspect_attributed_mask_geometry(
         return result
 
 
-def _read_worker_output(text, identities):
-    """Validate external native-worker data before constructing any geometry."""
+def _read_worker_output(text, identities, descriptions=None):
+    """Validate external native-worker data before constructing any geometry.
+
+    *descriptions* (issue #9234) optionally maps a source uuid to its kind and
+    parent footprint; both the worker's own and this reader's
+    missing/ambiguous-object errors are suffixed with it so a reason never
+    reads as a bare uuid.
+    """
+
+    def describe(identity):
+        if descriptions and identity in descriptions:
+            return f"{identity} ({descriptions[identity]})"
+        return identity
+
     import math
 
     def unique(pairs):
@@ -492,10 +586,18 @@ def _read_worker_output(text, identities):
         # report each missing object once, not twice (#9009).
         reported = {e for e in data["errors"] if e.endswith(": missing/ambiguous native object")}
         data["errors"].extend(
-            "Missing native object: " + identity
+            "Missing native object: " + describe(identity)
             for identity in sorted(missing)
             if f"{identity}: missing/ambiguous native object" not in reported
         )
+    if descriptions:
+        # Decorate after the dedup above, which matches the worker's raw
+        # error strings (issue #9234).
+        suffix = ": missing/ambiguous native object"
+        for index, error in enumerate(data["errors"]):
+            identity = error[: -len(suffix)] if error.endswith(suffix) else None
+            if identity is not None and identity in descriptions:
+                data["errors"][index] = f"{error} ({descriptions[identity]})"
     for identity, item in data["objects"].items():
         if not isinstance(item["net"], str) or not isinstance(item["kind"], str):
             raise ValueError("Invalid native object metadata")
