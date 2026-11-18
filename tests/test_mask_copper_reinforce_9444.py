@@ -222,3 +222,28 @@ def test_gr_circle_is_not_attributed_when_the_record_has_no_usable_gauge():
     # The strip's own B.Mask piece stays owned; the circle's openings do not.
     assert any(m.disposition == "violation" and m.owner_run is None for m in mid)
     assert all(m.owner_run is None for m in mid if m.mask_side == "F.Mask")
+
+
+def test_far_side_strip_opening_does_not_excuse_the_near_side_same_net_copper():
+    """A run on B.Cu whose strip carries mask on BOTH sides (#9444 review).
+
+    The far-side (F.Mask) strip opening must not be claimed by the run: the
+    doubled same-net F.Cu track under it stays an error with no owner. Pins the
+    ``not far`` candidate guard in ``mask_copper``.
+    """
+    pieces = _run_pieces()
+    pieces[1] = (
+        "gr_line",
+        "",
+        {
+            "B.Mask": box(A[0], 9.75, B[0], 10.25),
+            "F.Mask": box(A[0], 9.75, B[0], 10.25),
+        },
+    )
+    result = _run(pieces + [_mid_via(), _mid_circle()])
+    assert not result.passed
+    far = [
+        m for m in result.measurements if m.mask_side == "F.Mask" and m.disposition == "violation"
+    ]
+    assert far
+    assert any(m.owner_run is None for m in far)
