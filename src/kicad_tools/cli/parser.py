@@ -3222,7 +3222,8 @@ def _add_pcb_parser(subparsers) -> None:
         "--sides",
         default="front,back",
         help="Sides to populate: 'front', 'back', 'front,back' or 'populated' "
-        "(sides that carry BOM parts). Default: front,back",
+        "(sides that carry at least one SMD BOM part; through-hole-only sides are "
+        "skipped). Default: front,back",
     )
     pcb_add_fid.add_argument("--count", type=int, default=3, help="Fiducials per side (default: 3)")
     pcb_add_fid.add_argument(
