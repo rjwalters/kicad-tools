@@ -60,6 +60,31 @@ def _load_board_recipe_module():
 # ---------------------------------------------------------------------------
 
 
+BOARD07_MASK_NETS: tuple[str, ...] = (
+    # Issue #8858 (board 07 increment, seed-42 regen): every ``mask_to_copper``
+    # error net signature the regeneration carries, each entry citing #8858.
+    "+1V8",
+    "A0",
+    "A2",
+    "A3",
+    "A5",
+    "A7",
+    "DM0",
+    "DQ0",
+    "DQ1",
+    "DQ2",
+    "DQ3",
+    "DQ4",
+    "DQ5",
+    "DQ6",
+    "DQ7",
+    "GND",
+    "MIPI_CLK_P",
+    "TMDS_D2_N",
+    "TMDS_D2_P",
+)
+
+
 class TestBoard07Allowance:
     """Issue #3828 / #7339 / #7367: the allowance names identities, never a count."""
 
@@ -76,7 +101,7 @@ class TestBoard07Allowance:
         assert not hasattr(mod, "MATCHGROUP_VIOLATION_BASELINE")
         assert not hasattr(mod, "check_zero_violations")
 
-    def test_fixture_finding_allowance_is_fab_gap_only(self):
+    def test_fixture_finding_allowance_is_mask_signatures(self):
         """Issues #5333/#6448 emptied the pair/impedance/skew entries,
         #8974's route-side slit-band fix drained DQS_P, DQS_N, GND and
         +1V2 (entries deleted, survivors re-pointed to the #8962 parent
@@ -84,15 +109,18 @@ class TestBoard07Allowance:
         population (MIPI_CLK_N / MIPI_DAT0_N / MIPI_DAT1_N deleted), and
         issue #9124's tangent-seat rejection drained the last six fab-view
         ``physical_copper_gap`` entries (the re-sited gateway fan vias'
-        tangency wedges): board 07's allowance is empty, so every blocking
-        finding counts.  #8962's via-population re-baseline note is retired
-        with them: the wedges were exactly the tangent seats #9124 rejects,
-        so none is pending re-baselining."""
+        tangency wedges): board 07's fab-gap allowance is empty, so every
+        blocking fab-gap finding counts.  Issue #8858's board 07 increment
+        then baselined the seed-42 regen's ``mask_to_copper`` error net
+        signatures (net-signature keyed -- the board is regenerated each
+        CI run, so the mask rule's opening/conductor UUID items are
+        ephemeral), each citing #8858: the committed allowance is exactly
+        those entries and nothing else."""
         mod = _load_helper_module()
-        assert mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS == {}
-        assert mod.board_allowance(mod.MATCHGROUP_FIXTURE_KEY) == (
-            mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
-        )
+        allowed = mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
+        assert {i for r, i in allowed if r == "physical_copper_gap"} == set()
+        assert allowed == {("mask_to_copper", net): 8858 for net in BOARD07_MASK_NETS}
+        assert mod.board_allowance(mod.MATCHGROUP_FIXTURE_KEY) == allowed
 
 
 class TestBoard07SkewRetune:

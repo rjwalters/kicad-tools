@@ -121,10 +121,40 @@ def with_board07_synthetic(gate):
 # TMDS entries it left were the re-sited gateway fan vias' tangency wedges.
 # Issue #9124: the same-net slit-band guard no longer seats a TANGENT via
 # (touch-at-a-point leaves a wedge), so those findings stopped firing on the
-# seed-42 regen and their entries are deleted -- the allowance is empty.  The
+# seed-42 regen and their entries are deleted -- the fab-gap allowance is
+# empty.  The
 # #8962 via-population re-baseline note is retired with them: the wedges were
 # exactly the tangent seats #9124 rejects, so none is pending re-baselining.
 BOARD07_GAP_NETS: tuple[str, ...] = ()
+
+# Issue #8858 (board 07 increment, measured 2026-11-18, pinned image, seed-42
+# regen at main 163f4a175): every ``mask_to_copper`` error net signature the
+# regeneration carries.  Three independent regenerations (two in the pinned
+# image, one on a worker through KCT_KICAD_DOCKER) reproduced all 19
+# signatures and their per-net counts exactly (54 findings: 52 violation +
+# 2 uncertain, all same-net).  The committed allowance must list exactly
+# these; a net that starts failing or stops failing trips the gate.
+BOARD07_MASK_NETS = (
+    "+1V8",
+    "A0",
+    "A2",
+    "A3",
+    "A5",
+    "A7",
+    "DM0",
+    "DQ0",
+    "DQ1",
+    "DQ2",
+    "DQ3",
+    "DQ4",
+    "DQ5",
+    "DQ6",
+    "DQ7",
+    "GND",
+    "MIPI_CLK_P",
+    "TMDS_D2_N",
+    "TMDS_D2_P",
+)
 
 # #9124 drained the PCIE_RX+ face-aligned corner wedge (a tangent via seat)
 # alongside board 07's six; #9208 drained the USB2_D- annulus-vs-own-net-TRACE
@@ -175,13 +205,17 @@ def mask_allowance(nets: tuple[str, ...]) -> dict:
 
 
 def test_board07_committed_allowance():
-    """Issues #5333/#6448 emptied the pair/group/skew entries and issue
-    #9124's tangent-seat rejection drained the last six fab-view
+    """Issue #9124's tangent-seat rejection drained the last six fab-view
     ``physical_copper_gap`` entries (the re-sited gateway fan vias'
-    tangency wedges): board 07's allowance is empty, so every blocking
-    finding counts."""
+    tangency wedges), and issue #8858's board 07 increment added the
+    seed-42 regen's ``mask_to_copper`` net signatures (net-signature keyed
+    -- the board is regenerated each CI run, so the mask rule's
+    opening/conductor UUID items are ephemeral): board 07's allowance
+    holds exactly those 19 mask nets."""
     gate = load("check_matchgroup_coverage")
-    assert fab_gap_allowance(BOARD07_GAP_NETS) == gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
+    expected = fab_gap_allowance(BOARD07_GAP_NETS)
+    expected.update(mask_allowance(BOARD07_MASK_NETS))
+    assert expected == gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
     assert gate.board_allowance(BOARD07_KEY) == gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
 
 
@@ -581,12 +615,15 @@ def _stub_matchgroup(
 class TestBoard07CheckBoard:
     def test_clean_reroute_passes_on_the_committed_allowance(self, monkeypatch, tmp_path, capsys):
         """Issue #5333: the measured ``--differential-pairs`` re-route has no
-        blocking finding beyond the #8957 fab-gap nets, and every committed
-        allowance entry fires, so nothing is stale."""
+        blocking finding beyond the committed allowance's entries, and every
+        committed entry fires, so nothing is stale.  #8858: the committed
+        entries carry two rule_ids now (the drained fab-gap set and the
+        ``mask_to_copper`` net signatures), so the synthetic measurements
+        reuse each entry's own rule_id -- an entry judged under the wrong
+        rule reads unallowed."""
         gate = load("check_matchgroup_coverage")
         found = [
-            violation("physical_copper_gap", net)
-            for _rule, net in sorted(gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS)
+            violation(rule, net) for rule, net in sorted(gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS)
         ] + [violation("connectivity", "TMDS_D0_N")]
         groups = set(gate.MATCHGROUP_ALLOWED_GROUPS[BOARD07_KEY])
         gate, board = _stub_matchgroup(monkeypatch, tmp_path, found, groups, synthetic=False)
