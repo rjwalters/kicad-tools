@@ -158,26 +158,37 @@ class AssemblyPackageResult:
         """Check if generation was successful."""
         return len(self.errors) == 0
 
+    def rotation_review_lines(self) -> list[str]:
+        """Rotation provenance / unreviewed lines (unindented).
+
+        Shared by ``__str__`` and ``kct export`` (issue #9362) so the review
+        list is rendered from one place.
+        """
+        review = self.rotation_review
+        if review is None:
+            return []
+        lines: list[str] = []
+        if review.sidecar:
+            lines.append(
+                f"Rotation overrides: {Path(review.sidecar).name} "
+                f"({sum(1 for a in review.applied if a['source'] != 'footprint_glob')}"
+                " row(s) corrected)"
+            )
+        if review.unreviewed:
+            refs = ", ".join(u["reference"] for u in review.unreviewed)
+            lines.append(
+                f"Unreviewed rotation (no correction matched): {refs}"
+                " -- check JLC's placement preview"
+            )
+        return lines
+
     def __str__(self) -> str:
         lines = [f"Assembly Package: {self.output_dir}"]
         if self.bom_path:
             lines.append(f"  BOM: {self.bom_path.name}")
         if self.pnp_path:
             lines.append(f"  CPL: {self.pnp_path.name}")
-            review = self.rotation_review
-            if review is not None:
-                if review.sidecar:
-                    lines.append(
-                        f"    Rotation overrides: {Path(review.sidecar).name} "
-                        f"({sum(1 for a in review.applied if a['source'] != 'footprint_glob')}"
-                        " row(s) corrected)"
-                    )
-                if review.unreviewed:
-                    refs = ", ".join(u["reference"] for u in review.unreviewed)
-                    lines.append(
-                        f"    Unreviewed rotation (no correction matched): {refs}"
-                        " -- check JLC's placement preview"
-                    )
+            lines.extend(f"    {line}" for line in self.rotation_review_lines())
         if self.gerber_path:
             lines.append(f"  Gerbers: {self.gerber_path.name}")
         if self.errors:

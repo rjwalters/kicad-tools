@@ -242,7 +242,10 @@ def test_review_rejects_invalid_sidecar(board):
         ("LED2", True),
         ("R1", False),
         ("C5", False),
-        ("JP1", False),
+        ("JP1", True),
+        ("SW1", True),
+        ("Y1", True),
+        ("X1", True),
         ("", False),
     ],
 )
@@ -395,6 +398,18 @@ def test_verify_without_sidecar_does_not_inspect_the_cpl(board, tmp_path):
     assert _verify_cpl_rotations(_readiness_options(board, out)) == []
 
 
+def test_review_records_empty_but_present_sidecar(board):
+    # Issue #9362: an empty-but-present sidecar still has a path and a hash;
+    # the old truthiness guard (via ``__bool__``) nulled both.
+    (board.parent / SIDECAR_NAME).write_text("# comment only\n")
+    review = review_cpl_rotations(board, "jlcpcb")
+    assert review.sidecar == str(board.parent / SIDECAR_NAME)
+    assert review.sidecar_sha256 and len(review.sidecar_sha256) == 64
+    block = review.to_report("board/" + SIDECAR_NAME)
+    assert block["sidecar"] == "board/" + SIDECAR_NAME
+    assert block["sidecar_sha256"] == review.sidecar_sha256
+
+
 # --------------------------------------------------------------------------
 # The re-derivation must fail visibly, never silently skip (#9346)
 # --------------------------------------------------------------------------
@@ -504,6 +519,50 @@ def test_resolve_pnp_config_mirrors_the_export_resolution():
     assert resolve_pnp_config("jlcpcb", explicit) is explicit
     assert resolve_pnp_config("jlcpcb", None) is None  # aux-origin preset: left to the formatter
     assert resolve_pnp_config("oshpark", None) == PnPExportConfig(use_aux_origin=False)
+
+
+def test_export_prints_the_unreviewed_rotation_list(board, tmp_path, capsys):
+    # Issue #9362: `kct export` shows the same review list as the result's
+    # __str__ (rendered from rotation_review_lines(), not a re-implementation).
+    from kicad_tools.cli import export_cmd
+
+    rc = export_cmd.main(
+        [
+            str(board),
+            "--output",
+            str(tmp_path / "mfg"),
+            "--mfr",
+            "jlcpcb",
+            "--skip-preflight",
+            "--no-bom",
+            "--no-gerbers",
+            "--no-report",
+            "--no-project-zip",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Unreviewed rotation (no correction matched): J1, J2, J3, J4, J5" in out
+    # A present sidecar also surfaces its provenance line.
+    (board.parent / SIDECAR_NAME).write_text(_SIDECAR)
+    rc = export_cmd.main(
+        [
+            str(board),
+            "--output",
+            str(tmp_path / "mfg2"),
+            "--mfr",
+            "jlcpcb",
+            "--skip-preflight",
+            "--no-bom",
+            "--no-gerbers",
+            "--no-report",
+            "--no-project-zip",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Rotation overrides: cpl_rotations.yaml (4 row(s) corrected)" in out
+    assert "Unreviewed rotation (no correction matched): J4" in out
 
 
 def _bound_report(root: Path):
