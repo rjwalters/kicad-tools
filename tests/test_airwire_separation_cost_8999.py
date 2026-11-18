@@ -301,7 +301,7 @@ class TestStaleSoRejected:
     def test_required_version_is_at_least_67(self):
         from kicad_tools.router import router_cpp
 
-        # Issue #9208: a later bump (v69) must not re-break this pin; the
+        # Issue #9208: a later bump (v69+) must not re-break this pin; the
         # airwire verbs arrived in v67 and any newer build carries them.
         assert cpp_backend._REQUIRED_CPP_BUILD_VERSION >= 67
         assert router_cpp.BUILD_VERSION == cpp_backend._REQUIRED_CPP_BUILD_VERSION

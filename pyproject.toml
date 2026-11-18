@@ -181,6 +181,9 @@ bayesian = [
 # Screenshot/visualization pipeline (SVG to PNG conversion)
 screenshot = [
     "cairosvg>=2.6",
+    # `kct` screenshot-baseline comparison (pixel_drift) imports PIL directly;
+    # declared here rather than relying on transitive pins (issue #9274).
+    "pillow>=12",
 ]
 # Report generation (Jinja2 Markdown templates) and rendering (Markdown to HTML/PDF).
 # cairosvg is included because manufacturing reports embed PCB/schematic
@@ -437,6 +440,9 @@ dev = [
     # cairosvg in the default sync, worktree exports silently shipped
     # bundles with no images/ (per-layer renders, assembly views).
     "cairosvg>=2.6",
+    # tests/test_screenshot_baseline.py imports PIL at module scope
+    # (issue #9274); mirrors the `screenshot` extra.
+    "pillow>=12",
     # C++ router build tooling (mirrors the `native` extra). This group is
     # installed by a default `uv sync`, so keeping the build deps here means
     # nanobind stays resolved in the lockfile and a later `uv sync` won't

@@ -182,8 +182,11 @@ def test_via_form_band_semantics_unchanged():
     pad_top = PAD_BBOX[3]
     # Seated 0.075 beyond the annulus edge: gap 0.075, inside the band.
     assert not same_net_pad_gap_acceptable(0.0, pad_top + radius + 0.075, via, [PAD_BBOX], EDGE)
-    # Annulus edge exactly on the pad: one union.
-    assert same_net_pad_gap_acceptable(0.0, pad_top + radius, via, [PAD_BBOX], EDGE)
+    # Annulus edge exactly tangent to the pad (Issue #9124): a one-point
+    # touch leaves a wedge, not a union -- rejected.
+    assert not same_net_pad_gap_acceptable(0.0, pad_top + radius, via, [PAD_BBOX], EDGE)
+    # Real overlap: one union.
+    assert same_net_pad_gap_acceptable(0.0, pad_top + radius - 0.01, via, [PAD_BBOX], EDGE)
     # Gap exactly at the edge: not a fab finding.
     assert same_net_pad_gap_acceptable(0.0, pad_top + radius + EDGE, via, [PAD_BBOX], EDGE)
 
