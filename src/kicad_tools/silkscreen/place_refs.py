@@ -63,6 +63,7 @@ from kicad_tools.silkscreen._silk_defaults import (
     SILK_EDGE_CLEARANCE_MM,
 )
 from kicad_tools.validate.rules.silkscreen import (
+    _footprint_text_drawn_angle,
     _iter_graphic_mask_apertures,
     _iter_pad_apertures,
     _iter_via_apertures,
@@ -297,7 +298,7 @@ def _visible_reference(footprint: Footprint):
         ref_text.font_size,
         ref_text.font_thickness,
         center,
-        _read_text_angle(ref_node),
+        _footprint_text_drawn_angle(_read_text_angle(ref_node), ref_text.keep_upright),
         ref_text.justify,
     )
     if geom is None:
@@ -357,7 +358,7 @@ def _iter_owned_static_silk(pcb: PCB):
                 fp_text.font_size,
                 fp_text.font_thickness,
                 center,
-                fp_text.rotation,
+                _footprint_text_drawn_angle(fp_text.rotation, fp_text.keep_upright),
                 fp_text.justify,
             )
             if geom is None:
@@ -935,7 +936,10 @@ def _render_svg(
                 font_size,
                 font_thickness,
                 placement.old_position,
-                placement.old_rotation,
+                _footprint_text_drawn_angle(
+                    placement.old_rotation,
+                    ref_text.keep_upright if ref_text is not None else True,
+                ),
                 justify,
             )
             if old_geom is not None:
@@ -964,7 +968,10 @@ def _render_svg(
             font_size,
             font_thickness,
             placement.new_position,
-            placement.new_rotation,
+            _footprint_text_drawn_angle(
+                placement.new_rotation,
+                ref_text.keep_upright if ref_text is not None else True,
+            ),
             justify,
         )
         if geom is not None:
@@ -1225,7 +1232,7 @@ class SilkRefPlacer:
                         ref_text.font_size,
                         ref_text.font_thickness,
                         point,
-                        rotation,
+                        _footprint_text_drawn_angle(rotation, ref_text.keep_upright),
                         ref_text.justify,
                     )
                     ok, why = clears(geom)

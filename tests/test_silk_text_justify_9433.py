@@ -194,3 +194,80 @@ def test_same_ink_gives_same_silk_geometry_and_findings(tmp_path):
     assert findings[0], "fixture must raise a finding or the equivalence is vacuous"
     # Sanity: the shifted left/right texts really are different inputs.
     assert _CASES[1][2] != _CASES[2][2]
+
+
+# --- keep-upright footprint text (Issue #9433, review round 3) ---------------
+# KiCad draws footprint text without (unlocked yes) turned 180 deg when the
+# stored absolute angle is in (90, 270], keeping the justify tokens as written.
+
+
+@pytest.mark.parametrize(
+    "angle,keep,expected",
+    [
+        (0, True, 0),
+        (90, True, 90),  # boundary: unchanged
+        (91, True, -89),  # boundary: turned
+        (180, True, 0),
+        (270, True, 90),  # boundary: turned
+        (271, True, 271),  # boundary: unchanged
+        (315, True, 315),
+        (-90, True, -270),  # -90 % 360 == 270
+        (180, False, 180),  # unlocked: drawn as stored
+        (270, False, 270),
+    ],
+)
+def test_footprint_text_drawn_angle(angle, keep, expected):
+    assert silk._footprint_text_drawn_angle(angle, keep) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("justify", [("left",), ("top",)])
+@pytest.mark.parametrize("angle", [180, 270])
+def test_keep_upright_box_matches_kicad_side(justify, angle):
+    """rot 180 + left: KiCad's ink is on +x of the anchor (not -x)."""
+    drawn = silk._footprint_text_drawn_angle(angle, True)
+    minx, miny, maxx, maxy = _bbox((20, 20), drawn, justify)
+    cx, cy = (minx + maxx) / 2 - 20, (miny + maxy) / 2 - 20
+    if justify == ("left",) and angle == 180:
+        assert cx > 1.0 and abs(cy) < 0.1  # KiCad (+1.98, -0.05)
+    if justify == ("left",) and angle == 270:
+        assert cy < -1.0 and abs(cx) < 0.1  # KiCad (-0.05, -1.98)
+    if justify == ("top",) and angle == 180:
+        assert cy > 0.3 and abs(cx) < 0.1  # KiCad (-0.05, +0.54)
+
+
+def test_unlocked_footprint_text_keeps_stored_angle():
+    drawn = silk._footprint_text_drawn_angle(180, False)
+    minx, _, maxx, _ = _bbox((20, 20), drawn, ("left",))
+    assert (minx + maxx) / 2 - 20 < -1.0  # KiCad (-1.98, +0.05)
+
+
+def _upright_pcb(tmp_path: Path, angle: int = 180) -> PCB:
+    board = _BOARD.replace(
+        '(fp_text user "{text}" (at {fx} 0)',
+        '(fp_text user "{text}" (at {fx} 0 ' + str(angle) + ")",
+    )
+    path = tmp_path / "upright.kicad_pcb"
+    path.write_text(board.format(text=TEXT, x=0, fx=0, justify=" (justify left)"))
+    return PCB.load(str(path))
+
+
+def test_call_sites_apply_keep_upright(tmp_path):
+    pcb = _upright_pcb(tmp_path)
+    fp = next(f for f in pcb.footprints if f.reference == "Q1")
+    assert fp.texts[-1].keep_upright
+    a = [e[0] for e in silk._iter_board_frame_texts(pcb) if e[1] == "Q1 (user)"][0]
+    b = [e[1] for e in silk._iter_silk_elements(pcb) if e[2] == "Q1 (user)"][0]
+    assert a.bounds == pytest.approx(b.bounds)
+    # footprint at x=19, left-justified, drawn turned => ink on +x of anchor.
+    assert (a.bounds[0] + a.bounds[2]) / 2 > 19 + 1.0
+
+
+def test_pin1_marker_call_site_applies_rotation_and_justify(tmp_path):
+    """Pin1MarkerRule._silk_geometries boxes footprint text like the other sites."""
+    from kicad_tools.validate.rules.pin1_marker import Pin1MarkerRule
+
+    pcb = _upright_pcb(tmp_path, 270)  # drawn at 90: differs from 0 and from stored
+    fp = next(f for f in pcb.footprints if f.reference == "Q1")
+    expected = [e[0] for e in silk._iter_board_frame_texts(pcb) if e[1] == "Q1 (user)"][0]
+    geoms = list(Pin1MarkerRule()._silk_geometries(fp, []))
+    assert any(g.bounds == pytest.approx(expected.bounds) for g in geoms)

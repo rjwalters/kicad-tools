@@ -623,6 +623,21 @@ def _fp_transform(footprint: Footprint) -> _Transform:
     return transform
 
 
+def _footprint_text_drawn_angle(angle: float, keep_upright: bool) -> float:
+    """Angle KiCad actually draws a footprint text at (Issue #9433).
+
+    Footprint text without ``(unlocked yes)`` is kept upright: for a stored
+    absolute angle in (90, 270] KiCad draws it turned by 180 degrees while
+    keeping the ``justify`` tokens as written, so the ink lands on the other
+    side of the anchor.  Unlocked text, and every angle outside that range,
+    is drawn as stored.  Board ``gr_text`` is not affected -- do not use this
+    for it.
+    """
+    if keep_upright and 90.0 < (angle % 360.0) <= 270.0:
+        return angle - 180.0
+    return angle
+
+
 def _text_bbox_geometry(
     text: str,
     font_size: tuple[float, float],
@@ -1026,7 +1041,7 @@ def _iter_silk_elements(
                 fp_text.font_size,
                 fp_text.font_thickness,
                 center,
-                fp_text.rotation,
+                _footprint_text_drawn_angle(fp_text.rotation, fp_text.keep_upright),
                 fp_text.justify,
             )
             if geom is None:
@@ -1907,7 +1922,7 @@ def _iter_board_frame_texts(
                 fp_text.font_size,
                 fp_text.font_thickness,
                 center,
-                fp_text.rotation,
+                _footprint_text_drawn_angle(fp_text.rotation, fp_text.keep_upright),
                 fp_text.justify,
             )
             if geom is None:
@@ -2095,7 +2110,10 @@ def check_silk_ref_obscured(
             continue
         center = _fp_transform(footprint)(ref_text.position)
         ref_node = _find_reference_node(footprint)
-        angle = _read_text_angle(ref_node) if ref_node is not None else 0.0
+        angle = _footprint_text_drawn_angle(
+            _read_text_angle(ref_node) if ref_node is not None else 0.0,
+            ref_text.keep_upright,
+        )
         geom = _oriented_text_geometry(
             ref_text.text,
             ref_text.font_size,
