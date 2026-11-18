@@ -229,6 +229,9 @@ all = [
     "jinja2>=3.1",
     "markdown>=3.5",
     "weasyprint>=60.0",
+    # `kct` screenshot-baseline comparison (pixel_drift) imports PIL directly;
+    # mirrors the `screenshot` extra so `[all]` expresses the bound (issues #9274, #9281).
+    "pillow>=12",
     # nanobind is the build-time dependency for the C++ router extension
     # (`kct build-native`). Included here so `pip install kicad-tools[all]`
     # keeps it resolved; see the `native` extra and issue #4412.
