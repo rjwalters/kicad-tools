@@ -16,6 +16,7 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-18
 
+- **PR #9394**: ci: baseline board 07 mask_to_copper by net signature; drop the matchgroup-gate skip
 - **PR #9395**: fix: net-gate pad openings in mask_to_copper reinforce attribution
 - **PR #9391**: fix: keep every owner net in mask_to_copper signature for merged mask regions
 - **PR #9379**: fix: match LCSC BOM headers case/punctuation-insensitively in load_bom_csv
