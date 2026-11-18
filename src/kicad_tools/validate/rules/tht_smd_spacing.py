@@ -10,6 +10,9 @@ one board's Alert value panel, not confirmed):
 * gap < :data:`DANGER_MM` (2.032 mm)  -> ``error``   (JLCDFM "danger")
 * gap < :data:`WARNING_MM` (3.05 mm)  -> ``warning``
 
+Both upper edges are strict and carry no tolerance: exactly 2.032 mm is a warning and exactly
+3.05 mm is clean. ``TOLERANCE`` only guards overlap (distance ~ 0) and via-drill comparison.
+
 Measurement reference (a documented choice -- the epic does not say whether
 JLCDFM measures hole centre, hole edge or copper edge): **copper edge to copper
 edge**, i.e. the shortest distance between the THT pad's (or via annulus's)
@@ -242,10 +245,10 @@ def check_tht_smd_spacing(
 
     def report(layer, identity, geom, net, other_id, other_geom, other_net, what, where=None):
         distance = geom.distance(other_geom)
-        if distance <= TOLERANCE or distance >= warning_mm - TOLERANCE:
+        if distance <= TOLERANCE or distance >= warning_mm:
             return
         a, b = nearest_points(geom, other_geom)
-        is_error = distance < danger_mm - TOLERANCE
+        is_error = distance < danger_mm
         results.add(
             DRCViolation(
                 "tht_smd_spacing",

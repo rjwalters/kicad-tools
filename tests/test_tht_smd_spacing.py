@@ -76,9 +76,16 @@ def via(*, drill, size=1.9, layers='"F.Cu" "B.Cu"', kind=""):
         (1.5, "error"),
         # Issue #9421: the fab rated a 2.025 mm pair danger; the old 2.0 mm floor passed it.
         (2.025, "error"),
+        # Band edges: error is strictly < 2.032, warning strictly < 3.05 (no tolerance).
+        (2.031, "error"),
+        (2.0319, "error"),
+        (2.032, "warning"),
         (2.3, "warning"),
         (2.5, "warning"),
         (3.0, "warning"),
+        (3.049, "warning"),
+        (3.0499, "warning"),
+        (3.05, None),
         (3.06, None),
     ],
 )
