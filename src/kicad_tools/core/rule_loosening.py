@@ -699,6 +699,7 @@ def _dru_loosenings(before: Mapping[str, Any], after: Mapping[str, Any]) -> list
     weakest_class = min(classes.values()) if classes else None
     class_names = sorted(classes)
     scopes: set[str] = set()
+    has_outer = has_inner = False
     for rule in after_rules + before_rules:
         scope = rule.get("layer")
         # Probe concrete copper layers only: an ``(layer outer)`` /
@@ -706,9 +707,28 @@ def _dru_loosenings(before: Mapping[str, Any], after: Mapping[str, Any]) -> list
         # and as a probe it can never exercise the rule that carries it.
         if isinstance(scope, str) and scope.endswith(".Cu"):
             scopes.add(scope)
+        elif scope == "outer":
+            has_outer = True
+        elif scope == "inner":
+            has_inner = True
     for layer, _net, _value in zones:
         scopes.add(layer)
-    probe_layers: list[str | None] = [None, *sorted(scopes)]
+    probe_layers: list[str | None]
+    if has_outer or has_inner:
+        # A split-floor profile (Issue #9422: 2 oz outer / 0.5 oz inner) is
+        # emitted as ``outer`` / ``inner``-scoped rules only.  The unscoped
+        # ``None`` probe would match nothing but a hand-written unscoped rule
+        # (say 0.127 mm) and report it as the board's track-track resolution,
+        # although every real track lives on a concrete layer where the
+        # managed scoped rules come later and win.  Probe one representative
+        # concrete layer per scope class instead.
+        if has_outer:
+            scopes.update(("F.Cu", "B.Cu"))
+        if has_inner:
+            scopes.add("In1.Cu")
+        probe_layers = sorted(scopes)
+    else:
+        probe_layers = [None, *sorted(scopes)]
 
     def track_contexts() -> list[dict[str, str]]:
         return [

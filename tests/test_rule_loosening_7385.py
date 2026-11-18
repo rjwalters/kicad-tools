@@ -794,3 +794,58 @@ def test_regenerating_committed_board_dru_never_loosens(dru, tmp_path):
     written = stage.with_suffix(".kicad_dru").read_text(encoding="utf-8")
     managed |= _kct_managed_names(written)
     assert rule_loosenings(before, _dru_state(written, managed=managed)) == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #9422: layer-scoped managed rules over an unscoped authored rule
+# ---------------------------------------------------------------------------
+
+_SPLIT_RAISED_INNER = """(version 1)
+(rule "Clearance (outer)"
+  (layer outer)
+  (constraint clearance (min 0.15mm)))
+(rule "Clearance (inner)"
+  (layer inner)
+  (constraint clearance (min 0.1016mm)))
+(rule "Reviewed clearance - Default"
+  (layer inner)
+  (condition "A.NetClass == 'Default' || B.NetClass == 'Default'")
+  (constraint clearance (min 0.15mm)))
+"""
+_HAND_UNSCOPED = '(rule "Minimum Clearance"\n  (constraint clearance (min 0.127mm)))\n'
+_SPLIT_MANAGED = {"Clearance (outer)", "Clearance (inner)", "Reviewed clearance - Default"}
+_NETCLASS_015 = {"netclasses": {"Default": 0.15}, "zones": []}
+
+
+def test_scoped_managed_block_over_unscoped_authored_rule_is_not_a_loosening():
+    """The unscoped probe used to read the 0.127 hand rule as the whole board."""
+    before = _dru_state(
+        _HAND_UNSCOPED + _FLOOR_ONLY.replace("(version 1)\n", ""),
+        managed={"Clearance - jlcpcb"},
+    )
+    after = _dru_state(
+        _HAND_UNSCOPED + _SPLIT_RAISED_INNER.replace("(version 1)\n", ""),
+        managed=_SPLIT_MANAGED,
+        authored=_NETCLASS_015,
+    )
+    assert rule_loosenings(before, after) == []
+
+
+def test_scoped_managed_rule_below_netclass_on_its_own_layer_still_refuses():
+    """Inner floor 0.1016 is the last match on In1.Cu: still a loosening."""
+    after_text = _HAND_UNSCOPED + _SPLIT_FLOOR.replace("(version 1)\n", "")
+    found = rule_loosenings(
+        _dru_state(_HAND_UNSCOPED),
+        _dru_state(after_text, managed=_SPLIT_MANAGED, authored=_NETCLASS_015),
+    )
+    assert [(item.path, item.after) for item in found] == [("dru.resolved.track_track", 0.1016)]
+
+
+def test_unscoped_hand_rule_that_lowers_a_concrete_layer_still_refuses():
+    """A hand rule that is the last match on a concrete layer is a real loosening."""
+    after_text = _SPLIT_RAISED_INNER + _HAND_UNSCOPED
+    found = rule_loosenings(
+        _dru_state(None),
+        _dru_state(after_text, managed=_SPLIT_MANAGED, authored=_NETCLASS_015),
+    )
+    assert [(item.path, item.after) for item in found] == [("dru.resolved.track_track", 0.127)]
