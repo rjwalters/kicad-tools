@@ -650,6 +650,9 @@ def _reinforce_runs(objects: dict[str, Any], wires: Any) -> list[_ReinforceRun]:
 # Largest mid-run ``gr_circle`` a run may attribute: the anchor drill for the
 # record's gauge plus this much flash on each side (#9444). A bigger circle is
 # a board feature, not a wire-end hole, and would excuse unbounded copper.
+# The 0.5 mm is a chosen envelope, not a derived size: ``pcb reinforce`` emits
+# no circular flash (only ``gr_line`` openings), so there is no producer value
+# to match; mid-run circles are hand-drawn board graphics.
 _MID_RUN_CIRCLE_FLASH_MM = 0.5
 _CENTRE_EPS_MM = 1e-6
 

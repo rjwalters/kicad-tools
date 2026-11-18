@@ -164,7 +164,8 @@ def test_same_net_via_just_short_of_the_strip_is_not_attributed():
     assert any(m.disposition == "violation" and m.owner_run is None for m in result.measurements)
 
 
-def test_oversize_gr_circle_tangent_to_the_strip_is_not_attributed():
+def test_oversize_gr_circle_centred_off_the_strip_is_not_attributed():
+    """Refused by the centre-on-strip gate (not the size cap: see the next test)."""
     big = ("gr_circle", "", {"F.Mask": _disk(20.0, 13.0, 3.0), "B.Mask": _disk(20.0, 13.0, 3.0)})
     result = _run(_run_pieces() + [big])
     assert all(m.owner_run is None for m in _near(result, (20.0, 13.0), radius=0.3))
@@ -187,3 +188,37 @@ def test_run_track_in_a_different_net_via_opening_stays_an_error():
     assert inside
     assert {m.disposition for m in inside} == {"violation"}
     assert all(m.owner_run is None for m in inside)
+
+
+def _big_circle_on_the_strip():
+    """6 mm mask circle centred ON the strip: only the size cap can refuse it."""
+    return ("gr_circle", "", {"F.Mask": _disk(20.0, 10.0, 3.0), "B.Mask": _disk(20.0, 10.0, 3.0)})
+
+
+def _off_run_track():
+    """Same-net copper 2.5 mm off the run, under the big circle."""
+    return (
+        "segment",
+        "PWR",
+        {"B.Cu": box(18.0, 12.25, 22.0, 12.75), "F.Cu": box(18.0, 12.25, 22.0, 12.75)},
+    )
+
+
+def test_oversize_gr_circle_centred_on_the_strip_is_not_attributed():
+    """The size cap (drill + flash allowance) keeps an oversize circle from excusing copper (#9444)."""
+    result = _run(_run_pieces() + [_big_circle_on_the_strip(), _off_run_track()])
+    assert not result.passed
+    assert all(m.owner_run is None for m in _near(result, (20.0, 12.5), radius=0.5))
+    assert any(
+        m.disposition == "violation" and m.owner_run is None
+        for m in _near(result, (20.0, 12.5), radius=0.5)
+    )
+
+
+def test_gr_circle_is_not_attributed_when_the_record_has_no_usable_gauge():
+    """No gauge, no size bound: a mid-run circle is never attributed."""
+    result = _run(_run_pieces() + [_mid_circle()], wire_gauge_awg=None)
+    mid = _near(result, MID, radius=0.3)
+    # The strip's own B.Mask piece stays owned; the circle's openings do not.
+    assert any(m.disposition == "violation" and m.owner_run is None for m in mid)
+    assert all(m.owner_run is None for m in mid if m.mask_side == "F.Mask")
