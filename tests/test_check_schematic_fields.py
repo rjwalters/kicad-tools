@@ -157,6 +157,19 @@ class TestFieldOffset:
         # No overlaps in this layout.
         assert not _by_rule(results, RULE_FIELD_OVERLAP)
 
+    def test_message_states_the_exact_limit(self, tmp_path: Path) -> None:
+        """A user-supplied threshold is printed at full precision, not
+        truncated to one decimal (12.75 must not read as 12.8)."""
+        body = _symbol("R1", (100, 100), (140, 60))
+        sch = _write_sch(tmp_path, body)
+
+        offsets = _by_rule(check_schematic_fields(sch, threshold_mm=12.75), RULE_FIELD_OFFSET)
+        assert len(offsets) == 1
+        v = offsets[0]
+        assert "threshold 12.75mm" in v.message
+        assert "threshold 12.8mm" not in v.message
+        assert v.required_value == 12.75
+
     def test_all_warning_severity_never_errors(self, tmp_path: Path) -> None:
         body = _symbol("R1", (100, 100), (140, 60))
         sch = _write_sch(tmp_path, body)
