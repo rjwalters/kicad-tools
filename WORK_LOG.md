@@ -16,6 +16,7 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-18
 
+- **Issue #8858** (closed): Verify default-on mask_to_copper on native KiCad 10.0.5 and baseline 543/670 board findings (PR #8849)
 - **PR #9414**: test(ci): verify per-PR changelog admission before enabling a merge queue
 - **Issue #9413** (closed): Verify the per-PR changelog admission check before enabling a merge queue
 - **PR #9410**: ci: judge mask_to_copper by identity in the routed-DRC release gate

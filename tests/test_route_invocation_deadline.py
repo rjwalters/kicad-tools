@@ -26,7 +26,13 @@ import os, signal, threading, time
 from types import SimpleNamespace
 from kicad_tools.cli import route_cmd, route_deadline
 from kicad_tools.router.optimizer import TraceOptimizer
-signal.signal(signal.SIGTERM, route_cmd._handle_interrupt if {adaptive_handler!r} else route_deadline._deadline_signal)
+_handler = route_cmd._handle_interrupt if {adaptive_handler!r} else route_deadline._deadline_signal
+def _once(signum, frame):
+    # One-shot: restore the default action before delegating, so a lost first
+    # raise cannot be rescued by the supervisor's later SIGTERM (#9418).
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    return _handler(signum, frame)
+signal.signal(signal.SIGTERM, _once)
 def expensive_cleanup(self, *args):
     # Arm only after imports/setup: this fixture tests optimizer unwinding.
     timer = threading.Timer(1.5, os.kill, args=(os.getpid(), signal.SIGTERM))
@@ -62,6 +68,10 @@ raise SystemExit(route_cmd._in_process_main([]))
     # (timer + signal + unwind + save + report read) overran 4 s once on a
     # loaded hosted runner. Unwind/save are proven below by
     # interrupted_function/snapshot_saved; only the < 32 watchdog stays.
+    # A lost first deadline raise (#6324 class) is caught without a clock: the
+    # fixture handler is one-shot (SIGTERM reverts to SIG_DFL on first
+    # delivery), so the supervisor's own SIGTERM cannot rescue it and the
+    # worker dies with no snapshot, failing snapshot_saved below (#9418).
     assert report["status"] == "partial"
     assert report["stage"] == "optimization"
     assert report["interrupted_function"] == "expensive_cleanup"
