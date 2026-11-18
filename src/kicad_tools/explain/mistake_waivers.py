@@ -31,8 +31,8 @@ findings carry (Issue #5946, :mod:`kicad_tools.validate.evidence`):
 
     The hash carries its own compound version prefix,
     :data:`~kicad_tools.validate.evidence.MISTAKE_EVIDENCE_HASH_PREFIX`
-    (``ev3.m1:``): the ``kct check`` evidence version plus the measurement
-    recipe version.  Changing the shared evidence recipe (``ev3`` -> ``ev4``)
+    (``ev4.m1:``): the ``kct check`` evidence version plus the measurement
+    recipe version.  Changing the shared evidence recipe (``ev4`` -> ``ev5``)
     or only the measurement recipe (``m1`` -> ``m2``) reports existing
     mistake waivers as ``outdated_evidence_version``; the latter leaves every
     ``kct check`` waiver untouched.

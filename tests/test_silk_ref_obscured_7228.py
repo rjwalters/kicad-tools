@@ -108,3 +108,74 @@ def test_board_only_exclude_from_pos_files_attr_exempts_fiducial(rules, tmp_path
 def test_single_attr_flag_still_flagged(rules, tmp_path, attr):
     found = check_silk_ref_obscured(_attr_board(attr, tmp_path), rules).violations
     assert [v.items for v in found] == [("FID1 (reference)", "hidden")]
+
+
+# --- hidden reference replaced by a function label (#9435) -------------------
+
+
+def _label(pcb: PCB, fp_ref: str, *, dx: float = 0.0, dy: float = 0.0, **kw):
+    """A board ``gr_text`` placed over ``fp_ref`` (sheet-absolute, like the file)."""
+    from kicad_tools.schema.pcb import GraphicText
+
+    fp = next(f for f in pcb.footprints if f.reference == fp_ref)
+    ox, oy = getattr(pcb, "_board_origin", (0.0, 0.0))
+    fields = {
+        "text": "PWR",
+        "position": (fp.position[0] + dx + ox, fp.position[1] + dy + oy),
+        "layer": "F.SilkS",
+        "font_size": (1.0, 1.0),
+        "font_thickness": 0.15,
+    }
+    fields.update(kw)
+    text = GraphicText(**fields)
+    pcb.texts.append(text)
+    return text
+
+
+def _items(pcb: PCB, rules):
+    return [v.items for v in check_silk_ref_obscured(pcb, rules).violations]
+
+
+def test_hidden_reference_with_function_label_is_not_flagged(rules):
+    pcb = PCB.load(BOARD02)
+    _ref(pcb, "D1").hidden = True
+    _label(pcb, "D1")
+    assert _items(pcb, rules) == []
+
+
+def test_hidden_reference_and_obscured_visible_one_on_same_board(rules):
+    pcb = PCB.load(BOARD02)
+    _ref(pcb, "D1").hidden = True
+    _label(pcb, "D1")
+    _ref(pcb, "D2").hidden = True  # hidden, nothing replaces it
+    _ref(pcb, "U1").position = (3.81, 3.81)  # visible but inside its own body
+    assert sorted(_items(pcb, rules)) == [
+        ("D2 (reference)", "hidden"),
+        ("U1 (reference)", "courtyard"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"layer": "B.SilkS"},  # opposite side
+        {"hidden": True},  # not visible
+        {"dx": 40.0},  # outside the courtyard
+        {"layer": "F.Cu"},  # not silkscreen
+    ],
+)
+def test_replacement_text_that_does_not_count(rules, kw):
+    pcb = PCB.load(BOARD02)
+    _ref(pcb, "D1").hidden = True
+    _label(pcb, "D1", **kw)
+    assert _items(pcb, rules) == [("D1 (reference)", "hidden")]
+
+
+def test_function_label_exempts_with_nonzero_board_origin(rules):
+    pcb = PCB.load(BOARD02)
+    pcb._board_origin = (100.0, 50.0)
+    _ref(pcb, "D1").hidden = True
+    _label(pcb, "D1")  # absolute position includes the origin shift
+    assert _items(pcb, rules) == []
+    pcb.texts[-1].position = (pcb.texts[-1].position[0] + 30.0, pcb.texts[-1].position[1])
+    assert _items(pcb, rules) == [("D1 (reference)", "hidden")]
