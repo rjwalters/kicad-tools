@@ -20,5 +20,9 @@ uv run ruff format . --check
 step "Lint"
 uv run ruff check .
 
+step "Shellcheck the CI gate scripts"
+command -v shellcheck >/dev/null 2>&1 || die_skip "shellcheck not found; skipping (CI's ubuntu-latest image ships it)"
+shellcheck -s bash -S warning scripts/ci/jobs/*.sh scripts/ci/local-gate.sh
+
 step "Check documentation and agent-content contracts"
 bash scripts/ci/check-content-contracts.sh

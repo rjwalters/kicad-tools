@@ -32,7 +32,7 @@
 
 JOBS_DIR="$(cd "$(dirname "${BASH_SOURCE[1]}")" && pwd)"
 REPO_ROOT="$(cd "$JOBS_DIR/../../.." && pwd)"
-cd "$REPO_ROOT"
+cd "$REPO_ROOT" || exit
 
 step() { printf '=== %s ===\n' "$*"; }
 
@@ -76,7 +76,12 @@ _with_staged_committed_path() {
 
 check_drc_over_committed_path() {
   local fresh=$1 committed=$2
-  _with_staged_committed_path "$committed" \
+  _with_staged_committed_path "$committed" bash -c '
+    set -euo pipefail
+    cp "$1" "$2"
+    shift 2
+    "$@"
+  ' _ "$fresh" "$committed" \
     uv run python scripts/ci/check_routed_drc_internal.py "$committed"
 }
 
