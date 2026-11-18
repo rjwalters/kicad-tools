@@ -2908,6 +2908,7 @@ def _verify_finished_artifacts(options: ReadinessOptions) -> CheckOutcome:
     if "README.txt" not in actual:
         problems.append("finished package has no assembly/fabrication instructions")
     problems.extend(_verify_project_provenance(options))
+    problems.extend(_verify_cpl_rotations(options))
     for name, info in files.items():
         if (
             not isinstance(info, dict)
@@ -3586,6 +3587,15 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
     if spec.is_file():
         paths.add(spec.resolve())
 
+    # Issue #9322: the CPL rotation sidecar changes the shipped CPL, so it is
+    # provenance like the waivers sidecar; one outside the board directory is
+    # dropped by the filter below.
+    from kicad_tools.export.rotation_overrides import discover_rotation_overrides
+
+    rotations = discover_rotation_overrides(options.pcb)
+    if rotations is not None:
+        paths.add(rotations.resolve())
+
     return sorted(
         p
         for p in paths
@@ -3594,6 +3604,109 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
         and not _is_transient_local(p.relative_to(root))
         and not _is_render_artifact(p.relative_to(root))
     )
+
+
+def _cpl_rotation_state(options: ReadinessOptions) -> tuple[Any, str | None]:
+    """Re-derive the shipped CPL's rotation provenance (issue #9322).
+
+    Returns ``(RotationReview | None, error)``.  Reads the shipped BOM/CPL for
+    the LCSC numbers and footprint names the export actually used, so the
+    recorded corrections are the ones keyed against the shipped files.  ``None``
+    without an error means there is nothing to report (no CPL, or a board the
+    export step could not have parsed); an error means the sidecar is invalid.
+    """
+    if not options.assembly or not options.pcb.is_file():
+        return None, None
+    cpl = next(iter(sorted(options.output_dir.glob("cpl*.csv"))), None)
+    if cpl is None:
+        return None, None
+    from kicad_tools.export.assembly import review_cpl_rotations
+    from kicad_tools.export.rotation_overrides import RotationOverridesError
+
+    try:
+        names: dict[str, str] = {}
+        header, rows = _read_csv_rows(cpl)
+        lowered = [column.strip().lower() for column in header]
+        ref_col = next(
+            (lowered.index(n) for n in ("designator", "reference", "ref") if n in lowered), 0
+        )
+        pkg_col = next((lowered.index(n) for n in ("package", "footprint") if n in lowered), None)
+        if pkg_col is not None:
+            for row in rows:
+                if max(ref_col, pkg_col) < len(row) and row[ref_col].strip():
+                    names[row[ref_col].strip()] = row[pkg_col].strip()
+        lcsc: dict[str, str] = {}
+        for bom in sorted(options.output_dir.glob("bom*.csv")):
+            bom_header, bom_rows = _read_csv_rows(bom)
+            bom_lowered = [column.strip().lower() for column in bom_header]
+            d_col = next((i for i, n in enumerate(bom_lowered) if n.startswith("designator")), None)
+            l_col = next((i for i, n in enumerate(bom_lowered) if n.startswith("lcsc")), None)
+            if d_col is None or l_col is None:
+                continue
+            for row in bom_rows:
+                if max(d_col, l_col) < len(row) and row[l_col].strip():
+                    for ref in re.split(r"[,;\s]+", row[d_col].strip()):
+                        if ref:
+                            lcsc[ref] = row[l_col].strip()
+        review = review_cpl_rotations(
+            options.pcb,
+            options.manufacturer,
+            lcsc_by_reference=lcsc,
+            footprint_names=names,
+        )
+    except RotationOverridesError as exc:
+        return None, str(exc)
+    except Exception:
+        return None, None
+    return review, None
+
+
+def _verify_cpl_rotations(options: ReadinessOptions) -> list[str]:
+    """Problems between the retained CPL and the project's rotation sidecar (#9322).
+
+    Re-derives each sidecar-corrected placement's rotation from the PCB and the
+    sidecar *as they are now* and compares it with the retained CPL row, so an
+    edited sidecar (or one removed since generation) fails verification instead
+    of being waved through on a stale bundle.  Boards without a sidecar are not
+    touched.
+    """
+    from kicad_tools.export.rotation_overrides import SOURCE_GLOB
+
+    if not options.assembly:
+        return []
+    review, error = _cpl_rotation_state(options)
+    if error:
+        return [f"CPL rotation sidecar is invalid: {error}"]
+    if review is None or review.sidecar is None:
+        return []
+    cpl = next(iter(sorted(options.output_dir.glob("cpl*.csv"))), None)
+    if cpl is None:
+        return []
+    header, rows = _read_csv_rows(cpl)
+    lowered = [column.strip().lower() for column in header]
+    ref_col = next(
+        (lowered.index(n) for n in ("designator", "reference", "ref") if n in lowered), 0
+    )
+    rot_col = next((lowered.index(n) for n in ("rotation", "rot") if n in lowered), None)
+    if rot_col is None:
+        return []
+    retained = {
+        row[ref_col].strip(): row[rot_col].strip()
+        for row in rows
+        if max(ref_col, rot_col) < len(row)
+    }
+    problems: list[str] = []
+    for entry in review.applied:
+        if entry["source"] == SOURCE_GLOB:
+            continue
+        ref = entry["reference"]
+        expected = f"{review.rotations[ref]:.1f}"
+        if ref in retained and retained[ref] != expected:
+            problems.append(
+                f"CPL rotation for {ref} is {retained[ref]} but the current "
+                f"{Path(review.sidecar).name} gives {expected}; regenerate the bundle"
+            )
+    return problems
 
 
 def build_report(
@@ -3688,6 +3801,11 @@ def build_report(
         }
         if produced:
             report["report_sources"] = produced
+    cpl_rotations, _rotation_error = _cpl_rotation_state(options)
+    if cpl_rotations is not None:
+        report["cpl_rotations"] = cpl_rotations.to_report(
+            _rel(options, Path(cpl_rotations.sidecar)) if cpl_rotations.sidecar else None
+        )
     external = _external_dependencies(options)
     if external:
         # Hash the exact collected out-of-directory dependencies (Issue #5813).
