@@ -43,6 +43,7 @@ from kicad_tools.geometry.copper import pad_waiver_polygon as _pad_waiver_polygo
 
 from ..clearance_shapes import pad_kernel_params
 from ..primitives import Pad, pad_half_extents
+from ..via_clearance import SAME_NET_BAND_WRITE_SLACK_MM
 from . import kernel_adapter as ka
 from .geometry import (
     Pt,
@@ -1124,14 +1125,20 @@ class CommittedCopper:
 
         ``(x1, y1, x2, y2, width)`` centrelines for the via-vs-own-trace slit
         band (Issue #9272).  ``reach`` is the annulus radius plus the band
-        edge; each segment's own half-width widens the query pad.  A segment
-        stored on several layers is returned once per layer (harmless: the
-        band test is a pure ``any``).
+        edge; the query pad adds the write slack plus the global default
+        half-width, and each stored segment's OWN half-width and clearance
+        widen its index registration (``_cells_for_seg(pad=hw + clr + 0.5)``),
+        so a segment of any width that can sit in the band is returned --
+        the pad never has to guess a maximum width.  (Issue #9279 tightened
+        this from the ``via_clear``-style ``+ 2.0`` window: the band is a
+        ``~0.13 mm`` question and the wide window was pulling ~60 segments
+        into a scan per A* candidate.)  A segment stored on several layers is
+        returned once per layer (harmless: the band test is a pure ``any``).
         """
         out: list[tuple[float, float, float, float, float]] = []
         for layer in range(self.num_layers):
             for c, d, cnet, hw, _iclr in self.copper[layer].query_seg(
-                point, point, pad=reach + self.trace_half + 2.0
+                point, point, pad=reach + self.trace_half + SAME_NET_BAND_WRITE_SLACK_MM
             ):
                 if cnet == net:
                     out.append((c[0], c[1], d[0], d[1], 2.0 * hw))

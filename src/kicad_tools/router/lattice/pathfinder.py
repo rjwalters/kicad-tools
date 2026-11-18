@@ -2355,6 +2355,11 @@ class LatticePathfinder:
         # ANY layer is held to the fab-view ``(0, edge)`` band -- the
         # pure-Python twin of the C++ ``is_via_blocked_diag`` guard.  None/0
         # keeps it off; committed (stored) segments only, like C++.
+        # Ordered AFTER ``via_clear`` (issue #9279): the predicates are
+        # independent, so a seat the cheaper foreign-copper check rejects
+        # never pays the band query.
+        if not committed.via_clear(point, net, clearance):
+            return False
         trace_edge_mm = float(getattr(self.rules, "same_net_trace_gap_band_edge_mm", 0.0) or 0.0)
         if trace_edge_mm > 0:
             own_segments = committed.same_net_segments_near(point, net, via_radius + trace_edge_mm)
@@ -2362,7 +2367,7 @@ class LatticePathfinder:
                 point[0], point[1], self.rules.via_diameter, own_segments, trace_edge_mm
             ):
                 return False
-        return committed.via_clear(point, net, clearance)
+        return True
 
     # -- the route contract ------------------------------------------------------
 

@@ -783,6 +783,16 @@ SAME_NET_BAND_UNION_EPS_MM = 1e-6
 #: axis) on both sides of the pair (#8975).
 SAME_NET_BAND_WRITE_SLACK_MM = 1.5e-3
 
+#: How far outside the rejected band ``(eps, edge + slack)`` a seat's ANALYTIC
+#: gap may sit before :func:`via_annulus_trace_band_ok` skips the shapely
+#: grading for that segment (issue #9279).  The ``quad_segs=64`` buffer arcs
+#: sag ~1e-4 mm from the true round cap (measured 7.1e-5 mm over 3,000 random
+#: configurations), so a segment whose analytic gap clears the band by this
+#: margin can never flip the shared predicate's verdict -- anything closer is
+#: still handed to :func:`same_net_trace_band_clear`, which stays the sole
+#: authority.  This is a skip-filter, not a second distance test.
+SAME_NET_BAND_PREFILTER_SLACK_MM = 1e-3
+
 
 def same_net_band_edges(
     profile: str, layers: int, outer_oz: float, inner_oz: float
@@ -859,14 +869,39 @@ def via_annulus_trace_band_ok(
     graded by the shared predicate, so overlap/touch (one copper union) and
     clear-of-edge seats stay accepted.  ``trace_edge_mm <= 0`` (or no
     segments) disables the test.
+
+    Perf (issue #9279): the lattice via gate calls this per A* candidate with
+    dozens of segments in reach, and a ``quad_segs=64`` buffer pair per
+    segment measured ~21 ms per call -- a ~19x whole-file routing regression.
+    Each segment's analytic gap
+    (``point_to_segment_distance - diameter/2 - width/2``) is exact for a disc
+    against a round-capped segment, up to the ~1e-4 mm arc sag, so segments
+    whose analytic gap clears the rejected band by
+    ``SAME_NET_BAND_PREFILTER_SLACK_MM`` (10x that sag) are skipped without
+    building any geometry; only band-adjacent segments reach the shared
+    predicate, unchanged.
     """
     if trace_edge_mm <= 0:
         return True
-    from shapely.geometry import LineString, Point
-
     segs = list(same_net_segments)
     if not segs:
         return True
+    limit = trace_edge_mm + SAME_NET_BAND_WRITE_SLACK_MM
+    lower = SAME_NET_BAND_UNION_EPS_MM - SAME_NET_BAND_PREFILTER_SLACK_MM
+    upper = limit + SAME_NET_BAND_PREFILTER_SLACK_MM
+    near = [
+        seg
+        for seg in segs
+        if lower
+        < point_to_segment_distance(x, y, seg[0], seg[1], seg[2], seg[3])
+        - diameter / 2.0
+        - seg[4] / 2.0
+        < upper
+    ]
+    if not near:
+        return True
+    from shapely.geometry import LineString, Point
+
     # A fine ``quad_segs`` keeps the polygonal arcs within ~1e-4 mm of the
     # true circle, well inside the 1e-9-scale union epsilon's practical use.
     annulus = Point(x, y).buffer(diameter / 2.0, quad_segs=64)
@@ -874,7 +909,7 @@ def via_annulus_trace_band_ok(
         (Point(x1, y1) if (x1 == x2 and y1 == y2) else LineString([(x1, y1), (x2, y2)])).buffer(
             width / 2.0, quad_segs=64
         )
-        for x1, y1, x2, y2, width in segs
+        for x1, y1, x2, y2, width in near
     ]
     return same_net_trace_band_clear(annulus, outlines, trace_edge_mm)
 
