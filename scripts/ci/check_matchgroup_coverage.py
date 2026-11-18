@@ -681,28 +681,22 @@ def count_errors_via_kct_check(
 # doglegs, A* body edges, coupled attach/offset legs, gateway fans, the
 # class-pad repair's moved segments -- all held to the two-region rule
 # against own-net SMD pads).  Measured on the seed-42 regen (31/31 reach,
-# both passes): every one of the 14 pad-vs-trace slits above is gone --
-# the MIPI_CLK_N / MIPI_DAT0_N / MIPI_DAT1_N entries stop firing and are
-# deleted.  The residual same-net population is 6 findings, one per TMDS
-# net, all a DIFFERENT producer: the d0.3/s0.6 gateway fan vias re-sited
-# by the re-route sit TANGENT to their own J2 pad (annulus-to-pad-edge
-# AABB gap exactly 0.0 -- the #8957 union region admits the site), while
-# the checker's facing-edge slit detector excludes the tangency point and
-# grades the 0.040-0.064 mm wedge beside it (e.g. Via@150.1/94.2 tangent
-# to J2.1's bottom edge, 0.0408 mm wedge on TMDS_D0_P).  That via-side
-# tangency wedge is the d0.3/s0.6 via population's own tracker under
-# #8962 (producer 2's child -- the issue's coordination note says this
-# PR re-baselines once and the via-population child re-baselines again
-# when it lands), so the three _P identities join the allowance and the
-# three _N ones keep exactly their new measured counts.
-MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {
-    ("physical_copper_gap", "TMDS_D0_N"): 8962,
-    ("physical_copper_gap", "TMDS_D0_P"): 8962,
-    ("physical_copper_gap", "TMDS_D1_N"): 8962,
-    ("physical_copper_gap", "TMDS_D1_P"): 8962,
-    ("physical_copper_gap", "TMDS_D2_N"): 8962,
-    ("physical_copper_gap", "TMDS_D2_P"): 8962,
-}
+# both passes): every one of the 14 pad-vs-trace slits above is gone, and
+# the six TMDS entries that remained are gone too.  Those six were the
+# re-sited gateway fan vias sitting TANGENT to their own J2 pad
+# (annulus-to-pad-edge AABB gap exactly 0.0 -- the #8957 union region
+# admitted the site), with the checker's facing-edge slit detector grading
+# the 0.040-0.064 mm wedge beside the tangency point.  Issue #9124 closes
+# that producer: the same-net slit-band predicate rejects a TANGENT seat
+# (``gap == 0``, centre exactly one annulus radius from a pad face or
+# corner) in the Python point predicate, the ring form and the C++ mirror
+# (BUILD_VERSION 68), the findings stopped firing on the fresh seed-42
+# regen (31/31 reach, 0 error violations), and their entries are deleted.
+# The #8962 coordination note (the via-population child re-baselines again
+# when it lands) is retired with them: these wedges were exactly the
+# tangent seats #9124 rejects, so no via-population re-baseline is pending
+# for this population.  Board 07's allowance is now empty.
+MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {}
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key
 #: absent here has no allowance at all: every blocking finding counts.
