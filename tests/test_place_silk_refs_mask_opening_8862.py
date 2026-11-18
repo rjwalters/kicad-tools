@@ -73,3 +73,105 @@ def test_gr_text_over_opening_reported_not_moved(tmp_path: Path):
 def test_gr_text_without_opening_not_reported(tmp_path: Path):
     result = _plan(tmp_path, _gr_text())
     assert result.fixed_text_conflicts == []
+
+
+# --- Issue #9327: candidates avoid other silk; output uses one named frame ---
+
+
+def _gr_text_at(text: str, x: float, y: float, size: float = 1.0) -> str:
+    return (
+        f'  (gr_text "{text}" (at {x} {y}) (layer "F.SilkS")'
+        f" (effects (font (size {size} {size}) (thickness 0.15))))\n"
+    )
+
+
+def _box_of(text: str, size: float, point, rotation: float = 0.0):
+    from kicad_tools.silkscreen.place_refs import _oriented_text_geometry
+
+    return _oriented_text_geometry(text, (size, size), 0.15, point, rotation)
+
+
+def test_candidates_avoid_other_board_text(tmp_path: Path):
+    body = _opening() + _gr_text_at("FIRST", 30, 28.0, 1.2) + _gr_text_at("SECOND", 30, 26.0, 1.5)
+    result = _plan(tmp_path, body)
+    assert {c.text for c in result.fixed_text_conflicts} == {"FIRST", "SECOND"}
+    current = {
+        "FIRST": _box_of("FIRST", 1.2, (30, 28.0)),
+        "SECOND": _box_of("SECOND", 1.5, (30, 26.0)),
+    }
+    sizes = {"FIRST": 1.2, "SECOND": 1.5}
+    for c in result.fixed_text_conflicts:
+        other = next(k for k in current if k != c.text)
+        assert c.candidates
+        for pt in c.candidates:
+            assert not _box_of(c.text, sizes[c.text], pt).intersects(current[other]), (c.text, pt)
+
+
+def test_candidates_avoid_static_footprint_silk(tmp_path: Path):
+    # A silk line hugging the opening's top edge; no candidate box may touch it.
+    wall = (
+        "  (gr_line (start 20 26) (end 40 26) (stroke (width 0.15) (type solid))"
+        ' (layer "F.SilkS"))\n'
+    )
+    result = _plan(tmp_path, _opening() + wall + _gr_text())
+    (c,) = result.fixed_text_conflicts
+    from shapely.geometry import LineString
+
+    line = LineString([(20, 26), (40, 26)])
+    assert c.candidates
+    for pt in c.candidates:
+        assert not _box_of("NOTE", 1.0, pt).intersects(line)
+
+
+def test_text_output_uses_named_sheet_frame_on_offset_board(tmp_path: Path, capsys):
+    from kicad_tools.cli.place_silk_refs_cmd import _print_fixed_text_conflicts
+
+    ox, oy = 100.0, 50.0
+    head = _HEAD.replace("(start 0 0) (end 60 60)", f"(start {ox} {oy}) (end {ox + 60} {oy + 60})")
+    body = (
+        f"  (gr_rect (start {ox + 27} {oy + 27}) (end {ox + 33} {oy + 33})"
+        ' (stroke (width 0) (type solid)) (fill yes) (layer "F.Mask"))\n'
+        + _gr_text_at("NOTE", ox + 30, oy + 30)
+    )
+    path = tmp_path / "off.kicad_pcb"
+    path.write_text(head + body + ")\n")
+    result = SilkRefPlacer(path).plan(clearance_mm=0.15)
+    (c,) = result.fixed_text_conflicts
+    assert c.position == pytest.approx((30.0, 30.0))
+    assert c.to_sheet(c.position) == pytest.approx((130.0, 80.0))
+    assert c.to_dict()["frame"] == "board-relative"
+    _print_fixed_text_conflicts(result)
+    out = capsys.readouterr().out
+    assert "at (130.000, 80.000) [sheet coords]" in out
+    # the opening label is quoted in the same (sheet) frame
+    assert "(130.000, 80.000)" in c.opening
+    assert "candidate clear positions [sheet coords]" in out
+
+
+def test_drill_hit_label_uses_named_sheet_frame_on_offset_board(tmp_path: Path, capsys):
+    # A *drill* hit (tented via, issue #9054 set) under board text: its label
+    # must name the same sheet point as the text position, not the
+    # board-relative frame (#9327 judge follow-up).
+    from kicad_tools.cli.place_silk_refs_cmd import _print_fixed_text_conflicts
+
+    ox, oy = 100.0, 50.0
+    head = _HEAD.replace(
+        "(start 0 0) (end 60 60)", f"(start {ox} {oy}) (end {ox + 60} {oy + 60})"
+    ).replace(
+        "(pad_to_mask_clearance 0)",
+        '(pad_to_mask_clearance 0) (tenting (front yes) (back yes)) (net 1 "N1")',
+    )
+    body = (
+        f'  (via (at {ox + 30} {oy + 30}) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu")'
+        " (net 1))\n" + _gr_text_at("NOTE", ox + 30, oy + 30)
+    )
+    path = tmp_path / "drill.kicad_pcb"
+    path.write_text(head + body + ")\n")
+    result = SilkRefPlacer(path).plan(clearance_mm=0.15)
+    (c,) = result.fixed_text_conflicts
+    # tented via: the only aperture under the text is the drill itself
+    assert c.opening.startswith("drill via at ")
+    assert "(130.000, 80.000)" in c.opening
+    _print_fixed_text_conflicts(result)
+    out = capsys.readouterr().out
+    assert "'NOTE' at (130.000, 80.000) [sheet coords] over drill via at (130.000, 80.000)" in out

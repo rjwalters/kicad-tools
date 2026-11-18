@@ -229,22 +229,31 @@ def test_rotated_same_net_pad_uses_rotation_aware_bbox(rotation, layer):
     assert not router._can_place_via(x, 0.0, net=1, foreign_pads=[pad], clearance=0.05)
 
 
-@pytest.mark.parametrize("rotation", [0.0, 90.0])
-def test_cardinal_rotation_bbox_is_unchanged(rotation):
-    # rotation 0 / 90 keep the pre-fix result: 0 is the raw box; 90 is
-    # handled by the loader's axis swap (``rotation`` carries only the residual
-    # 0 here), so the in-band / beyond-edge seats behave exactly as before.
-    pad = _rotated_pad(rotation)
+def test_cardinal_rotation_bbox_is_unchanged():
+    # rotation 0 keeps the pre-fix result: the raw 0.3 x 0.7 box.  This is
+    # both the loader-swapped 90-degree pad (whose residual ``rotation`` is
+    # 0 after io.py's axis swap) and the no-rotation-info default, so the
+    # in-band / beyond-edge seats behave exactly as before.
+    pad = _rotated_pad(0.0)
     router = _router(EDGE_1OZ)
     in_band = PAD_TOP + R + 0.0891
     beyond = PAD_TOP + R + EDGE_1OZ + 0.05
-    if rotation == 90.0:
-        # An unswapped 90-degree pad is a 0.7 x 0.3 box on the board.
-        in_band = PAD_W / 2 + R + 0.0891
-        beyond = PAD_W / 2 + R + EDGE_1OZ + 0.05
-        assert not router._can_place_via(0.0, in_band, net=1, foreign_pads=[pad], clearance=0.05)
-        assert router._can_place_via(0.0, beyond, net=1, foreign_pads=[pad], clearance=0.05)
-        return
+    assert not router._can_place_via(0.0, in_band, net=1, foreign_pads=[pad], clearance=0.05)
+    assert router._can_place_via(0.0, beyond, net=1, foreign_pads=[pad], clearance=0.05)
+
+
+def test_unswapped_90deg_pad_uses_swapped_extents():
+    # A pad constructed with a full ``rotation=90.0`` -- the "no swap fired"
+    # path (e.g. the MCP / placement pad-dict builders, which pass the pad's
+    # absolute board angle) -- gets swapped AABB extents from
+    # ``pad_half_extents``: a 0.7 x 0.3 box on the board.  This is behaviour
+    # #9236 CHANGED: before the fix the raw 0.3-wide box left both seats
+    # below clear, so the in-band seat was accepted.
+    pad = _rotated_pad(90.0)
+    router = _router(EDGE_1OZ)
+    # An unswapped 90-degree pad is a 0.7 x 0.3 box on the board.
+    in_band = PAD_W / 2 + R + 0.0891
+    beyond = PAD_W / 2 + R + EDGE_1OZ + 0.05
     assert not router._can_place_via(0.0, in_band, net=1, foreign_pads=[pad], clearance=0.05)
     assert router._can_place_via(0.0, beyond, net=1, foreign_pads=[pad], clearance=0.05)
 

@@ -36,7 +36,8 @@ What did **not** change (deliberately, per the epic's scope guards):
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
@@ -1216,6 +1217,53 @@ class VectorCollisionChecker:
         width: float,
         exclude_net: int,
     ) -> bool:
+        """Check if a path is clear (see :meth:`_path_is_clear_ignoring`)."""
+        return self._path_is_clear_ignoring(x1, y1, x2, y2, layer, width, exclude_net, frozenset())
+
+    def ignoring(self, segment_ids: AbstractSet[int]) -> Callable[..., bool]:
+        """A ``path_is_clear`` that treats the segments in *segment_ids* as absent.
+
+        *segment_ids* holds ``id()`` of ``Segment`` objects -- the key the
+        routed-copper R-tree is indexed by.  A planner that has already decided
+        to delete some copper (the acute fold-back repair, Issue #9355) uses
+        this so a later candidate is not vetoed by a leg that will not exist.
+
+        Only the exact R-tree pass can honour this.  When the layer has no
+        R-tree the answer comes from the raster fallback, which cannot say
+        which cells a removed segment painted, so it keeps refusing against
+        the removed copper: conservative, never permissive.  Vias, pads and
+        keepouts are never ignored.
+
+        *segment_ids* is read live on every call, so a caller may keep growing
+        one set between calls.
+        """
+
+        def path_is_clear(
+            x1: float,
+            y1: float,
+            x2: float,
+            y2: float,
+            layer: Layer,
+            width: float,
+            exclude_net: int,
+        ) -> bool:
+            return self._path_is_clear_ignoring(
+                x1, y1, x2, y2, layer, width, exclude_net, segment_ids
+            )
+
+        return path_is_clear
+
+    def _path_is_clear_ignoring(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        layer: Layer,
+        width: float,
+        exclude_net: int,
+        ignored: AbstractSet[int],
+    ) -> bool:
         """Check if a path is clear using R-tree + exact vector math.
 
         Broad phase: queries the per-layer R-tree for candidate segments
@@ -1235,6 +1283,8 @@ class VectorCollisionChecker:
             layer: The layer the path is on.
             width: The trace width.
             exclude_net: Net ID to exclude from collision checks.
+            ignored: ``id()`` of routed ``Segment`` objects to treat as absent
+                (empty for a plain :meth:`path_is_clear`).
 
         Returns:
             True if the path is clear, False if it would cross obstacles.
@@ -1281,6 +1331,10 @@ class VectorCollisionChecker:
 
             # Skip own-net segments
             if other_seg.net == exclude_net:
+                continue
+
+            # Copper the caller has already decided to delete (Issue #9355).
+            if cand_id in ignored:
                 continue
 
             # Exact edge-to-edge clearance.  Issue #5625: the arithmetic moved

@@ -572,6 +572,8 @@ def run_export(args: argparse.Namespace) -> int:
                 print(f"  [ok] BOM: {result.assembly_result.bom_path.name}")
             if result.assembly_result.pnp_path:
                 print(f"  [ok] CPL: {result.assembly_result.pnp_path.name}")
+                for line in result.assembly_result.rotation_review_lines():
+                    print(f"  {line}")
             if result.assembly_result.gerber_path:
                 gerber_rel = result.bundle_relpath(result.assembly_result.gerber_path)
                 print(f"  [ok] Gerbers: {gerber_rel}")

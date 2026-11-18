@@ -75,11 +75,13 @@ Offenders concentrate in four boards (01: 1, 02: 4, 03: 4, 05: 7); boards
   and once without `--report-detour-ratio`; the written `.kicad_pcb` files
   are **byte-identical** (`cmp`). Board 03 exercises the negotiated driver
   with rip-up activity (its log shows iteration rip-up/re-route rounds).
-- Scope of that claim: the probe restores router state, not wall-clock
-  time. Its searches run before the real route and count against any
-  `--timeout` / wall deadline, so a run that a time limit cuts short can
-  differ with the flag on. The `cmp` runs above finished inside their
-  limits.
+- Scope of that claim: the probe restores router state, and since #9244 its
+  wall-clock cost is excluded from the routing budgets too (stage
+  `--timeout`, the CLI routing/wall deadlines, installed excursion
+  deadlines), so a run a time limit cuts short no longer differs with the
+  flag on. Residual: the hard supervisor cap
+  (`KCT_ROUTE_INVOCATION_DEADLINE`) still bounds the invocation as a whole.
+  The `cmp` runs above finished inside their limits.
 - Review of PR #9014 found that the probe at `c8e4feca6` leaked its own
   failure records (`routing_failures`), the failure-analysis cache and
   budget, the Python-fallback memo and stage budget, and lazily built grid
