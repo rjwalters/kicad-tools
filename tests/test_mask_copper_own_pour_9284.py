@@ -250,6 +250,26 @@ def test_solid_declared_but_fill_shows_spokes_stays_an_error():
     assert _severity(result) == "error"
 
 
+@pytest.mark.parametrize("top", [0.75, 0.88])
+def test_solid_fill_clipped_by_other_net_clearance_is_still_info(top):
+    """Issue #9436 review: a solid join clipped over 12-25% of the pad is info.
+
+    The rim coverage of such a fill is 62-69%, inside the band a perimeter
+    fraction cannot separate from thermal spokes; the spoke-width bound can.
+    """
+    fill = box(-3, -3, 4, top)
+    result, m = _measure(_geometry(fill, owner_conn=pad_connection(pad=SOLID)))
+    assert m.disposition == "own_pour_solid"
+    assert _severity(result) == "info"
+
+
+def test_solid_fill_notched_through_two_pad_edges_is_still_info():
+    fill = box(-3, -3, 4, 4).difference(box(0.3, 0.3, 0.7, 1.5)).difference(box(-1, 0.3, 0.3, 0.7))
+    result, m = _measure(_geometry(fill, owner_conn=pad_connection(pad=SOLID)))
+    assert m.disposition == "own_pour_solid"
+    assert _severity(result) == "info"
+
+
 def test_solid_unconnected_same_net_island_stays_an_error():
     island = box(-3, -3, 4, 4).difference(PAD.buffer(0.05, join_style="mitre"))
     result, m = _measure(

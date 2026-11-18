@@ -965,12 +965,9 @@ def _own_pour_thermal(opening, copper, owner_copper, owner, item, margin, band, 
     return qualifies, spokes, excess, gap, spoke
 
 
-#: Width (mm) of the rim around a pad probed for a solid join, and the share of
-#: it the fill must cover. Thermal spokes cover roughly 4 x spoke width of the
-#: perimeter (about 0.3 on a 1 mm pad); a solid join covers it all except where
-#: another net's clearance cuts the fill, so 0.75 separates them and fails closed.
+#: Width (mm) of the rim around a pad probed for a solid join. The fill's
+#: contact length along the pad edge is its area in that rim over this width.
 _SOLID_RIM_MM = 0.01
-_SOLID_RIM_COVERAGE = 0.75
 
 
 def _own_pour_solid(opening, copper, owner_copper, owner, item, margin, uncertainty):
@@ -985,9 +982,13 @@ def _own_pour_solid(opening, copper, owner_copper, owner, item, margin, uncertai
     3. Direct connection: the fill overlaps the pad beyond ``u``.
     4. Nothing exposed beyond the pad: ``opening ∩ fill − pad.buffer(u)`` is
        empty, so a positive expansion with pour in its ring fails.
-    5. The fill shows the solid join: it covers at least ``_SOLID_RIM_COVERAGE``
-       of a ``_SOLID_RIM_MM`` rim around the pad, so a declaration the fill
-       does not bear out (spokes, a relief gap) keeps its verdict.
+    5. The fill shows the solid join: its contact along the pad edge is longer
+       than any thermal fill could make it, ``_MAX_THERMAL_SPOKES`` spokes of
+       the declared spoke width (pad override, else the zone's), so a
+       declaration the fill does not bear out (spokes, a relief gap) keeps its
+       verdict. The bound comes from the declared spoke width, not a fraction
+       of the perimeter, so another net's clearance clipping the pour (which
+       leaves a solid join covering only part of the edge) does not defeat it.
 
     Unlike ``_own_pour_thermal`` there is no spoke-band test: a solid pour
     body lies inside the band by definition.
@@ -1004,7 +1005,14 @@ def _own_pour_solid(opening, copper, owner_copper, owner, item, margin, uncertai
     rim = owner_copper.buffer(_SOLID_RIM_MM).difference(owner_copper)
     if rim.area <= 0:
         return False
-    return rim.intersection(copper).area >= _SOLID_RIM_COVERAGE * rim.area
+    _effective, pad, pour = _effective_connection(owner, item)
+    spoke = (
+        pad["thermal_spoke_width_mm"]
+        if pad["thermal_spoke_width_mm"] is not None
+        else pour["thermal_spoke_width_mm"]
+    )
+    thermal_contact = _MAX_THERMAL_SPOKES * (spoke or 0.0) + 4 * max(uncertainty, 1e-6)
+    return rim.intersection(copper).area / _SOLID_RIM_MM > thermal_contact
 
 
 def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=()):

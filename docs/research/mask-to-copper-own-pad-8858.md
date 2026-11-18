@@ -338,6 +338,8 @@ a 0.1 mm relief gap are errors; a different-net pour at 0.12 mm is a warning.
 Warnings are unchanged on every board. Board 01's two remaining errors are the
 two via rings (family C), unchanged.
 
+*Counts in the table above predate #9436, which turns the solid pads below to info.*
+
 **Board 03's 51 own-pour findings:** 45 are spoke-connected (thermal declared,
 spokes confirmed in the fill, relief gap 0.2 mm, spoke 0.25 or 0.3 mm; fill spokes-only out to
 ≥ 0.19 mm from the opening) and are now info. 6 are **solid** (pad-level solid override: U1 pads
