@@ -67,13 +67,23 @@ gates keep this from becoming the via flood above:
   regardless of what covers its ring. The reporter noted the anchor via of
   their item 1 was untented on both sides, which suggests tenting is part of
   the fab's test, but **the fab's exact test is unverified**.
+* **Same-net anchor↔anchor pairs are exempt** (Issue #9325). ``kct pcb
+  reinforce`` lays consecutive wire legs so their end anchor vias sit ~2.3-2.5
+  mm apart on one net (1.9 mm annuli, 1.3 mm drill); this pairing reported one
+  error per junction -- 7 of the 11 errors on the reporter's board -- and the
+  fab's DFM counted none of them. A same-net ring that is a *fan-out-sized*
+  via is still reported (#8925 item 5, which the fab did count). **The fab's
+  treatment of same-net anchor↔anchor pairs is evidenced only by this one
+  board** (it counted none); that is an observation, not a general fab-rule
+  confirmation.
 
 No board in this repo's regression set has an anchor-sized via, and every via
 on boards 03 / 05 / 06 / 07 resolves as tented, so this pairing adds nothing to
 their counts (6 / 0 / 0 / 0); its live calibration is unverified. A pair is
 reported **once**, even when it meets on both faces or both vias are anchors
 (each then sits on both sides of the comparison); the message names every
-layer it meets on.
+layer it meets on. A same-net anchor↔anchor pair is not reported at all
+(above); a different-net one is, once.
 
 A pad whose ``shape`` this rule cannot measure is **reported as unmeasured**
 (``tht_smd_spacing_incomplete``, info) rather than silently dropped: a shape the
@@ -126,7 +136,9 @@ def check_tht_smd_spacing(
     """Report THT pads and anchor-sized vias closer than the thresholds to any SMD pad.
 
     Anchor-sized vias are also judged against every *exposed* via annulus
-    (Issue #8925); THT component pads are not.
+    (Issue #8925); THT component pads are not.  A same-net anchor↔anchor pair
+    is exempt (Issue #9325) -- consecutive ``kct pcb reinforce`` wire legs --
+    while a same-net anchor against a fan-out-sized annulus is still reported.
 
     ``via_drill_mm`` is the drill diameter at which a via starts being judged
     like a THT component pad (:data:`ANCHOR_DRILL_MM` by default; see the module
@@ -257,6 +269,9 @@ def check_tht_smd_spacing(
     # de-duplicate), on the first layer, naming every layer it meets on.
     # pair -> (layers, hole entry, ring entry)
     pairs: dict[tuple[str, str], tuple[list[str], tuple[str, Any, str], tuple[str, Any, str]]] = {}
+    # Identities judged as anchor vias above; a ring whose identity is in here
+    # is itself an anchor-sized via.
+    anchor_ids = {tht[index][1] for index in anchor_vias}
     for layer in sorted({a[0] for a in annuli}):
         rings = [a for a in annuli if a[0] == layer]
         tree = STRtree([r[2] for r in rings])
@@ -267,6 +282,13 @@ def check_tht_smd_spacing(
             for raw in tree.query(geom, predicate="dwithin", distance=warning_mm):
                 _, ring_id, ring_geom, ring_net = rings[int(raw)]
                 if ring_id == identity:
+                    continue
+                # Same-net anchor↔anchor pairs are exempt (Issue #9325):
+                # consecutive ``kct pcb reinforce`` wire legs sit 2.3-2.5 mm
+                # apart on one net, and the fab's DFM counted none of those
+                # pairs.  A same-net ring that is a fan-out-sized via is still
+                # reported (the #8925 item-5 shape the fab did count).
+                if ring_id in anchor_ids and ring_net == net:
                     continue
                 key = (min(identity, ring_id), max(identity, ring_id))
                 entry = pairs.setdefault(

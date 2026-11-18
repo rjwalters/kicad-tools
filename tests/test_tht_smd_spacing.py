@@ -198,11 +198,11 @@ UNTENTED = "(tenting (front no) (back no))"
 TENTED = "(tenting (front yes) (back yes))"
 
 
-def ring(x, *, uuid, drill=0.4, size=0.8, tenting=UNTENTED):
+def ring(x, *, uuid, drill=0.4, size=0.8, tenting=UNTENTED, net=1):
     """A via at ``(x, 0)``; ``tenting=""`` omits the node (absent-token path)."""
     return (
         f'(via (at {x} 0) (size {size}) (drill {drill}) (layers "F.Cu" "B.Cu") '
-        f'(net 1) {tenting} (uuid "{uuid}"))'
+        f'(net {net}) {tenting} (uuid "{uuid}"))'
     )
 
 
@@ -258,17 +258,45 @@ def test_tht_component_pad_is_never_paired_with_a_via_annulus():
     assert not check_tht_smd_spacing(board(pad, exposed)).violations
 
 
-def test_two_exposed_anchor_vias_report_the_pair_once():
-    """AC7: each anchor via is on both sides of the comparison; one finding, not two."""
-    a = ring(0, uuid="a", drill=1.3, size=1.9)
-    b = ring(0.95 + 1.5 + 0.95, uuid="b", drill=1.3, size=1.9)
+def test_two_exposed_anchor_vias_on_different_nets_report_the_pair_once():
+    """Each anchor via is on both sides of the comparison; one finding, not two.
+
+    The nets differ (Issue #9325): a same-net anchor↔anchor pair is exempt
+    (the fab's DFM counted none), so the dedup guard needs different nets.
+    """
+    a = ring(0, uuid="a", drill=1.3, size=1.9, net=1)
+    b = ring(0.95 + 1.5 + 0.95, uuid="b", drill=1.3, size=1.9, net=2)
     found = check_tht_smd_spacing(board(a, b)).violations
     assert [v.severity for v in found] == ["error"]
     # Front-only exposure: still one finding, never one per ordering.
-    a = ring(0, uuid="a", drill=1.3, size=1.9, tenting="(tenting (front no) (back yes))")
-    b = ring(3.4, uuid="b", drill=1.3, size=1.9, tenting="(tenting (front no) (back yes))")
+    a = ring(0, uuid="a", drill=1.3, size=1.9, net=1, tenting="(tenting (front no) (back yes))")
+    b = ring(3.4, uuid="b", drill=1.3, size=1.9, net=2, tenting="(tenting (front no) (back yes))")
     found = check_tht_smd_spacing(board(a, b)).violations
     assert [v.layer for v in found] == ["F.Cu"]
+
+
+def test_same_net_exposed_anchor_vias_produce_no_finding():
+    """Issue #9325: consecutive `kct pcb reinforce` wire legs are same-net by design.
+
+    Both vias are anchor-sized and both annuli are exposed within the warning
+    band; the fab's DFM counted none of these pairs, so the rule must not
+    either. (One-board evidence only -- see the module docstring.)
+    """
+    a = ring(0, uuid="a", drill=1.3, size=1.9)
+    b = ring(0.95 + 1.5 + 0.95, uuid="b", drill=1.3, size=1.9)
+    assert not check_tht_smd_spacing(board(a, b)).violations
+    # Same-net anchor pair exposed on the front face only: exempt all the same.
+    a = ring(0, uuid="a", drill=1.3, size=1.9, tenting="(tenting (front no) (back yes))")
+    b = ring(3.4, uuid="b", drill=1.3, size=1.9, tenting="(tenting (front no) (back yes))")
+    assert not check_tht_smd_spacing(board(a, b)).violations
+
+
+def test_anchor_against_different_net_fanout_annulus_is_still_reported():
+    """Issue #9325: the same-net anchor↔anchor exemption does not cross nets."""
+    anchor = ring(0, uuid="anchor", drill=1.3, size=1.9, net=1)
+    small = ring(0.95 + 1.5 + 0.4, uuid="small", net=2)
+    found = check_tht_smd_spacing(board(anchor, small)).violations
+    assert [v.severity for v in found] == ["error"]
 
 
 @pytest.mark.parametrize(

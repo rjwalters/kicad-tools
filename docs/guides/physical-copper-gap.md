@@ -14,7 +14,7 @@ limits, and live in one table at the top of `validate/rules/physical_gap.py`:
 | Copper gap (tracks, pads, vias, fills; same-net included) | < 0.10 mm | `error` |
 | Copper gap | 0.10 to < 0.15 mm | `warning` |
 | Pad-to-pad mask bridge on **2 oz** copper | < 0.20 mm | `error` |
-| THT pad (any drill) or via drilled >= 1.0 mm, to SMD pad; via drilled >= 1.0 mm, to exposed via annulus (`tht_smd_spacing`) | < 2.0 mm / < 2.7 mm | `error` / `warning` |
+| THT pad (any drill) or via drilled >= 1.0 mm, to SMD pad; via drilled >= 1.0 mm, to exposed via annulus except a same-net anchor↔anchor pair (`tht_smd_spacing`) | < 2.0 mm / < 2.7 mm | `error` / `warning` |
 
 Same-net near-parallel copper (e.g. 0.08 mm) is always listed; it uses the same
 tiers. The mask-bridge check needs a known copper weight (stackup or `--copper`);
@@ -46,7 +46,12 @@ An **exposed via annulus** also counts as the "SMD" side (Issue #8925): JLCDFM
 flagged a 1.9 mm / 1.3 mm-drill anchor via 1.5 mm from an ordinary 0.8 mm /
 0.4 mm via. Only an anchor *via* (drill >= `ANCHOR_DRILL_MM`) is paired against
 via annuli -- a THT component pad never is (that reading added 24 findings to
-board 05), and fan-out-vs-fan-out pairs are never judged. An annulus counts only
+board 05), and fan-out-vs-fan-out pairs are never judged. A same-net
+anchor↔anchor pair is exempt (Issue #9325): consecutive `kct pcb reinforce`
+wire legs sit ~2.3-2.5 mm apart on one net, the fab's DFM counted none of
+those pairs, and reporting them produced 7 of the 11 errors on that board. The
+fab's same-net treatment is evidenced only by that one board, not a general
+fab-rule confirmation. An annulus counts only
 on an outer face where it is **not tented** (per-via `(tenting ...)` override,
 then the board setup default, then KiCad's absent-token default: tented); the
 fab's exact tenting test is unverified. A pair is reported once, naming every
