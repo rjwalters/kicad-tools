@@ -844,6 +844,53 @@ class TestCrossNetRepairsClearEachOther:
 
 
 # --------------------------------------------------------------------------
+# Issue #9210: copper a later same-group repair removed must not veto
+# a later group's repair
+# --------------------------------------------------------------------------
+
+#: Net 5: two fold-backs chained so that round 2 supersedes a chord round 1
+#: added.  Round 1 (detour-collapse at (0.24, -0.299)) adds
+#: (0.112,0.725)-(0.332,0.945)-(0.531,0.945); round 2 (detour-collapse at
+#: (0.531, 0.945)) removes the second of those, (0.332,0.945)-(0.531,0.945).
+_SUPERSEDING_NET5 = [
+    seg((0.0, 0.0), (0.531, 0.945), net=5, net_name="A"),
+    seg((0.531, 0.945), (0.24, -0.299), net=5, net_name="A"),
+    seg((0.24, -0.299), (0.112, 0.725), net=5, net_name="A"),
+]
+#: Net 6 (planned after net 5): a fold-back whose collapse chord lands within
+#: clearance (0.14 mm gap < 0.2 mm) of the superseded chord, yet clears every
+#: segment net 5 actually leaves behind.  Found by randomized search (seed 11).
+_LATER_NET6 = [
+    seg((0.534, -0.001), (0.288, 1.355), net=6, net_name="B"),
+    seg((0.288, 1.355), (0.702, 0.651), net=6, net_name="B"),
+]
+
+
+class TestSupersededChordDoesNotVeto:
+    """Issue #9210: ``accepted_added`` must drop segments a later repair removed."""
+
+    def _scene(self) -> list[Segment]:
+        return _SUPERSEDING_NET5 + _LATER_NET6
+
+    def test_scene_supersedes_a_chord_within_the_group(self):
+        """Fixture check: net 5's second repair removes a segment its first added."""
+        result = plan_foldback_repairs(_SUPERSEDING_NET5, path_is_clear=clear)
+        assert [r.net for r in result.repairs] == [5, 5]
+        added = {id(s) for s in result.repairs[0].added}
+        assert any(id(s) in added for s in result.repairs[1].removed)
+
+    def test_later_group_repair_is_accepted(self):
+        """The chord net 5 superseded is not copper any more, so it cannot veto."""
+        scene = self._scene()
+        # ``clear`` as the base model isolates the plan's own veto list: the
+        # only thing that can decline net 6 is the copper the plan added.
+        out, result = repair_foldbacks(scene, path_is_clear=clear, clearance=_CLEARANCE)
+        assert [r.net for r in result.repairs] == [5, 5, 6]
+        assert (result.repaired, result.skipped) == (3, 0)
+        assert TestCrossNetRepairsClearEachOther._cross_net_violations(out) == []
+
+
+# --------------------------------------------------------------------------
 # Issue #9355: a later group must not be vetoed by legs an earlier repair
 # already removed
 # --------------------------------------------------------------------------
