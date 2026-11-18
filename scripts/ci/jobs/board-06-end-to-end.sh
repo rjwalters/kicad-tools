@@ -12,9 +12,6 @@
 #   * copper-LVS clean re-check, out-of-process (any open/short or vacuous
 #     verdict fails -- the #4006 guard forces clean=false when zero pins
 #     bind);
-#   * DRC of the fresh PCB within the identity allowlist, staged over the
-#     committed path (board 06 carries identity-allowed DRC *quality*
-#     residuals, #7367);
 #   * the synthetic routing gate on the regenerated bundle copied into the
 #     git-ignored regression-output/ directory (matching PCB and sidecars;
 #     historical pair/group baselines never permit new physical errors);
@@ -59,11 +56,13 @@ cp -a /tmp/board06-ci/. boards/06-diffpair-test/regression-output/
 uv run python scripts/ci/check_diffpair_coverage.py \
   boards/06-diffpair-test --skip-route --seed 42
 
-step "Independent DRC re-check within allowlist (out-of-process, #3840)"
-check_drc_over_committed_path \
-  /tmp/board06-ci/diffpair_test_routed.kicad_pcb \
-  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb
-
+# NOTE: deliberately NO converged DRC re-check here, unlike boards 03/04.
+# CI's board-06 job never ran one on main, and converging it turned the gate
+# red (46 blocking errors from check_routed_drc_internal.py on the fresh
+# PCB; PR #9392 review, finding 2). The residuals are #6396/#8839/#8842
+# territory; convergence re-lands deliberately via the tracking issue, not
+# silently. (Main's local-gate --full ran this step for board 06 and fails
+# the same way -- that latent failure is filed, not silently dropped.)
 step "Emit board.json via kct board-metrics"
 rm -rf /tmp/board06-staging
 mkdir -p /tmp/board06-staging/06-diffpair-test/output

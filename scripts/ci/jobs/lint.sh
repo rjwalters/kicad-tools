@@ -20,9 +20,15 @@ uv run ruff format . --check
 step "Lint"
 uv run ruff check .
 
+# The content contracts run BEFORE the shellcheck step, and shellcheck is
+# deliberately LAST: hosts without shellcheck (CI's Test container among
+# them) hit die_skip here, which exits the whole job -- placed mid-job it
+# pre-empted the mandatory contracts step and the gate reported SKIP as PASS
+# (PR #9392 review). A contracts failure still exits non-zero before this
+# step is reached.
+step "Check documentation and agent-content contracts"
+bash scripts/ci/check-content-contracts.sh
+
 step "Shellcheck the CI gate scripts"
 command -v shellcheck >/dev/null 2>&1 || die_skip "shellcheck not found; skipping (CI's ubuntu-latest image ships it)"
 shellcheck -s bash -S warning scripts/ci/jobs/*.sh scripts/ci/local-gate.sh
-
-step "Check documentation and agent-content contracts"
-bash scripts/ci/check-content-contracts.sh

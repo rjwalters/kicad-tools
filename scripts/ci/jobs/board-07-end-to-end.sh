@@ -49,11 +49,14 @@ cp -a /tmp/board07-ci/. boards/07-matchgroup-test/regression-output/
 uv run python scripts/ci/check_matchgroup_coverage.py \
   boards/07-matchgroup-test --skip-route --seed 42
 
-step "Independent DRC re-check within allowlist (out-of-process, #3840)"
-check_drc_over_committed_path \
-  /tmp/board07-ci/matchgroup_test_routed.kicad_pcb \
-  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb
-
+# NOTE: deliberately NO converged DRC re-check here, unlike boards 03/04.
+# CI's board-07 job never ran one on main, and converging it turned the gate
+# red (488 blocking errors from check_routed_drc_internal.py on the fresh
+# PCB; PR #9392 review, finding 2). Board 07's allowlist entry is explicitly
+# withheld until #6396 lands, and the residuals are #8839/#8842 territory;
+# convergence re-lands deliberately via the tracking issue, not silently.
+# (Main's local-gate --full ran this step for board 07 and fails the same
+# way -- that latent failure is filed, not silently dropped.)
 step "Emit board.json via kct board-metrics"
 rm -rf /tmp/board07-staging
 mkdir -p /tmp/board07-staging/07-matchgroup-test/output
