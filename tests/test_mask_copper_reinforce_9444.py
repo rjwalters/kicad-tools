@@ -247,3 +247,26 @@ def test_far_side_strip_opening_does_not_excuse_the_near_side_same_net_copper():
     ]
     assert far
     assert any(m.owner_run is None for m in far)
+
+
+def test_far_side_chain_grows_only_through_strip_pieces():
+    """A non-strip board circle on the run's mask side must not extend the chain.
+
+    A same-net via 3.25 mm off the strip sits inside a ``gr_circle`` that overlaps
+    the strip on the run's own mask side. Chaining through that circle would
+    attribute the same-net ``F.Cu`` track in the via's opening to the run; it
+    stands nowhere near the run and stays an error. Pins the ``kind == "gr_line"``
+    filter on the far-side chain in ``mask_copper`` (#9444 review).
+    """
+    off_run = (20.0, 13.5)
+    pieces = _run_pieces() + [
+        ("gr_circle", "", {"B.Mask": _disk(20.0, 12.5, 2.5)}),
+        _mid_via(at=off_run),
+        ("segment", "PWR", {"F.Cu": box(19.0, 13.25, 21.0, 13.75)}),
+    ]
+    result = _run(pieces)
+    far = _near(result, off_run, radius=0.6)
+    far = [m for m in far if m.mask_side == "F.Mask"]
+    assert far
+    assert {m.disposition for m in far} == {"violation"}
+    assert all(m.owner_run is None for m in far)
