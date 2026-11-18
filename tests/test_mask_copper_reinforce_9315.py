@@ -236,6 +236,49 @@ def test_stray_untented_via_off_the_run_is_not_excused():
     assert {m.owner_run for m in over_strip} == {"HS_POWER"}
 
 
+def _pad_beside_anchor_geometry(pad_net):
+    """Straight leg plus an untented pad whose opening sits at anchor A's flash."""
+    geometry = straight_geometry()
+    pad = _disk(A[0] - 0.53, A[1], 0.5)
+    from kicad_tools.validate.mask_copper_geometry import AttributedMaskGeometry
+
+    identity = "00000000-0000-0000-0000-0000000000ff"
+    geometry.objects[identity] = {
+        "kind": "pad:circle",
+        "net": pad_net,
+        "layers_geometry": {"F.Cu": pad, "F.Mask": pad},
+        "margin_mm": {"F.Mask": 0.0},
+    }
+    exported = geometry.exported
+    exported.layers["F.Mask"] = exported.layers["F.Mask"].union(pad)
+    exported.layers["F.Cu"] = exported.layers["F.Cu"].union(pad)
+    return AttributedMaskGeometry(exported, geometry.objects), identity
+
+
+def test_different_net_pad_opening_near_anchor_is_not_attributed():
+    """A pad opening within strip tolerance of an anchor needs the run's net (#9348).
+
+    Via anchor flashes were net-gated; a pad-kind opening was not, so a
+    different-net pad beside the anchor was attributed to the run and the
+    triage metadata named the run's net as its owner.
+    """
+    geometry, pad_uuid = _pad_beside_anchor_geometry("OTHER")
+    result = assess_attributed_geometry(geometry, POLICY, (), [reinforce_record()])
+    own = [m for m in result.measurements if pad_uuid in m.opening_uuids]
+    assert own, "the pad opening was not measured"
+    assert {m.owner_run for m in own} == {None}
+    assert {m.owner_net for m in own} == {"OTHER"}
+
+
+def test_same_net_pad_opening_near_anchor_is_still_attributed():
+    geometry, pad_uuid = _pad_beside_anchor_geometry("PWR")
+    result = assess_attributed_geometry(geometry, POLICY, (), [reinforce_record()])
+    own = [m for m in result.measurements if pad_uuid in m.opening_uuids]
+    assert own, "the pad opening was not measured"
+    assert {m.owner_run for m in own} == {"HS_POWER"}
+    assert {m.owner_net for m in own} == {"PWR"}
+
+
 def test_same_net_trace_under_unrelated_opening_not_excused():
     """A same-net trace wholly under its own cutout far from the run stays an error.
 
