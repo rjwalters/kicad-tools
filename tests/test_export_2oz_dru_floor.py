@@ -76,7 +76,12 @@ def _export(pcb: Path, *, dry_run: bool = False) -> ManufacturingResult:
         pcb, manufacturer="jlcpcb", config=ManufacturingConfig(output_dir=pcb.parent / "out")
     )
     result = ManufacturingResult(output_dir=pcb.parent / "out")
-    pkg._write_drc_constraints(result, dry_run=dry_run)
+    # Omit the kwarg on a real run so the regression tests fail behaviourally,
+    # not on a signature error, against the unfixed tree.
+    if dry_run:
+        pkg._write_drc_constraints(result, dry_run=True)
+    else:
+        pkg._write_drc_constraints(result)
     return result
 
 
@@ -106,16 +111,22 @@ def test_one_oz_board_keeps_one_oz_floor(tmp_path: Path) -> None:
 def test_dry_run_surfaces_the_refusal_the_real_run_hits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``--dry-run`` reaches the DRU merge, raises the same error, writes nothing."""
-    from kicad_tools.core.rule_loosening import Loosening
-    from kicad_tools.manufacturers import dru_generator
+    """``--dry-run`` raises the same message (writer label included), writes nothing.
 
-    def _refuse(*_args, **_kwargs):
-        raise RuleLooseningError([Loosening("dru.resolved.track_track", "lowered", 0.15, 0.1016)])
+    Forces the real loosening gate to report one loosening so the production
+    code builds the writer label in both arms (#9430: it used to name the
+    dry-run's scratch directory).
+    """
+    from kicad_tools.core import rule_loosening
+    from kicad_tools.core.rule_loosening import Loosening
 
     pcb = _board(tmp_path, 2.0)
     _seed_stale_block(pcb, 0.15)
-    monkeypatch.setattr(dru_generator, "merge_dru_floors", _refuse)
+    monkeypatch.setattr(
+        rule_loosening,
+        "rule_loosenings",
+        lambda *_a, **_k: [Loosening("dru.resolved.track_track", "lowered", 0.15, 0.1016)],
+    )
     before = {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()}
 
     with pytest.raises(RuleLooseningError) as dry:
@@ -124,6 +135,8 @@ def test_dry_run_surfaces_the_refusal_the_real_run_hits(
 
     with pytest.raises(RuleLooseningError) as real:
         _export(pcb)
+    assert str(pcb.with_suffix(".kicad_dru")) in str(real.value)
+    assert "kct-export-dry-run-" not in str(dry.value)
     assert str(dry.value) == str(real.value)
 
 
@@ -145,7 +158,7 @@ def test_dry_run_package_export_reaches_the_merge(
     ManufacturingPackage(
         pcb, manufacturer="jlcpcb", config=ManufacturingConfig(output_dir=tmp_path / "out")
     ).export(dry_run=True)
-    assert len(calls) == 1
+    assert calls == [pcb.with_suffix(".kicad_dru")]
     assert not pcb.with_suffix(".kicad_dru").exists()
 
 

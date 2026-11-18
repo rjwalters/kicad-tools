@@ -1205,6 +1205,7 @@ class ManufacturingPackage:
                     net_classes=net_classes,
                     max_ampacity_width_mm=max_width_mm,
                     _board_path=pcb_path,
+                    _report_dru_path=pcb_path.with_suffix(".kicad_dru"),
                 )
             except OSError as e:
                 logger.debug("Dry-run DRC-constraint merge skipped: %s", e)
