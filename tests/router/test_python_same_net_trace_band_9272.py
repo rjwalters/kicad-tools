@@ -253,11 +253,23 @@ def test_python_helper_matches_exact_gap_region_over_a_fan(angle_deg):
 @pytest.mark.skipif(not is_cpp_available(), reason="C++ router backend not available")
 @pytest.mark.parametrize("dy", [0.0, 0.25, 0.375, 0.5, 0.6, 0.7, 1.0])
 def test_python_gates_agree_with_the_cpp_guard(dy):
-    """Same fixture, same verdict: C++ ``is_via_blocked`` vs both Python gates."""
+    """Same fixture, same verdict: C++ ``is_via_blocked`` vs both Python gates.
+
+    ``is_via_blocked`` takes grid cells, so the seat it grades is
+    ``round(y / res) * res``.  At the Grid3D's routing resolution 0.125 the
+    dy=0.6 seat (10, 10.6) rounds to cell 85 = 10.625, whose gap is exactly
+    ``10.625 - 10.0 - 0.25 - 0.125 = 0.25 == EDGE`` -- the band's accepted
+    boundary, not the strictly-in-band ``0.225`` seat the Python gates grade
+    (both measured in the #9279 CI triage).  Each backend is correct at its
+    own seat; the disagreement was the fixture's, so the C++ grid here uses
+    0.025 -- which divides every probed dy exactly -- and keeps the parity
+    verdicts on one shared point.  (``rules.grid_resolution`` stays 0.125:
+    the band guard is pure world math and never reads it.)
+    """
     from kicad_tools.router import router_cpp
 
-    res = 0.125
-    grid = router_cpp.Grid3D(160, 160, 2, res, 0.0, 0.0)
+    cpp_res = 0.025
+    grid = router_cpp.Grid3D(800, 800, 2, cpp_res, 0.0, 0.0)
     grid.add_stored_segment(*SEG, TRACE_WIDTH, 0, NET)
     rules = router_cpp.DesignRules()
     rules.trace_width = TRACE_WIDTH
@@ -268,7 +280,9 @@ def test_python_gates_agree_with_the_cpp_guard(dy):
     rules.allow_smd_vias = True
     rules.same_net_trace_gap_band_edge_mm = EDGE
     pf = router_cpp.Pathfinder(grid, rules, False)
-    cpp_ok = not pf.is_via_blocked(round(10.0 / res), round((10.0 + dy) / res), NET, True)
+    cpp_ok = not pf.is_via_blocked(
+        round(10.0 / cpp_res), round((10.0 + dy) / cpp_res), NET, True
+    )
 
     esc_ok = _router(EDGE)._can_place_via(10.0, 10.0 + dy, net=NET, foreign_tracks=[_segment()])
     lpf, committed = _lattice(EDGE)
