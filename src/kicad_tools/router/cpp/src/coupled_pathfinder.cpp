@@ -190,6 +190,57 @@ bool CoupledPathfinder::via_drill_at_smd_pad_edge(int gx, int gy) const {
     return false;
 }
 
+// Issue #8994: the same-net pad slit band, coupled twin of the single-ended
+// block in ``Pathfinder::is_via_blocked_diag`` -- a rail via's ANNULUS must
+// union with its own net's SMD pad or clear the stackup-resolved detection
+// edge; the open band in between is a fab-view slit.  Own net only, SMD only,
+// OFF when no edge was resolved.  The annulus takes the net class's via
+// diameter when one is installed, exactly as ``via_route_geometry_clear``
+// builds its candidate.  Same arithmetic as Python
+// ``via_clearance.same_net_pad_gap_acceptable`` (types.hpp's
+// ``same_net_pad_gap_in_band`` holds the single shared copy).
+bool CoupledPathfinder::same_net_pad_gap_in_band(int gx, int gy, int net) const {
+    const float edge_mm = rules_.same_net_pad_gap_band_edge_mm;
+    if (edge_mm <= 0.0f || net <= 0) return false;
+    const auto [wx, wy] = grid_.grid_to_world(gx, gy);
+    const HaloNetDims* dims = halo_dims_for(net);
+    const double half =
+        static_cast<double>(dims ? dims->via_diameter : rules_.via_diameter) / 2.0;
+    for (const auto& pad : grid_.pads()) {
+        if (pad.net != net || pad.layer_idx < 0) continue;  // Own net, SMD only.
+        if (router::same_net_pad_gap_in_band(static_cast<double>(wx),
+                                             static_cast<double>(wy), half, pad,
+                                             edge_mm))
+            return true;
+    }
+    return false;
+}
+
+// Issue #9208: trace-population twin of ``same_net_pad_gap_in_band`` -- a rail
+// via's annulus against its own net's committed trace copper.  Same arithmetic
+// as ``Pathfinder::is_via_blocked_diag``'s block (types.hpp's
+// ``same_net_segment_gap_in_band`` holds the single shared copy).
+bool CoupledPathfinder::same_net_trace_gap_in_band(int gx, int gy, int net) const {
+    const float edge_mm = rules_.same_net_trace_gap_band_edge_mm;
+    if (edge_mm <= 0.0f || net <= 0) return false;
+    const auto [wx, wy] = grid_.grid_to_world(gx, gy);
+    const HaloNetDims* dims = halo_dims_for(net);
+    const double half =
+        static_cast<double>(dims ? dims->via_diameter : rules_.via_diameter) / 2.0;
+    const float reach = static_cast<float>(half + edge_mm);
+    const auto candidates =
+        grid_.route_geometry_candidates(wx - reach, wy - reach, wx + reach, wy + reach);
+    for (const size_t i : candidates.first) {
+        const auto& seg = grid_.stored_segments()[i];
+        if (seg.net != net) continue;
+        if (router::same_net_segment_gap_in_band(static_cast<double>(wx),
+                                                 static_cast<double>(wy), half, seg,
+                                                 static_cast<double>(edge_mm)))
+            return true;
+    }
+    return false;
+}
+
 // Mirror of Python ``_is_via_blocked`` (diffpair_routing.py:793-832).
 bool CoupledPathfinder::is_via_blocked(int gx, int gy, int net) const {
     // Issue #6008: via-blocking keepout rule areas (Python
@@ -1040,11 +1091,18 @@ CoupledRouteResult CoupledPathfinder::route(
                 if (smd_vias_ok < 0) {
                     // Issue #7296: plus the mask-dam floor, which applies
                     // even where via-in-pad is allowed.
+                    // Issue #8994: plus the same-net pad slit band, per rail
+                    // (each rail's annulus against its OWN net's SMD pads).
                     smd_vias_ok = ((rules_.allow_smd_vias ||
                                     (!via_drill_in_smd_pad(current.p_x, current.p_y) &&
                                      !via_drill_in_smd_pad(current.n_x, current.n_y))) &&
                                    !via_drill_at_smd_pad_edge(current.p_x, current.p_y) &&
-                                   !via_drill_at_smd_pad_edge(current.n_x, current.n_y)) ? 1 : 0;
+                                   !via_drill_at_smd_pad_edge(current.n_x, current.n_y) &&
+                                   !same_net_pad_gap_in_band(current.p_x, current.p_y, p_net) &&
+                                   !same_net_pad_gap_in_band(current.n_x, current.n_y, n_net) &&
+                                   // Issue #9208: and the annulus vs own committed trace copper.
+                                   !same_net_trace_gap_in_band(current.p_x, current.p_y, p_net) &&
+                                   !same_net_trace_gap_in_band(current.n_x, current.n_y, n_net)) ? 1 : 0;
                 }
                 if (smd_vias_ok == 0) { rej("via_in_pad"); continue; }
                 if (!p_at_ep && is_via_blocked(current.p_x, current.p_y, p_net)) { rej("via_blocked_p"); continue; }

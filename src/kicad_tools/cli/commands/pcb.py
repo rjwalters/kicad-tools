@@ -761,6 +761,58 @@ def _parse_region_arg(
     return (x1, y1, x2, y2), None
 
 
+def _print_waiver_invalidation_report(
+    project: Path,
+    before_board: Any,
+    after_board: Any,
+    accepted_plans: list,
+    *,
+    output_format: str,
+) -> None:
+    """Report waiver sidecar keys this prune edit invalidated (Issue #9331).
+
+    Diffs which sidecar entries waive something before vs. after the edit
+    (``check_cmd.waiver_invalidation_report_lines``).  Silent when no waivers
+    sidecar is discoverable, when nothing was edited, or when no entry was
+    invalidated.  Board output and the exit code are unchanged: the report
+    goes to stdout (text format) or stderr (``--format json``, so stdout
+    stays a single JSON document).
+    """
+    if not accepted_plans or before_board is None:
+        return
+    if after_board is None:
+        # Dry run: rebuild the would-be board in memory from the plans
+        # prune accepted (nothing was written to disk).
+        from kicad_tools.pcb_prune import apply_plans
+        from kicad_tools.schema.pcb import PCB
+
+        after_board = PCB.load(project)
+        apply_plans(after_board, accepted_plans)
+    from kicad_tools.cli.check_cmd import waiver_invalidation_report_lines
+
+    out = sys.stderr if output_format == "json" else sys.stdout
+    for line in waiver_invalidation_report_lines(project, before_board, after_board):
+        print(line, file=out)
+
+
+def _waiver_report_before_board(pcb_path: Path):
+    """Pre-edit geometry for the waiver-invalidation report, or ``None``.
+
+    Prune overwrites its input when ``--output`` is not given, so the board
+    must be captured before the edit.  ``None`` (no sidecar next to the
+    board) skips the report entirely -- and the extra load.
+    """
+    try:
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.rules.waivers import discover_waivers_sidecar
+
+        if discover_waivers_sidecar(pcb_path) is None:
+            return None
+        return PCB.load(pcb_path)
+    except Exception:  # noqa: BLE001 - the report must never fail the command
+        return None
+
+
 def _run_prune_command(args, pcb_path: Path) -> int:
     """Handle the 'pcb prune' command (issue #8216).
 
@@ -830,6 +882,9 @@ def _run_prune_command(args, pcb_path: Path) -> int:
     unverified = getattr(args, "unverified", False)
     src_path = pcb_path
     res = None
+    # Issue #9331: pre-edit geometry for the invalidated-waiver report;
+    # prune overwrites the input when --output is not given.
+    waiver_before_board = _waiver_report_before_board(pcb_path)
     try:
         # Issue #8730: one invocation iterates to a fixed point -- a pass can
         # expose more redundant copper (a split container's piece is frozen
@@ -1003,6 +1058,18 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         except Exception as e:
             print(f"Error saving PCB: {e}", file=sys.stderr)
             return 1
+
+    if changed:
+        # Issue #9331: a collinear merge or snap moves copper that waiver keys
+        # embed, so entries that waived a finding before the edit may match
+        # nothing now.  Report-only; the edit itself is already written.
+        _print_waiver_invalidation_report(
+            pcb_path,
+            waiver_before_board,
+            pcb if not dry_run else None,
+            res.accepted,
+            output_format=output_format,
+        )
     return 0
 
 

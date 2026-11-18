@@ -67,8 +67,11 @@ The comment body's literal **first line** is the marker:
   `opaque_host_id(host_identity())` — `host-` followed by the first 8
   lowercase hex chars of `sha256("loom-lease-host-id-v1:" + host_identity())`
   — instead of the raw `sweep_registry::host_identity()` value
-  (`LOOM_HOST_ID` env > `$HOSTNAME` > the `hostname` binary >
-  `unknown-host`).
+  (`LOOM_LEASE_HOST_ID` env > `LOOM_HOST_ID` env > `$HOSTNAME` > the
+  `hostname` binary > `unknown-host`; `LOOM_LEASE_HOST_ID` is what a
+  dispatcher exports to a session it spawns, so a session in a container
+  with its own hostname still resolves its dispatcher's lease host, and
+  `sweep-lease-*.sh` read it first too).
   - **This id is still directly `==`-comparable** across every reader in
     this subsystem — [claim-then-verify-order](#phase-2-dispatch-time-half-claim-then-verify-order-6287)
     (`resolve_lease_order`) and sweep-side [fencing](#phase-3-issue-6309-has-now-shipped-sweep-side-fencing-before-pushpr-open)

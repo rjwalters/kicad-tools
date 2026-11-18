@@ -569,7 +569,21 @@ def _run_drc_error_count_by_category(
             copper_oz=copper_oz,
         )
         if min_clearance_mm is not None and min_clearance_mm > 0:
-            checker.design_rules = replace(checker.design_rules, min_clearance_mm=min_clearance_mm)
+            # The board's authored rule governs both floors: lowering the outer
+            # floor to it must carry the fab preset's inner floor down with it
+            # (DesignRules forbids inner > outer, Issue #9113).  A profile with
+            # no inner floor gains none.
+            inner = checker.design_rules.min_inner_clearance_mm
+            if inner is not None and inner > min_clearance_mm:
+                checker.design_rules = replace(
+                    checker.design_rules,
+                    min_clearance_mm=min_clearance_mm,
+                    min_inner_clearance_mm=min_clearance_mm,
+                )
+            else:
+                checker.design_rules = replace(
+                    checker.design_rules, min_clearance_mm=min_clearance_mm
+                )
         # Check clearances and dimensions (the DRC categories relevant to
         # trace optimization -- silkscreen and edge clearance are unaffected
         # by segment reshaping)

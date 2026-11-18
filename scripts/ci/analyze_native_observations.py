@@ -103,6 +103,9 @@ def concurrency_profile(intervals: list[tuple[int, int]]) -> dict[str, Any]:
     total = sum(histogram.values()) or 1
     return {
         "max_observed": maximum,
+        "ns_by_concurrency": {
+            str(level): duration for level, duration in sorted(histogram.items())
+        },
         "seconds_by_concurrency": {
             str(level): round(duration / 1e9, 3) for level, duration in sorted(histogram.items())
         },
@@ -306,7 +309,47 @@ def analyze_group(directory: Path, top: int, simulate: Sequence[int] = ()) -> di
     }
 
 
-def verdict(groups: list[dict[str, Any]], max_concurrency: int | None) -> list[str]:
+def excess_seconds(group: dict[str, Any], max_concurrency: int) -> float:
+    """Seconds this group spent with more native processes than the bound.
+
+    Sums the raw nanosecond histogram when present, so a sub-0.5 ms excursion
+    that the rounded display histogram collapses to ``0.000`` still counts
+    (Issue #9152).
+    """
+    profile = group["native_concurrency"]
+    raw = profile.get("ns_by_concurrency")
+    if raw is not None:
+        return sum(ns for level, ns in raw.items() if int(level) > max_concurrency) / 1e9
+    histogram = profile["seconds_by_concurrency"]
+    return sum(seconds for level, seconds in histogram.items() if int(level) > max_concurrency)
+
+
+def _format_overshoot(seconds: float) -> str:
+    """Duration for a problem/NOTE line; sub-0.5 ms overshoots need visible precision."""
+    if 0 < seconds < 0.0005:
+        return f"{seconds * 1e6:.0f}µs"
+    return f"{seconds:.3f}s"
+
+
+def verdict(
+    groups: list[dict[str, Any]],
+    max_concurrency: int | None,
+    tolerance_seconds: float = 0.0,
+) -> list[str]:
+    """Problems that fail the audit.
+
+    ``tolerance_seconds`` (Issue #9120) is an explicit, stated allowance for
+    time spent above ``max_concurrency``; the default ``0`` keeps the audit
+    strict. It exists because the gate wraps ``subprocess.Popen`` in Python
+    only, so a native process started straight from a shell (the sign-off
+    skill's ``kicad-cli`` gate blocks, run by ``bash -c`` in
+    ``tests/test_signoff_skill_e2e.py``) is invisible to it and can briefly
+    overlap two gated launches. It never excuses an OOM, an unbounded launch,
+    or an overshoot longer than the tolerance. At the default ``0`` (strict)
+    *any* overshoot fails however brief, including one whose duration the
+    display histogram rounds to ``0.000`` -- or one that is exactly zero, a
+    zero-duration record crossing the bound (Issue #9152).
+    """
     problems = []
     for group in groups:
         name = group["group"]
@@ -322,10 +365,12 @@ def verdict(groups: list[dict[str, Any]], max_concurrency: int | None) -> list[s
             )
         if max_concurrency is not None:
             observed = group["native_concurrency"]["max_observed"]
-            if observed > max_concurrency:
+            over = excess_seconds(group, max_concurrency)
+            if observed > max_concurrency and (tolerance_seconds <= 0 or over > tolerance_seconds):
                 problems.append(
                     f"{name}: observed native concurrency {observed} exceeds the "
-                    f"configured bound {max_concurrency}"
+                    f"configured bound {max_concurrency} for {_format_overshoot(over)} "
+                    f"(tolerance {tolerance_seconds:g}s)"
                 )
     return problems
 
@@ -334,6 +379,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path, help="native-observer output root")
     parser.add_argument("--max-concurrency", type=int, default=None)
+    parser.add_argument(
+        "--tolerance-seconds",
+        type=float,
+        default=0.0,
+        metavar="S",
+        help=(
+            "allow up to S seconds above --max-concurrency before failing "
+            "(default 0: strict). Tolerated overshoot is still printed."
+        ),
+    )
     parser.add_argument(
         "--simulate-bound",
         type=int,
@@ -347,6 +402,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.max_concurrency is not None and args.max_concurrency < 1:
         parser.error("--max-concurrency must be positive")
+    if args.tolerance_seconds < 0:
+        parser.error("--tolerance-seconds must not be negative")
     if any(bound < 1 for bound in args.simulate_bound):
         parser.error("--simulate-bound must be positive")
     directories = sorted(
@@ -389,7 +446,18 @@ def main(argv: list[str] | None = None) -> int:
                 f"{worst[0]['added_wait_seconds'] if worst else 0.0:.1f}s "
                 f"({worst[0]['nodeid'] if worst else 'n/a'})"
             )
-    problems = verdict(groups, args.max_concurrency)
+    problems = verdict(groups, args.max_concurrency, args.tolerance_seconds)
+    if args.max_concurrency is not None:
+        for group in groups:
+            over = excess_seconds(group, args.max_concurrency)
+            if over and not any(
+                item.startswith(f"{group['group']}: observed") for item in problems
+            ):
+                print(
+                    f"NOTE {group['group']}: {_format_overshoot(over)} above the bound "
+                    f"{args.max_concurrency} "
+                    f"(within the stated {args.tolerance_seconds:g}s tolerance)"
+                )
     for problem in problems:
         print(f"FAIL {problem}", file=sys.stderr)
     return 1 if problems else 0

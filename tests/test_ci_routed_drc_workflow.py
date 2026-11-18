@@ -54,6 +54,16 @@ def _load_helper_module():
     return module
 
 
+def _stub_counts(helper, blocking: int, advisory: dict | None = None):
+    """A ``count_errors`` return value for the no-allowance path.
+
+    Issue #8858: ``count_errors`` returns
+    ``(blocking, advisory_by_rule, IdentityOutcome)``; these tests stub it
+    without an allowance, so the outcome is the plain not-applied shape.
+    """
+    return (blocking, advisory or {}, helper.IdentityOutcome(blocking, False, [], []))
+
+
 # ---------------------------------------------------------------------------
 # Workflow YAML structural tests
 # ---------------------------------------------------------------------------
@@ -428,10 +438,11 @@ class TestHelperCheckFile:
         self.helper = _load_helper_module()
 
     def test_zero_errors_zero_allowed_passes(self) -> None:
-        # Issue #3074: count_errors now returns (blocking_errors,
-        # advisory_by_rule).  Stub with the no-advisory tuple to keep
-        # the historical semantics of "0 blocking + 0 advisory".
-        with patch.object(self.helper, "count_errors", return_value=(0, {})):
+        # Issue #3074/#8858: count_errors returns (blocking_errors,
+        # advisory_by_rule, IdentityOutcome).  Stub with the no-advisory
+        # shape to keep the historical semantics of "0 blocking + 0
+        # advisory", no allowance applied.
+        with patch.object(self.helper, "count_errors", return_value=_stub_counts(self.helper, 0)):
             passed, msg, errors = self.helper.check_file(Path("foo.kicad_pcb"), allowed=0)
         assert passed
         assert "0 errors" in msg
@@ -440,7 +451,7 @@ class TestHelperCheckFile:
     def test_under_allowed_passes(self) -> None:
         """A board grandfathered at 17 errors that drops to 5 must pass --
         the gate is "allowed minus epsilon", not "exact match"."""
-        with patch.object(self.helper, "count_errors", return_value=(5, {})):
+        with patch.object(self.helper, "count_errors", return_value=_stub_counts(self.helper, 5)):
             passed, msg, errors = self.helper.check_file(Path("foo.kicad_pcb"), allowed=17)
         assert passed
         assert "5 errors" in msg
@@ -451,14 +462,14 @@ class TestHelperCheckFile:
 
     def test_at_allowed_passes(self) -> None:
         """Equal-to-allowed is the steady state for a grandfathered board."""
-        with patch.object(self.helper, "count_errors", return_value=(17, {})):
+        with patch.object(self.helper, "count_errors", return_value=_stub_counts(self.helper, 17)):
             passed, _, errors = self.helper.check_file(Path("foo.kicad_pcb"), allowed=17)
         assert passed
         assert errors == 17
 
     def test_over_allowed_fails_grandfathered(self) -> None:
         """Regression on a grandfathered board: 17 -> 22. Must fail."""
-        with patch.object(self.helper, "count_errors", return_value=(22, {})):
+        with patch.object(self.helper, "count_errors", return_value=_stub_counts(self.helper, 22)):
             passed, msg, errors = self.helper.check_file(Path("foo.kicad_pcb"), allowed=17)
         assert not passed
         assert "regression" in msg.lower()
@@ -471,7 +482,7 @@ class TestHelperCheckFile:
         report 0 errors. Any errors mean the gate fails. This is the
         critical assertion that PR #2538's merge state would have
         triggered (board 04 with 5 errors)."""
-        with patch.object(self.helper, "count_errors", return_value=(5, {})):
+        with patch.object(self.helper, "count_errors", return_value=_stub_counts(self.helper, 5)):
             passed, msg, errors = self.helper.check_file(
                 Path("boards/04-x/output/x_routed.kicad_pcb"), allowed=0
             )
@@ -487,7 +498,9 @@ class TestHelperCheckFile:
         must reach ``count_errors`` as the ``mfr`` keyword (not be silently
         dropped).  Pin this so a future refactor of the call chain doesn't
         regress board-04's tier-aware measurement."""
-        with patch.object(self.helper, "count_errors", return_value=(4, {})) as mock:
+        with patch.object(
+            self.helper, "count_errors", return_value=_stub_counts(self.helper, 4)
+        ) as mock:
             passed, msg, errors = self.helper.check_file(
                 Path("foo.kicad_pcb"), allowed=4, mfr="jlcpcb-tier1"
             )
@@ -504,7 +517,9 @@ class TestHelperCheckFile:
     def test_mfr_default_is_jlcpcb(self) -> None:
         """When no override is supplied, ``check_file`` must fall back to
         the strict ``jlcpcb`` profile (the historical default)."""
-        with patch.object(self.helper, "count_errors", return_value=(0, {})) as mock:
+        with patch.object(
+            self.helper, "count_errors", return_value=_stub_counts(self.helper, 0)
+        ) as mock:
             self.helper.check_file(Path("foo.kicad_pcb"), allowed=0)
         call_kwargs = mock.call_args.kwargs
         # Default may be passed explicitly or omitted; both routes resolve
@@ -660,8 +675,8 @@ class TestMainDriftWarningEmission:
         but a ``::warning file=...::`` MUST be emitted so the reviewer
         sees the stale entry. This is the regression test for #2590."""
         pcb, allowlist = self._make_pcb_and_allowlist(tmp_path, allowlist_value=17)
-        # Issue #3074: count_errors returns (blocking, advisory_by_rule).
-        with patch.object(self.helper, "count_errors", return_value=(15, {})):
+        # Issue #3074/#8858: (blocking, advisory_by_rule, IdentityOutcome).
+        with patch.object(self.helper, "count_errors", return_value=_stub_counts(self.helper, 15)):
             rc = self.helper.main(["--allowlist", str(allowlist), str(pcb)])
         assert rc == 0  # gate still passes
         captured = capsys.readouterr()
@@ -676,7 +691,7 @@ class TestMainDriftWarningEmission:
         """Steady state: actual=17, allowlist=17. No warning -- the
         floor matches reality. (The OK message still goes to stdout.)"""
         pcb, allowlist = self._make_pcb_and_allowlist(tmp_path, allowlist_value=17)
-        with patch.object(self.helper, "count_errors", return_value=(17, {})):
+        with patch.object(self.helper, "count_errors", return_value=_stub_counts(self.helper, 17)):
             rc = self.helper.main(["--allowlist", str(allowlist), str(pcb)])
         assert rc == 0
         captured = capsys.readouterr()
@@ -692,7 +707,7 @@ class TestMainDriftWarningEmission:
         ::error::, and we must NOT also emit a drift warning -- the
         problem here is too many errors, not a stale floor."""
         pcb, allowlist = self._make_pcb_and_allowlist(tmp_path, allowlist_value=17)
-        with patch.object(self.helper, "count_errors", return_value=(22, {})):
+        with patch.object(self.helper, "count_errors", return_value=_stub_counts(self.helper, 22)):
             rc = self.helper.main(["--allowlist", str(allowlist), str(pcb)])
         assert rc == 2  # gate fails (regression)
         captured = capsys.readouterr()
@@ -707,7 +722,7 @@ class TestMainDriftWarningEmission:
         importantly the ``allowed > 0`` guard suppresses the warning so
         every clean PR doesn't get nagged."""
         pcb, allowlist = self._make_pcb_and_allowlist(tmp_path, allowlist_value=None)
-        with patch.object(self.helper, "count_errors", return_value=(0, {})):
+        with patch.object(self.helper, "count_errors", return_value=_stub_counts(self.helper, 0)):
             rc = self.helper.main(["--allowlist", str(allowlist), str(pcb)])
         assert rc == 0
         captured = capsys.readouterr()
@@ -721,7 +736,7 @@ class TestMainDriftWarningEmission:
         that triggers the drift warning must still exit 0 so the gate
         doesn't become accidentally blocking."""
         pcb, allowlist = self._make_pcb_and_allowlist(tmp_path, allowlist_value=10)
-        with patch.object(self.helper, "count_errors", return_value=(3, {})):
+        with patch.object(self.helper, "count_errors", return_value=_stub_counts(self.helper, 3)):
             rc = self.helper.main(["--allowlist", str(allowlist), str(pcb)])
         assert rc == 0  # warning emitted, but gate still passes
         captured = capsys.readouterr()
@@ -767,8 +782,13 @@ class TestMainDriftWarningEmission:
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
 
-                # Issue #3074: count_errors returns (blocking, advisory_by_rule).
-                with patch.object(module, "count_errors", return_value=(15, {{}})):
+                # Issue #3074/#8858: count_errors returns (blocking,
+                # advisory_by_rule, IdentityOutcome).
+                with patch.object(
+                    module,
+                    "count_errors",
+                    return_value=(15, {{}}, module.IdentityOutcome(15, False, [], [])),
+                ):
                     sys.exit(module.main([
                         "--allowlist", {str(allowlist)!r},
                         {rel_pcb!r},
@@ -803,7 +823,7 @@ class TestMainDriftWarningEmission:
         stays entry-free for the committed-artifact ratchet.
         """
         pcb, allowlist = self._make_pcb_and_allowlist(tmp_path, allowlist_value=None)
-        with patch.object(self.helper, "count_errors", return_value=(2, {})):
+        with patch.object(self.helper, "count_errors", return_value=_stub_counts(self.helper, 2)):
             rc = self.helper.main(["--allowlist", str(allowlist), "--allow", "2", str(pcb)])
         assert rc == 0  # 2 <= 2 (explicit override), gate passes
 
@@ -812,7 +832,7 @@ class TestMainDriftWarningEmission:
     ) -> None:
         """``--allow N`` is a ceiling, not a bypass: N+1 blocking errors fail."""
         pcb, allowlist = self._make_pcb_and_allowlist(tmp_path, allowlist_value=None)
-        with patch.object(self.helper, "count_errors", return_value=(3, {})):
+        with patch.object(self.helper, "count_errors", return_value=_stub_counts(self.helper, 3)):
             rc = self.helper.main(["--allowlist", str(allowlist), "--allow", "2", str(pcb)])
         assert rc == 2  # 3 > 2, gate fails
         captured = capsys.readouterr()
@@ -824,7 +844,7 @@ class TestMainDriftWarningEmission:
         """No drift nag under ``--allow``: the tolerance is an intentional
         recipe-vs-artifact divergence, not a stale YAML floor to tighten."""
         pcb, allowlist = self._make_pcb_and_allowlist(tmp_path, allowlist_value=None)
-        with patch.object(self.helper, "count_errors", return_value=(0, {})):
+        with patch.object(self.helper, "count_errors", return_value=_stub_counts(self.helper, 0)):
             rc = self.helper.main(["--allowlist", str(allowlist), "--allow", "2", str(pcb)])
         assert rc == 0  # 0 <= 2
         captured = capsys.readouterr()
@@ -881,8 +901,10 @@ class TestMainManufacturerOverride:
         rel = "boards/04-test/output/test_routed.kicad_pcb"
         allowlist = tmp_path / "tolerance.yml"
         allowlist.write_text(f"tolerances:\n  {rel}: 4\nmanufacturers:\n  {rel}: jlcpcb-tier1\n")
-        # Issue #3074: count_errors returns (blocking, advisory_by_rule).
-        with patch.object(self.helper, "count_errors", return_value=(4, {})) as mock:
+        # Issue #3074/#8858: (blocking, advisory_by_rule, IdentityOutcome).
+        with patch.object(
+            self.helper, "count_errors", return_value=_stub_counts(self.helper, 4)
+        ) as mock:
             rc = self.helper.main(["--allowlist", str(allowlist), rel])
         assert rc == 0
         mock.assert_called_once()
@@ -899,7 +921,9 @@ class TestMainManufacturerOverride:
         allowlist = tmp_path / "tolerance.yml"
         # tolerances entry only; no manufacturers section at all.
         allowlist.write_text(f"tolerances:\n  {rel}: 4\n")
-        with patch.object(self.helper, "count_errors", return_value=(4, {})) as mock:
+        with patch.object(
+            self.helper, "count_errors", return_value=_stub_counts(self.helper, 4)
+        ) as mock:
             rc = self.helper.main(["--allowlist", str(allowlist), rel])
         assert rc == 0
         mock.assert_called_once()

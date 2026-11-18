@@ -219,6 +219,7 @@ write_scope_register "$STUB_DIR/checkout" acme/widget
 cd "$STUB_DIR/checkout" || exit 1
 # Deterministic identity + clock for every case below.
 export LOOM_HOST_ID="studio-host"
+unset LOOM_LEASE_HOST_ID 2> /dev/null || true # a dispatched session running this suite carries one
 # Issue #6322/#6333: by default (no LOOM_LEASE_PUBLISH_HOSTNAME opt-in), the
 # script publishes the OPAQUE form of LOOM_HOST_ID, not the raw value -- this
 # is the pinned first-8-hex-chars-of-sha256("loom-lease-host-id-v1:studio-host")
@@ -230,7 +231,7 @@ reset_state() {
     rm -f "$STUB_DIR"/comments.json "$STUB_DIR"/comments-fail "$STUB_DIR"/post-fail
     rm -f "$STUB_DIR"/post-*.body "$STUB_DIR"/post-count "$STUB_DIR"/post-calls.log
     rm -f "$STUB_DIR"/post-flags.log
-    unset LOOM_LEASE_PUBLISH_NOW
+    unset LOOM_LEASE_PUBLISH_NOW LOOM_LEASE_HOST_ID
 }
 
 post_count() {
@@ -462,6 +463,20 @@ assert_eq "0" "$RC" "(k) the raw-hostname opt-in still publishes successfully"
 assert_eq "studio-host sweep-run-A" "$OUT" "(k) LOOM_LEASE_PUBLISH_HOSTNAME=1 publishes the RAW host, not the opaque form"
 FIRST_LINE_K="$(head -n1 "$STUB_DIR/post-1.body" 2>/dev/null || echo MISSING)"
 assert_eq "<!-- loom:lease host=studio-host sweep=sweep-run-A -->" "$FIRST_LINE_K" "(k) the marker carries the raw host under the opt-in"
+
+# --- (k2) LOOM_LEASE_HOST_ID outranks LOOM_HOST_ID: a session in a container
+# is handed its dispatcher's lease host id, so the dispatcher's fresh lease
+# under the same sweep id is this sweep's own (no-op), not a peer's (exit 4).
+# `host-60a4fb97` is the pinned opaque id of "opaque-test-host"
+# (test-sweep-lease-fence.sh (m)).
+reset_state
+lease_json "host-60a4fb97" "step-builder-6320-1" "$NOW_ISO" > "$STUB_DIR/comments.json"
+LOOM_LEASE_HOST_ID="opaque-test-host" run_script publish 6320 --sweep-id step-builder-6320-1
+assert_eq "0" "$RC" "(k2) the dispatcher's lease is this sweep's own under LOOM_LEASE_HOST_ID -> exit 0"
+assert_eq "host-60a4fb97 step-builder-6320-1" "$OUT" "(k2) ... and the identity printed is the dispatcher's lease host"
+assert_eq "0" "$(post_count)" "(k2) ... with no duplicate lease published"
+run_script publish 6320 --sweep-id step-builder-6320-1
+assert_eq "4" "$RC" "(k2) without LOOM_LEASE_HOST_ID the same lease reads as a peer's -> exit 4"
 
 # --- (l) publish -> fence round trip (regression test for #6333) ----------
 # Before the fix, publish wrote the RAW host while sweep-lease-fence.sh's

@@ -1097,6 +1097,54 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
         }
     }
 
+    // Issue #8994: same-net pad slit band -- the fab-view ``physical_copper_gap``
+    // population #8957 graded and #8974 drained on the Python producers.  The
+    // annulus (NOT the drill: that is the #7296 block above) must either union
+    // with its own SMD pad or clear the stackup-resolved detection edge;
+    // the open band in between is a slit the checker rejects, so the seat is
+    // refused.  Own net only (a foreign pad here is min_via_pad_edge_gap's /
+    // clearance's job), SMD only (``layer_idx < 0`` is a through-hole annulus,
+    // excluded exactly as the Python predicate's SMD bboxes exclude it), and
+    // OFF when the caller resolved no stackup edge -- never a literal
+    // (#8974 AC-3).  Same arithmetic as Python
+    // ``via_clearance.same_net_pad_gap_acceptable`` (types.hpp's
+    // ``same_net_pad_gap_in_band`` holds the single shared copy).
+    if (rules_.same_net_pad_gap_band_edge_mm > 0.0f) {
+        const auto [wx, wy] = grid_.grid_to_world(x, y);
+        const double half = search_via_half_diam_mm_ > 0
+            ? search_via_half_diam_mm_ : rules_.via_diameter / 2.0;
+        for (const auto& pad : grid_.pads()) {
+            if (pad.net != net || pad.layer_idx < 0) continue;
+            if (same_net_pad_gap_in_band(static_cast<double>(wx),
+                                         static_cast<double>(wy), half, pad,
+                                         rules_.same_net_pad_gap_band_edge_mm))
+                return true;
+        }
+    }
+
+    // Issue #9208: the trace-population twin of the block above -- the annulus
+    // against its OWN net's stored trace copper (any layer: a through via's
+    // annulus exists on every layer).  Same two acceptable regions at the
+    // ``trace_spacing`` detection edge; OFF when no edge was resolved.  Sees
+    // COMMITTED routes only (``Grid3D::stored_segments``); copper of the route
+    // being searched is the segment-emit side's job.
+    if (rules_.same_net_trace_gap_band_edge_mm > 0.0f) {
+        const auto [wx, wy] = grid_.grid_to_world(x, y);
+        const double half = search_via_half_diam_mm_ > 0
+            ? search_via_half_diam_mm_ : rules_.via_diameter / 2.0;
+        const double edge = rules_.same_net_trace_gap_band_edge_mm;
+        const float reach = static_cast<float>(half + edge);
+        const auto candidates = grid_.route_geometry_candidates(wx - reach, wy - reach,
+                                                                wx + reach, wy + reach);
+        for (const size_t i : candidates.first) {
+            const auto& seg = grid_.stored_segments()[i];
+            if (seg.net != net) continue;
+            if (same_net_segment_gap_in_band(static_cast<double>(wx),
+                                             static_cast<double>(wy), half, seg, edge))
+                return true;
+        }
+    }
+
     if (!rules_.allow_smd_vias) {
         const auto [wx, wy] = grid_.grid_to_world(x, y);
         const float drill_radius = rules_.via_drill / 2.0f;

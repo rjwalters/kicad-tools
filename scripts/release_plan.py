@@ -859,23 +859,39 @@ def request_main_ci(forge: Forge, sha: str) -> list[str]:
 
 
 def pr_checks_state(forge: Forge, sha: str) -> tuple[str, list[str]]:
-    """State of every ``pull_request`` workflow run on the release PR's head."""
+    """State of every ``pull_request`` workflow run on the release PR's head.
+
+    Per workflow the verdict is read from the newest run that actually
+    produced one -- a completed run whose conclusion is set and is not
+    ``skipped`` -- not from the newest run outright: a job-level ``if:`` that
+    skips an event (the Changelog workflow on non-``changelog:skip`` label
+    events, issue #8434) still records a newer ``skipped`` run, and that
+    no-verdict run must not supersede the substantive verdict it followed.
+    Pending detection stays on the newest run per workflow regardless of
+    conclusion, so a substantive re-run in flight still parks the gate.
+    """
     runs = [r for r in forge.runs_for_sha(sha) if r.get("event") == "pull_request"]
     latest: dict[Any, dict[str, Any]] = {}
+    verdicted: dict[Any, dict[str, Any]] = {}
     for run in runs:
         key = run.get("workflow_id") or run.get("path")
-        if key not in latest or (run.get("created_at") or "") > (
-            latest[key].get("created_at") or ""
-        ):
+        created = run.get("created_at") or ""
+        if key not in latest or created > (latest[key].get("created_at") or ""):
             latest[key] = run
-    ci = [r for r in latest.values() if (r.get("path") or "").endswith(CI_WORKFLOW_FILE)]
+        conclusion = run.get("conclusion")
+        if run.get("status") == "completed" and conclusion and conclusion != "skipped":
+            cur = verdicted.get(key)
+            if cur is None or created > (cur.get("created_at") or ""):
+                verdicted[key] = run
+    chosen = {key: verdicted.get(key, run) for key, run in latest.items()}
+    ci = [r for r in chosen.values() if (r.get("path") or "").endswith(CI_WORKFLOW_FILE)]
     if not ci:
         return "pending", [f"no CI pull_request run on {sha[:12]} yet"]
     pending = [r for r in latest.values() if r.get("status") != "completed"]
     if pending:
         return "pending", [f"{r.get('name')} run {r['id']} is {r.get('status')}" for r in pending]
     problems: list[str] = []
-    for run in latest.values():
+    for run in chosen.values():
         jobs = forge.run_jobs(run["id"])
         required = RELEASE_JOBS if run in ci else ()
         problems += evaluate_jobs(jobs, required)

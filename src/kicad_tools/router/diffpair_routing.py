@@ -6563,10 +6563,71 @@ class DiffPairRouter:
         net: int,
         width: float,
     ) -> bool:
-        """True when a candidate span keeps foreign-pad clearance (#4571)."""
-        return (
-            self._span_pad_deficit(x1, y1, x2, y2, layer_idx, net, width) <= _SHADOW_PAD_DEFICIT_EPS
+        """True when a candidate span keeps foreign-pad clearance (#4571) and
+        stays out of the own-net pad slit band (#9140)."""
+        return self._span_pad_deficit(
+            x1, y1, x2, y2, layer_idx, net, width
+        ) <= _SHADOW_PAD_DEFICIT_EPS and self._span_own_net_pad_band_ok(
+            x1, y1, x2, y2, layer_idx, net, width
         )
+
+    def _span_own_net_pad_band_ok(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        layer_idx: int,
+        net: int,
+        width: float,
+    ) -> bool:
+        """True when a span keeps the fab slit band clear of its OWN-net SMD pads.
+
+        Issue #9140: :meth:`_span_pad_deficit` skips same-net pads, so the
+        coupled pose / trunk legs and the synthesized stub tail could skirt
+        their own pad inside the fab ``pad_spacing`` band (board 06 LVDS:
+        0.1275 mm < 0.15 mm, ``physical_copper_gap``).  This is the
+        two-region rule of
+        :func:`~kicad_tools.router.via_clearance.same_net_segment_pad_gap_acceptable`
+        -- union with the pad (``gap <= 0``) or clear of the detection edge --
+        measured with the kernel's true pad outline (rotated roundrects) so it
+        agrees with ``kct check``.  The edge is the caller-resolved
+        ``DesignRules.same_net_pad_gap_band_edge_mm`` (``None``/0 keeps the
+        guard off, as for the single-net A*, #9018).  Only own-net SMD pads on
+        the span's layer are consulted; foreign-pad logic is unchanged.
+        """
+        edge_mm = float(getattr(self.autorouter.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
+        if edge_mm <= 0.0:
+            return True
+        grid = self.autorouter.grid
+        layer = Layer(grid.index_to_layer(layer_idx))
+        probe = segment_shape(
+            Segment(
+                x1=x1,
+                y1=y1,
+                x2=x2,
+                y2=y2,
+                width=width,
+                layer=layer,
+                net=net,
+                net_name="",
+            )
+        )
+        reach = width / 2.0 + edge_mm + 0.5
+        lo_x, hi_x = min(x1, x2) - reach, max(x1, x2) + reach
+        lo_y, hi_y = min(y1, y2) - reach, max(y1, y2) + reach
+        for pad in grid.pads:
+            if pad.net != net or pad.through_hole or getattr(pad, "drill", 0.0) > 0.0:
+                continue
+            if pad.layer.value != layer.value:
+                continue
+            ext = max(pad.width, pad.height)  # conservative broad phase (rotation-safe)
+            if not (lo_x - ext <= pad.x <= hi_x + ext and lo_y - ext <= pad.y <= hi_y + ext):
+                continue
+            gap = copper_gap(probe, pad_shape(pad))
+            if _SHADOW_PAD_DEFICIT_EPS < gap < edge_mm - _SHADOW_PAD_DEFICIT_EPS:
+                return False
+        return True
 
     def _segment_pad_clear(self, seg: Segment) -> bool:
         """True when an assembled segment keeps foreign-pad clearance (#4571)."""
@@ -6580,6 +6641,28 @@ class DiffPairRouter:
             seg.net,
             seg.width,
         )
+
+    def _segment_own_net_pad_band_ok(self, seg: Segment) -> bool:
+        """True when an assembled segment keeps the own-net pad slit band clear (#9140)."""
+        grid = self.autorouter.grid
+        return self._span_own_net_pad_band_ok(
+            seg.x1,
+            seg.y1,
+            seg.x2,
+            seg.y2,
+            grid.layer_to_index(seg.layer.value),
+            seg.net,
+            seg.width,
+        )
+
+    def _route_own_net_pad_band_ok(self, route: Route) -> bool:
+        """True when every assembled segment keeps the own-net pad band clear (#9140).
+
+        Vias are not swept: their seats are the #8994 guards' domain (the C++
+        joint search band-checks them in-search; the single-ended producers
+        were guarded by #8974/#9019).
+        """
+        return all(self._segment_own_net_pad_band_ok(seg) for seg in route.segments)
 
     def _via_pad_deficit(self, via: Via) -> float:
         """Worst exact clearance deficit of a via vs FOREIGN pads (#4571).
@@ -6665,10 +6748,32 @@ class DiffPairRouter:
         Returns ``(reason, violation)``.  ``reason`` is ``None`` when the
         candidate may be committed, else a short description; ``violation`` is
         the (possibly mild) #3320 intra-pair clearance finding, which the
-        committed candidate buffers for Phase B.  The gates are the #3320
-        severe centreline overlap and the #6840 via-aware physical overlap,
-        applied identically to the joint and the pose-centreline candidate.
+        committed candidate buffers for Phase B.  The gates are the #9140
+        own-net pad slit-band sweep, the #3320 severe centreline overlap and
+        the #6840 via-aware physical overlap, applied identically to the
+        joint and the pose-centreline candidate.
+
+        Issue #9140 (AC2): the joint candidate's legs come from a search whose
+        per-step gates hold copper to authored minima only, so a leg can skirt
+        its own SMD pad inside the fab slit band -- Python A* and the
+        reconstructed C++ joint path alike (the pose candidate's legs were
+        already re-verified through the identical predicate via its
+        ``span_check``).  Sweeping assembled copper here judges both
+        candidates by one rule, so the two backends cannot drift.
         """
+        for route in (p_route, n_route):
+            if not self._route_own_net_pad_band_ok(route):
+                print(
+                    f"    WARNING: Coupled candidate leg skirts own-net pad "
+                    f"inside the slit band ({route.net_name}); rejecting "
+                    "candidate."
+                )
+                logger.warning(
+                    "diffpair coupled candidate REJECTED by own-net pad band: pair=%r rail=%r",
+                    pair.name,
+                    route.net_name,
+                )
+                return "own-net-pad-band", None
         violation = find_intra_pair_clearance_violations(
             p_route,
             n_route,
@@ -13746,6 +13851,15 @@ class DiffPairRouter:
                 # or restore the original routes).
                 return [], None
             p_route, n_route = result
+            # Issue #9140: the fine-grid repair emits joint-search legs the
+            # same way -- hold them to the own-net pad slit band before they
+            # can replace the ripped-up copper.  Abandoning mirrors the
+            # failed-spec handling above: the caller restores the original
+            # routes and keeps the violation state.
+            if not self._route_own_net_pad_band_ok(p_route) or not self._route_own_net_pad_band_ok(
+                n_route
+            ):
+                return [], None
             produced_routes.append(p_route)
             produced_routes.append(n_route)
 

@@ -14,6 +14,14 @@ name: CI
 #   - workflow_dispatch: an on-demand full verification, never skipped (the
 #     daily release gate in scripts/release_plan.py dispatches one when the
 #     SHA it gates has no main run yet).
+#   - merge_group (Issue #9299): one run per GitHub merge-queue entry
+#     (`checks_requested`), validating the COMBINED queue tree -- the queue
+#     commit GitHub built from the queued PR(s) on top of main -- before the
+#     queue may merge it. There is no PR to read on this event, so every
+#     job's gate below treats it like a main verification run (`!= 'pull_request'`)
+#     and runs the full suite unconditionally; `changes` path filtering stays
+#     a pull_request-only gate. Runs only once the operator enables a merge
+#     queue rule (a separate rollout step).
 # Every non-`pull_request` event is therefore a "main verification run", and
 # the job gates below test `github.event_name != 'pull_request'` (never
 # `== 'push'`, which would now silently skip them). A break that only appears
@@ -21,6 +29,8 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  merge_group:
+    types: [checks_requested]
   schedule:
     - cron: "17 0-3,5-23 * * *"
     - cron: "17 4 * * *"
@@ -58,9 +68,15 @@ env:
 # runs. Scheduled runs (hourly and nightly) share the `nightly` key; a
 # workflow_dispatch run on main lands in the `ci` key. Since Issue #5986 main
 # runs come from the schedule above, not from every merge.
+#
+# Merge-group runs (Issue #9299) are keyed by `github.sha` -- the queue
+# commit, unique per queue entry -- and are never cancelled or superseded:
+# each entry validates its own combined tree, and a PR push (a different
+# group) cannot cancel a queue entry's started run. The PR/push/schedule
+# groups are byte-identical to the pre-merge-queue template.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'schedule' && 'nightly' || 'ci' }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ${{ github.event_name == 'merge_group' && format('ci-merge-group-{0}', github.sha) || format('ci-{0}-{1}-{2}', github.workflow, github.ref, github.event_name == 'schedule' && 'nightly' || 'ci') }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' && github.ref != 'refs/heads/main' }}
 
 jobs:
   # Bridge job (#5682): republishes the workflow-level KICAD_IMAGE env value
@@ -127,16 +143,24 @@ jobs:
   # green. Content contracts still run in lint.
   changes:
     name: Detect Changes
+    # merge-group-audit: pr-only -- path groups gate PR runs only; merge_group
+    # runs take the `!= 'pull_request'` branch of every dependent job's gate
+    # and run the full suite on the combined tree (Issue #9299).
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     permissions:
       pull-requests: read
     outputs:
-      code: ${{ steps.filter.outputs.code }}
-      board00: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board00 == 'true') }}
-      board06: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board06 == 'true') }}
-      board07: ${{ steps.shared.outputs.shared == 'true' || (steps.filter.outputs.code == 'true' && steps.boards.outputs.board07 == 'true') }}
-      site: ${{ steps.site.outputs.site }}
+      # Issue #9245: every output folds in "its step failed" (`outcome ==
+      # 'failure'`) so a transient paths-filter/listFiles 5xx means
+      # "assume changed" -- never an empty value that downstream
+      # `== 'true'` conditions would read as "nothing changed" (a false
+      # green that skips every job).
+      code: ${{ steps.filter.outcome == 'failure' || steps.filter.outputs.code == 'true' }}
+      board00: ${{ steps.shared.outcome == 'failure' || steps.shared.outputs.shared == 'true' || ((steps.filter.outcome == 'failure' || steps.filter.outputs.code == 'true') && (steps.boards.outcome == 'failure' || steps.boards.outputs.board00 == 'true')) }}
+      board06: ${{ steps.shared.outcome == 'failure' || steps.shared.outputs.shared == 'true' || ((steps.filter.outcome == 'failure' || steps.filter.outputs.code == 'true') && (steps.boards.outcome == 'failure' || steps.boards.outputs.board06 == 'true')) }}
+      board07: ${{ steps.shared.outcome == 'failure' || steps.shared.outputs.shared == 'true' || ((steps.filter.outcome == 'failure' || steps.filter.outputs.code == 'true') && (steps.boards.outcome == 'failure' || steps.boards.outputs.board07 == 'true')) }}
+      site: ${{ steps.site.outcome == 'failure' || steps.site.outputs.site == 'true' }}
     steps:
       # Issue #5366: a single combined `!(a|b|c|...)` extglob only excludes
       # one path segment below each alternative (picomatch/extglob
@@ -151,6 +175,7 @@ jobs:
       # regression coverage this depends on.
       - uses: dorny/paths-filter@v4
         id: filter
+        continue-on-error: true  # Issue #9245: transient listFiles 5xx -> assume changed
         with:
           predicate-quantifier: every
           filters: |
@@ -179,6 +204,7 @@ jobs:
       # trigger boards 00/06.
       - uses: dorny/paths-filter@v4
         id: boards
+        continue-on-error: true  # Issue #9245: transient listFiles 5xx -> assume changed
         with:
           filters: |
             board00:
@@ -190,6 +216,7 @@ jobs:
 
       - uses: dorny/paths-filter@v4
         id: shared
+        continue-on-error: true  # Issue #9245: transient listFiles 5xx -> assume changed
         with:
           predicate-quantifier: every
           filters: |
@@ -222,6 +249,7 @@ jobs:
       # README/docs it links into (anchors and paths are tested).
       - uses: dorny/paths-filter@v4
         id: site
+        continue-on-error: true  # Issue #9245: transient listFiles 5xx -> assume changed
         with:
           filters: |
             site:
@@ -234,6 +262,13 @@ jobs:
               - 'src/kicad_tools/agent_surfaces.py'
               - 'src/kicad_tools/mcp/tools/registry.py'
               - 'src/kicad_tools/agent_skills/kct/**'
+
+      # Issue #9245: make the over-run visible. A failed filter step is
+      # tolerated (continue-on-error) and its output treated as "changed".
+      - name: Warn on failed path filter
+        if: ${{ steps.filter.outcome == 'failure' || steps.boards.outcome == 'failure' || steps.shared.outcome == 'failure' || steps.site.outcome == 'failure' }}
+        run: |
+          echo "::warning title=paths-filter failed::A dorny/paths-filter step failed (likely a transient GitHub API error). Treating its outputs as changed so dependent jobs run (fail-open)."
 
   # Issue #7665: run the website's own checks. Dependabot /site bumps are
   # ordinary pull_request events, so they trigger this via the `site` filter.
@@ -332,7 +367,10 @@ jobs:
   typecheck:
     name: Type Check
     needs: kicad_pin
-    if: needs.kicad_pin.outputs.skip != 'true'
+    # merge_group: runs unconditionally; the kicad_pin `skip` output is only
+    # ever 'true' on the hourly schedule, so the PR/main gate is unchanged
+    # (Issue #9299).
+    if: github.event_name == 'merge_group' || needs.kicad_pin.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -367,7 +405,7 @@ jobs:
   test:
     name: Test
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && (github.event_name == 'merge_group' || (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     # GitHub-hosted for every event (Issue #6013). It used to run on a
     # self-hosted runner for main pushes and same-repo PRs, where it took
     # ~30 min; on ubuntu-latest every step runs ~2.2x slower (#5747), so the
@@ -462,9 +500,10 @@ jobs:
       # fire inside the queue wait, killing tests that were merely queued.
       # See src/kicad_tools/native_concurrency.py "Timeout credit".
       KCT_NATIVE_MAX_CONCURRENCY: "2"
-      # Explicit diagnostic opt-in only; PR body is evaluated, never passed
-      # into shell or retained. Pushes/absent markers leave the wrapper inert.
-      KCT_NATIVE_DIAGNOSTICS: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.body, '<!-- kct:native-diagnostics -->') }}
+      # Explicit diagnostic opt-in only. KCT_NATIVE_DIAGNOSTICS is set by the
+      # "Resolve native diagnostics opt-in" step below (Issue #9120), not here:
+      # a job-level contains() on the PR body is an unanchored substring test,
+      # so a PR that merely quoted the marker in prose opted itself in.
       KCT_OBSERVER_PR_HEAD: ${{ github.event.pull_request.head.sha }}
     # Issue #5747/#6013/#5768: one hosted runner, so one budget. Measured
     # 2026-10-10 over the 25 most recent successful PR `Test` jobs (workflow
@@ -587,6 +626,14 @@ jobs:
         # safe.directory entry lives in a temporary HOME and is removed
         # afterwards, so persist one for the rest of the job.
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Resolve native diagnostics opt-in
+        # Issue #9120: opt in only when the PR body carries the
+        # `kct:native-diagnostics` comment alone on its own line (outside a
+        # code fence). The body is read from the event JSON by the script,
+        # never interpolated into shell or retained; only true/false is
+        # written to GITHUB_ENV. Pushes and absent markers stay inert.
+        run: python3 scripts/ci/native_diagnostics_optin.py
 
       - name: Initialize stock KiCad libraries
         run: python3 scripts/ci/init_kicad_libraries.py
@@ -765,10 +812,23 @@ jobs:
         # against the retained pre-fix baseline this fails on the bulk group
         # (observed native concurrency 4), so a green result here is evidence
         # rather than a lucky retry. Additive gate: it can only add failures.
+        #
+        # STATED TOLERANCE (Issue #9120): --tolerance-seconds 1 lets native
+        # concurrency spend up to 1 s above the bound, so a green here is
+        # "no OOM, no unbounded launch, and at most 1 s above the bound", not
+        # "never above it". Measured on run 44026950753 (bulk, 2041.6 s):
+        # 0.272 s at 3 processes, from a kicad-cli started by a `bash -c` gate
+        # block of tests/test_signoff_skill_e2e.py -- the flock gate wraps
+        # Python's subprocess.Popen only, so a shell-launched kicad-cli is
+        # outside it (gate unbounded_launches was 0). The run's separate
+        # "permit concurrency 3" figure was a log-ordering artifact, fixed in
+        # native_concurrency._Permit.release. Anything longer, any OOM and any
+        # unbounded launch still fails.
         if: ${{ always() && env.KCT_NATIVE_DIAGNOSTICS == 'true' }}
         run: |
           python3 scripts/ci/analyze_native_observations.py "$RUNNER_TEMP/native-observer" \
             --max-concurrency "$KCT_NATIVE_MAX_CONCURRENCY" \
+            --tolerance-seconds 1 \
             --simulate-bound 1 --simulate-bound 2 --simulate-bound 4 \
             --json "$RUNNER_TEMP/native-observer/attribution.json"
 
@@ -827,7 +887,7 @@ jobs:
     # gets full coverage on every scheduled run.
     name: Test (extended)
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') }}
+    if: ${{ !cancelled() && (github.event_name == 'merge_group' || (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true')) }}
     runs-on: ubuntu-latest
     env:
       PYTEST_XDIST_AUTO_NUM_WORKERS: "4"
@@ -902,7 +962,7 @@ jobs:
     # fall back to Python and fail this check with an actionable message.
     name: C++ Build Check
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && (github.event_name == 'merge_group' || (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -993,7 +1053,7 @@ jobs:
     needs: [changes, kicad_pin]
     # Issue #7327: main runs (schedule/workflow_dispatch) gate on
     # `!= 'pull_request'`, never `== 'push'` (no push trigger since #5986).
-    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && (github.event_name == 'merge_group' || (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -1094,7 +1154,7 @@ jobs:
   kicad-cli-smoke:
     name: kicad-cli Round-trip Smoke
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && (github.event_name == 'merge_group' || (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Separate job: a regression gate that PCB files emitted by kicad-tools'
@@ -1218,7 +1278,7 @@ jobs:
     # fail, but the gate can land before every board reaches 0 errors.
     name: Routed PCB DRC Check
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && (github.event_name == 'merge_group' || (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -1415,7 +1475,7 @@ jobs:
     # the merge button.
     name: Diff-Pair Routing Regression
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') }}
+    if: ${{ !cancelled() && (github.event_name == 'merge_group' || (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true')) }}
     # Runs on the fleet's dedicated CI runner (2AMLogic/2am#29; ten slots for
     # this repo since the 2026-09-11 resize) for main pushes AND same-repo PRs;
     # fork PRs route back to GitHub-hosted instead of being skipped, so no
@@ -1673,9 +1733,14 @@ jobs:
 
   matchgroup-routing-regression:
     # Board 07 CI is enabled via the repository variable vars.BOARD_07_CI_ENABLED
-    # (#5097 suspension ended; #5164).
+    # (#5097 suspension ended; #5164). Merge-group runs bypass the variable
+    # deliberately (Issue #9299): a queue gate must provably report on every
+    # group, and `vars.*` is unknowable statically. The variable remains the
+    # suspension switch for PR and main runs; on a merge group a suspended
+    # board's failure is advisory (it gates merges only if the rollout makes
+    # it a required queue check).
     needs: [changes, kicad_pin]
-    if: ${{ (vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board07 == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ github.event_name == 'merge_group' || ((vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board07 == 'true' || needs.changes.result == 'failure')) }}
     # Issue #2726 / Epic #2661 Phase 3N: re-route board 07 (the
     # N-trace match-group testbench, #2724 Phase 3L) from scratch on
     # every PR and verify that
@@ -1977,7 +2042,7 @@ jobs:
     # ``diffpair-routing-regression`` and ``matchgroup-routing-regression``.
     name: Board 00 End-to-End
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board00 == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && (github.event_name == 'merge_group' || (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board00 == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     # The recipe is ~30 seconds locally (1 signal net + 2 pour nets),
     # the C++ backend build is ~2 min, ``kct export`` + ``kct check`` +
@@ -2125,7 +2190,7 @@ jobs:
     # Issue #5743 item 4 (operator ruling 2026-10-17): main verification
     # runs only -- boards 01-05 do not run on pull requests; boards 00
     # and 06 are the PR-side representatives. See the `changes` job.
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') }}
+    if: ${{ !cancelled() && (github.event_name == 'merge_group' || (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     container:
@@ -2222,7 +2287,7 @@ jobs:
     # Issue #5743 item 4 (operator ruling 2026-10-17): main verification
     # runs only -- boards 01-05 do not run on pull requests; boards 00
     # and 06 are the PR-side representatives. See the `changes` job.
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') }}
+    if: ${{ !cancelled() && (github.event_name == 'merge_group' || (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     container:
@@ -2339,7 +2404,7 @@ jobs:
     # Issue #5743 item 4 (operator ruling 2026-10-17): main verification
     # runs only -- boards 01-05 do not run on pull requests; boards 00
     # and 06 are the PR-side representatives. See the `changes` job.
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') }}
+    if: ${{ !cancelled() && (github.event_name == 'merge_group' || (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container:
@@ -2519,7 +2584,7 @@ jobs:
     # board 00/01 e2e jobs).
     name: Board 06 End-to-End (LVS)
     needs: [changes, kicad_pin]
-    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board06 == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ !cancelled() && (github.event_name == 'merge_group' || (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board06 == 'true' || needs.changes.result == 'failure') }}
     # Runs on the fleet's dedicated CI runner (2AMLogic/2am#29; ten slots for
     # this repo since the 2026-09-11 resize) for main pushes AND same-repo PRs;
     # fork PRs route back to GitHub-hosted instead of being skipped, so no
@@ -2684,9 +2749,11 @@ jobs:
 
   board-07-end-to-end:
     # Board 07 CI is enabled via the repository variable vars.BOARD_07_CI_ENABLED
-    # (#5097 suspension ended; #5164).
+    # (#5097 suspension ended; #5164). Merge-group runs bypass the variable
+    # deliberately -- same rationale as `matchgroup-routing-regression` above
+    # (Issue #9299).
     needs: [changes, kicad_pin]
-    if: ${{ (vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board07 == 'true' || needs.changes.result == 'failure') }}
+    if: ${{ github.event_name == 'merge_group' || ((vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board07 == 'true' || needs.changes.result == 'failure')) }}
     # Issue #3779: end-to-end gate for board 07 ("matchgroup-test").  The
     # fixture schematic is FULLY WIRED (#4012: 244/244 pads bound), so the
     # copper comparator carries real evidence.  Issue #7557 moved U4's TMDS
@@ -2943,7 +3010,7 @@ jobs:
     # Issue #5743 item 4 (operator ruling 2026-10-17): main verification
     # runs only -- boards 01-05 do not run on pull requests; boards 00
     # and 06 are the PR-side representatives. See the `changes` job.
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') }}
+    if: ${{ !cancelled() && (github.event_name == 'merge_group' || (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     container:
@@ -3087,7 +3154,7 @@ jobs:
     # Issue #5743 item 4 (operator ruling 2026-10-17): main verification
     # runs only -- boards 01-05 do not run on pull requests; boards 00
     # and 06 are the PR-side representatives. See the `changes` job.
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') }}
+    if: ${{ !cancelled() && (github.event_name == 'merge_group' || (github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container:

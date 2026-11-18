@@ -20,23 +20,33 @@ BOARDS_DIR = Path(__file__).resolve().parent.parent / "boards"
 # directory name.  Each entry cites the issue that owns the refresh; remove the
 # entry when that lands (strict xfail turns an unexpected pass into a failure).
 EXPECTED_STALE: dict[str, str] = {
-    # Issue #9058: PR #8848 kept its regenerated board 01 copper (VOUT
-    # sharp_trace_corner wedge removed) over main's, so the evidence main
-    # re-pinned for #8937's ``.kicad_dru`` no longer applies.  Stale input:
-    # the routed ``.kicad_dru`` only; the refill under it agrees with the
-    # saved copper.  Since #9064 (closing #9009) ``mask_to_copper`` runs to
-    # completion under ``KCT_KICAD_DOCKER=1``, so the host is no longer the
-    # obstacle: the producer's ``kct check`` gate refuses on 12 completed,
-    # all same-net ``mask_to_copper`` errors (10 own-pad entry / same-net zone
-    # exposures that main's own board 01 also has, plus 2 same-net VOUT via
-    # pass-throughs at R1.2/R2.1).  Native DRC (saved and refilled), LVS,
-    # zone_fill, artifacts and bom pass.  The re-pin waits on mask_to_copper
-    # qualifying same-net exposures; #9058 owns it.
+    # Issue #9058: board 01's recipe now slides the two VOUT vias out of
+    # R1.2/R2.1's mask apertures and re-fills the pours after the
+    # fiducials land (plus UUID canonicalization), so a fresh regen no
+    # longer carries the 2 via pass-through errors and is byte-stable
+    # across runs.  The re-pin itself still waits on the operator's
+    # review of the five same-net own-pour zone findings (J1.2/J2.2
+    # front+back, R2.2) -- declaration review per the operator ruling,
+    # not a rule change.  Remove the entry when the re-pin lands.
     "01-voltage-divider": (
-        "Issue #9058: board 01 copper from PR #8848 cannot be re-pinned under "
-        "#8937's .kicad_dru while kct check refuses on 12 same-net mask_to_copper "
-        "errors (check completes since #9064/#9009); waits on same-net "
-        "mask_to_copper qualification."
+        "Issue #9058: board 01 evidence is stale against the "
+        "recipe-repaired copper (vias slid out of the R1.2/R2.1 mask "
+        "apertures, pours refilled post-fiducials); the re-pin waits on "
+        "the operator's review of the 5 same-net own-pour "
+        "mask_to_copper findings."
+    ),
+    # PR #9177 (issue #9143) landed the fiducials + board-ID silk on board 03
+    # and refreshed its evidence, but deliberately did NOT re-issue the
+    # readiness receipt: every fresh board-03 receipt is blocked (385
+    # same-net mask_to_copper errors, #8900/#9144), and whether that demotes
+    # board 03 from the ready set is the operator decision parked in #9144
+    # (recommended: keep ready).  Until #9144 lands, main's 2026-10-21 ready
+    # receipt stays committed and goes stale against the #9143 tree change.
+    "03-usb-joystick": (
+        "Issue #9144: board 03's tree moved in #9143 (fiducials, board-ID "
+        "silk, refreshed evidence) while every fresh receipt is blocked; the "
+        "pending ready/demote decision owns the re-pin. Remove when #9144 "
+        "lands."
     ),
     # Issue #8937 (PR #8955) re-emitted the routed ``.kicad_dru`` of the
     # boards whose recipes byte-reproduce it (01/05/06; the recipe-replay

@@ -22,7 +22,7 @@ from kicad_tools.router.pairplan.outcome import (
     segment_record,
 )
 
-#: Every segment-level outcome string the lattice engine and core produce.
+#: Known segment-level outcome strings the lattice engine and core produce.
 _DECLINES = [
     "pair-no-path",
     "pair-no-path-keepout-constrained",
@@ -34,6 +34,7 @@ _DECLINES = [
     "pair-polarity-twist",
     "pair-pad-attach",
     "pair-leg-blocked",
+    "pair-leg-own-net-pad-band",
     "pair-leg-keepout",
     "pair-leg-pairwise-blocked",
     "pair-intra-clearance",

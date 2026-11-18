@@ -160,6 +160,16 @@ def _inventory(tree):
                 "layer": node.find_child("layer").get_string(0) if node.find_child("layer") else "",
                 "coordinate_frame": "board",
             }
+        # A rule area (a zone carrying a ``(keepout ...)`` child) plots no
+        # copper and has no mask presence, whatever layers it spans or whether
+        # it sits at board level or inside a footprint (#9234). Requiring a
+        # native object for it made every board using a stock module
+        # footprint with a built-in antenna keepout read incomplete, so it is
+        # not part of the plotted-object inventory at all; the worker's
+        # reverse scan skips it symmetrically. No zone child is itself a
+        # plotted object, so the subtree needs no visit.
+        if node.name == "zone" and node.find_child("keepout") is not None:
+            return
         is_object = node.name in object_tags or node.name.startswith(("fp_", "gr_"))
         if is_object:
             layer = node.find_child("layer")

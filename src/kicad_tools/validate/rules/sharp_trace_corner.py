@@ -24,6 +24,23 @@ the observed fab behaviour, not looser.  Eight unflagged two-segment bends on
 that board look like the flagged three; they are unknown, not negatives, so
 they were not used to narrow the rule.  The angle threshold was not changed.
 
+Sub-types (issue #9037): every finding carries ``corner_class`` --
+``"bend"`` when exactly two segments meet at the vertex (the population
+JLCDFM was observed to flag) or ``"junction"`` when three or more do.
+Reporting is unchanged -- the tag only makes the populations separable, so
+a consumer can gate on the fab-equivalent two-segment subset.  Stacked
+duplicate segments count once, so a duplicated bend is not misclassified
+as a junction.  The fab-DFM parity table attributes only the bend
+population to JLCDFM's category (``sharp_trace_corner#bend``).
+
+Inner layers (issue #9037 decision): in scope.  The fab's three flagged
+vertices on the consumer board were all on outer layers (F.Cu/B.Cu), so
+inner-layer behaviour was never observed from the fab either way; the rule
+still reports inner-layer acute corners like outer ones because the angle
+geometry of an acid trap is layer-independent and the findings are
+warnings (a plain ``kct check`` still exits 0).  The same-net through-via
+burial exemption applies on inner layers via :func:`_covers_layer`.
+
 Rule ID generated:
     - sharp_trace_corner: two same-net, same-layer segments meet at an angle
       below the limit, away from same-net pad/via copper on that layer.
@@ -143,9 +160,18 @@ def _wedge_is_open(seg1, seg2, junction: tuple[float, float], angle_deg: float) 
     the legs only separate at ``s0 = (w1 + w2) / (4 sin(theta / 2))`` along the
     legs, so a leg shorter than that (a width-filled hairpin) leaves solid
     copper, and a thin leg lying entirely inside a wider one adds no notch.
+
+    The router's ``acute_foldback.wedge_is_open`` is a second copy of this
+    predicate; ``tests/router/test_acute_foldback_parity_8930.py`` drives both
+    over one shared geometry table, so a change to either exemption fails there.
     """
     half = math.radians(angle_deg) / 2
-    s0 = (seg1.width + seg2.width) / (4 * math.sin(half))
+    sin_half = math.sin(half)
+    if sin_half <= 0.0:
+        # Collinear doubling-back: no wedge to be open.  Matches
+        # ``acute_foldback.wedge_is_open`` (Issue #8930).
+        return False
+    s0 = (seg1.width + seg2.width) / (4 * sin_half)
     p1, p2 = _far_end(seg1, junction), _far_end(seg2, junction)
     if min(math.dist(junction, p1), math.dist(junction, p2)) <= s0:
         return False
@@ -189,7 +215,7 @@ class SharpTraceCornerRule(DRCRule):
 
         # One report per (net, layer, location): stacked duplicate segments
         # would otherwise report the same vertex once per pair.
-        found: dict[tuple, tuple[float, str, str, tuple[float, float]]] = {}
+        found: dict[tuple, tuple[float, str, str, tuple[float, float], str, int]] = {}
         for mistake in check.check(pcb):
             net_name, layer = mistake.components[0], mistake.components[1]
             loc = mistake.location
@@ -207,6 +233,19 @@ class SharpTraceCornerRule(DRCRule):
                 for s in segs.get((net_numbers[net_name], layer), [])
                 if min(math.dist(loc, s.start), math.dist(loc, s.end)) < _JUNCTION_TOL * 1.5
             ]
+            # Count distinct legs: stacked duplicate segments (issue #8840's
+            # art artifact) share one (start, end) pair and must not turn a
+            # two-segment bend into a "junction" (issue #9037).
+            distinct: list = []
+            seen_edges: set[tuple[tuple[float, float], tuple[float, float]]] = set()
+            for s in touching:
+                p_a = (round(s.start[0], 2), round(s.start[1], 2))
+                p_b = (round(s.end[0], 2), round(s.end[1], 2))
+                edge = (p_a, p_b) if p_a <= p_b else (p_b, p_a)
+                if edge not in seen_edges:
+                    seen_edges.add(edge)
+                    distinct.append(s)
+            corner_class = "junction" if len(distinct) >= 3 else "bend"
             worst = None
             for i, s1 in enumerate(touching):
                 for s2 in touching[i + 1 :]:
@@ -218,21 +257,23 @@ class SharpTraceCornerRule(DRCRule):
                     if _wedge_is_open(s1, s2, loc, angle) and (worst is None or angle < worst):
                         worst = angle
             if worst is not None:
-                found[key] = (worst, net_name, layer, loc)
+                found[key] = (worst, net_name, layer, loc, corner_class, len(distinct))
 
-        for angle, net_name, layer, loc in found.values():
+        for angle, net_name, layer, loc, corner_class, n_legs in found.values():
+            kind = f"; {n_legs}-segment junction" if corner_class == "junction" else ""
             results.add(
                 DRCViolation(
                     rule_id=SHARP_TRACE_CORNER_RULE_ID,
                     severity="warning",
                     message=(
-                        f"Sharp trace corner of {angle:.1f} deg on {net_name} ({layer}); "
+                        f"Sharp trace corner of {angle:.1f} deg on {net_name} ({layer}){kind}; "
                         f"reroute with 45/90 deg corners"
                     ),
                     location=loc,
                     layer=layer,
                     actual_value=float(angle),
                     nets=(net_name,),
+                    corner_class=corner_class,
                 )
             )
         return results

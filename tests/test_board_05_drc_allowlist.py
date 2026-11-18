@@ -71,6 +71,29 @@ ALLOWLIST_PATH = REPO_ROOT / ".github" / "routed-drc-tolerance.yml"
 BOARD_05_ALLOWLIST_KEY = "boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb"
 
 
+def _load_gate_module():
+    """Import ``scripts/ci/check_routed_drc.py`` for its identity helpers.
+
+    The gate module's ``load_identity_allowances`` / ``identity_outcome``
+    are the single source of truth for how the YAML's identity_allowances
+    block is parsed and applied; importing them (instead of re-implementing
+    the keying here) keeps this mirror from drifting off the CI verdict.
+    """
+    import importlib.util
+
+    ci_dir = REPO_ROOT / "scripts" / "ci"
+    if str(ci_dir) not in sys.path:
+        sys.path.insert(0, str(ci_dir))
+    spec = importlib.util.spec_from_file_location(
+        "check_routed_drc_board05_mirror", ci_dir / "check_routed_drc.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["check_routed_drc_board05_mirror"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 @pytest.fixture(scope="module")
 def routed_pcb_path() -> Path:
     """Resolve the committed routed PCB or skip if absent."""
@@ -154,10 +177,10 @@ def _run_kct_check(pcb_path: Path) -> dict:
         # the profile inline to stay aligned with that verdict.
         "--mfr",
         "jlcpcb-tier1",
-        # Issue #8842: mask_to_copper is default-on under --mfr but has no baseline
-        # in this gate; skipped until the #8839 threshold table lands.
-        "--skip",
-        "mask_to_copper",
+        # Issue #8858: no --skip mask_to_copper any more -- the CI gate
+        # runs the rule and judges the committed board's residual
+        # population by identity (identity_allowances in the same YAML),
+        # so this mirror must see the same findings it does.
         "--errors-only",
         "--format",
         "json",
@@ -263,7 +286,20 @@ class TestBoard05DRCAllowlistGuard:
         from tests.test_board_05_drc_hotspot_regression import Board05DRCHotspotAssertions
 
         report = _run_kct_check(routed_pcb_path)
-        errors = _count_blocking_errors(report)
+        # Issue #8858: judge by identity exactly as the CI gate does --
+        # the YAML's identity_allowances entry for this board excepts the
+        # reviewed residual mask_to_copper population, a net outside it
+        # counts, and an entry whose finding stopped firing is stale and
+        # must be deleted (the #7270 Q3 model).  Without this the mirror
+        # would diverge from CI the moment the skip came out.
+        gate = _load_gate_module()
+        allowance = gate.load_identity_allowances(ALLOWLIST_PATH).get(BOARD_05_ALLOWLIST_KEY)
+        outcome = gate.identity_outcome(report, allowance)
+        errors = len(outcome.unallowed) if outcome.applied else _count_blocking_errors(report)
+        assert not outcome.stale, (
+            f"Stale identity allowance for board 05: {outcome.stale} -- "
+            f"delete the entries from {ALLOWLIST_PATH.relative_to(REPO_ROOT)!s}."
+        )
         # Check the same real-board result once, including every former
         # hotspot guard. Separate subprocesses repeated this 8,114-segment
         # check five times and competed for CPU under xdist.

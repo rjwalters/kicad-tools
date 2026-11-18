@@ -20,7 +20,7 @@
         "USB_MCU_D-"
       ],
       "deterministic_rescue": false,
-      "cmd": "-m kicad_tools.cli route /tmp/r6697d/pairs/03-lattice-s42/r0/usb_joystick.kicad_pcb -o /tmp/r6697d/pairs/03-lattice-s42/r0/usb_joystick_routed.kicad_pcb --timeout 900 --no-cache --route-engine lattice --strategy basic --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --net-class-map /home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6697/boards/03-usb-joystick/output/net_class_map.json --seed 42",
+      "cmd": "-m kicad_tools.cli route /tmp/r6697d/pairs/03-lattice-s42/r0/usb_joystick.kicad_pcb -o /tmp/r6697d/pairs/03-lattice-s42/r0/usb_joystick_routed.kicad_pcb --timeout 900 --no-cache --route-engine lattice --strategy basic --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --net-class-map .loom/worktrees/issue-6697/boards/03-usb-joystick/output/net_class_map.json --seed 42",
       "exit_code": 0,
       "wall_s": 164.6,
       "killed_by_harness": false,
@@ -241,7 +241,7 @@
         "USB_MCU_D-"
       ],
       "deterministic_rescue": false,
-      "cmd": "-m kicad_tools.cli route /tmp/r6697d/pairs/03-lattice-s43/r0/usb_joystick.kicad_pcb -o /tmp/r6697d/pairs/03-lattice-s43/r0/usb_joystick_routed.kicad_pcb --timeout 900 --no-cache --route-engine lattice --strategy basic --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --net-class-map /home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6697/boards/03-usb-joystick/output/net_class_map.json --seed 43",
+      "cmd": "-m kicad_tools.cli route /tmp/r6697d/pairs/03-lattice-s43/r0/usb_joystick.kicad_pcb -o /tmp/r6697d/pairs/03-lattice-s43/r0/usb_joystick_routed.kicad_pcb --timeout 900 --no-cache --route-engine lattice --strategy basic --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --net-class-map .loom/worktrees/issue-6697/boards/03-usb-joystick/output/net_class_map.json --seed 43",
       "exit_code": 0,
       "wall_s": 167.9,
       "killed_by_harness": false,
