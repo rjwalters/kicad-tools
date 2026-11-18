@@ -186,7 +186,15 @@ relation is `overlap`, and the conductor and the opening's owner are pads of
 Merged openings, copper beside an opening, pads of different footprints or nets,
 and any track, via or pour keep their measured verdict. The fab's own DFM view
 cannot see footprints or nets, so this changes how kct reports the finding, not
-whether the fab accepts the board. `physical_copper_gap` is unchanged.
+whether the fab accepts the board.
+
+The same pair rule applies to the 2 oz pad mask-bridge check inside
+`physical_copper_gap` (`Pad mask bridge ... < 0.2000mm`): two pads of one
+footprint on one identical non-empty net read at **info**, still listed. There
+the fab evidence is located: JLCDFM measured the module's two 0.19 mm pad pairs
+and rated them Good under pad spacing, with an empty Soldermask bridge row. The
+rest of `physical_copper_gap` (pads of different footprints, different or
+missing nets, pad-to-track/via/zone gaps) is unchanged.
 
 ### A pad's own pour joined by thermal spokes: `own_pour_thermal`
 
