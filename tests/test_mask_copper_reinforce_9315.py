@@ -85,7 +85,12 @@ def _geometry(mask_pieces, copper_pieces):
 
 
 def straight_geometry(
-    neighbour=None, offrun=None, pad_on_run=False, stray_via=False, stray_strip=False
+    neighbour=None,
+    offrun=None,
+    pad_on_run=False,
+    stray_via=False,
+    stray_strip=False,
+    beside=False,
 ):
     """One straight reinforced leg: strip from anchor to anchor, untented anchors."""
     track = box(10.0, 9.75, 30.0, 10.25)
@@ -115,6 +120,10 @@ def straight_geometry(
         copper.append(("segment", "OTHER", {"F.Cu": box(15.0, 10.32, 18.0, 10.42)}))
     if offrun is not None:
         copper.append(("segment", "PWR", {"F.Cu": box(20.0, 9.5, 20.2, 10.5)}))
+    if beside:
+        # Same net, 0.07 mm off the strip edge: inside the clearance band but
+        # not under the strip, so it is not copper the run exposes (#9419).
+        copper.append(("segment", "PWR", {"F.Cu": box(20.0, 10.32, 20.2, 11.0)}))
     return _geometry(mask, copper)
 
 
@@ -187,11 +196,11 @@ def test_finding_message_names_run_and_net_relation():
     assert gated and all("reinforce run HS_POWER" in m for m in gated)
 
 
-def test_same_net_off_run_neighbour_still_reported():
-    geometry = straight_geometry(offrun=True)
+def test_same_net_beside_the_strip_still_reported():
+    geometry = straight_geometry(beside=True)
     result = assess_attributed_geometry(geometry, POLICY, (), [reinforce_record()])
     gated = [m for m in result.measurements if m.disposition == "violation"]
-    assert gated, "same-net off-run copper was excused"
+    assert gated, "same-net copper beside the strip was excused"
     assert {m.conductor_net for m in gated} == {"PWR"}
     assert {m.same_net for m in gated} == {True}
     # ...while the run's own copper on the same strip stays excused.
@@ -200,6 +209,14 @@ def test_same_net_off_run_neighbour_still_reported():
         "within_reinforce_run",
     }
     assert not result.passed
+
+
+def test_same_net_branch_under_the_strip_is_not_an_error():
+    """A branch teeing off the run inside the strip width is the wire's attachment (#9419)."""
+    geometry = straight_geometry(offrun=True)
+    result = assess_attributed_geometry(geometry, POLICY, (), [reinforce_record()])
+    assert result.passed
+    assert {m.disposition for m in result.measurements} == {"within_reinforce_run"}
 
 
 def test_strip_over_same_net_pad_on_the_run_is_excused():
@@ -225,7 +242,8 @@ def test_stray_untented_via_off_the_run_is_not_excused():
         if m.conductor_uuid == stray_uuid or stray_uuid in m.opening_uuids
     ]
     assert stray
-    assert {m.disposition for m in stray} == {"violation"}
+    own_measurements = [m for m in stray if stray_uuid in m.opening_uuids]
+    assert {m.disposition for m in own_measurements} == {"violation"}
     # Its opening is not attributed either: no owner net, no run. The stray
     # conductor measured against the attributed strip still names that run.
     own_opening = [m for m in stray if stray_uuid in m.opening_uuids]
@@ -234,6 +252,8 @@ def test_stray_untented_via_off_the_run_is_not_excused():
     over_strip = [m for m in stray if m.conductor_uuid == stray_uuid]
     assert over_strip
     assert {m.owner_run for m in over_strip} == {"HS_POWER"}
+    # Same-net copper the attributed strip passes over is excused (#9419).
+    assert {m.disposition for m in over_strip} == {"within_reinforce_run"}
 
 
 def _pad_beside_anchor_geometry(pad_net):

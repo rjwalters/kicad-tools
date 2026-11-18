@@ -246,6 +246,246 @@ def write_sidecar(board: Path, new_wires: list[dict[str, Any]]) -> Path:
     return path
 
 
+# ---------------------------------------------------------------- adopt (#9419)
+
+
+class AdoptResult:
+    """Outcome of :func:`adopt_wire_records`: records built, strips left unresolved."""
+
+    def __init__(self) -> None:
+        self.records: list[dict[str, Any]] = []
+        #: ``(net, layer, (x, y), why)``, sheet-absolute; reported, never guessed.
+        self.unresolved: list[tuple[str, str, tuple[float, float], str]] = []
+
+
+def _dist_to_seg(p: tuple[float, float], a: tuple[float, float], b: tuple[float, float]) -> float:
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    sq = dx * dx + dy * dy
+    if sq <= 1e-18:
+        return math.dist(p, a)
+    t = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / sq))
+    return math.dist(p, (a[0] + t * dx, a[1] + t * dy))
+
+
+def adopt_wire_records(pcb: Any, net: str | None = None) -> AdoptResult:
+    """Build wire records from strips and anchors already on the board (Issue #9419).
+
+    ``pcb reinforce`` leaves, per wire, one continuous solder-mask strip (a
+    chain of ``gr_line`` pieces on the leg's side's mask layer) from anchor to
+    anchor, and a plated anchor hole of the wire's drill at each end. A board
+    whose wires were re-laid by hand keeps both but loses the sidecar; this
+    reads them back, moving nothing. A strip chain becomes a record only when
+    every piece lies on one net's copper on the matching outer layer, the
+    chain is a simple open path, and each end stands on a same-net hole whose
+    drill is a supported wire gauge's anchor drill (both ends the same gauge).
+    Anything else is returned in ``unresolved`` rather than guessed.
+
+    ``net`` restricts the adoption to one net. Coordinates are written
+    sheet-absolute, like every other sidecar coordinate.
+    """
+    from kicad_tools.core.geometry import rotate_pad_offset
+    from kicad_tools.pcb.reinforce import MASK_LAYER_FOR_COPPER
+    from kicad_tools.physics.wire_gauge import anchor_drill_for_awg, supported_gauges
+    from kicad_tools.validate.rules.reinforcement_incomplete import (
+        DRILL_TOLERANCE_MM,
+        MASK_TOLERANCE_MM,
+    )
+
+    out = AdoptResult()
+    ox, oy = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+    Pt = tuple[float, float]
+
+    def absolute(p: Pt) -> Pt:
+        return (p[0] + ox, p[1] + oy)
+
+    wanted_number: int | None = None
+    if net is not None:
+        netobj = pcb.get_net_by_name(net)
+        if netobj is None:
+            return out
+        wanted_number = netobj.number
+    net_names = {number: n.name for number, n in pcb.nets.items()}
+
+    gauge_by_drill = [(awg, anchor_drill_for_awg(awg)) for awg in supported_gauges()]
+
+    def gauge_for(drill: float) -> int | None:
+        for awg, d in gauge_by_drill:
+            if abs(d - drill) <= DRILL_TOLERANCE_MM:
+                return awg
+        return None
+
+    # Same-net holes, board-relative: (net_number, centre, drill).
+    holes: list[tuple[int, Pt, float]] = [
+        (v.net_number, (v.position[0], v.position[1]), v.drill) for v in pcb.vias if v.drill > 0
+    ]
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if pad.type != "thru_hole" or pad.drill <= 0:
+                continue
+            off = rotate_pad_offset(pad.position[0], pad.position[1], fp.rotation)
+            holes.append(
+                (pad.net_number, (fp.position[0] + off[0], fp.position[1] + off[1]), pad.drill)
+            )
+
+    for copper, mask in MASK_LAYER_FOR_COPPER.items():
+        pieces = [
+            ((g.start[0] - ox, g.start[1] - oy), (g.end[0] - ox, g.end[1] - oy))
+            for g in pcb.graphic_lines
+            if g.layer == mask and math.dist(g.start, g.end) > 1e-9
+        ]
+        if not pieces:
+            continue
+        segs_by_net: dict[int, list[tuple[Pt, Pt, float]]] = {}
+        for seg in pcb.segments:
+            if seg.layer == copper:
+                segs_by_net.setdefault(seg.net_number, []).append(
+                    (tuple(seg.start), tuple(seg.end), float(seg.width))
+                )
+
+        def on_net(point: Pt, number: int, segs_by_net: dict = segs_by_net) -> bool:
+            return any(
+                _dist_to_seg(point, a, b) <= w / 2.0 + MASK_TOLERANCE_MM
+                for a, b, w in segs_by_net.get(number, [])
+            )
+
+        # Each piece belongs to the one net whose copper both its ends stand on.
+        by_net: dict[int, list[tuple[Pt, Pt]]] = {}
+        for a, b in pieces:
+            owners = [n for n in segs_by_net if on_net(a, n) and on_net(b, n)]
+            if len(owners) == 1:
+                by_net.setdefault(owners[0], []).append((a, b))
+            elif owners:
+                out.unresolved.append(
+                    ("", copper, absolute(a), "strip lies on several nets' copper")
+                )
+        for number, net_pieces in sorted(by_net.items()):
+            if wanted_number is not None and number != wanted_number:
+                continue
+            name = net_names.get(number, "")
+            # Chains: pieces whose ends meet (within the strip tolerance).
+            parent = list(range(len(net_pieces)))
+
+            def find(i: int, parent: list[int] = parent) -> int:
+                while parent[i] != i:
+                    parent[i] = parent[parent[i]]
+                    i = parent[i]
+                return i
+
+            for i, (a1, b1) in enumerate(net_pieces):
+                for j in range(i + 1, len(net_pieces)):
+                    a2, b2 = net_pieces[j]
+                    if any(
+                        math.dist(p, q) <= MASK_TOLERANCE_MM for p in (a1, b1) for q in (a2, b2)
+                    ):
+                        parent[find(i)] = find(j)
+            chains: dict[int, list[tuple[Pt, Pt]]] = {}
+            for i, piece in enumerate(net_pieces):
+                chains.setdefault(find(i), []).append(piece)
+            for chain in chains.values():
+                record = _adopt_chain(chain, name, number, copper, holes, gauge_for, absolute, out)
+                if record is not None:
+                    out.records.append(record)
+    out.records = sort_wires(out.records)
+    return out
+
+
+def _adopt_chain(
+    chain: list[tuple[tuple[float, float], tuple[float, float]]],
+    net: str,
+    number: int,
+    layer: str,
+    holes: list[tuple[int, tuple[float, float], float]],
+    gauge_for: Any,
+    absolute: Any,
+    out: AdoptResult,
+) -> dict[str, Any] | None:
+    """One strip chain -> a record, or ``None`` with the reason in ``out.unresolved``."""
+    from kicad_tools.physics.wire_gauge import bare_copper_diameter_mm
+    from kicad_tools.validate.rules.reinforcement_incomplete import (
+        ANCHOR_ON_LEG_SLACK_MM,
+        MASK_TOLERANCE_MM,
+    )
+
+    # Distinct end points of the chain, with how many piece ends meet there.
+    nodes: list[list[Any]] = []  # [point, count]
+    for a, b in chain:
+        for p in (a, b):
+            for node in nodes:
+                if math.dist(node[0], p) <= MASK_TOLERANCE_MM:
+                    node[1] += 1
+                    break
+            else:
+                nodes.append([p, 1])
+    here = absolute(chain[0][0])
+
+    def fail(why: str) -> None:
+        out.unresolved.append((net, layer, here, why))
+
+    ends = [n[0] for n in nodes if n[1] == 1]
+    if len(ends) != 2 or any(n[1] > 2 for n in nodes):
+        fail("strip is not a single open anchor-to-anchor run (branched or closed)")
+        return None
+    anchors = []
+    drills = []
+    for end in ends:
+        best = None
+        for hole_net, centre, drill in holes:
+            if hole_net != number:
+                continue
+            d = math.dist(centre, end)
+            if d <= ANCHOR_ON_LEG_SLACK_MM + MASK_TOLERANCE_MM and (best is None or d < best[0]):
+                best = (d, centre, drill)
+        if best is None:
+            fail(f"no same-net hole at the strip end {absolute(end)}")
+            return None
+        anchors.append(best[1])
+        drills.append(best[2])
+    awg = gauge_for(drills[0])
+    if awg is None or gauge_for(drills[1]) != awg:
+        fail("end holes are not a supported wire gauge's anchor drill")
+        return None
+    length = sum(math.dist(a, b) for a, b in chain)
+    a_abs = [absolute(a) for a in anchors]
+    straight = math.hypot(a_abs[1][0] - a_abs[0][0], a_abs[1][1] - a_abs[0][1])
+    return {
+        "net": net,
+        "layer": layer,
+        "kind": "run",
+        "path": None,
+        "paths": [],
+        "leg_start": _pt(*absolute(ends[0])),
+        "leg_end": _pt(*absolute(ends[1])),
+        "anchors": [_pt(*a) for a in a_abs],
+        "length_mm": round(length, 4),
+        "straight_line_mm": round(straight, 4),
+        "wire_gauge_awg": awg,
+        "max_end_shift_mm": None,
+        "bare_diameter_mm": round(bare_copper_diameter_mm(awg), 4),
+        "mask_opening": None,
+        "status": "adopted",
+        "reason": "adopted from the solder-mask strip and anchor holes already on the board",
+    }
+
+
+def already_recorded(existing: list[dict[str, Any]], record: dict[str, Any]) -> bool:
+    """True when ``existing`` already has a wire of the same net and layer at these anchors.
+
+    Adoption must not shadow a richer ``pcb reinforce`` record (which carries
+    its path name and leg ends, so a different :func:`wire_key`) with a bare
+    one for the same wire.
+    """
+    anchors = [(a["x"], a["y"]) for a in record.get("anchors", [])]
+    if not anchors:
+        return False
+    for w in existing:
+        if w.get("net") != record["net"] or w.get("layer") != record["layer"]:
+            continue
+        have = w.get("anchors") or []
+        if len(have) == len(anchors) and all(any(_near(h, a) for h in have) for a in anchors):
+            return True
+    return False
+
+
 def format_wire_list(wires: list[dict[str, Any]]) -> str:
     """Human-readable wire list."""
     if not wires:
