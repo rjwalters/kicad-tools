@@ -7,7 +7,10 @@ Uses the existing LCSCClient to fetch datasheet URLs from JLCPCB's API.
 from __future__ import annotations
 
 import logging
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urljoin, urlparse
 
 from ..models import DatasheetResult
 from ..utils import calculate_part_confidence
@@ -17,6 +20,48 @@ if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
+
+# Upper bound on how much of an HTML viewer page we read while hunting for the
+# embedded PDF URL. The viewer pages are small; this just guards against an
+# unexpectedly huge response.
+_MAX_VIEWER_PAGE_BYTES = 2 * 1024 * 1024
+
+# Candidate PDF URLs inside an HTML/JSON body: absolute or protocol-relative
+# links ending in ".pdf" (optionally followed by a query string).
+_PDF_URL_RE = re.compile(r"""(?:https?:)?//[^\s"'<>\\]+?\.pdf(?:\?[^\s"'<>\\]*)?""", re.IGNORECASE)
+
+# Host LCSC serves the real datasheet files from.
+_LCSC_FILE_HOST = "wmsc.lcsc.com"
+
+
+def _resolve_lcsc_pdf_url(html: str, base_url: str) -> str | None:
+    """
+    Find the real PDF URL inside an LCSC datasheet viewer page.
+
+    ``www.lcsc.com/datasheet/...`` answers with an HTML viewer page; the actual
+    file lives on ``wmsc.lcsc.com/wmsc/upload/file/pdf/...`` and is referenced
+    from the page (often inside embedded JSON with ``\\/`` or ``\\u002F``
+    escapes).
+
+    Args:
+        html: Decoded body of the viewer page.
+        base_url: URL the page was fetched from (excluded from the results and
+            used to resolve protocol-relative links).
+
+    Returns:
+        The best candidate PDF URL (preferring the ``wmsc.lcsc.com`` host), or
+        ``None`` if the page embeds no PDF link.
+    """
+    text = html.replace("\\u002F", "/").replace("\\/", "/").replace("&amp;", "&")
+    candidates: list[str] = []
+    for match in _PDF_URL_RE.findall(text):
+        url = urljoin(base_url, match)
+        if url != base_url and url not in candidates:
+            candidates.append(url)
+    for url in candidates:
+        if urlparse(url).hostname == _LCSC_FILE_HOST:
+            return url
+    return candidates[0] if candidates else None
 
 
 class LCSCDatasheetSource(HTTPDatasheetSource):
@@ -115,3 +160,58 @@ class LCSCDatasheetSource(HTTPDatasheetSource):
             logger.warning(f"LCSC search failed for '{part_number}': {e}")
 
         return results
+
+    @requires_requests
+    def download(self, result: DatasheetResult, output_path: Path) -> Path:
+        """
+        Download a datasheet, resolving LCSC's HTML viewer page if needed.
+
+        LCSC's ``www.lcsc.com/datasheet/...`` URLs often answer HTTP 200 with an
+        HTML viewer page instead of the PDF. When that happens the page is
+        scanned for the embedded real file URL (``wmsc.lcsc.com/...``) and the
+        download is retried once with it. Every written file is still gated by
+        the PDF magic-byte check.
+
+        Raises:
+            DatasheetDownloadError: If the PDF cannot be obtained. The message
+                always names the URL(s) tried so the user can open them by hand.
+        """
+        import requests
+
+        from ..exceptions import DatasheetDownloadError
+
+        url = result.datasheet_url
+        try:
+            return super().download(result, output_path)
+        except DatasheetDownloadError as first_error:
+            # Only a non-PDF payload (HTML viewer page) is worth resolving;
+            # network/HTTP errors are surfaced as-is.
+            if "non-PDF content" not in str(first_error):
+                raise
+
+            try:
+                response = self._get_session().get(url, timeout=self.timeout, allow_redirects=True)
+                response.raise_for_status()
+                body = response.content[:_MAX_VIEWER_PAGE_BYTES]
+                html = body.decode(response.encoding or "utf-8", errors="replace")
+            except (requests.RequestException, LookupError) as e:
+                raise DatasheetDownloadError(
+                    f"{first_error}; could not re-fetch the page to find the PDF link ({e}). "
+                    f"Open {url} in a browser to get the datasheet by hand"
+                ) from e
+
+            resolved = _resolve_lcsc_pdf_url(html, url)
+            if resolved is None:
+                raise DatasheetDownloadError(
+                    f"{first_error}; no PDF link found on the page. "
+                    f"Open {url} in a browser to get the datasheet by hand"
+                ) from first_error
+
+            logger.info("LCSC viewer page %s resolved to %s", url, resolved)
+            try:
+                return self._download_file(self._get_session(), resolved, output_path, self.timeout)
+            except DatasheetDownloadError as retry_error:
+                raise DatasheetDownloadError(
+                    f"{first_error}; resolved PDF link {resolved} also failed: {retry_error}. "
+                    f"Open {url} or {resolved} in a browser to get the datasheet by hand"
+                ) from retry_error

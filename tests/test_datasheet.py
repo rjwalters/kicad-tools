@@ -594,6 +594,9 @@ class TestLCSCDatasheetSource:
                 b'<!doctype html>\n<html data-n-head-ssr lang="en_US">'
             ]
             mock_resp.headers = {"Content-Type": "text/html"}
+            # Body for the LCSC viewer-page link resolution re-fetch (no PDF link).
+            mock_resp.content = b"<html></html>"
+            mock_resp.encoding = "utf-8"
             mock_resp.raise_for_status = MagicMock()
             mock_session.return_value.get.return_value = mock_resp
 
@@ -627,6 +630,8 @@ class TestLCSCDatasheetSource:
             mock_resp = MagicMock()
             mock_resp.iter_content.return_value = []
             mock_resp.headers = {}
+            mock_resp.content = b""
+            mock_resp.encoding = "utf-8"
             mock_resp.raise_for_status = MagicMock()
             mock_session.return_value.get.return_value = mock_resp
 
@@ -2265,3 +2270,161 @@ class TestCLIExtractPins:
 
         assert _parse_pages("1-5") == [1, 2, 3, 4, 5]
         assert _parse_pages("10,15,20") == [10, 15, 20]
+
+
+class TestLCSCViewerPageResolution:
+    """Issue #9473: LCSC serves an HTML viewer page instead of the PDF."""
+
+    VIEWER_URL = "https://www.lcsc.com/datasheet/lcsc_datasheet_2304140030_C47787.pdf"
+    FILE_URL = "https://wmsc.lcsc.com/wmsc/upload/file/pdf/v2/lcsc/2304140030_C47787.pdf"
+
+    @staticmethod
+    def _resp(chunks, content=b"", content_type="text/html"):
+        resp = MagicMock()
+        resp.iter_content.return_value = chunks
+        resp.content = content
+        resp.encoding = "utf-8"
+        resp.headers = {"Content-Type": content_type}
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    @staticmethod
+    def _result(url):
+        from kicad_tools.datasheet.models import DatasheetResult
+
+        return DatasheetResult(
+            part_number="BCX53-16,115",
+            manufacturer="Nexperia",
+            description="PNP",
+            datasheet_url=url,
+            source="lcsc",
+        )
+
+    def test_resolve_helper_prefers_wmsc_host_and_unescapes(self):
+        from kicad_tools.datasheet.sources.lcsc import _resolve_lcsc_pdf_url
+
+        html = (
+            '<a href="https://cdn.example.com/other.pdf">x</a>'
+            '<script>{"pdf":"https:\\u002F\\u002Fwmsc.lcsc.com\\u002Fwmsc\\u002Fupload\\u002Ffile\\u002Fpdf\\u002Fa.pdf"}</script>'
+        )
+        assert (
+            _resolve_lcsc_pdf_url(html, self.VIEWER_URL)
+            == "https://wmsc.lcsc.com/wmsc/upload/file/pdf/a.pdf"
+        )
+
+    def test_resolve_helper_none_without_link(self):
+        from kicad_tools.datasheet.sources.lcsc import _resolve_lcsc_pdf_url
+
+        assert _resolve_lcsc_pdf_url("<html>nothing</html>", self.VIEWER_URL) is None
+        # The viewer page's own URL is not a resolution.
+        assert _resolve_lcsc_pdf_url(f'<a href="{self.VIEWER_URL}">', self.VIEWER_URL) is None
+
+    def test_html_viewer_resolved_and_retried(self, tmp_path):
+        from kicad_tools.datasheet.sources import LCSCDatasheetSource
+
+        source = LCSCDatasheetSource()
+        html = f'<html><a href="{self.FILE_URL}">pdf</a></html>'.encode()
+        responses = [
+            self._resp([b"<!DOCTYPE html><html lang="]),  # first attempt (streamed)
+            self._resp([], content=html),  # re-fetch for resolution
+            self._resp([b"%PDF-1.4 real"], content_type="application/pdf"),  # retry
+        ]
+        with patch.object(source, "_get_session") as mock_session:
+            mock_session.return_value.get.side_effect = responses
+            out = source.download(self._result(self.VIEWER_URL), tmp_path / "x.pdf")
+
+        assert out.read_bytes().startswith(b"%PDF-")
+        urls = [c.args[0] for c in mock_session.return_value.get.call_args_list]
+        assert urls == [self.VIEWER_URL, self.VIEWER_URL, self.FILE_URL]
+
+    def test_html_viewer_without_link_names_url(self, tmp_path):
+        from kicad_tools.datasheet.sources import LCSCDatasheetSource
+
+        source = LCSCDatasheetSource()
+        responses = [
+            self._resp([b"<!DOCTYPE html><html lang="]),
+            self._resp([], content=b"<html>no links</html>"),
+        ]
+        out = tmp_path / "x.pdf"
+        with patch.object(source, "_get_session") as mock_session:
+            mock_session.return_value.get.side_effect = responses
+            with pytest.raises(DatasheetDownloadError) as exc_info:
+                source.download(self._result(self.VIEWER_URL), out)
+
+        assert self.VIEWER_URL in str(exc_info.value)
+        assert "by hand" in str(exc_info.value)
+        assert list(tmp_path.iterdir()) == []
+
+    def test_resolved_url_also_html_is_not_saved(self, tmp_path):
+        from kicad_tools.datasheet.sources import LCSCDatasheetSource
+
+        source = LCSCDatasheetSource()
+        html = f'<a href="{self.FILE_URL}">'.encode()
+        responses = [
+            self._resp([b"<!DOCTYPE html><html lang="]),
+            self._resp([], content=html),
+            self._resp([b"<!DOCTYPE html><html lang="]),
+        ]
+        with patch.object(source, "_get_session") as mock_session:
+            mock_session.return_value.get.side_effect = responses
+            with pytest.raises(DatasheetDownloadError) as exc_info:
+                source.download(self._result(self.VIEWER_URL), tmp_path / "x.pdf")
+
+        message = str(exc_info.value)
+        assert self.VIEWER_URL in message and self.FILE_URL in message
+        assert list(tmp_path.iterdir()) == []
+
+    def test_network_error_not_retried(self, tmp_path):
+        import requests
+
+        from kicad_tools.datasheet.sources import LCSCDatasheetSource
+
+        source = LCSCDatasheetSource()
+        with patch.object(source, "_get_session") as mock_session:
+            mock_session.return_value.get.side_effect = requests.RequestException("boom")
+            with pytest.raises(DatasheetDownloadError) as exc_info:
+                source.download(self._result(self.VIEWER_URL), tmp_path / "x.pdf")
+
+        assert mock_session.return_value.get.call_count == 1
+        assert self.VIEWER_URL in str(exc_info.value)
+
+    def test_manager_failure_message_lists_every_url(self):
+        from kicad_tools.datasheet.manager import DatasheetManager
+
+        manager = DatasheetManager(cache_dir=None, sources=[])
+        lcsc = self._result(self.VIEWER_URL)
+        mfr = self._result("https://assets.nexperia.com/documents/data-sheet/BCX53.pdf")
+        mfr.source = "octopart"
+
+        with patch.object(manager, "search") as mock_search:
+            with patch.object(manager, "download") as mock_download:
+                mock_search.return_value = MagicMock(has_results=True, results=[lcsc, mfr])
+                mock_download.side_effect = [
+                    DatasheetDownloadError("lcsc returned non-PDF content"),
+                    DatasheetDownloadError("timeout"),
+                ]
+                with pytest.raises(DatasheetDownloadError) as exc_info:
+                    manager.download_by_part("BCX53-16,115")
+
+        message = str(exc_info.value)
+        assert self.VIEWER_URL in message
+        assert "assets.nexperia.com" in message
+
+    def test_search_keeps_distinct_manufacturer_url_for_same_part(self):
+        from kicad_tools.datasheet.manager import DatasheetManager
+
+        lcsc_src = MagicMock()
+        lcsc_src.name = "lcsc"
+        mfr_src = MagicMock()
+        mfr_src.name = "octopart"
+        lcsc = self._result(self.VIEWER_URL)
+        lcsc.confidence = 1.0
+        mfr = self._result("https://assets.nexperia.com/documents/data-sheet/BCX53.pdf")
+        mfr.source = "octopart"
+        mfr.confidence = 0.9
+        lcsc_src.search.return_value = [lcsc]
+        mfr_src.search.return_value = [mfr]
+
+        manager = DatasheetManager(cache_dir=None, sources=[lcsc_src, mfr_src])
+        result = manager.search("BCX53-16,115")
+        assert [r.datasheet_url for r in result.results] == [lcsc.datasheet_url, mfr.datasheet_url]
