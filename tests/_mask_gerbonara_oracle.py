@@ -11,9 +11,9 @@ from pathlib import Path
 
 
 def read_native_gerber(path: Path, *, chord_error_mm: float = 0.000001):
-    from gerbonara.graphic_primitives import Line, Rectangle
+    from gerbonara.graphic_primitives import ArcPoly, Line, Rectangle
     from gerbonara.rs274x import GerberFile
-    from gerbonara.utils import MM
+    from gerbonara.utils import MM, polygon_area
     from shapely import make_valid
     from shapely.affinity import scale
     from shapely.geometry import GeometryCollection, Polygon
@@ -32,23 +32,31 @@ def read_native_gerber(path: Path, *, chord_error_mm: float = 0.000001):
             # which renders as a disk of that diameter (issue #9232). A Line
             # has zero area exactly when its width is zero.
             #
-            # For the remaining primitive types is_zero_size() is not a
-            # zero-area test either, but the one bad case cannot arise from
-            # KiCad output: a region drawn as a full circle from exactly two
-            # semicircular arcs has a two-point outline and polygon area 0
-            # even though the disk it encloses is real (measured on
-            # gerbonara 1.6.3: Line(0,0,0,0,1.7).to_arc_poly(), issue
-            # #9288). ArcPoly reaches this arm only from G36..G37 regions
-            # and polygon apertures, and KiCad polygonizes zone fills at the
-            # board's arc approximation error before plotting, so no KiCad
-            # region carries G02/G03 segments: all 49 committed region
-            # blocks in this repo's bundles and fresh KiCad 10.0.6 plots of
-            # antipad, keepout-void and isolated-copper-island boards use
-            # G01 segments only (issue #9288). Polygon apertures likewise
-            # always carry a genuine multi-point outline, so every ArcPoly
-            # built from KiCad output with nonzero area is retained here.
+            # ArcPoly gets the mirrored treatment: its is_zero_size() tests
+            # the polygon area of the *linear* outline, so a full circle
+            # drawn as two semicircular arcs -- a two-point outline around a
+            # real disk -- reports zero size (measured on gerbonara 1.6.3:
+            # Line(0,0,0,0,1.7).to_arc_poly() encloses 2.27 mm^2, issue
+            # #9288). Such regions do occur in KiCad output: a graphic
+            # gr_poly with (arc ...) corners is plotted as a G36..G37 region
+            # with G02/G03 segments (measured on KiCad 10.0.6, issue #9288),
+            # while zone fills are polygonized at the board's arc
+            # approximation error before plotting -- every committed region
+            # block and fresh antipad/keepout-void/island plots use G01
+            # segments only. ArcPoly's other sources are polygon apertures
+            # (from_regular_polygon: genuine multi-point outline) and
+            # aperture-macro Outline primitives (arc centers all None, so
+            # always arc-free with a genuine multi-point outline). Testing
+            # the arc-approximated outline's area keeps genuinely degenerate
+            # regions skipped while retaining real copper.
             if isinstance(primitive, Line):
                 if primitive.width <= 0:
+                    continue
+            elif isinstance(primitive, ArcPoly):
+                if math.isclose(
+                    polygon_area(primitive.approximate_arcs(max_error=chord_error_mm).outline),
+                    0,
+                ):
                     continue
             elif primitive.is_zero_size():
                 continue

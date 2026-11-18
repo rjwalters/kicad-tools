@@ -109,6 +109,38 @@ def test_clear_zero_length_flash_erases_dark_disk(tmp_path):
     assert read_native_gerber(path).is_empty
 
 
+def test_two_arc_circle_region_is_retained_not_dropped(tmp_path):
+    # Issue #9288: a full circle drawn as a G36..G37 region from exactly
+    # two semicircular arcs has a two-point outline, so gerbonara 1.6.3's
+    # is_zero_size() -- which tests the polygon area of the linear outline
+    # -- calls it zero-size and the oracle used to silently drop a real
+    # 2.27 mm^2 disk. KiCad 10.0.6 emits such arc-bearing regions for
+    # graphic polygons with (arc ...) corners (measured; zone fills are
+    # polygonized and carry no arcs). The skip must test the
+    # arc-approximated outline's area instead.
+    from shapely.geometry import Point
+
+    path = _gerber(
+        tmp_path,
+        "G36*\nX-850000Y0D02*\nG75*\n"
+        "G02*X850000Y0I850000J0D01*\n"
+        "G02*X-850000Y0I-850000J0D01*\n"
+        "G37*",
+    )
+    shape = read_native_gerber(path)
+    assert shape.area == pytest.approx(math.pi * 0.85**2, rel=5e-3)
+    assert shape.covers(Point(0, 0))
+    assert not shape.covers(Point(0, 0.86))
+
+
+def test_zero_area_region_is_still_skipped(tmp_path):
+    # The mirrored arm of the two-arc circle fix: the approximated-area
+    # skip must keep dropping genuinely degenerate regions. A one-segment
+    # region closes on its own start point and encloses no area.
+    path = _gerber(tmp_path, "G36*\nX0Y0D02*\nG01*\nX1000000Y0D01*\nG37*")
+    assert read_native_gerber(path).is_empty
+
+
 def test_oracle_repairs_self_touching_region_like_production_reader():
     # Issue #8947: a KiCad 10 zone-fill contour that pinches off at a point
     # is invalid to Shapely but legal Gerber. The oracle must apply the same
