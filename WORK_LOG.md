@@ -16,6 +16,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-18
 
+- **PR #9410**: ci: judge mask_to_copper by identity in the routed-DRC release gate
+- **PR #9303**: ci: qualify PR checks for GitHub merge queues
+- **Issue #9299** (closed): ci: qualify PR checks for GitHub merge queues
+- **PR #9409**: test: make the pinch-repair material-mismatch assertion falsifiable
+- **Issue #9103** (closed): Dead `material mismatch` assertion in the pinched-zone-fill regression (PR #9084)
 - **PR #9405**: fix: prefer first non-empty LCSC column when CSV headers collide
 - **PR #9398**: docs: changelog per-PR check runs --pr with a live gh pr view, not --pr-event
 - **Issue #9402** (closed): load_bom_csv and pcb/lcsc_bom accept different LCSC header spellings (shared normaliser, divergent accept-lists)
