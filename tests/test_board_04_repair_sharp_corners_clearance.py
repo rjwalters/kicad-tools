@@ -226,6 +226,11 @@ def test_width_fallback_is_gone(step, tmp_path, capsys):
         (("* .Cu".replace(" ", ""),), "In1.Cu", True),
         (("F&B.Cu",), "B.Cu", True),
         (("F&B.Cu",), "In1.Cu", False),
+        (("* .In.Cu".replace(" ", ""),), "In1.Cu", True),
+        (("* .In.Cu".replace(" ", ""),), "In2.Cu", True),
+        (("* .In.Cu".replace(" ", ""),), "F.Cu", False),
+        (("* .In.Cu".replace(" ", ""),), "B.Cu", False),
+        (("* .In.Cu".replace(" ", ""), "F.Cu"), "In1.Cu", True),
         ((), "F.Cu", True),  # empty spec falls back to zone.layer="F.Cu"
         ((), "B.Cu", False),  # ... and does not match other layers
     ],
