@@ -6,8 +6,8 @@ Covers:
    (``check_rule_coverage``, ``load_allowlist``, ``find_routed_pcb``).
 2. The ``diffpair-routing-regression`` CI job in
    ``.github/workflows/ci.yml`` (job exists, runs on ubuntu-latest,
-   matrix is parametric over board, calls the helper, no diff-driven
-   short-circuit).
+   board pinned via job-level ``env.BOARD``, calls the helper, no
+   diff-driven short-circuit).
 3. The new ``rules_checked_by_rule`` field in ``DRCResults`` /
    ``kct check --format json`` output (Phase 4N JSON schema extension).
 4. The three diff-pair rules populate ``rules_checked_by_rule`` with
@@ -289,20 +289,34 @@ class TestWorkflowJob:
         timeout = job.get("timeout-minutes")
         assert isinstance(timeout, int) and 1 <= timeout <= 30
 
-    def test_job_is_matrix_parametric_over_board(self, workflow: dict) -> None:
-        """Per the curator: must be parametric over board name so board 03
-        can be added cheaply when #2589 + #2513 close."""
+    def test_job_pins_board_via_env_not_matrix(self, workflow: dict) -> None:
+        """Issue #9306: the job must NOT carry a ``strategy.matrix``, even a
+        single-value one -- GitHub suffixes the check-run name with the
+        matrix value (``... (boards/06-diffpair-test)``), which the
+        merge-queue required-context audit cannot match against the
+        branch-protection ``name:``.  The board is pinned in exactly one
+        place (job-level ``env.BOARD``) instead, so adding boards stays
+        cheap -- but re-introducing a matrix also re-introduces the
+        suffixed names and the branch-protection swap that entails (see
+        the comment on this job in ci.yml)."""
         job = workflow["jobs"][JOB_NAME]
-        strategy = job.get("strategy", {})
-        matrix = strategy.get("matrix", {})
-        assert "board" in matrix, (
-            f"Expected ``matrix.board`` in {JOB_NAME} strategy so additional "
-            "boards can be added without job duplication."
+        assert "strategy" not in job, (
+            f"{JOB_NAME} must not define ``strategy``: a matrix -- even a "
+            "single-value one -- suffixes the check-run name and breaks "
+            "the required-context audit (Issue #9306)."
         )
-        boards = matrix["board"]
-        assert isinstance(boards, list) and boards
-        # Board 06 must be in the initial matrix.
-        assert any("06-diffpair-test" in str(b) for b in boards)
+        env = job.get("env", {})
+        assert "06-diffpair-test" in str(env.get("BOARD", "")), (
+            f"Expected job-level ``env.BOARD`` pinning board 06 in "
+            f"{JOB_NAME} (Issue #9306 dropped the single-value matrix)."
+        )
+        steps = workflow["jobs"][JOB_NAME]["steps"]
+        run_blocks = [s.get("run", "") for s in steps if isinstance(s, dict) and "run" in s]
+        joined = "\n".join(run_blocks)
+        assert "${{ env.BOARD }}" in joined, (
+            f"Expected ``${{{{ env.BOARD }}}}`` references in {JOB_NAME} run "
+            "steps -- the pin must actually be used (Issue #9306)."
+        )
 
     def test_job_invokes_helper_script(self, workflow: dict) -> None:
         steps = workflow["jobs"][JOB_NAME]["steps"]
