@@ -115,7 +115,8 @@ flag such an entry. Such a measurement reads `within_own_pad` at **info** (issue
 
 ```text
 Mask-to-copper overlap: within_own_pad; exposed area 0.42 mm²; beyond owner pad
-copper 0 mm²; ...; opening pad:R1/1; exposed copper segment (net VOUT); same-net own-pad entry
+copper 0 mm²; beside owner excess 0 mm²; ...; opening pad:R1/1; exposed copper
+segment (net VOUT); same-net own-pad entry
 ```
 
 The class is granted for what the copper does, not for touching the pad. All of
