@@ -645,6 +645,13 @@ def _execute_repair(
     pass_results: list[PassResult] = []
     do_connectivity_check = not args.dry_run and not args.no_connectivity_check
     connectivity_rollback_occurred = False
+    # Issue #9331: the pre-edit report and pass-1 targets, kept so the
+    # invalidated-waiver report can diff waiver matching across the edit.
+    initial_report = report
+    first_pass_targets: tuple[list, list] | None = None
+    # fix-drc overwrites its input when --output is not given, so the
+    # pre-edit geometry must be captured before the first repair pass.
+    waiver_before_board = _waiver_report_before_board(pcb_path)
 
     # Active manufacturer design rules -- forwarded to the drill-clearance
     # repairer so every via slide is re-validated against the shared clearance
@@ -658,6 +665,8 @@ def _execute_repair(
 
     for pass_num in range(1, effective_max_passes + 1):
         clearance_violations, drill_violations = _targeted(report, args.only)
+        if first_pass_targets is None:
+            first_pass_targets = (clearance_violations, drill_violations)
 
         mask_violations = _targeted_mask(report, args.only)
         if mask_violations:
@@ -916,6 +925,22 @@ def _execute_repair(
                     file=human_out,
                 )
 
+    # Issue #9331: a nudge moves copper that waiver keys embed, so entries
+    # that waived a finding before the edit may match nothing now.
+    # Report-only; it never changes the exit code or the repair output.
+    if not args.quiet and pass_results:
+        _print_waiver_invalidation_report(
+            args,
+            pcb_path,
+            output_path,
+            pass_results,
+            initial_report,
+            first_pass_targets,
+            waiver_before_board,
+            drill_design_rules,
+            human_out,
+        )
+
     # Exit code: 0 = all repaired (the re-check finds no targeted error and
     #                no non-repairable violation was detected),
     #            1 = no violations found/no progress,
@@ -947,6 +972,90 @@ def _execute_repair(
     if final_pass.repaired == 0 and non_targeted == 0:
         return 1
     return 2
+
+
+def _print_waiver_invalidation_report(
+    args: argparse.Namespace,
+    pcb_path: Path,
+    output_path: Path,
+    pass_results: list[PassResult],
+    initial_report: DRCReport,
+    first_pass_targets: tuple[list, list] | None,
+    before_board,
+    design_rules: DesignRules | None,
+    human_out,
+) -> None:
+    """Report waiver sidecar keys this edit invalidated (Issue #9331).
+
+    Silent when the edit changed no copper (nothing repaired, or every
+    repair was rolled back) or when no waivers sidecar is discoverable for
+    the input board.  Under ``--dry-run`` the predicted repairs are re-run
+    on a throwaway copy of the board so the preview shows what the edit
+    *would* orphan.  Goes to ``human_out`` (stderr under ``--format json``,
+    so stdout stays a single JSON document); never changes the exit code.
+    """
+    if first_pass_targets is None or before_board is None:
+        return
+    applied = any(p.repaired > 0 and not p.connectivity_rolled_back for p in pass_results)
+    if not applied:
+        return
+    try:
+        from kicad_tools.cli.check_cmd import waiver_invalidation_report_lines
+        from kicad_tools.schema.pcb import PCB
+
+        if args.dry_run:
+            # Re-run the predicted pass-1 repairs on a throwaway copy of the
+            # board; the input's project rules ride along so the collateral
+            # checks see the same clearances the real pass would.  The report
+            # runs while the copy still exists: the findings pipeline re-opens
+            # the board under ``PCB.path``.
+            with tempfile.TemporaryDirectory(prefix="kct_fixdrc_waive_") as tmp:
+                sim = Path(tmp) / "preview.kicad_pcb"
+                shutil.copy2(pcb_path, sim)
+                for suffix in (".kicad_pro", ".kicad_dru"):
+                    sidecar = pcb_path.with_suffix(suffix)
+                    if sidecar.exists():
+                        shutil.copy2(sidecar, sim.with_suffix(suffix))
+                _run_single_pass(
+                    report=initial_report,
+                    pcb_path=sim,
+                    output_path=sim,
+                    clearance_violations=first_pass_targets[0],
+                    drill_violations=first_pass_targets[1],
+                    max_displacement=args.max_displacement,
+                    margin=args.margin,
+                    dry_run=False,
+                    pass_number=1,
+                    local_reroute=args.local_reroute,
+                    design_rules=design_rules,
+                )
+                lines = waiver_invalidation_report_lines(pcb_path, before_board, PCB.load(sim))
+        else:
+            lines = waiver_invalidation_report_lines(pcb_path, before_board, PCB.load(output_path))
+    except Exception as e:  # noqa: BLE001 - the report must never fail the command
+        print(f"WARNING: waiver invalidation report skipped: {e}", file=human_out)
+        return
+    for line in lines:
+        print(line, file=human_out)
+
+
+def _waiver_report_before_board(pcb_path: Path):
+    """Pre-edit geometry for the waiver-invalidation report, or ``None``.
+
+    fix-drc overwrites its input when ``--output`` is not given, so the
+    board must be captured before the first repair pass.  ``None`` (no
+    sidecar next to the board) skips the report entirely -- and the extra
+    load.
+    """
+    try:
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.rules.waivers import discover_waivers_sidecar
+
+        if discover_waivers_sidecar(pcb_path) is None:
+            return None
+        return PCB.load(pcb_path)
+    except Exception:  # noqa: BLE001 - the report must never fail the command
+        return None
 
 
 def _run_single_pass(

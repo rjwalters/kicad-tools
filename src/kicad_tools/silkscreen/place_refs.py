@@ -615,6 +615,13 @@ class RefPlacement:
     #: "under_component_fallback" (best-effort position still sits on its
     #: own component's courtyard -- reported, never silently accepted).
     status: str
+    #: Why the status is what it is: the obstacle that defeated the last
+    #: candidate tried (``unplaceable`` / ``under_component_fallback``) or
+    #: the association note (``moved`` / ``unchanged``).  Obstacle labels
+    #: quote **sheet-absolute** coordinates -- e.g. ``pad aperture drill
+    #: via at (130.000, 80.000)`` -- unlike ``old_position`` /
+    #: ``new_position``, which are board-relative; add :attr:`origin` to
+    #: map between the two frames (Issue #9364).
     reason: str = ""
     #: Footprint-local coordinates to write into the ``(at ...)`` node.
     #: Populated only for ``status == "moved"``.
@@ -625,10 +632,18 @@ class RefPlacement:
     #: True when no clear candidate reached ``ASSOCIATION_MARGIN_MM`` and the
     #: best-margin clear candidate was used instead (Issue #8628).
     low_association: bool = False
+    #: Sheet origin of the board-relative frame; add it to ``old_position``
+    #: / ``new_position`` to get the sheet coordinates ``reason`` quotes
+    #: when it carries any (Issue #9364, mirroring :class:`FixedTextConflict`).
+    origin: tuple[float, float] = (0.0, 0.0)
 
     @property
     def moved(self) -> bool:
         return self.status == "moved"
+
+    def to_sheet(self, point: tuple[float, float]) -> tuple[float, float]:
+        """Convert a board-relative point to sheet-absolute coordinates."""
+        return (point[0] + self.origin[0], point[1] + self.origin[1])
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -642,6 +657,8 @@ class RefPlacement:
             "reason": self.reason,
             "association_margin_mm": self.association_margin_mm,
             "low_association": self.low_association,
+            "frame": "board-relative",
+            "origin_mm": list(self.origin),
         }
 
 
@@ -1045,6 +1062,12 @@ class SilkRefPlacer:
             seen_refs.add(footprint.reference)
         result = PlaceSilkRefsResult(clearance_mm=clearance_mm)
         self._ref_nodes = {}
+        # Sheet origin of the board-relative frame every RefPlacement
+        # reports positions in; ``reason`` obstacle labels quote the sheet
+        # frame, so placements carry the origin to map between the two
+        # (Issue #9364).  Unavailable outline degrades to (0, 0), where the
+        # frames coincide.
+        placement_origin = tuple(getattr(pcb, "_board_origin", (0.0, 0.0)))
 
         # --- Static obstacles (never move) ---
         apertures = collect_apertures(pcb, mask_clearance_mm)
@@ -1215,6 +1238,7 @@ class SilkRefPlacer:
                         new_rotation=old_rotation,
                         status=status,
                         reason=last_reason or "no collision-free candidate within search radius",
+                        origin=placement_origin,
                     )
                 )
                 continue
@@ -1248,6 +1272,7 @@ class SilkRefPlacer:
                         new_local_position=local,
                         association_margin_mm=chosen_margin,
                         low_association=low_assoc,
+                        origin=placement_origin,
                     )
                 )
             else:
@@ -1263,6 +1288,7 @@ class SilkRefPlacer:
                         reason=assoc_reason,
                         association_margin_mm=chosen_margin,
                         low_association=low_assoc,
+                        origin=placement_origin,
                     )
                 )
 

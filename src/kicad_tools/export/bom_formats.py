@@ -92,6 +92,13 @@ class JLCPCBBOMFormatter(BOMFormatter):
         - Designator: Reference designator(s), comma-separated for groups
         - Footprint: Footprint name
         - LCSC Part #: LCSC part number (e.g., C123456)
+
+        Groups sharing an LCSC part number and footprint are merged into one
+        line even when their Value text differs: JLCPCB flags BOM lines that
+        match the same part and leaves every such line unticked, so the
+        parts silently go unfitted (issue #9323). The merged line's Comment
+        lists the distinct values joined with "; ". Items without an LCSC
+        number are grouped by value and footprint as before.
         """
         filtered = self.filter_items(items)
 
@@ -106,19 +113,38 @@ class JLCPCBBOMFormatter(BOMFormatter):
         writer = csv.writer(output, lineterminator="\n")
         writer.writerow(self.get_headers())
 
-        for key, group_items in sorted(grouped.items()):
+        rows = []
+        for key, group_items in grouped.items():
             value, footprint, lcsc = key
             designators = ",".join(sorted(item.reference for item in group_items))
+            if lcsc:
+                # Merged across differing Value texts: list them all.
+                value = "; ".join(sorted({item.value for item in group_items}))
+            rows.append((value, footprint, lcsc, designators))
+        # Sort like the old (value, footprint, lcsc) key order, extended
+        # deterministically to merged rows.
+        rows.sort()
+        for value, footprint, lcsc, designators in rows:
             writer.writerow([value, designators, footprint, lcsc])
 
         return output.getvalue()
 
     def _group_items(self, items: list[BOMItem]) -> dict[tuple, list[BOMItem]]:
-        """Group items by value, footprint, and LCSC part."""
+        """Group items by footprint and LCSC part.
+
+        Items sharing an LCSC part number and footprint are merged into one
+        group even when their Value text differs: JLCPCB flags BOM lines
+        matched to the same part and leaves every such line unticked
+        (issue #9323). Items without an LCSC number are grouped by value
+        and footprint, and never merged across values.
+        """
         groups: dict[tuple, list[BOMItem]] = {}
         for item in items:
             lcsc = getattr(item, "lcsc", "")
-            key = (item.value, item.footprint, lcsc)
+            if lcsc:
+                key = ("", item.footprint, lcsc)
+            else:
+                key = (item.value, item.footprint, "")
             if key not in groups:
                 groups[key] = []
             groups[key].append(item)
@@ -349,6 +375,9 @@ def read_existing_lcsc_assignments(csv_path: Path) -> dict[tuple[str, str], str]
     Returns:
         A dict mapping ``(value, footprint)`` to the LCSC part number
         string.  Only rows with a non-empty LCSC value are included.
+        Rows whose value joins distinct values with ``"; "`` (merged
+        JLCPCB rows, issue #9323) additionally register each
+        constituent value, so fresh per-value items still match.
     """
     assignments: dict[tuple[str, str], str] = {}
     try:
@@ -374,6 +403,14 @@ def read_existing_lcsc_assignments(csv_path: Path) -> dict[tuple[str, str], str]
                 lcsc = (row.get(lcsc_col) or "").strip()
                 if value and footprint and lcsc:
                     assignments[(value, footprint)] = lcsc
+                    # A merged JLCPCB row joins distinct values with
+                    # "; " (issue #9323); register each constituent so
+                    # the read-back merge still finds per-value items
+                    # on regeneration.
+                    if "; " in value:
+                        for part in value.split("; "):
+                            if part:
+                                assignments[(part, footprint)] = lcsc
     except (OSError, UnicodeDecodeError, csv.Error):
         # If the file can't be read or parsed, return empty — the
         # caller will simply regenerate without merging.
