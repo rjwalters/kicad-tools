@@ -140,10 +140,16 @@ def test_load_bom_csv_board07_jlcpcb_bom_keeps_lcsc():
     assert populated, "fixture has no populated LCSC rows; this guard is vacuous"
 
     bom = load_bom_csv(bom_csv)
-    rows_by_designator = {r["Designator"].strip(): r for r in rows}
+    expected_lcsc: dict[str, str] = {}
+    for r in rows:
+        lcsc_val = (r.get("LCSC Part #") or "").strip()
+        for ref in (part.strip() for part in (r.get("Designator") or "").split(",")):
+            if ref:
+                expected_lcsc[ref] = lcsc_val
     for item in bom.items:
-        row = rows_by_designator[item.reference]
-        assert item.lcsc == (row.get("LCSC Part #") or "").strip(), item.reference
+        assert item.lcsc == expected_lcsc[item.reference], item.reference
+
+
 def test_load_bom_csv_expands_grouped_designators(tmp_path):
     from kicad_tools.schema.bom import load_bom_csv
 
