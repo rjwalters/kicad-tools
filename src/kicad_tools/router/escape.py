@@ -45,7 +45,7 @@ from kicad_tools.core.types import copper_span_contains
 
 from .layers import Layer, LayerType
 from .pad_geometry import pad_point_distance
-from .primitives import Pad, Route, Segment, Via
+from .primitives import Pad, Route, Segment, Via, pad_half_extents
 from .via_clearance import point_clear_of_copper, segment_clears_foreign_via
 from .via_in_pad_eligibility import (
     resolve_component_hole_context,
@@ -7173,18 +7173,18 @@ class EscapeRouter:
             same_net_bboxes: list[tuple[float, float, float, float]] = []
             if foreign_pads:
                 for p in foreign_pads:
+                    # Issue #9236: ``Pad.width``/``height`` are pre-rotation
+                    # local dims plus a residual ``Pad.rotation``, so a raw
+                    # ``x +/- width/2`` box under-sizes a non-cardinal pad.
+                    # ``pad_half_extents`` is the rotation-aware AABB (the
+                    # same helper ``grid.py`` uses); rotation 0 is
+                    # byte-identical to the raw box.
+                    hw, hh = pad_half_extents(p)
                     if net is not None and p.net == net:
                         if band_edge_mm > 0 and not getattr(p, "through_hole", False):
-                            same_net_bboxes.append(
-                                (
-                                    p.x - p.width / 2.0,
-                                    p.y - p.height / 2.0,
-                                    p.x + p.width / 2.0,
-                                    p.y + p.height / 2.0,
-                                )
-                            )
+                            same_net_bboxes.append((p.x - hw, p.y - hh, p.x + hw, p.y + hh))
                         continue
-                    pad_tuples.append((p.x, p.y, p.width, p.height, p.net))
+                    pad_tuples.append((p.x, p.y, 2.0 * hw, 2.0 * hh, p.net))
             if same_net_bboxes:
                 from .via_clearance import same_net_pad_gap_acceptable
 
@@ -7339,8 +7339,9 @@ class EscapeRouter:
                 continue
 
             # Distance from via center to the pad rectangle (axis-aligned).
-            half_w = p.width / 2
-            half_h = p.height / 2
+            # Issue #9236: rotation-aware AABB (raw width/height under-size
+            # a pad at a non-cardinal ``Pad.rotation``).
+            half_w, half_h = pad_half_extents(p)
             dx_abs = abs(x - p.x)
             dy_abs = abs(y - p.y)
             outside_x = max(0.0, dx_abs - half_w)
@@ -7475,11 +7476,13 @@ class EscapeRouter:
         ):
             return via_x, via_y, False
 
-        # Determine pad long-axis direction.  The Pad primitive does not
-        # carry rotation; ``width``/``height`` already encode the post-
-        # rotation footprint (KiCad emits oriented bounding-box extents
-        # when the loader projects pad geometry to world coordinates).
-        # The longer extent is the long axis.
+        # Determine pad long-axis direction.  The io.py loaders swap
+        # ``width``/``height`` for pads within 1 degree of 90/270, so the
+        # raw dims give the long axis for cardinal pads.  A non-cardinal
+        # pad keeps its pre-rotation dims plus a residual ``Pad.rotation``
+        # (Issue #9236 traced this: the old "already post-rotation" claim
+        # only holds for cardinal angles); the slide below stays on the
+        # nearest grid axis either way.  The longer extent is the long axis.
         if pad.width >= pad.height:
             long_dim = pad.width
             axis_x, axis_y = 1.0, 0.0

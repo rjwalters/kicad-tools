@@ -9,9 +9,10 @@ Board 06's last USB2_D- ``physical_copper_gap`` finding is a via ANNULUS
 
 * the C++ verdict equals the Python predicate's regions over in-band /
   overlapping / touching-union / beyond-edge / exact-edge seats -- the Python
-  oracle is ``via_clearance.same_net_segment_pad_gap_acceptable`` (an
-  axis-aligned segment is a zero-thickness box swept by ``via_r + w/2``) and,
-  for diagonals, the same region test on the exact point-to-segment gap;
+  oracle is ``via_clearance.same_net_segment_trace_gap_acceptable`` (the
+  trace-population wrapper of the shared predicate, tangent accepted; an
+  axis-aligned segment is a zero-thickness box swept by ``via_r + w/2``)
+  and, for diagonals, the same region test on the exact point-to-segment gap;
 * only the via's OWN net's segments count (a foreign net's trace is
   clearance's job);
 * a through via's annulus exists on every layer, so an own-net trace on ANY
@@ -27,7 +28,7 @@ import pytest
 
 from kicad_tools.core.geometry import point_to_segment_distance
 from kicad_tools.router.cpp_backend import is_cpp_available
-from kicad_tools.router.via_clearance import same_net_segment_pad_gap_acceptable
+from kicad_tools.router.via_clearance import same_net_segment_trace_gap_acceptable
 
 requires_cpp = pytest.mark.skipif(
     not is_cpp_available(),
@@ -87,10 +88,10 @@ def _oracle_ok(x_mm, y_mm, seg, edge_mm=EDGE) -> bool:
 
 
 def _python_axis_aligned_ok(x_mm, y_mm, seg) -> bool:
-    """Same verdict through the shared Python predicate (axis-aligned seg)."""
+    """Same verdict through the trace-population Python predicate (axis-aligned seg)."""
     x1, y1, x2, y2, width = seg[:5]
     box = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
-    return same_net_segment_pad_gap_acceptable(
+    return same_net_segment_trace_gap_acceptable(
         (x_mm, y_mm), (x_mm, y_mm), VIA_DIAMETER / 2 + width / 2, [box], EDGE
     )
 
