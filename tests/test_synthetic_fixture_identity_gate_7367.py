@@ -129,7 +129,7 @@ BOARD07_GAP_NETS = (
     "TMDS_D2_P",
 )
 
-BOARD06_GAP_NETS = ("GND", "MIPI_CLK+", "PCIE_RX+", "USB2_D-")
+BOARD06_GAP_NETS = ("GND", "MIPI_CLK+", "PCIE_RX+")
 
 
 def fab_gap_allowance(nets: tuple[str, ...]) -> dict:
@@ -284,10 +284,10 @@ def test_board06_committed_allowance():
     """Issue #7548 emptied the skew entry: board 06's allowance holds only
     the #8957 fab-view ``physical_copper_gap`` nets (net-signature keyed --
     the board is regenerated each CI run, so geometry-keyed identities are
-    ephemeral).  Issue #8994's C++ mirror landed but the PCIE_RX+/USB2_D-
-    findings survive (corner-wedge + trace-population pairs, see the
-    allowance comment in check_diffpair_coverage.py), so their entries
-    stay."""
+    ephemeral).  Issue #9208's C++ own-net-trace slit refusal drained the
+    USB2_D- trace-population finding, leaving only the PCIE_RX+ corner
+    wedge (#9124, see the allowance comment in
+    check_diffpair_coverage.py)."""
     gate = load("check_diffpair_coverage")
     assert fab_gap_allowance(BOARD06_GAP_NETS) == gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
     assert not hasattr(gate, "DIFFPAIR_SKEW_TRACKER")

@@ -216,6 +216,31 @@ bool CoupledPathfinder::same_net_pad_gap_in_band(int gx, int gy, int net) const 
     return false;
 }
 
+// Issue #9208: trace-population twin of ``same_net_pad_gap_in_band`` -- a rail
+// via's annulus against its own net's committed trace copper.  Same arithmetic
+// as ``Pathfinder::is_via_blocked_diag``'s block (types.hpp's
+// ``same_net_segment_gap_in_band`` holds the single shared copy).
+bool CoupledPathfinder::same_net_trace_gap_in_band(int gx, int gy, int net) const {
+    const float edge_mm = rules_.same_net_trace_gap_band_edge_mm;
+    if (edge_mm <= 0.0f || net <= 0) return false;
+    const auto [wx, wy] = grid_.grid_to_world(gx, gy);
+    const HaloNetDims* dims = halo_dims_for(net);
+    const double half =
+        static_cast<double>(dims ? dims->via_diameter : rules_.via_diameter) / 2.0;
+    const float reach = static_cast<float>(half + edge_mm);
+    const auto candidates =
+        grid_.route_geometry_candidates(wx - reach, wy - reach, wx + reach, wy + reach);
+    for (const size_t i : candidates.first) {
+        const auto& seg = grid_.stored_segments()[i];
+        if (seg.net != net) continue;
+        if (router::same_net_segment_gap_in_band(static_cast<double>(wx),
+                                                 static_cast<double>(wy), half, seg,
+                                                 static_cast<double>(edge_mm)))
+            return true;
+    }
+    return false;
+}
+
 // Mirror of Python ``_is_via_blocked`` (diffpair_routing.py:793-832).
 bool CoupledPathfinder::is_via_blocked(int gx, int gy, int net) const {
     // Issue #6008: via-blocking keepout rule areas (Python
@@ -1074,7 +1099,10 @@ CoupledRouteResult CoupledPathfinder::route(
                                    !via_drill_at_smd_pad_edge(current.p_x, current.p_y) &&
                                    !via_drill_at_smd_pad_edge(current.n_x, current.n_y) &&
                                    !same_net_pad_gap_in_band(current.p_x, current.p_y, p_net) &&
-                                   !same_net_pad_gap_in_band(current.n_x, current.n_y, n_net)) ? 1 : 0;
+                                   !same_net_pad_gap_in_band(current.n_x, current.n_y, n_net) &&
+                                   // Issue #9208: and the annulus vs own committed trace copper.
+                                   !same_net_trace_gap_in_band(current.p_x, current.p_y, p_net) &&
+                                   !same_net_trace_gap_in_band(current.n_x, current.n_y, n_net)) ? 1 : 0;
                 }
                 if (smd_vias_ok == 0) { rej("via_in_pad"); continue; }
                 if (!p_at_ep && is_via_blocked(current.p_x, current.p_y, p_net)) { rej("via_blocked_p"); continue; }

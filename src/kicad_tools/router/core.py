@@ -2136,6 +2136,15 @@ class Autorouter:
         self._stub_region_world: tuple[float, float, float, float] | None = None
         self.net_names: dict[int, str] = {}
         self.routes: list[Route] = []
+        # Issue #8999: airwire-separation state (owned by
+        # :mod:`kicad_tools.router.airwire_cost`; weight 0.0 = flag off =
+        # byte-identical cost model).
+        self._airwire_separation_weight = 0.0
+        self._airwire_skeleton_cache: dict[
+            int, list[tuple[tuple[float, float], tuple[float, float]]]
+        ] = {}
+        self._airwire_log_printed = False
+        self._airwire_cost_pushed = False
         # Issue #3002 (PR #3006 perf): single-slot cache for the
         # ``vias_by_net`` index used by
         # :meth:`_update_router_segment_foreign_context`.  Stores
@@ -2262,6 +2271,15 @@ class Autorouter:
         self.report_detour_ratio: bool = False
         self.detour_probe_records: list[DetourConnectionRecord] | None = None
         self._detour_unattributed_drawn_mm: float = 0.0
+
+        # Issue #9013: ``--detour-repair`` attribute-on-router pattern (same
+        # shape as ``report_detour_ratio`` above).  When True the alone-on-empty
+        # probe pre-pass runs too (it is the offender list) and
+        # ``route_all_negotiated`` invokes the targeted post-settle repair pass
+        # once the loop settles.  Default off: with the flag absent, routed
+        # output is byte-identical (pinned by the #9003 report test).
+        self.detour_repair: bool = False
+        self.detour_repair_outcomes: list[Any] = []
 
         # Fine zones for multi-resolution escape routing (Issue #1828)
         # Set externally (e.g., from CLI's MultiResolutionGridPlan) before
@@ -9083,6 +9101,24 @@ class Autorouter:
             num_copper_layers=None,
         )
 
+    def _refresh_skew_trackers_after_detour_repair(self, outcomes: list) -> None:
+        """Re-run :meth:`_finalize_routing` when a detour repair mutated routes (#9197).
+
+        The opt-in ``--detour-repair`` pass (#9013) runs AFTER the
+        ``_finalize_routing`` at the tail of each ``route_all_*`` entry point,
+        and a ``kept`` attempt lifts, re-routes and re-lands nets in
+        ``self.routes``.  Without a refresh the diff-pair / match-group
+        trackers would keep lengths for copper that no longer exists, breaking
+        the "``self.routes`` is final when ``_finalize_routing`` runs" contract.
+
+        Gated on a ``kept`` verdict so the flag-off path and a no-keep pass
+        (every attempt rolled back or skipped restores the exact prior board)
+        make no extra call and stay byte-identical.  ``_finalize_routing`` is
+        safe to repeat: ``record_routes`` overwrites per net id.
+        """
+        if any(getattr(o, "verdict", None) == "kept" for o in outcomes):
+            self._finalize_routing()
+
     def _pair_via_parity_copper(self) -> list[Route]:
         """The copper ``kct check`` sees on the written board, for the parity audit.
 
@@ -12653,7 +12689,9 @@ class Autorouter:
     def _probe_alone_on_empty_lengths(self, net_order: list[int] | None = None) -> None:
         """Pre-pass probe: every connection's alone-on-empty length (#9003).
 
-        ``--report-detour-ratio`` only.  Runs BEFORE any copper is committed
+        ``--report-detour-ratio``, or ``--detour-repair`` (Issue #9013: the
+        repair pass consumes these records as its offender list).  Runs
+        BEFORE any copper is committed
         -- the grid at this point already is the empty board (pads, keepouts
         and fixed copper only), which is exactly the substrate the metric's
         denominator is defined on.  For each net the probe runs the SAME
@@ -12716,7 +12754,9 @@ class Autorouter:
         A failure here is never fatal: the report is advisory, so an
         unexpected error degrades to empty records plus one warning line.
         """
-        if not getattr(self, "report_detour_ratio", False):
+        if not getattr(self, "report_detour_ratio", False) and not getattr(
+            self, "detour_repair", False
+        ):
             return
         if getattr(self, "detour_probe_records", None) is not None:
             # Already probed on this Autorouter (a re-entered driver); the
@@ -12989,6 +13029,7 @@ class Autorouter:
         best_stall_min_iterations: int = 2,
         early_bail_terminal_stall: bool = True,
         deterministic_rescue: bool = DETERMINISTIC_RESCUE_DEFAULT,
+        airwire_weight: float | None = None,
     ) -> list[Route]:
         """Route all nets using PathFinder-style negotiated congestion.
 
@@ -13156,6 +13197,19 @@ class Autorouter:
                 measured a board-07 regression on this entry point with
                 it on, so it stays opt-in.  See that constant and
                 :meth:`_relief_subsearch_budget`.
+            airwire_weight: Issue #8999 -- weight of the prospective
+                airwire-separation cost term.  ``None`` (the default) keeps
+                any instance-level weight (``kct route
+                --airwire-separation-weight`` sets it on the router before
+                dispatch, so paths that reach this method bare -- the
+                adaptive multi-resolution and sub-grid drivers -- inherit
+                it too); ``0.0`` never builds the crossing-count plane and
+                is byte-identical to the historical cost model; ``> 0``
+                prices each cell by how many *still-unrouted* nets'
+                straight-line desire lines cover it (the current net's own
+                desire lines excluded), so candidate paths that slip around
+                other nets' pending flight lines are preferred to ones that
+                cut across them.
 
         Returns:
             List of routes (may be partial if timeout reached)
@@ -13164,6 +13218,17 @@ class Autorouter:
         import time
 
         start_time = time.time()
+
+        # Issue #8999: publish the airwire-separation weight on the instance
+        # BEFORE any per-net search runs -- every path that reaches the
+        # negotiated per-net funnel (``_route_net_negotiated`` and the
+        # two-phase ``_route_net_with_corridor``, including the relief probe
+        # and the rip-up re-land) reads it there to refresh the
+        # crossing-count plane from the current committed set.  ``None``
+        # (a bare call from an internal driver) leaves the CLI-set instance
+        # weight in place.
+        if airwire_weight is not None:
+            self._airwire_separation_weight = float(airwire_weight)
 
         # Issue #4463: the corridor-yield recovery re-runs the caller's
         # strategy a SECOND time after ripping the coupled bodies that sealed
@@ -13314,6 +13379,15 @@ class Autorouter:
         # callers of ``route_all_negotiated`` picks it up uniformly.  Default
         # ``"negotiated"`` falls through to the unmodified loop below.
         if getattr(self, "_ripup_strategy", "negotiated") == "sequential-n1":
+            # Issue #9013: the detour repair pass settles after the negotiated
+            # loop this prototype replaces, so the flag combination would be a
+            # silent no-op here (the #5908 lesson).  Warn and skip.
+            if getattr(self, "detour_repair", False):
+                flush_print(
+                    "  --detour-repair: not available under --ripup-strategy "
+                    "sequential-n1 (that strategy replaces the negotiated loop "
+                    "the repair pass settles after); skipping the pass"
+                )
             from .sequential_ripup import route_all_sequential_ripup
 
             return route_all_sequential_ripup(
@@ -13992,6 +14066,22 @@ class Autorouter:
             # Issue #2657 / Epic #2556 Phase 3H-cont: post-route
             # diff-pair skew bookkeeping (see _finalize_routing docstring).
             self._finalize_routing()
+            # Issue #9013: the same opt-in post-settle repair pass as the
+            # main tail below -- a zero-overflow initial pass is still a
+            # settled board whose nets may detour around each other's
+            # copper (order-of-routing detours produce no overflow).
+            if getattr(self, "detour_repair", False):
+                from .detour_repair import run_detour_repair_pass
+
+                self._refresh_skew_trackers_after_detour_repair(
+                    run_detour_repair_pass(
+                        self,
+                        net_routes=net_routes,
+                        pads_by_net=pads_by_net,
+                        neg_router=neg_router,
+                        per_net_timeout=per_net_timeout,
+                    )
+                )
             return list(self.routes)
         elif initial_partial:
             partial_names = sorted(self.net_names.get(n, f"Net_{n}") for n in initial_partial)
@@ -16990,6 +17080,29 @@ class Autorouter:
                 "(issue #5923)"
             )
 
+        # Issue #9013: opt-in targeted post-settle detour repair pass.  Read
+        # once here, at the SAME relative point as the rescue sweep above --
+        # after the loop, the demote safety nets and _finalize_routing have
+        # settled the board -- so every internal caller of
+        # ``route_all_negotiated`` picks it up uniformly.  The pass is
+        # transactional per offender (whole-board ``RouteScore`` accept
+        # gate, exact rollback) and bounded (one attempt per offender
+        # net), so it can only shorten copper, never regress the routed
+        # count.  Default off: with ``detour_repair`` False this is a
+        # no-op and routed output is byte-identical (#9003 pin).
+        if getattr(self, "detour_repair", False):
+            from .detour_repair import run_detour_repair_pass
+
+            self._refresh_skew_trackers_after_detour_repair(
+                run_detour_repair_pass(
+                    self,
+                    net_routes=net_routes,
+                    pads_by_net=pads_by_net,
+                    neg_router=neg_router,
+                    per_net_timeout=per_net_timeout,
+                )
+            )
+
         return list(self.routes)
 
     def _restore_negotiated_route_snapshot(self, restored_routes: list[Route]) -> None:
@@ -18700,6 +18813,21 @@ class Autorouter:
         if net not in self.nets and not stub_targets:
             return []
 
+        # Issue #8999: refresh the airwire-separation plane before the
+        # search.  This is the single negotiated per-net funnel (the initial
+        # pass, every rip-up iteration, the relief probe and the re-land
+        # paths all reach the search through it), so one hook covers every
+        # negotiated search with a plane recomputed from the CURRENT
+        # committed set -- the net being routed is excluded (its own desire
+        # lines must not price its own straight path).  A no-op returning 0
+        # when the flag is off (weight 0.0), keeping that path
+        # byte-identical.
+        from .airwire_cost import refresh_airwire_cost
+
+        refresh_airwire_cost(
+            self, weight=getattr(self, "_airwire_separation_weight", 0.0), current_net=net
+        )
+
         pads = self._region_filtered_pad_keys(net, self.nets.get(net, []))
         if len(pads) + len(stub_targets) < 2:
             return []
@@ -20279,6 +20407,20 @@ class Autorouter:
         # Issue #2657 / Epic #2556 Phase 3H-cont: post-route diff-pair
         # skew bookkeeping (see _finalize_routing docstring).
         self._finalize_routing()
+        # Issue #9013: opt-in targeted post-settle detour repair pass on the
+        # two-phase settle path.  ``kct route`` sends every escape-routed
+        # board HERE (``route_with_escape`` -> ``route_all_two_phase`` ->
+        # ``TwoPhaseRouter``), which never reaches ``route_all_negotiated`` --
+        # dispatching only there would make the flag a silent no-op on
+        # exactly the boards the #9003 measurement flagged (03/05; the
+        # #5908 shape).  Same transactional, bounded pass as the negotiated
+        # tail; default off keeps this a no-op.
+        if getattr(self, "detour_repair", False):
+            from .detour_repair import run_detour_repair_pass_from_autorouter
+
+            self._refresh_skew_trackers_after_detour_repair(
+                run_detour_repair_pass_from_autorouter(self, per_net_timeout=per_net_timeout)
+            )
         _emit_route_checkpoint(
             getattr(checkpoint_callback, "checkpoint_completed", None),
             self.routes,
@@ -20309,6 +20451,18 @@ class Autorouter:
         pads = self.nets[net]
         if len(pads) < 2:
             return []
+
+        # Issue #8999: same airwire-separation refresh as the plain
+        # negotiated funnel -- the two-phase detailed loop (and the escape
+        # pre-phase's Phase 2) routes every net through HERE, so without
+        # this hook the crossing-count plane stays all-zero on every board
+        # dispatched to two-phase (board 03's escape+two-phase path is the
+        # measured example) and the term silently no-ops.
+        from .airwire_cost import refresh_airwire_cost
+
+        refresh_airwire_cost(
+            self, weight=getattr(self, "_airwire_separation_weight", 0.0), current_net=net
+        )
 
         _dbg = bool(os.environ.get("KCT_DEBUG_PNT"))
         _t0 = time.monotonic() if _dbg else 0.0
@@ -21803,6 +21957,9 @@ class Autorouter:
             discs=discs,
             path_is_clear=path_is_clear,
             is_mutable=lambda s: id(s) in owner_of,
+            # The checker above is a pre-repair snapshot; this makes later
+            # repairs clear the chords earlier ones added (issue #8930).
+            clearance=float(self.grid.rules.trace_clearance),
         )
         if not result.repairs:
             if result.skipped:

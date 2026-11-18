@@ -335,6 +335,13 @@ def apply_fabrication_overrides(
     # fields); every field name was already checked against `_OVERRIDABLE_FIELDS`
     # (itself checked against DesignRules' own fields) in the validation loop
     # above, so this is safe at runtime.
+    #
+    # If a verified `min_clearance_mm` floor is ever registered for a profile
+    # whose `min_inner_clearance_mm` is higher, this `replace` would raise from
+    # `DesignRules.__post_init__` (inner > outer, Issue #9113): `min_inner_clearance_mm`
+    # is deliberately not in `_OVERRIDABLE_FIELDS`, so the override alone cannot
+    # keep the floors ordered -- carry the inner floor down alongside at that
+    # point, as the optimizer referee does (router/optimizer/pcb.py).
     return replace(rules, **changes)  # type: ignore[arg-type]
 
 

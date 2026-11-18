@@ -535,7 +535,7 @@ def connect_attended_page(
     """
     require_attended()
     try:
-        from playwright.sync_api import sync_playwright  # type: ignore[import-not-found]
+        from playwright.sync_api import sync_playwright
     except ImportError as exc:
         raise DriverAbort(
             "connect",

@@ -78,6 +78,7 @@ from .thermal import (
 )
 from .trace_length import (
     DifferentialPairReport,
+    NetPathMeasurement,
     TraceLengthAnalyzer,
     TraceLengthReport,
 )
@@ -104,6 +105,7 @@ __all__ = [
     "ElectricalRatingResult",
     "ImpedanceDiscontinuity",
     "LayerPrediction",
+    "NetPathMeasurement",
     "NetStatus",
     "NetStatusAnalyzer",
     "NetStatusResult",

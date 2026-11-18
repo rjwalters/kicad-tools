@@ -31,11 +31,14 @@ Design notes:
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any, Protocol
 
 from kicad_tools.core.geometry import point_in_polygon as _core_point_in_polygon
 from kicad_tools.core.geometry import point_to_segment_distance
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Duck-typed protocols so the helper works with both stitcher and router
@@ -694,6 +697,110 @@ def same_net_pad_gap_band_ring(
     # the corners, which IS visible at mask resolution).
     return pad.buffer(radius + min_gap_mm, quad_segs=64).difference(
         pad.buffer(radius, quad_segs=64)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Same-net fab-view slit band: shared edge resolution + trace-population test
+# (Issue #9150; the #8938 / #8957 / #8975 / #9007 / #9114 family)
+# ---------------------------------------------------------------------------
+
+#: A same-net gap at or below this is one copper union (touch/overlap), not a
+#: slit.  Only the open band ``(SAME_NET_BAND_UNION_EPS_MM, edge + slack)`` is
+#: rejected.
+SAME_NET_BAND_UNION_EPS_MM = 1e-6
+
+#: Added to the fab edge so a seat accepted at plan time cannot land a hair
+#: under the edge on disk: positions are written at 3 decimals (0.0005 mm per
+#: axis) on both sides of the pair (#8975).
+SAME_NET_BAND_WRITE_SLACK_MM = 1.5e-3
+
+
+def same_net_band_edges(
+    profile: str, layers: int, outer_oz: float, inner_oz: float
+) -> tuple[float, float]:
+    """``(pad_edge_mm, trace_edge_mm)`` of the fab-view same-net slit band.
+
+    Resolved from the caller's stackup: ``profile``, ``layers``, ``outer_oz``
+    and ``inner_oz`` name the fab entry to grade against -- required, no
+    defaults, so a caller cannot silently inherit another board's stackup
+    (#9188).  Edges are never literals, so a repair pass's acceptance bands
+    match the fab-view checker by construction (#8957, #8975).  The pad
+    population's error edge grades via-annulus-to-SMD-pad slits; the trace
+    population's grades annulus/segment pairs.  A missing profile entry
+    logs a warning and yields ``(0.0, 0.0)``, which disables the band
+    rather than guessing an edge.
+    """
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.validate.rules.physical_gap import fab_gap_policy_from_entry
+
+    entry = get_profile(profile).get_dfm_entry(layers, outer_oz, inner_oz)
+    policy = fab_gap_policy_from_entry(entry) if entry else None
+    if policy is None:
+        logger.warning(
+            "same_net_band_edges: no fab gap policy for stackup "
+            "profile=%r layers=%r outer_oz=%r inner_oz=%r; "
+            "same-net slit band disabled (#9226)",
+            profile,
+            layers,
+            outer_oz,
+            inner_oz,
+        )
+        return 0.0, 0.0
+    return policy.pad.error_edge_mm, policy.trace.error_edge_mm
+
+
+def same_net_trace_band_clear(
+    geom: Any,
+    same_net_copper: Any,
+    trace_edge_mm: float,
+) -> bool:
+    """True iff ``geom`` opens no same-net slit against ``same_net_copper``.
+
+    ``geom`` is a shapely geometry (a via annulus or a segment outline) and
+    ``same_net_copper`` an iterable of shapely geometries on the same net
+    (segment outlines and via circles) that the caller already restricted to
+    the layers that matter: any layer for an annulus (it exists on every
+    layer), the path's own layer for a segment.  Overlap/touch is one copper
+    union; only the open gap band ``(0, trace_edge_mm + slack)`` is rejected.
+    ``trace_edge_mm <= 0`` disables the test.
+    """
+    if trace_edge_mm <= 0:
+        return True
+    limit = trace_edge_mm + SAME_NET_BAND_WRITE_SLACK_MM
+    return not any(
+        SAME_NET_BAND_UNION_EPS_MM < geom.distance(other) < limit for other in same_net_copper
+    )
+
+
+def same_net_band_seat_ok(
+    x: float,
+    y: float,
+    diameter: float,
+    same_net_copper: Any,
+    same_net_pad_bboxes: list[tuple[float, float, float, float]] | None,
+    pad_edge_mm: float,
+    trace_edge_mm: float,
+) -> bool:
+    """True iff a via annulus at ``(x, y)`` opens no same-net fab-view slit.
+
+    The pure seat predicate every board recipe's via-placement pass shares
+    (Issue #9150, lifted from board 06's ``_same_net_band_seat_ok``, #9114).
+    The annulus exists on every layer, so same-net copper on any layer counts.
+    ``same_net_copper`` is an iterable of shapely geometries of the via's own
+    net (the via being moved excluded by the caller); pads grade on the pad
+    population's edge via :func:`same_net_pad_gap_acceptable`, everything else
+    on the trace population's via :func:`same_net_trace_band_clear`.  An edge
+    of ``0`` disables that test.
+    """
+    if not same_net_pad_gap_acceptable(x, y, diameter, same_net_pad_bboxes, pad_edge_mm):
+        return False
+    if trace_edge_mm <= 0:
+        return True
+    from shapely.geometry import Point
+
+    return same_net_trace_band_clear(
+        Point(x, y).buffer(diameter / 2), same_net_copper, trace_edge_mm
     )
 
 

@@ -74,7 +74,15 @@ def test_actual_cli_missing_policy_never_prints_or_serializes_pass(tmp_path, cap
     )
 
 
-def toy_geometry(conductor_x=1.2, *, overlap_owner=False, merged=False, conductor_kind="segment"):
+def toy_geometry(
+    conductor_x=1.2,
+    *,
+    overlap_owner=False,
+    merged=False,
+    conductor_kind="segment",
+    owner_net="N",
+    conductor_net="N",
+):
     from shapely.geometry import box
 
     from kicad_tools.validate.mask_copper_geometry import AttributedMaskGeometry
@@ -92,13 +100,13 @@ def toy_geometry(conductor_x=1.2, *, overlap_owner=False, merged=False, conducto
         {
             owner: {
                 "kind": "pad:rect",
-                "net": "N",
+                "net": owner_net,
                 "layers_geometry": {"F.Mask": opening, "F.Cu": pad},
                 "margin_mm": {"F.Mask": 0.1},
             },
             other: {
                 "kind": conductor_kind,
-                "net": "N",
+                "net": conductor_net,
                 "layers_geometry": {"F.Cu": trace},
                 "margin_mm": {},
             },
@@ -166,7 +174,16 @@ def test_same_net_conductor_inside_the_opening_is_flagged_without_overlapping(
     [
         (kind, mode)
         for kind in ("segment", "zone")
-        for mode in ("valid", "stale", "wrong_uuid", "wrong_layer", "disconnected")
+        for mode in (
+            "valid",
+            "stale",
+            "wrong_uuid",
+            "wrong_layer",
+            "disconnected",
+            "different_net",
+            "unidentified_owner_net_none",
+            "unidentified_owner_net_empty",
+        )
     ],
 )
 def test_intent_requires_exact_binding_identity_layer_and_direct_connection(conductor_kind, mode):
@@ -178,8 +195,18 @@ def test_intent_requires_exact_binding_identity_layer_and_direct_connection(cond
         source_binding,
     )
 
+    # Geometry stays directly connected for the net modes so that only the
+    # net check can reject the declaration.
+    net_kwargs = {
+        "different_net": {"conductor_net": "M"},
+        "unidentified_owner_net_none": {"owner_net": None},
+        "unidentified_owner_net_empty": {"owner_net": ""},
+    }.get(mode, {})
     geometry, owner, other = toy_geometry(
-        overlap_owner=mode != "disconnected", conductor_x=1.05, conductor_kind=conductor_kind
+        overlap_owner=mode != "disconnected",
+        conductor_x=1.05,
+        conductor_kind=conductor_kind,
+        **net_kwargs,
     )
     binding = source_binding(geometry)
     if mode == "stale":
@@ -203,6 +230,10 @@ def test_intent_requires_exact_binding_identity_layer_and_direct_connection(cond
     else:
         # A rejected declaration never suppresses the measurement it names.
         assert conductor_measurements[0].disposition == "violation"
+    if net_kwargs:
+        assert result.intent_audit[0]["reason"] == "connection must share an identified net"
+        # A rejected declaration must not suppress the exposure it names.
+        assert [m.disposition for m in result.measurements] == ["violation"]
 
 
 @pytest.mark.parametrize(
@@ -1311,3 +1342,80 @@ def test_v1_payload_without_new_fields_loads_and_round_trips():
     assert measurement.owner_ref is None
     reloaded = MaskCopperAssessment.from_dict(assessment.to_dict())
     assert reloaded.measurements[0].to_dict() == measurement.to_dict()
+
+
+def _merged_region_geometry(trace_kind):
+    """Two pads on nets N/M whose mask openings are bridged by one native region.
+
+    The native F.Mask is wider than the two per-pad openings, so the residual
+    bridge strip (x 1.1..1.3) becomes a ``merged_region`` opening with both pads
+    as contributors. A conductor on net N sits wholly inside that strip.
+    """
+    from shapely.geometry import Point, box
+    from shapely.ops import unary_union
+
+    from kicad_tools.validate.mask_copper_geometry import AttributedMaskGeometry
+    from kicad_tools.validate.mask_export_geometry import ExportedMaskGeometry
+
+    pad_a, pad_b, trace = (f"00000000-0000-0000-0000-00000000000{i}" for i in (1, 2, 3))
+    open_a, open_b = box(-0.1, -0.1, 1.1, 1.1), box(1.3, -0.1, 2.3, 1.1)
+    native = unary_union([open_a, open_b, box(1.0, -0.1, 1.3, 1.1)])
+    copper_a, copper_b = box(0, 0, 1, 1), box(1.4, 0, 2.2, 1)
+    conductor = Point(1.2, 0.5).buffer(0.04) if trace_kind == "via" else box(1.15, 0.4, 1.25, 0.6)
+    exported = ExportedMaskGeometry(
+        "a" * 64,
+        None,
+        None,
+        "10.0.5",
+        {},
+        layers={"F.Mask": native, "F.Cu": unary_union([copper_a, copper_b, conductor])},
+    )
+    return AttributedMaskGeometry(
+        exported,
+        {
+            pad_a: {
+                "kind": "pad:rect",
+                "net": "N",
+                "pad_ref": "R1/1",
+                "layers_geometry": {"F.Mask": open_a, "F.Cu": copper_a},
+                "margin_mm": {"F.Mask": 0.1},
+            },
+            pad_b: {
+                "kind": "pad:rect",
+                "net": "M",
+                "pad_ref": "R2/1",
+                "layers_geometry": {"F.Mask": open_b, "F.Cu": copper_b},
+                "margin_mm": {"F.Mask": 0.1},
+            },
+            trace: {
+                "kind": trace_kind,
+                "net": "N",
+                "layers_geometry": {"F.Cu": conductor},
+                "margin_mm": {},
+            },
+        },
+    )
+
+
+@pytest.mark.parametrize("trace_kind", ["segment", "via"])
+def test_same_net_conductor_over_merged_region_prints_bare_same_net(trace_kind):
+    """Issue #9149: bare ``same-net`` is also the no-single-owner-pad path.
+
+    A segment/arc/via has a terminating endpoint, yet over a merged-region
+    opening there is no single owner pad to test it against, so the relation
+    is the bare ``same-net`` string -- not own-pad entry / pass-through.
+    """
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    assessment = assess_attributed_geometry(_merged_region_geometry(trace_kind), _POLICY)
+    merged = [m for m in assessment.measurements if m.opening_kind == "merged_region"]
+    assert len(merged) == 1
+    assert merged[0].conductor_kind == trace_kind
+    assert merged[0].same_net is True and merged[0].own_pad_entry is None
+    labels = [
+        v.message
+        for v in _mask_findings(assessment_results(assessment))
+        if "opening merged_region" in v.message
+    ]
+    assert len(labels) == 1
+    assert labels[0].endswith("; same-net")

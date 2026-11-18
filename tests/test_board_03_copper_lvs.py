@@ -419,6 +419,14 @@ class TestBoard03PartialRouteFastFail:
         monkeypatch.setattr(module, "fill_zones_in_routed_pcb", lambda *a, **k: None)
         monkeypatch.setattr(module, "run_drc", lambda *a, **k: True)
         monkeypatch.setattr(module, "require_saved_copper_connected", lambda *a, **k: None)
+        # Step 5.48 imports these inside the function; route_pcb is stubbed so
+        # no routed board exists for them to edit (board 01 precedent #8598).
+        monkeypatch.setattr(
+            "kicad_tools.cli.pcb_add_fiducials.run_add_fiducials", lambda *a, **k: 0
+        )
+        monkeypatch.setattr(
+            "kicad_tools.cli.pcb_add_board_info.run_add_board_info", lambda *a, **k: 0
+        )
 
         lvs_called: list[bool] = []
 

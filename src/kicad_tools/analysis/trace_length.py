@@ -19,7 +19,8 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from heapq import heappop, heappush
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
@@ -121,6 +122,16 @@ class TraceLengthReport:
     arc_count: int = 0
     arc_lengths: list[float] = field(default_factory=list)
 
+    # Physical pad-to-pad path (Issue #9117).  ``path_length_mm`` is the
+    # shortest copper path between the net's pads through the shared
+    # copper-contact graph (longest pairwise shortest path for nets with
+    # more than two pads); ``off_path_length_mm`` is the copper on no such
+    # path -- dead-end loops, overlapping duplicates, stubs.  ``None``
+    # until measured (:meth:`TraceLengthAnalyzer.measure_net_path`); the
+    # summed ``total_length_mm`` keeps its meaning and its callers.
+    path_length_mm: float | None = None
+    off_path_length_mm: float | None = None
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         result: dict[str, Any] = {
@@ -153,7 +164,234 @@ class TraceLengthReport:
                 "skew_mm": round(self.skew_mm or 0, 3),
             }
 
+        if self.path_length_mm is not None:
+            result["path_length_mm"] = round(self.path_length_mm, 3)
+        if self.off_path_length_mm is not None:
+            result["off_path_length_mm"] = round(self.off_path_length_mm, 3)
+
         return result
+
+
+@dataclass
+class NetPathMeasurement:
+    """Physical pad-to-pad copper path for one net (Issue #9117).
+
+    Attributes:
+        path_length_mm: Shortest copper path between the net's pads through
+            the shared copper-contact graph (for nets with more than two
+            pads: the longest pairwise shortest path between pads).  ``None``
+            when the net has fewer than two pads, no shapely backend, or no
+            connected pad-to-pad path (an open net).
+        off_path_length_mm: Copper on no pad-to-pad path -- dead-end loops,
+            overlapping duplicates, stubs -- i.e. summed track length minus
+            the path.  ``None`` whenever the path is ``None``.
+        pad_count: Number of pads of this net found in the contact graph.
+        path_via_indices: Indices into ``board.vias`` of the vias the
+            measured path runs through (for via-travel accounting).
+    """
+
+    path_length_mm: float | None = None
+    off_path_length_mm: float | None = None
+    pad_count: int = 0
+    path_via_indices: tuple[int, ...] = ()
+
+
+# Point-coincidence radius (mm) for path-graph nodes; mirrors the contact
+# model's ``POSITION_TOLERANCE`` so a node is exactly "where copper meets".
+_NODE_MERGE_MM = 0.01
+
+
+class _PadToPadGraph(NamedTuple):
+    """Weighted point graph over one net's copper-contact graph."""
+
+    points: list[tuple[float, float]]
+    adjacency: dict[int, list[tuple[int, float]]]
+    pad_nodes: dict[int, int]
+    via_nodes: dict[int, int]
+    total_track_length_mm: float
+
+
+def _build_pad_to_pad_graph(
+    items: list[Any],
+    bonds: list[tuple[int, int]],
+) -> _PadToPadGraph:
+    """Weighted point graph over one net's copper-contact graph.
+
+    Nodes are physical meeting points: pad centres, via centres, track
+    endpoints, and the projection of any bonded pad/via/track endpoint onto
+    a track centreline (so a junction in the middle of a segment splits it
+    instead of charging its full length).  Edges carry the centreline
+    length between consecutive meeting points.  Track-to-track contact
+    links are charged the geometric distance between their meeting points,
+    so a chain of sub-width segment hops (bonded through capsule contact
+    without sharing endpoints) pays what it physically spans instead of
+    crossing copper at zero cost; a true junction merges into one node and
+    pays nothing.  Pad, via and fill nodes are zero-cost joints: in-pad /
+    in-annulus copper is a joint (it keeps in-pad escape copper on the
+    path; vertical via travel is the caller's accounting), and a fill is a
+    plane, so a path across a fill-bearing net measures the track hops
+    between contact points, not a physical copper length.  Contact
+    decisions are the shared model's (``bonds``), never re-derived.
+    """
+    from shapely.geometry import Point as _Point  # type: ignore[import-untyped]
+    from shapely.ops import nearest_points as _nearest_points  # type: ignore[import-untyped]
+
+    from kicad_tools.validate.copper_contact import FILL, PAD, TRACK, VIA
+
+    points: list[tuple[float, float]] = []
+
+    def node_for(point: Any) -> int:
+        px, py = float(point[0]), float(point[1])
+        for index, (nx, ny) in enumerate(points):
+            if (px - nx) ** 2 + (py - ny) ** 2 < _NODE_MERGE_MM**2:
+                return index
+        points.append((px, py))
+        return len(points) - 1
+
+    adjacency: dict[int, list[tuple[int, float]]] = {}
+
+    def link(a: int, b: int, weight: float) -> None:
+        if a != b:
+            adjacency.setdefault(a, []).append((b, weight))
+            adjacency.setdefault(b, []).append((a, weight))
+
+    def link_geometric(a: int, b: int) -> None:
+        """Track-to-track contact link charged the distance it spans.
+
+        Two bonded capsules meet somewhere between their centrelines;
+        charging that distance keeps a chain of sub-width segment hops
+        from crossing real copper at zero cost (Issue #9117), while a
+        genuine end-to-end or mid-track junction merges into one node
+        and pays nothing.
+        """
+        link(a, b, math.dist(points[a], points[b]))
+
+    pad_nodes: dict[int, int] = {}
+    via_nodes: dict[int, int] = {}
+    fill_nodes: dict[int, int] = {}
+    track_length: dict[int, float] = {}
+    line_length: dict[int, float] = {}
+    end_nodes: dict[int, tuple[int, int]] = {}
+    attachments: dict[int, list[tuple[float, int]]] = {}
+
+    for index, item in enumerate(items):
+        if item.kind == PAD and item.center is not None:
+            pad_nodes[index] = node_for(item.center)
+        elif item.kind == VIA and item.center is not None:
+            via_nodes[index] = node_for(item.center)
+        elif item.kind == FILL:
+            point = item.geom.representative_point()
+            fill_nodes[index] = node_for((point.x, point.y))
+        elif item.kind == TRACK:
+            start, end = item.endpoints[0], item.endpoints[-1]
+            track_length[index] = (
+                math.dist(start, end) if item.straight else max(float(item.line.length), 0.0)
+            )
+            line_length[index] = max(float(item.line.length), 1e-9)
+            end_nodes[index] = (node_for(start), node_for(end))
+
+    def attach(track_index: int, point: Any) -> int:
+        """Node at ``point``'s contact position on a track's centreline."""
+        item = items[track_index]
+        first, last = end_nodes[track_index]
+        total = line_length[track_index]
+        if total <= 2 * _NODE_MERGE_MM:
+            return first
+        geometry = point if hasattr(point, "project") else _Point(point)
+        distance = item.line.project(geometry)
+        if distance <= _NODE_MERGE_MM:
+            return first
+        if total - distance <= _NODE_MERGE_MM:
+            return last
+        split = item.line.interpolate(distance)
+        node = node_for((split.x, split.y))
+        attachments.setdefault(track_index, []).append((distance, node))
+        return node
+
+    for a, b in bonds:
+        ia, ib = items[a], items[b]
+        if ia.kind == TRACK and ib.kind == TRACK:
+            for t_index, o_index in ((a, b), (b, a)):
+                t_item, o_item = items[t_index], items[o_index]
+                linked = False
+                for ep_node, endpoint in zip(end_nodes[o_index], o_item.endpoints, strict=True):
+                    if t_item.line.distance(_Point(endpoint)) <= (
+                        t_item.half_width + o_item.half_width + 1e-9
+                    ):
+                        link_geometric(ep_node, attach(t_index, endpoint))
+                        linked = True
+                if not linked:
+                    # Capsule contact with no endpoint involvement (an
+                    # X crossing): bond at the closest centreline points.
+                    p_t, p_o = _nearest_points(t_item.line, o_item.line)
+                    link_geometric(attach(t_index, (p_t.x, p_t.y)), attach(o_index, (p_o.x, p_o.y)))
+        elif ia.kind == TRACK or ib.kind == TRACK:
+            t_index = a if ia.kind == TRACK else b
+            o_index = b if ia.kind == TRACK else a
+            o_item = items[o_index]
+            if o_item.kind == FILL:
+                p_t, _ = _nearest_points(items[t_index].line, o_item.geom)
+                link(fill_nodes[o_index], attach(t_index, (p_t.x, p_t.y)), 0.0)
+            elif o_item.center is not None:
+                joint = pad_nodes.get(o_index, via_nodes.get(o_index))
+                if joint is not None:
+                    # Deliberately zero-cost: in-pad / in-annulus copper is
+                    # a joint, which keeps in-pad escape copper on the path.
+                    link(joint, attach(t_index, o_item.center), 0.0)
+        elif FILL in (ia.kind, ib.kind):
+            fill_index = a if ia.kind == FILL else b
+            other_index = b if ia.kind == FILL else a
+            if items[other_index].kind == FILL:
+                link(fill_nodes[a], fill_nodes[b], 0.0)
+            else:
+                joint = pad_nodes.get(other_index, via_nodes.get(other_index))
+                if joint is not None:
+                    link(joint, fill_nodes[fill_index], 0.0)
+        else:
+            joint_a = pad_nodes.get(a, via_nodes.get(a))
+            joint_b = pad_nodes.get(b, via_nodes.get(b))
+            if joint_a is not None and joint_b is not None:
+                link(joint_a, joint_b, 0.0)
+
+    for track_index in track_length:
+        first, last = end_nodes[track_index]
+        stops = [(0.0, first), (line_length[track_index], last)]
+        stops.extend(attachments.get(track_index, ()))
+        stops.sort()
+        total = track_length[track_index]
+        scale = total / line_length[track_index]
+        for position in range(len(stops) - 1):
+            d0, n0 = stops[position]
+            d1, n1 = stops[position + 1]
+            link(n0, n1, (d1 - d0) * scale)
+
+    return _PadToPadGraph(
+        points=points,
+        adjacency=adjacency,
+        pad_nodes=pad_nodes,
+        via_nodes=via_nodes,
+        total_track_length_mm=sum(track_length.values()),
+    )
+
+
+def _shortest_path_from(
+    adjacency: dict[int, list[tuple[int, float]]], source: int
+) -> tuple[dict[int, float], dict[int, int]]:
+    """Dijkstra distances and predecessor map from ``source``."""
+    dist = {source: 0.0}
+    prev: dict[int, int] = {}
+    heap: list[tuple[float, int]] = [(0.0, source)]
+    while heap:
+        d, node = heappop(heap)
+        if d > dist.get(node, math.inf):
+            continue
+        for neighbour, weight in adjacency.get(node, ()):
+            candidate = d + weight
+            if candidate < dist.get(neighbour, math.inf) - 1e-12:
+                dist[neighbour] = candidate
+                prev[neighbour] = node
+                heappush(heap, (candidate, neighbour))
+    return dist, prev
 
 
 @dataclass
@@ -217,12 +455,19 @@ class TraceLengthAnalyzer:
             self._patterns.extend(critical_patterns)
         self._compiled_patterns = [re.compile(p) for p in self._patterns]
 
-    def analyze_net(self, board: PCB, net_name: str) -> TraceLengthReport:
+    def analyze_net(
+        self, board: PCB, net_name: str, *, with_path_length: bool = False
+    ) -> TraceLengthReport:
         """Calculate trace length for a specific net.
 
         Args:
             board: PCB object to analyze.
             net_name: Name of the net to analyze.
+            with_path_length: Also measure the physical pad-to-pad path
+                (Issue #9117) and fill ``path_length_mm`` /
+                ``off_path_length_mm``.  Off by default: the measurement
+                builds a contact graph per net and existing callers keep
+                the summed-length behaviour unchanged.
 
         Returns:
             TraceLengthReport with length measurements.
@@ -267,7 +512,7 @@ class TraceLengthAnalyzer:
 
         total_length = sum(segment_lengths) + sum(arc_lengths)
 
-        return TraceLengthReport(
+        report = TraceLengthReport(
             net_name=net_name,
             total_length_mm=total_length,
             segment_count=len(segment_lengths),
@@ -277,6 +522,94 @@ class TraceLengthAnalyzer:
             via_count=via_count,
             layer_changes=layer_changes,
             layers_used=layers_used,
+        )
+        if with_path_length:
+            measurement = self.measure_net_path(board, net_name)
+            report.path_length_mm = measurement.path_length_mm
+            report.off_path_length_mm = measurement.off_path_length_mm
+        return report
+
+    def measure_net_path(self, board: PCB, net_name: str) -> NetPathMeasurement:
+        """Measure the physical pad-to-pad copper path of one net.
+
+        The path runs through the shared copper-contact graph
+        (:mod:`kicad_tools.validate.copper_contact`): track copper bonded
+        where it physically meets pads, other tracks or same-net fills,
+        with vias joining layers.  For a two-pin net this is the shortest
+        pad-to-pad path; for more pads it is the longest pairwise shortest
+        path (the binding length-matching measurement).  Copper on no such
+        path -- dead-end loops, overlapping duplicates, stubs -- is
+        reported through :attr:`NetPathMeasurement.off_path_length_mm`
+        instead of silently counting toward matched length (Issue #9117).
+
+        Args:
+            board: PCB object to analyze.
+            net_name: Name of the net to analyze.
+
+        Returns:
+            NetPathMeasurement; ``path_length_mm`` is ``None`` when the net
+            is unknown, has fewer than two pads, no shapely backend, or no
+            connected pad-to-pad path (an open net).
+        """
+        net = board.get_net_by_name(net_name)
+        if net is None:
+            return NetPathMeasurement()
+
+        from kicad_tools._shapely import has_shapely
+
+        if not has_shapely():
+            return NetPathMeasurement()
+
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+        from kicad_tools.validate.copper_contact import build_copper_contact_graph
+
+        graph = build_copper_contact_graph(
+            ConnectivityValidator(board), net.number, with_bonds=True
+        )
+        path_graph = _build_pad_to_pad_graph(graph.items, graph.bonds)
+        adjacency, pad_nodes, via_nodes = (
+            path_graph.adjacency,
+            path_graph.pad_nodes,
+            path_graph.via_nodes,
+        )
+        total = path_graph.total_track_length_mm
+        pads = sorted(pad_nodes)
+        if len(pads) < 2:
+            return NetPathMeasurement(pad_count=len(pad_nodes))
+
+        # Longest pairwise shortest path between pads (two-pin: the single
+        # pair).  Documented multi-pin behaviour: other branches count as
+        # off-path copper, never silently into the measured length.
+        best: tuple[float, int, int, dict[int, int]] | None = None
+        for src in pads:
+            dist, prev = _shortest_path_from(adjacency, pad_nodes[src])
+            for dst in pads:
+                if dst <= src:
+                    continue
+                length = dist.get(pad_nodes[dst], math.inf)
+                if length == math.inf:
+                    continue
+                if best is None or length > best[0]:
+                    best = (length, src, dst, prev)
+        if best is None:
+            # No connected pad-to-pad path (an open net).
+            return NetPathMeasurement(pad_count=len(pad_nodes))
+
+        path_length, src, dst, prev = best
+        node_to_via = {node: graph.items[index].key for index, node in via_nodes.items()}
+        path_via_indices: set[int] = set()
+        node: int | None = pad_nodes[dst]
+        while node is not None and node != pad_nodes[src]:
+            via_index = node_to_via.get(node)
+            if via_index is not None:
+                path_via_indices.add(via_index)
+            node = prev.get(node)
+        off_path = max(total - path_length, 0.0)
+        return NetPathMeasurement(
+            path_length_mm=path_length,
+            off_path_length_mm=off_path,
+            pad_count=len(pad_nodes),
+            path_via_indices=tuple(sorted(path_via_indices)),
         )
 
     def analyze_diff_pair(

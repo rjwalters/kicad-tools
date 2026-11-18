@@ -217,11 +217,35 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # The entries therefore STAY until the trace-population / corner-wedge
 # guard exists; deleting them here fails the gate on the still-firing
 # identities.
+# Issue #9140 (re-measured 2026-11-17, fresh seed-42 regen judged by this
+# gate): the coupled-leg gates drained the remaining population to 15
+# blocking physical_copper_gap findings -- MIPI_CLK+ 11, GND 2, USB2_D- 1,
+# PCIE_RX+ 1 (was 21: MIPI_CLK+ 11, GND 6, USB2_D- 3, PCIE_RX+ 1).  The
+# pose/trunk and stub-tail spans have been re-verified through the
+# slit-band predicate since #9156, and the joint-search candidate plus the
+# Phase-B fine-grid repair are swept through it before commit (#9140), so
+# the LVDS1_P..4_P own-pad population the issue filed is at 0 and the
+# GND / USB2_D- remainder drained with the changed coupled-vs-fallback
+# mix.  Both sibling via populations persist, one finding each: the
+# PCIE_RX+ 0.0011 mm face-aligned corner wedge and a USB2_D- 0.0413 mm
+# annulus-vs-own-net-TRACE slit (0.1016 edge).  All four entries still
+# fire (0 unallowed, 0 stale), reach 21/21, pour audit OK.  CI's
+# regeneration remains the authority on the final counts (host-sensitive
+# board).
+# Issue #9208 (measured 2026-11-17, fresh seed-42 regen): the USB2_D-
+# annulus-vs-own-net-TRACE slit is drained -- ``DesignRules.
+# same_net_trace_gap_band_edge_mm`` (the ``trace_spacing`` detection edge,
+# 0.1016 on jlcpcb 4-layer 1oz) is threaded into both C++ via checks, which
+# now refuse a via annulus whose gap to its own net's committed trace copper
+# falls in ``(0, edge)``.  The offending via (114.15, 56.05; trace-then-via:
+# the pair's trunk at x=113.7025 is already stored when the leg seats it)
+# re-seats at (114.25, 56.05), 0.1 mm further out, and the USB2_D- entry is
+# deleted.  GND, MIPI_CLK+ and the PCIE_RX+ corner wedge (#9124) are
+# untouched.
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("physical_copper_gap", "GND"): 8962,
     ("physical_copper_gap", "MIPI_CLK+"): 8962,
     ("physical_copper_gap", "PCIE_RX+"): 8962,
-    ("physical_copper_gap", "USB2_D-"): 8962,
 }
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key

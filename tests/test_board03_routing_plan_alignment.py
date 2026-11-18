@@ -105,3 +105,41 @@ def test_apply_rejects_numeric_net_ref(routing, tmp_path, monkeypatch):
     pcb.write_text(_NUMERIC_BOARD)
     with pytest.raises(ValueError, match="numeric net id 8"):
         routing["apply_plan"](pcb, tmp_path / "out.kicad_pcb", plan_file)
+
+
+# Issue #9143: the recipe adds stock fiducials to the routed board after
+# routing (#8532). They are netless assembly aids, so the reviewed physical
+# contract must fingerprint identically with and without them -- otherwise
+# every export/check gate would refuse the board the plan itself produced.
+_STOCK_FIDUCIAL = """(footprint "Fiducial:Fiducial_1mm_Mask2mm"
+		(layer "F.Cu")
+		(at 100 100)
+		(property "Reference" "FID9" (at 0 -1.95 0) (layer "F.SilkS"))
+		(property "Value" "Fiducial" (at 0 1.95 0) (layer "F.Fab"))
+		(pad "" smd circle
+			(at 0 0)
+			(size 1 1)
+			(layers "F.Cu" "F.Mask")
+			(solder_mask_margin 0.5)
+			(clearance 0.6)
+			(uuid "00000000-0000-0000-0000-000000000009"))
+		(attr smd exclude_from_pos_files exclude_from_bom board_only))"""
+
+
+def test_physical_contract_ignores_fiducial_footprints(routing, tmp_path):
+    committed = BOARD / "output/usb_joystick_routed.kicad_pcb"
+    doc_text = committed.read_text()
+    with_fid = tmp_path / "with-fiducial.kicad_pcb"
+    # Append inside the board: the final ')' closes (kicad_pcb).
+    with_fid.write_text(doc_text[:-1] + _STOCK_FIDUCIAL + ")")
+    assert routing["fingerprint"](with_fid) == routing["fingerprint"](committed)
+    # A netted probe pad on a non-fiducial footprint is NOT exempt: the
+    # contract still binds it (the netless exemption is fiducial-shaped only).
+    probe = (
+        _STOCK_FIDUCIAL.replace("Fiducial:Fiducial_1mm_Mask2mm", "Probe:Probe_1mm")
+        .replace("FID9", "PRBE")
+        .replace('(pad "" smd', '(pad "1" smd')
+    )
+    with_probe = tmp_path / "with-netted-probe.kicad_pcb"
+    with_probe.write_text(doc_text[:-1] + probe + ")")
+    assert routing["fingerprint"](with_probe) != routing["fingerprint"](committed)

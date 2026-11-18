@@ -10,6 +10,10 @@ name: Changelog
 # times each). Hosted, stdlib-only Python, no `uv sync`: it finishes in
 # seconds. Deliberately NOT gated by ci.yml's `changes` path filter -- a
 # docs-only or fragment-only PR must still be evaluated.
+#
+# `timeout-minutes` is a ceiling for a slow checkout, not an expected runtime
+# (issue #9246): one slow full-history fetch once consumed a 5-minute budget,
+# skipped every real step and reported `cancelled` with no verdict.
 on:
   pull_request:
     branches: [main]
@@ -27,7 +31,7 @@ jobs:
   fragment-check:
     name: Changelog Fragment Check
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       # The PR merge commit, its first parent (the base, so `--base HEAD^1`
       # diffs exactly the PR's own changes) and the PR branch's full history:

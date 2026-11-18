@@ -138,7 +138,16 @@ STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
 # same-net pad slit-band refusal in both A* via checks.  A v65 .so seats via
 # annuli in the (0, edge) slit band beside their own SMD pads (board 06's
 # d0.25/s0.6 PCIE_RX+/USB2_D- population).
-_REQUIRED_CPP_BUILD_VERSION = 66
+# v67 (Issue #8999): ``GridCell::airwire_cost`` + the ``clear_airwire_costs``
+# / ``set_airwire_cells`` verbs -- the prospective airwire-separation term
+# summed inside ``Grid3D::get_negotiated_cost``.  A v66 .so prices negotiated
+# cells without the term, silently breaking Python/C++ cost parity.
+# v69 (Issue #9208): ``DesignRules.same_net_trace_gap_band_edge_mm`` + the
+# same-net via-annulus-vs-own-trace slit-band refusal in both A* via checks.  A
+# v67 .so seats via annuli in the (0, edge) slit band beside their own net's
+# committed trace copper (board 06's USB2_D- annulus-vs-trace finding).  v68 is
+# reserved by the open #9124 / PR #9209 tangent fix.
+_REQUIRED_CPP_BUILD_VERSION = 69
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -1491,6 +1500,10 @@ class CppPathfinder:
         # single-ended via check (``None`` collapses to 0.0 = guard off).
         cpp_rules.same_net_pad_gap_band_edge_mm = float(
             getattr(rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0
+        )
+        # Issue #9208: the trace-population twin (``None`` -> 0.0 = guard off).
+        cpp_rules.same_net_trace_gap_band_edge_mm = float(
+            getattr(rules, "same_net_trace_gap_band_edge_mm", 0.0) or 0.0
         )
         cpp_rules.grid_resolution = rules.grid_resolution
         cpp_rules.cost_straight = rules.cost_straight
@@ -4205,6 +4218,26 @@ class CppPathfinder:
         """
         self._grid._impl.clear_avoidance_costs()
 
+    def clear_airwire_costs(self) -> None:
+        """Zero the C++ airwire-separation plane (Issue #8999).
+
+        Thin passthrough for ``Grid3D::clear_airwire_costs``; the plane is
+        normally managed end-to-end by
+        :func:`kicad_tools.router.airwire_cost.refresh_airwire_cost`.
+        """
+        self._grid._impl.clear_airwire_costs()
+
+    def set_airwire_cells(self, xs: list[int], ys: list[int], costs: list[float]) -> None:
+        """Push the weighted sparse airwire plane onto the C++ grid (Issue #8999).
+
+        ``xs``/``ys``/``costs`` are parallel lists; each column is written to
+        every layer (a desire line is layer-less).  Callers must
+        ``clear_airwire_costs()`` first -- the refresh contract is a full
+        clear + rewrite, never an increment, so the native plane stays a
+        pure function of the committed set.
+        """
+        self._grid._impl.set_airwire_cells(xs, ys, costs)
+
     def _try_python_fallback(
         self,
         start: Pad,
@@ -4816,7 +4849,17 @@ class CppPathfinder:
     # #6098 memo without making it any safer.  ``_saved_*`` are rip-up
     # snapshots the search never reads.
     _COST_ONLY_GRID_ARRAYS = frozenset(
-        {"_history_cost", "_congestion", "_congestion_counted", "_present_cost_ema"}
+        {
+            "_history_cost",
+            "_congestion",
+            "_congestion_counted",
+            "_present_cost_ema",
+            # Issue #8999: the airwire-separation crossing-count plane feeds
+            # negotiated-cell COSTS only (never passability) and is rewritten
+            # on every negotiated refresh, so fingerprinting it would churn
+            # the #6098 fallback memo for no safety benefit.
+            "_airwire_cost",
+        }
     )
 
     def _py_grid_state_stamp(self, py_grid) -> tuple:
@@ -5791,6 +5834,10 @@ class CppCoupledPathfinder:
         # pads (``None`` collapses to 0.0 = guard off).
         cpp_rules.same_net_pad_gap_band_edge_mm = float(
             getattr(rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0
+        )
+        # Issue #9208: the trace-population twin (``None`` -> 0.0 = guard off).
+        cpp_rules.same_net_trace_gap_band_edge_mm = float(
+            getattr(rules, "same_net_trace_gap_band_edge_mm", 0.0) or 0.0
         )
         self._impl = router_cpp.CoupledPathfinder(
             cpp_grid._impl,
