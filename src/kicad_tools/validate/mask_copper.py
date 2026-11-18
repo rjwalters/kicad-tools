@@ -111,6 +111,23 @@ spoke width and nothing else, so the pour body lies beyond the band
 (relief gaps 0.2 and 0.3 mm, 0 mm expansion). A solid connection, an
 unconnected same-net pour, a pour body inside the band, pour exposed by a
 positive expansion and different-net pour keep their measured verdict.
+
+A pad solid-connected to its own pour (issue #9436)
+===================================================
+
+A same-net ``zone`` that is the pour a plain pad is *solid*-connected to is
+``own_pour_solid`` at info. JLCDFM on the consumer board that exposed this
+(13 pads solid in their own-net pour, 0 mm expansion) reported 0 danger and 0
+warning, so the "solid is untested" reason that kept it an error no longer
+holds. Every condition is required (``_own_pour_solid``): the pad is a plain
+shape with a non-negative mask margin; its *effective* zone connection (pad
+override, else footprint, else zone, as ``_declared_thermal`` resolves it) is
+solid, a "thermal for through-hole" setting on an SMD pad counting as solid;
+the fill overlaps the pad beyond ``u``, shows a solid join (it covers the
+pad's whole rim, not just spoke crossings), and nothing of it is exposed
+beyond the pad. A declared-solid pad whose fill shows spokes or no join, an
+unconnected same-net pour, a positive expansion with pour in the ring and a
+different-net pour keep their measured verdict.
 """
 
 from __future__ import annotations
@@ -264,6 +281,7 @@ class MaskCopperMeasurement:
             "within_own_pad",
             "within_reinforce_run",
             "own_pour_thermal",
+            "own_pour_solid",
         ) or self.relation not in ("overlap", "touching", "disjoint"):
             raise ValueError("Invalid mask measurement disposition/relation")
         if self.mask_side not in (
@@ -795,21 +813,19 @@ def _conductor_on_reinforce_run(run, item, copper, opening, strip_union, uncerta
 #: pcbnew ZONE_CONNECTION codes (black-box read on the pinned image, #9284).
 _ZONE_CONNECTION_INHERITED = -1
 _ZONE_CONNECTION_THERMAL = 1
+_ZONE_CONNECTION_SOLID = 2
 _ZONE_CONNECTION_THT_THERMAL = 3
 
 #: pcbnew draws at most four thermal spokes per pad.
 _MAX_THERMAL_SPOKES = 4
 
 
-def _declared_thermal(owner, zone):
-    """``(relief_gap_mm, spoke_width_mm)`` when the pad declares thermal relief to *zone*.
+def _effective_connection(owner, zone):
+    """``(code, pad, pour)`` for the pad's effective zone connection to *zone*, or None.
 
     Precedence as pcbnew stores it: the pad's own zone-connection override,
-    else its footprint's, else the zone's. Thermal relief only (or
-    "thermal for through-hole pads" on a plated through-hole pad); a solid,
-    none, or unknown connection returns None. Gap and spoke width are the
-    pad's overrides when set, else the zone's. Custom ``zone_connection``
-    DRC rules never get here: they make the native run incomplete.
+    else its footprint's, else the zone's. None when either side carries no
+    connection data (older worker output): callers fail closed.
     """
     pad = owner.get("zone_connection")
     pour = zone.get("zone_connection")
@@ -822,6 +838,22 @@ def _declared_thermal(owner, zone):
         effective = pad["footprint"]
     if effective == _ZONE_CONNECTION_INHERITED:
         effective = pour["pad_connection"]
+    return effective, pad, pour
+
+
+def _declared_thermal(owner, zone):
+    """``(relief_gap_mm, spoke_width_mm)`` when the pad declares thermal relief to *zone*.
+
+    Thermal relief only (or "thermal for through-hole pads" on a plated
+    through-hole pad); a solid, none, or unknown connection returns None. Gap
+    and spoke width are the pad's overrides when set, else the zone's. Custom
+    ``zone_connection`` DRC rules never get here: they make the native run
+    incomplete.
+    """
+    resolved = _effective_connection(owner, zone)
+    if resolved is None:
+        return None
+    effective, pad, pour = resolved
     thermal = effective == _ZONE_CONNECTION_THERMAL or (
         effective == _ZONE_CONNECTION_THT_THERMAL and pad["plated_through"]
     )
@@ -836,6 +868,21 @@ def _declared_thermal(owner, zone):
     if not gap or not spoke or gap <= 0 or spoke <= 0:
         return None
     return gap, spoke
+
+
+def _declared_solid(owner, zone):
+    """True when the pad's effective connection to *zone* is solid.
+
+    pcbnew's solid code, or "thermal for through-hole pads" on a pad that is
+    not plated through-hole (an SMD pad), which pcbnew joins solid.
+    """
+    resolved = _effective_connection(owner, zone)
+    if resolved is None:
+        return False
+    effective, pad, _pour = resolved
+    return effective == _ZONE_CONNECTION_SOLID or (
+        effective == _ZONE_CONNECTION_THT_THERMAL and not pad["plated_through"]
+    )
 
 
 def _own_pour_thermal(opening, copper, owner_copper, owner, item, margin, band, uncertainty):
@@ -916,6 +963,48 @@ def _own_pour_thermal(opening, copper, owner_copper, owner, item, margin, band, 
         excess = sum(piece.area for piece in pieces)
     qualifies = spokes >= 1 and excess <= _AREA_EPSILON_MM2
     return qualifies, spokes, excess, gap, spoke
+
+
+#: Width (mm) of the rim around a pad probed for a solid join, and the share of
+#: it the fill must cover. Thermal spokes cover roughly 4 x spoke width of the
+#: perimeter (about 0.3 on a 1 mm pad); a solid join covers it all except where
+#: another net's clearance cuts the fill, so 0.75 separates them and fails closed.
+_SOLID_RIM_MM = 0.01
+_SOLID_RIM_COVERAGE = 0.75
+
+
+def _own_pour_solid(opening, copper, owner_copper, owner, item, margin, uncertainty):
+    """True when *item* is the pour a plain pad is solid-connected to (issue #9436).
+
+    Fab evidence (JLCDFM on the consumer board of #9436: 13 such pads, 0 mm
+    expansion, 0 danger / 0 warning) covers exactly this, and every condition
+    is required:
+
+    1. The owner is a plain pad shape with a non-negative mask margin.
+    2. The pad's effective zone connection is solid (``_declared_solid``).
+    3. Direct connection: the fill overlaps the pad beyond ``u``.
+    4. Nothing exposed beyond the pad: ``opening ∩ fill − pad.buffer(u)`` is
+       empty, so a positive expansion with pour in its ring fails.
+    5. The fill shows the solid join: it covers at least ``_SOLID_RIM_COVERAGE``
+       of a ``_SOLID_RIM_MM`` rim around the pad, so a declaration the fill
+       does not bear out (spokes, a relief gap) keeps its verdict.
+
+    Unlike ``_own_pour_thermal`` there is no spoke-band test: a solid pour
+    body lies inside the band by definition.
+    """
+    if (
+        owner["kind"] not in _WITHIN_OWN_PAD_OWNER_KINDS
+        or margin < 0
+        or not _declared_solid(owner, item)
+        or owner_copper.buffer(-uncertainty).intersection(copper.buffer(-uncertainty)).area <= 0
+        or opening.intersection(copper).difference(owner_copper.buffer(uncertainty)).area
+        > _AREA_EPSILON_MM2
+    ):
+        return False
+    rim = owner_copper.buffer(_SOLID_RIM_MM).difference(owner_copper)
+    if rim.area <= 0:
+        return False
+    return rim.intersection(copper).area >= _SOLID_RIM_COVERAGE * rim.area
 
 
 def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=()):
@@ -1199,6 +1288,17 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                         disposition = "own_pour_thermal"
                         beside_excess = pour_excess
                         pour_spokes, pour_gap, pour_spoke = spokes, gap, spoke
+                    elif _own_pour_solid(
+                        opening,
+                        copper,
+                        owner_copper,
+                        owner_items[0],
+                        item,
+                        margin,
+                        uncertainty,
+                    ):
+                        # Issue #9436: a pad solid-connected to its own pour.
+                        disposition = "own_pour_solid"
                 intent = (
                     approved.get((owners[0], identity, side))
                     if len(owners) == 1 and kind != "merged_region"
@@ -1432,11 +1532,14 @@ def assessment_results(assessment: MaskCopperAssessment) -> DRCResults:
         # copper beyond what its reinforce run puts there on purpose.
         # ``own_pour_thermal`` (issue #9284): the only copper under mask
         # beside the opening is the pad's own thermal spokes.
+        # ``own_pour_solid`` (issue #9436): the copper is the pour the pad is
+        # solid-connected to; the fab reports nothing for that shape.
         if measurement.disposition in (
             "intentional",
             "within_own_pad",
             "within_reinforce_run",
             "own_pour_thermal",
+            "own_pour_solid",
         ):
             severity = "info"
         # Warning-disposition measurements and provisional (incomplete-run)
