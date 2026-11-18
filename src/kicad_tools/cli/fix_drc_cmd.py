@@ -1125,9 +1125,7 @@ def _waived_report_indices(report_path: Path, violation_count: int) -> set[int]:
     items = data.get("violations")
     if not isinstance(items, list) or len(items) != violation_count:
         return set()
-    return {
-        i for i, item in enumerate(items) if isinstance(item, dict) and item.get("waived")
-    }
+    return {i for i, item in enumerate(items) if isinstance(item, dict) and item.get("waived")}
 
 
 def _get_drc_report(
@@ -1169,9 +1167,7 @@ def _get_drc_report(
         # Reports without the flag are unchanged.
         waived_idx = _waived_report_indices(report_path, len(report.violations))
         if waived_idx:
-            report.violations = [
-                v for i, v in enumerate(report.violations) if i not in waived_idx
-            ]
+            report.violations = [v for i, v in enumerate(report.violations) if i not in waived_idx]
             print(
                 f"Skipping {len(waived_idx)} waived finding(s) from the DRC report "
                 f"(waivers are not repair targets).",
