@@ -36,6 +36,7 @@ from pathlib import Path
 from shapely.affinity import rotate  # type: ignore[import-untyped]
 from shapely.geometry import LineString, Point, box  # type: ignore[import-untyped]
 from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
+from shapely.ops import unary_union  # type: ignore[import-untyped]
 
 from ..sexp import SExp, parse_file
 from .net_compat import resolve_net_atom
@@ -439,8 +440,12 @@ class MaskCopperRepairer:
         if blocked:
             return "junction_at_moved_end"
 
-        # Clearance gate: never bring the track closer than the rule to
-        # other-net copper than it already was.
+        # Clearance gate: never bring the track closer than ``clearance_mm`` to
+        # other-net copper than it already was.  ``fix-drc`` passes the
+        # manufacturer floor here, which is below a net class's clearance, so
+        # this only stops floor-crossing moves; a move that lands between the
+        # floor and the class clearance is caught by fix-drc's post-save
+        # re-check (``_run_mask_pass``, Issue #9365).
         required = clearance_mm if clearance_mm is not None else 0.0
         old_shape = LineString([outside, inside]).buffer(width / 2, quad_segs=16)
         new_shape = LineString([outside, centre]).buffer(width / 2, quad_segs=16)
@@ -525,6 +530,25 @@ class MaskCopperRepairer:
             end_node.set_value(1, round(action.old_y, 4))
         self.modified = True
         return True
+
+    def moved_geometry(self, action: MaskRepairAction) -> BaseGeometry | None:
+        """Copper of the moved segment (and joined ones) as it sits in this board.
+
+        Used to attribute a re-check finding to a move by proximity.  ``None``
+        when a segment is gone or malformed.
+        """
+        segments = self._segment_nodes()
+        shapes: list[BaseGeometry] = []
+        for uuid in (action.uuid, *(u for u, _ in action.joined)):
+            node = segments.get(_bare(uuid))
+            if node is None:
+                return None
+            start, end = self._xy(node.find("start")), self._xy(node.find("end"))
+            width_node = node.find("width")
+            if start is None or end is None or width_node is None:
+                return None
+            shapes.append(LineString([start, end]).buffer(_num(width_node) / 2, quad_segs=16))
+        return shapes[0] if len(shapes) == 1 else unary_union(shapes)
 
     def save(self, output_path: str | Path | None = None) -> None:
         from ..core.sexp_file import save_pcb
