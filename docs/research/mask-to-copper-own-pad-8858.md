@@ -543,3 +543,55 @@ CI-exact environment — the pinned image `kicad/kicad@sha256:18693567392b…`
 The remaining two skips stay: `check_routed_drc.py` (the release surface)
 and `board_05_unattended.py` await their own per-board increments.
 
+
+## 2026-11-18: the release-surface increment — `check_routed_drc.py` drops the skip
+
+Main `ea0c5e2a1` (post-#9394), pinned image kicad-cli 10.0.6
+(`KCT_KICAD_DOCKER=1`), one `kct check <pcb> --mfr <tier> --format json`
+per committed release PCB. #9292 (thermal-spoke own pour -> info) had
+landed since the last re-curation, so the counts were re-measured rather
+than reused:
+
+| board | m2c errors | net signatures | other blocking errors |
+|---|---:|---:|---|
+| 00 | 0 | 0 | 0 |
+| 01 | 2 | 1 | 0 |
+| 02 | 29 | 8 | 13 physical_copper_gap + 1 tht_smd_spacing (tracked #9325/#9332) |
+| 03 | 78 | 23 | 0 |
+| 04 | 21 (generic path) | — | paid-drill validator does not run m2c (77 rules, absent) |
+| 05 | 83 | 21 | 0 |
+| 06 (output) | 48 | 14 | 0 |
+| 07 (output) | 67 | 16 | 29 physical_copper_gap (pre-existing gate failure) |
+
+**Mechanism.** The skip is removed from `count_errors`; the residual
+population is excepted by identity in a new `identity_allowances:` block
+of `.github/routed-drc-tolerance.yml` (83 entries across boards
+01/02/03/05/06/07, each citing #8858), parsed by
+`load_identity_allowances` and applied by `identity_outcome` in the gate.
+The block lives in the YAML, not the script, because the script is the
+consumer-vendored artifact (#8134's no-reference-board-logic test pins
+that). The verdict compares only findings no entry covers; an entry whose
+net stops carrying the finding fails the gate as stale until deleted
+(the #7270 Q3 model, same as the coverage gates); `tolerances:` stays
+empty.
+
+**Verdict parity, measured by running the gate itself on every board:**
+01 OK (2 identity-allowed), 02 FAIL (14 unallowed, all pre-existing
+non-m2c — identical to main's verdict), 03 OK (78 allowed), 05 OK (83
+allowed), 06 OK (48 allowed), 07 FAIL (29 unallowed physical_copper_gap,
+pre-existing). Board 04's native dispatch never ran m2c before or after.
+So no board's release-gate verdict changes; three boards that passed only
+because the skip hid their m2c population (01/03/05 — and 06) now pass
+with that population explicitly allowed, and a NEW mask finding on any
+net of any board fails the gate from here on.
+
+The committed board 07 regression fixture carries 162 m2c errors on 22
+signatures — a different population from the matchgroup gate's regen
+allowance (9 uncovered / 6 stale against it), because that gate measures
+the fresh re-route, not the committed snapshot.
+`tests/test_kct_check_parity.py` excludes the committed fixture's
+population with a test-local signature list so its family pins keep
+measuring what they always measured.
+
+Remaining under #8858: `board_05_unattended.py` (fresh seed routes,
+0-warnings gate, and the with/without `kct check` timing AC).
