@@ -1297,6 +1297,12 @@ def test_refilled_zone_fill_pinch_repairs_instead_of_dropping(monkeypatch, tmp_p
     The extraction used to drop the whole layer for such a zone
     (``invalid native object polygon``) and then flag the per-object/full-layer
     mismatch, capping every board 05 finding at a provisional warning.
+
+    The fake export supplies the full-layer unions for both copper layers, so
+    the per-object/full-layer comparison actually executes: the ``material
+    mismatch`` assertion pins the repaired geometry against the layer union
+    (falsifiable via a wrong union), and ``B.Cu`` being present but empty must
+    not false-positive.
     """
     from shapely.validation import explain_validity
 
@@ -1329,6 +1335,12 @@ def test_refilled_zone_fill_pinch_repairs_instead_of_dropping(monkeypatch, tmp_p
             rules_sha256=None,
             native_version=_QUALIFIED_VERSION,
             export_identity={},
+            # Full-layer unions consistent with the repaired payload: F.Cu is
+            # the extraction's own repair product, B.Cu is authored empty.
+            # Without these, layers defaults to {} and the per-object/full-layer
+            # comparison skips both layers, leaving the "material mismatch"
+            # assertion below vacuous (issue #9103).
+            layers={"F.Cu": repaired, "B.Cu": Polygon()},
         ),
     )
 
