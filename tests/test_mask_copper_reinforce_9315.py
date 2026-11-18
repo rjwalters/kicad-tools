@@ -110,8 +110,11 @@ def straight_geometry(
             )
         )
     if stray_via:
+        # 0.07 mm off the strip edge: beyond the 0.05 mm continuity tolerance
+        # (a via the strip touches is a mid-run hole, #9444) yet inside the
+        # clearance band, so it is still measured against the strip's opening.
         copper.append(
-            ("via", "PWR", {"F.Cu": _disk(22.0, 10.6, 0.4), "F.Mask": _disk(22.0, 10.6, 0.4)})
+            ("via", "PWR", {"F.Cu": _disk(22.0, 10.72, 0.4), "F.Mask": _disk(22.0, 10.72, 0.4)})
         )
     if stray_strip:
         copper.append(("segment", "PWR", {"F.Cu": box(40.0, 39.75, 50.0, 40.25)}))
@@ -252,8 +255,9 @@ def test_stray_untented_via_off_the_run_is_not_excused():
     over_strip = [m for m in stray if m.conductor_uuid == stray_uuid]
     assert over_strip
     assert {m.owner_run for m in over_strip} == {"HS_POWER"}
-    # Same-net copper the attributed strip passes over is excused (#9419).
-    assert {m.disposition for m in over_strip} == {"within_reinforce_run"}
+    # Same-net copper that the strip does not pass over is not the run's, so
+    # it keeps its measured verdict (copper under the strip is excused, #9419).
+    assert {m.disposition for m in over_strip} == {"violation"}
 
 
 def _pad_beside_anchor_geometry(pad_net):
