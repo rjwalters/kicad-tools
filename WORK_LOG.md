@@ -16,6 +16,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-18
 
+- **PR #9389**: docs: document fix-drc --only mask-copper repair pass in reference docs
+- **PR #9386**: fix(parts): default check_bom quantity_needed to 1 for BOMItem
+- **PR #9385**: fix: emit one row per item in ungrouped JLCPCB/PCBWay BOM export
+- **PR #9339**: fix: skip waived findings in fix-drc --drc-report repair targets
+- **Issue #9384** (closed): docs: cli.md still describes fix-drc as clearance + drill; --only mask-copper is undocumented
+- **Issue #9382** (closed): BOM formatters silently drop designators when group_by_value=False (pre-existing)
+- **Issue #9377** (closed): LCSCClient.check_bom accesses BOMItem.quantity, which schema/bom.BOMItem does not define (kct suggest alternatives crashes on any BOM)
+- **Issue #9326** (closed): No repair path for the fab-parity rules, and fix-drc/prune side effects on waivers (consumer board: 538 check errors, fix-drc finds nothing repairable)
 - **PR #9375**: fix: evaluate the Changelog fragment check against the PR's live labels
 - **PR #9372**: fix: make readiness CPL rotation re-derivation fail visibly, not open
 - **PR #9367**: fix: name the coordinate frame of place-silk-refs placement output
