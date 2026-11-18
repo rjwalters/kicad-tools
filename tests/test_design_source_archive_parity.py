@@ -11,6 +11,12 @@ artifacts.
 
 Only ``.py`` copies are compared: ``.md`` copies are deliberately
 link-rewritten by ``_bundle_links.py`` and are not byte-identical by design.
+
+Both directions are checked (Issue #9267): an archived copy with no live
+counterpart fails (the archive is the only remaining copy), and a live
+recipe of a board that ships an archive with no archived copy fails too
+(the archive then misrepresents the recipe that made the committed
+artifacts — board 03's ``silk_repair.py`` sat unarchived this way).
 """
 
 from __future__ import annotations
@@ -27,7 +33,20 @@ BOARDS_DIR = Path(__file__).resolve().parent.parent / "boards"
 # lands (strict xfail turns an unexpected pass into a failure).
 EXPECTED_STALE: dict[str, str] = {}
 
+# Live recipes deliberately left out of the archive, keyed by
+# "<board-dir>/<live filename>" relative to the boards directory.  Each entry
+# cites the issue that owns the omission; remove the entry when the file is
+# archived (strict xfail turns an unexpected pass into a failure).
+EXPECTED_OMITTED: dict[str, str] = {}
+
 ARCHIVE_COPIES = sorted(BOARDS_DIR.glob("*/output/manufacturing/design-source/*.py"))
+
+# Every top-level live recipe of a board that ships an archive.
+LIVE_RECIPES = sorted(
+    live
+    for archive_dir in BOARDS_DIR.glob("*/output/manufacturing/design-source")
+    for live in archive_dir.parents[2].glob("*.py")
+)
 
 
 def archive_key(archive_copy: Path) -> str:
@@ -66,4 +85,26 @@ def test_archive_inventory_is_non_empty() -> None:
     assert ARCHIVE_COPIES, (
         "no boards/*/output/manufacturing/design-source/*.py copies found; "
         "the parity check is comparing nothing."
+    )
+
+
+def live_recipe_key(live_recipe: Path) -> str:
+    """Return the ``<board-dir>/<filename>`` identity of a live recipe."""
+    return f"{live_recipe.parent.name}/{live_recipe.name}"
+
+
+@pytest.mark.parametrize("live_recipe", LIVE_RECIPES, ids=live_recipe_key)
+def test_live_recipe_has_archived_copy(live_recipe: Path, request) -> None:
+    """A live recipe of an archived board must have an archived copy (Issue #9267)."""
+    key = live_recipe_key(live_recipe)
+    archived = live_recipe.parent / "output/manufacturing/design-source" / live_recipe.name
+    if key in EXPECTED_OMITTED:
+        request.applymarker(pytest.mark.xfail(reason=EXPECTED_OMITTED[key], strict=True))
+    assert archived.is_file(), (
+        f"{key}: live recipe has no archived design-source copy ({archived}); "
+        "a fab or outside reviewer reading the archive cannot see a step that "
+        "produced the committed board. Copy it into the archive through the "
+        "design-source refresh path (scripts/boards) and re-pin the bundle "
+        "manifest hashes, or record the deliberate omission in EXPECTED_OMITTED "
+        "citing the owning issue."
     )
