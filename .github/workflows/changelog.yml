@@ -15,11 +15,15 @@ name: Changelog
 # `unlabeled` event for any other label (Loom flips `loom:reviewing` and
 # friends several times per PR) does not re-run the check (issue #8434): each
 # such event used to start a run and cancel the queued one, leaving the last
-# required check restarting under a backed-up queue. Two parts, both needed:
-# the job-level `if:` skips the run, and the concurrency group below moves the
-# ignored event into its own per-run group -- concurrency is evaluated before
-# the job `if:`, so without that split the skipped run would still cancel the
-# in-flight substantive run in `changelog-<PR>`.
+# required check restarting under a backed-up queue. Three parts, all needed:
+# the job-level `if:` skips the run; the conditional `name:` below reports
+# that skipped run under a non-required name (the branch check rollup takes
+# the *latest* run per name regardless of conclusion, so a `skipped` run
+# under the required name would supersede a prior failure -- issue #9309);
+# and the concurrency group moves the ignored event into its own per-run
+# group -- concurrency is evaluated before the job `if:`, so without that
+# split the skipped run would still cancel the in-flight substantive run in
+# `changelog-<PR>`.
 #
 # `timeout-minutes` is a ceiling for a slow checkout, not an expected runtime
 # (issue #9246): one slow full-history fetch once consumed a 5-minute budget,
@@ -39,7 +43,11 @@ concurrency:
 
 jobs:
   fragment-check:
-    name: Changelog Fragment Check
+    # Skipped run from an ignored label event must not report under the
+    # required name: the check rollup takes the latest run per name
+    # regardless of conclusion, so it would supersede a prior failure
+    # (issue #9309). See the file header.
+    name: ${{ ((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'changelog:skip') && 'Changelog Fragment Check (ignored label event)' || 'Changelog Fragment Check' }}
     if: ${{ (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'changelog:skip' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
