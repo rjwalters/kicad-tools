@@ -248,6 +248,12 @@ class MaskCopperMeasurement:
     pour_spokes: int | None = None
     pour_relief_gap_mm: float | None = None
     pour_spoke_width_mm: float | None = None
+    # Issue #9374: every distinct owner net of the opening, sorted. ``owner_net``
+    # is None when a merged region is owned by pads on 2+ nets, so the net
+    # signature built from it alone collapsed to the conductor net and hid a
+    # different-net exposure behind a same-net allowance entry. Empty means
+    # "not recorded" (a payload written before this field loads unchanged).
+    owner_nets: tuple[str, ...] = ()
 
     def __post_init__(self):
         if self.disposition not in (
@@ -280,6 +286,10 @@ class MaskCopperMeasurement:
         ):
             if value is not None and not isinstance(value, str):
                 raise ValueError("Invalid mask measurement triage metadata")
+        if not isinstance(self.owner_nets, tuple) or any(
+            not isinstance(n, str) for n in self.owner_nets
+        ):
+            raise ValueError("Invalid mask measurement triage metadata")
         for flag in (self.same_net, self.own_pad_entry):
             if flag is not None and not isinstance(flag, bool):
                 raise ValueError("Invalid mask measurement triage metadata")
@@ -369,6 +379,7 @@ class MaskCopperAssessment:
                         **m,
                         "opening_uuids": tuple(m["opening_uuids"]),
                         "location_mm": tuple(m["location_mm"]),
+                        "owner_nets": tuple(m.get("owner_nets", ())),
                     }
                 )
                 for m in data["measurements"]
@@ -1267,6 +1278,7 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                         intent.rationale if intent else None,
                         margin < 0,
                         owner_net=owner_nets[0] if len(owner_nets) == 1 else None,
+                        owner_nets=tuple(owner_nets),
                         conductor_net=conductor_net,
                         conductor_kind=item["kind"],
                         same_net=same_net,
@@ -1480,8 +1492,22 @@ def assessment_results(assessment: MaskCopperAssessment) -> DRCResults:
                 # board regeneration re-mints, so they cannot key an
                 # identity allowance; owner + conductor net names are
                 # stable across regenerations of the same recipe.
+                # Issue #9374: carry *every* owner net, not just the sole-owner
+                # one -- a merged region owned by pads on 2+ nets has
+                # ``owner_net is None`` and would otherwise collapse to the
+                # conductor net, matching a same-net allowance entry.
                 nets=tuple(
-                    sorted({n for n in (measurement.owner_net, measurement.conductor_net) if n})
+                    sorted(
+                        {
+                            n
+                            for n in (
+                                measurement.owner_net,
+                                *measurement.owner_nets,
+                                measurement.conductor_net,
+                            )
+                            if n
+                        }
+                    )
                 ),
             )
         )
