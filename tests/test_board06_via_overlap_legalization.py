@@ -160,9 +160,11 @@ def test_grid_escape_seat_is_graded_through_the_band():
 
     pad = [(-1.0, -1.0, 1.0, 1.0)]
     dia = 0.5
-    # Annulus edge 0.05 from the pad (in band) / touching / clear of the band.
+    # Annulus edge 0.05 from the pad (in band) / tangent / clear of the band.
     assert not via_clearance.same_net_band_seat_ok(1.3, 0, dia, [], pad, 0.15, 0.15)
-    assert via_clearance.same_net_band_seat_ok(1.25, 0, dia, [], pad, 0.15, 0.15)
+    # Tangent (Issue #9124): a one-point touch is a wedge, not a union.
+    assert not via_clearance.same_net_band_seat_ok(1.25, 0, dia, [], pad, 0.15, 0.15)
+    assert via_clearance.same_net_band_seat_ok(1.2, 0, dia, [], pad, 0.15, 0.15)
     assert via_clearance.same_net_band_seat_ok(1.5, 0, dia, [], pad, 0.15, 0.15)
     # Same-net segment / via copper grade on the trace edge.
     seg = LineString([(0, 1.65), (3, 1.65)]).buffer(0.075)
