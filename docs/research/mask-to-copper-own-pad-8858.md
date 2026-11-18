@@ -205,8 +205,10 @@ their copper beyond the entry conductor is empty, so a union view would report
 nothing at all. Per shape, `tests/test_mask_copper_own_pad_8858.py` pins every
 #8914 danger item (1-5) and the U1/13 jog at its per-object distance. No
 threshold, disposition or count changes; the parity row note already records
-that jogged exits stay errors.
-
+that jogged exits stay errors. Whether the entry-allowance tolerance itself
+belongs in this rule — the open question the owner raises against the
+post-#9108 consumer measurement in the #9107 thread — is tracked separately
+in #9305, so the pointer survives this issue's close.
 
 ## Reproduce
 

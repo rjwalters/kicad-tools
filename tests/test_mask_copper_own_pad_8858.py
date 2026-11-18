@@ -487,7 +487,12 @@ def test_8914_item2_t_junction_branch_along_the_opening_edge_stays_an_error():
 
 @pytest.mark.parametrize("gap", [0.05, 0.07])
 def test_8914_items_3_and_4_parallel_same_net_track_at_the_fab_distance_stays_an_error(gap):
-    """Fab items 3 and 4: straight same-net tracks 0.05 / 0.07 mm copper-to-copper."""
+    """Fab items 3 and 4: straight same-net tracks 0.05 / 0.07 mm copper-to-copper.
+
+    Item 3's authored track is 0.30 mm wide; the fixture keeps the default
+    0.2 mm because the measured gap is set by the centerline arithmetic and
+    the entry allowance never applies to a track with no end inside the pad.
+    """
     centerline = 1 + gap + 0.1
     result, m = _only(_segment((centerline, -0.5), (centerline, 1.5)))
     assert m.disposition == "violation"
@@ -510,6 +515,8 @@ def test_8914_item5_jogged_exit_to_a_via_stays_an_error():
     # The chained jog keeps its own distance, shared cap included.
     assert found[1].disposition == "violation"
     assert _severity_of(result, found[1].conductor_uuid) == "error"
+    # The pin reads the implementation's own measurement, not just the fixture.
+    assert found[1].clearance_mm == pytest.approx(0.025, abs=1e-4)
     assert PAD.distance(jog_copper) == pytest.approx(0.025, abs=1e-4)
     assert not result.passed
 
@@ -533,6 +540,11 @@ def test_jog_chained_to_a_pad_entry_is_measured_per_object(degrees, union_mm):
     assert found[0].disposition == "within_own_pad"
     assert found[1].disposition == "violation"
     assert _severity_of(result, found[1].conductor_uuid) == "error"
+    # The pin is the implementation's own measurement: per-object, and never
+    # the union view this decision rejected (the 45 deg case measures the same
+    # as the fixture; a union switch would read union_mm instead).
+    assert found[1].clearance_mm == pytest.approx(0.025, abs=1e-4)
+    assert found[1].clearance_mm != pytest.approx(union_mm, abs=5e-4)
     assert PAD.distance(jog_copper) == pytest.approx(0.025, abs=1e-4)
     union = PAD.distance(jog_copper.difference(entry_copper))
     assert union == pytest.approx(union_mm, abs=5e-4)
@@ -552,6 +564,7 @@ def test_fully_enclosed_collinear_redundant_segment_stays_an_error():
     assert found[0].disposition == "within_own_pad"
     assert found[1].disposition == "violation"
     assert _severity_of(result, found[1].conductor_uuid) == "error"
+    assert found[1].clearance_mm == pytest.approx(0.05, abs=1e-9)
     assert PAD.distance(red_copper) == pytest.approx(0.05, abs=1e-9)
     assert not result.passed
 
