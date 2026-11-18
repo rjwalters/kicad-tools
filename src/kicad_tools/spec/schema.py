@@ -630,6 +630,18 @@ class ManufacturingRequirements(SpecModel):
     finish: str | None = Field(default=None, description="Surface finish (HASL, ENIG, etc.)")
     solder_mask: str | None = Field(default=None, description="Solder mask color")
     silkscreen: str | None = Field(default=None, description="Silkscreen color")
+    silkscreen_min_reference_height_mm: float | None = Field(
+        default=None,
+        description=(
+            "Issue #9448: declared minimum character height (mm) for reference "
+            "designators only.  Unset (the default) holds designators to the "
+            "target fab's silkscreen text-height floor like every other silk "
+            "text.  When set below that floor it relaxes the designator floor "
+            "in the generated .kicad_dru and in `kct check`; labels and board "
+            "text keep the fab floor.  Must be >= 0.8 mm.  The declaration is "
+            "reported by `kct readiness` as an accepted deviation."
+        ),
+    )
     escalation: EscalationPolicy | None = Field(
         default=None,
         description=(
@@ -648,6 +660,19 @@ class ManufacturingRequirements(SpecModel):
         if v is None:
             return None
         return _parse_copper_weight_oz(v)
+
+    @field_validator("silkscreen_min_reference_height_mm")
+    @classmethod
+    def validate_reference_height(cls, v: float | None) -> float | None:
+        """Reject a designator height below the smallest legible size (#9448)."""
+        from kicad_tools.manufacturers.base import MIN_DECLARED_REFERENCE_HEIGHT_MM
+
+        if v is not None and v < MIN_DECLARED_REFERENCE_HEIGHT_MM:
+            raise ValueError(
+                f"silkscreen_min_reference_height_mm must be >= "
+                f"{MIN_DECLARED_REFERENCE_HEIGHT_MM} mm, got {v}"
+            )
+        return v
 
     @model_validator(mode="before")
     @classmethod

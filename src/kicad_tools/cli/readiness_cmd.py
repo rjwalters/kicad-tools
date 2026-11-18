@@ -288,6 +288,36 @@ def _declared_copper_weights(pcb_path: Path) -> dict[str, float | None]:
     return {"outer_oz": outer, "inner_oz": inner}
 
 
+def _declared_reference_height_deviation(options: ReadinessOptions) -> dict[str, Any] | None:
+    """The project's declared designator-height deviation, or ``None`` (Issue #9448).
+
+    Present only when ``project.kct`` declares a reference-designator height
+    below the target fab's silkscreen text-height floor -- the one case where
+    ``silkscreen_text_height`` is relaxed for designators.  Reported in the
+    manifest and README so a sign-off never carries the relaxation silently.
+    """
+    from kicad_tools.sync.discover import resolve_declared_reference_height_for_pcb
+
+    declared = resolve_declared_reference_height_for_pcb(options.pcb)
+    if declared is None:
+        return None
+    try:
+        from kicad_tools.manufacturers import get_profile
+
+        fab_floor = get_profile(options.manufacturer).get_design_rules(2).min_silkscreen_height_mm
+    except Exception:  # noqa: BLE001 - receipt metadata must not fail readiness
+        return None
+    if declared >= fab_floor:
+        return None
+    return {
+        "rule": "silkscreen_text_height",
+        "scope": "reference designators",
+        "declared_min_height_mm": declared,
+        "fab_min_height_mm": fab_floor,
+        "source": "project.kct requirements.manufacturing.silkscreen_min_reference_height_mm",
+    }
+
+
 def _run_native_drc(pcb: Path, report_path: Path) -> EngineRun:
     """Inspect exactly the saved candidate; independent refill has its own gate."""
     from kicad_tools.drc import DRCReport
@@ -2373,6 +2403,11 @@ def _write_full_manifest(options: ReadinessOptions, warning_counts: dict[str, in
             "copper_weights": _declared_copper_weights(options.pcb),
         }
     )
+    deviation = _declared_reference_height_deviation(options)
+    if deviation is not None:
+        manifest["declared_deviations"] = [deviation]
+    else:
+        manifest.pop("declared_deviations", None)
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return manifest_path
 
@@ -2874,12 +2909,20 @@ def _write_readme(
         lines.extend(["", "Assembly prep", "-------------"])
         for key in ("fiducials", "board_info"):
             lines.append(f"  {key}: {prep[key]}")
+    deviation = _declared_reference_height_deviation(options)
     lines.extend(["", "Accepted-risk waivers", "---------------------"])
     if acked:
         lines.append(f"  see the {len(acked)} line(s) above")
+    if deviation is not None:
+        lines.append(
+            f"  DECLARED DEVIATION: reference designators may be as small as "
+            f"{deviation['declared_min_height_mm']:g} mm (fab floor "
+            f"{deviation['fab_min_height_mm']:g} mm) per project.kct "
+            "silkscreen_min_reference_height_mm; labels keep the fab floor."
+        )
     for entry in options.known_issues:
         lines.append(f"  #{entry['issue']} [{entry['kind']}] {entry['summary']}")
-    if not acked and not options.known_issues:
+    if not acked and not options.known_issues and deviation is None:
         lines.append("  no accepted-risk waivers")
     lines.append("")
 

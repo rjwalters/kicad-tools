@@ -335,7 +335,13 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "`silkscreen_text_thickness` (text) enforce JLCPCB's published >= 0.15 mm. "
         "Not covered: JLCDFM flags silk that meets that floor (#8844: 63 "
         "warnings on gerbers with no silk stroke below 0.150 mm). How JLCDFM "
-        "selects the items it flags is unknown (#8943).",
+        "selects the items it flags is unknown (#8943). Text height is a separate "
+        "floor: JLCPCB publishes 1.0 mm (40 mil) minimum character height "
+        "(pcb-capabilities, verified 2026-11-18) and `silkscreen_text_height` "
+        "enforces it; a project may declare a smaller reference-designator height "
+        "(`silkscreen_min_reference_height_mm`, >= 0.8 mm, #9448) which relaxes "
+        "that floor for designators only and is reported by `kct readiness` as a "
+        "declared deviation -- the fab's own limit is unchanged.",
     ),
     ParityRow(
         "fiducial",

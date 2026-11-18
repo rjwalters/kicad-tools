@@ -70,6 +70,11 @@ DFM_THRESHOLD_NAMES: tuple[str, ...] = (
 #: Max |declared - offered| oz still treated as the offered weight (0.434 -> 0.5).
 DFM_OZ_SNAP_TOLERANCE = 0.1
 
+#: Smallest reference-designator height (mm) a project may declare for itself
+#: (Issue #9448).  Below this no supported fab prints a legible character, so
+#: the declaration is rejected rather than recorded.
+MIN_DECLARED_REFERENCE_HEIGHT_MM = 0.8
+
 
 @dataclass(frozen=True)
 class DfmThreshold:
@@ -274,6 +279,13 @@ class DesignRules:
     # Silkscreen constraints
     min_silkscreen_width_mm: float = 0.15
     min_silkscreen_height_mm: float = 0.8
+    # Project-declared reference-designator height (Issue #9448).  ``None``
+    # (the default) means no declaration: designators are held to the fab's
+    # ``min_silkscreen_height_mm`` like every other silk text.  Set from the
+    # project spec (``requirements.manufacturing.silkscreen_min_reference_height_mm``),
+    # never from a fab profile.  Only ever relaxes the designator floor; see
+    # :attr:`min_silkscreen_reference_height_mm`.
+    declared_reference_height_mm: float | None = None
 
     # Solder mask
     min_solder_mask_dam_mm: float = 0.1
@@ -377,6 +389,25 @@ class DesignRules:
                 f"min_clearance_mm ({self.min_clearance_mm}): the inner-layer "
                 "floor is the looser one (lighter inner copper)"
             )
+
+    @property
+    def min_silkscreen_reference_height_mm(self) -> float:
+        """Height floor for reference designators (Issue #9448).
+
+        The fab floor ``min_silkscreen_height_mm`` unless the project declared
+        a smaller ``declared_reference_height_mm``.  A declaration larger than
+        the fab floor is ignored: it can only relax the designator floor, never
+        tighten it.  Labels and board text always keep the fab floor.
+        """
+        declared = self.declared_reference_height_mm
+        if declared is None:
+            return self.min_silkscreen_height_mm
+        return min(declared, self.min_silkscreen_height_mm)
+
+    @property
+    def has_reference_height_deviation(self) -> bool:
+        """True when a declaration actually relaxes the designator floor."""
+        return self.min_silkscreen_reference_height_mm < self.min_silkscreen_height_mm
 
     @property
     def min_trace_width_mil(self) -> float:

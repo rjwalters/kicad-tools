@@ -2586,7 +2586,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    from kicad_tools.sync.discover import resolve_declared_currents_for_pcb
+    from kicad_tools.sync.discover import (
+        resolve_declared_currents_for_pcb,
+        resolve_declared_reference_height_for_pcb,
+    )
     from kicad_tools.validate.coverage import _declares_ampacity
 
     declared_spec_currents = resolve_declared_currents_for_pcb(pcb_path)
@@ -2623,6 +2626,7 @@ def main(argv: list[str] | None = None) -> int:
             suppress_library=args.suppress_library,
             net_class_map=net_class_map,
             authored_min_clearance_mm=_authored_min_clearance_mm(pcb_path),
+            declared_reference_height_mm=resolve_declared_reference_height_for_pcb(pcb_path),
             # The CLI already prints its own up-front INACTIVE warning
             # below, so suppress the per-rule checker-level warning here to
             # avoid duplicating it (Issue #3917 Defect 3).
@@ -3649,7 +3653,10 @@ def build_check_rule_set(
         except (OSError, ValueError) as exc:
             notes.append(f"ignoring malformed current-paths sidecar {cp_path}: {exc}")
 
-    from kicad_tools.sync.discover import resolve_declared_currents_for_pcb
+    from kicad_tools.sync.discover import (
+        resolve_declared_currents_for_pcb,
+        resolve_declared_reference_height_for_pcb,
+    )
 
     copper_outer, copper_inner = stackup_copper_oz(pcb)
     checker = DRCChecker(
@@ -3661,6 +3668,7 @@ def build_check_rule_set(
         copper_oz_inner=copper_inner,
         net_class_map=net_class_map,
         authored_min_clearance_mm=_authored_min_clearance_mm(project_pcb_path),
+        declared_reference_height_mm=resolve_declared_reference_height_for_pcb(project_pcb_path),
         warn_on_inactive_skew_rules=False,
         courtyard_waivers=courtyard_waivers,
         strict_connectivity=True,

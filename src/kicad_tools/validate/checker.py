@@ -153,6 +153,7 @@ class DRCChecker:
         require_routing_policy: bool = False,
         routing_policy_defer_pair_vias: bool = True,
         strict_copper: bool = True,
+        declared_reference_height_mm: float | None = None,
     ) -> None:
         """Initialize the DRC checker.
 
@@ -264,6 +265,13 @@ class DRCChecker:
                 that applies the DFM threshold table's fail-closed
                 ``incomplete`` verdict right after construction
                 (``kct check``, Issue #8839).
+
+            declared_reference_height_mm: The project's declared minimum
+                reference-designator height (``requirements.manufacturing.
+                silkscreen_min_reference_height_mm`` in ``project.kct``), or
+                ``None``.  Relaxes the ``silkscreen_text_height`` floor for
+                reference designators only; labels and board text keep the fab
+                floor (Issue #9448).
 
         Raises:
             ValueError: If manufacturer ID is not recognized
@@ -381,6 +389,14 @@ class DRCChecker:
                     if copper_oz_inner is not None
                     else self.design_rules.inner_copper_oz
                 ),
+            )
+
+        # Issue #9448: carry the project's declared designator height into the
+        # rules (a copy -- the preset instance may be shared).
+        if declared_reference_height_mm is not None:
+            self.design_rules = replace(
+                self.design_rules,
+                declared_reference_height_mm=declared_reference_height_mm,
             )
 
     # The canonical ordered list of bound-method names that
