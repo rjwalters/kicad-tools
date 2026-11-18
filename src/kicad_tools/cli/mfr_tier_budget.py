@@ -134,6 +134,14 @@ def per_tier_routing_budget(
     deadline is configured.
     """
     original = getattr(args, "_routing_deadline", None)
+    # Issue #9244: the detour probe pre-pass can run inside this block and
+    # shifts ``args._routing_deadline`` forward by its cost (see
+    # ``route_cmd._wire_detour_probe_deadline_shift``).  Capturing the
+    # cumulative shift here lets ``__exit__`` restore the original PLUS
+    # whatever the probe added inside the block -- a bare ``original``
+    # restore would re-count the probe's time against every later tier and
+    # the auto-fix reserve.
+    _shift_at_enter = getattr(args, "_detour_probe_shift_s", 0.0)
     narrowed = per_tier_routing_deadline(
         args,
         tier_index=tier_index,
@@ -145,5 +153,7 @@ def per_tier_routing_budget(
         yield
     finally:
         # Restore unconditionally.  ``original`` may be ``None`` (unbounded
-        # run) -- restoring ``None`` is correct in that case.
-        args._routing_deadline = original
+        # run) -- restoring ``None`` is correct in that case (no deadline
+        # means no probe shift to fold in either).
+        grew = getattr(args, "_detour_probe_shift_s", 0.0) - _shift_at_enter
+        args._routing_deadline = original if original is None else original + grew

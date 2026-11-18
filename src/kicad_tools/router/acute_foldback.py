@@ -854,8 +854,13 @@ def plan_foldback_repairs(
             tolerance,
             min_segment_length,
         )
+        # A later repair in a group may remove a segment an earlier one added
+        # (``FoldBackRepair``: apply in order).  That copper is gone from the
+        # applied result, so it must not veto a later group (Issue #9210).
+        # Same ``id()``-set model as ``repair_foldbacks`` below.
+        superseded = {id(s) for repair in repairs for s in repair.removed}
         for repair in repairs:
-            accepted_added.extend(repair.added)
+            accepted_added.extend(s for s in repair.added if id(s) not in superseded)
         result.repairs.extend(repairs)
         result.repaired += repaired
         result.skipped += skipped

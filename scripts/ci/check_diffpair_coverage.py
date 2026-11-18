@@ -249,6 +249,27 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # entries are gone -- 13 findings remain (MIPI_CLK+ 11, GND 2); CI's
 # regeneration remains the authority on the final counts (host-sensitive
 # board).  The C++ mirror ships both fixes as BUILD_VERSION 70.
+# Issue #9140 AC4 (all-boards re-measurement recorded 2026-11-18 at
+# 47aa7bdca): the #9019/#9140 family is INERT outside this fixture --
+# ``same_net_pad_gap_band_edge_mm`` / ``same_net_trace_gap_band_edge_mm``
+# resolve only in boards/06-diffpair-test/generate_design.py (#9019), and
+# every gate in the family returns True before touching copper when an
+# edge is 0 (#9195), so no other board's allowance can move because of
+# it.  This fixture: fresh seed-42 regen + identity gate at 47aa7bdca
+# (through #9337's escape-router rotated-pad AABB) -- 13 blocking
+# physical_copper_gap findings (MIPI_CLK+ 11, GND 2), 0 unallowed, 0
+# stale (both sibling via populations drained by #9124/#9208 stay gone),
+# reach 21/21, all 3 diff-pair rules exercised, pour audit OK, and the
+# LVDS1_P..4_P population the issue filed is 0.  The regen exits 1 on
+# the documented pre-existing pour-repair/check gate, independent of the
+# guard.  Boards 00/01/07 are green in CI at dc51c4b6 (#9195's merge:
+# Board 00/01 End-to-End, Board 07 End-to-End, Match-Group) and boards
+# 00/07 again at #9209's PR run; boards 02/03/04/05 fail on main from
+# pre-existing out-of-scope floods (red since <= 2026-11-13, before
+# #9156: board 03 mask_to_copper #8900, board 05 strict-gate flood
+# #9068, board 02 same-net gap + tht_smd_spacing #9325/#9332, board 04
+# unaccepted silk_hole_overlap advisories #9097).  CI's regeneration
+# remains the authority on the final counts (host-sensitive board).
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("physical_copper_gap", "GND"): 8962,
     ("physical_copper_gap", "MIPI_CLK+"): 8962,

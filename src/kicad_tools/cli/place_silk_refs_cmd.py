@@ -108,11 +108,13 @@ def _print_fixed_text_conflicts(result: PlaceSilkRefsResult) -> None:
         "(not moved; relocate by hand):"
     )
     for c in result.fixed_text_conflicts:
-        x, y = c.position
-        print(f"  {c.text!r} at ({x:.3f}, {y:.3f}) over {c.opening}")
+        # Print in sheet coordinates, the frame the opening label (and the
+        # KiCad editor / kicad-cli) uses (Issue #9327).
+        x, y = c.to_sheet(c.position)
+        print(f"  {c.text!r} at ({x:.3f}, {y:.3f}) [sheet coords] over {c.opening}")
         if c.candidates:
-            spots = ", ".join(f"({cx:.3f}, {cy:.3f})" for cx, cy in c.candidates)
-            print(f"    candidate clear positions: {spots}")
+            spots = ", ".join("({:.3f}, {:.3f})".format(*c.to_sheet(p)) for p in c.candidates)
+            print(f"    candidate clear positions [sheet coords]: {spots}")
         else:
             print("    no clear position found within the search radius")
 

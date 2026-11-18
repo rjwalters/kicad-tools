@@ -246,3 +246,47 @@ def test_auto_output_is_clean_under_kicad_cli(tmp_path, origin, layer):
     assert _kicad_cli_silk_findings(p) == []
     assert _run(p, auto=True, order_placeholder="JLCJLCJLCJLC", layer=layer) == 0
     assert _kicad_cli_silk_findings(p) == []
+
+
+# --- Issue #9327: --auto treats graphic mask openings, NPTH and drills as obstacles ---
+
+
+def _mask_strip(ox: float, oy: float, y: float = 4.0) -> str:
+    # A wide bare strip on B.Mask (a `pcb reinforce`-style wire strip).
+    return (
+        f"(gr_line (start {ox + 2} {oy + y}) (end {ox + 38} {oy + y}) "
+        '(stroke (width 3) (type solid)) (layer "B.Mask"))'
+    )
+
+
+@pytest.mark.parametrize("origin", [(0.0, 0.0), (100.0, 100.0)])
+def test_auto_avoids_graphic_mask_opening(tmp_path, origin):
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.validate.rules.silkscreen import (
+        _iter_graphic_mask_apertures,
+        check_silk_over_mask_opening,
+    )
+
+    ox, oy = origin
+    text = "A TEXT OF SOME LENGTH 27 CH"
+    # Without a strip --auto picks the bottom band near y=27.9 (board-relative);
+    # lay the strip right across that spot.
+    p = _write(tmp_path, origin=origin, extra=_mask_strip(ox, oy, y=27.9))
+    assert _run(p, auto=True, layer="B.SilkS", text=text) == 0
+    pcb = PCB.load(p)
+    assert list(_iter_graphic_mask_apertures(pcb)), "fixture must contain the strip"
+    rules = get_profile("jlcpcb").get_design_rules(2)
+    res = check_silk_over_mask_opening(pcb, rules)
+    assert not res.violations, [v.message for v in res.violations]
+
+
+def test_obstacles_and_planner_share_aperture_helper(tmp_path):
+    from kicad_tools.cli.pcb_add_board_info import _obstacles
+    from kicad_tools.silkscreen.place_refs import collect_apertures
+
+    p = _write(tmp_path, extra=_mask_strip(100.0, 100.0))
+    pcb = PCB.load(p)
+    expected = collect_apertures(pcb, 0.05)["B"]
+    got = _obstacles(pcb, "B", 0.05)[0]
+    assert [lbl for _g, lbl in got] == [lbl for _g, lbl in expected]
+    assert any("mask opening" in lbl for _g, lbl in got)

@@ -1045,3 +1045,40 @@ def test_analyzer_overshoot_is_strict_by_default_and_toleranced_only_when_stated
     bad["gate"] = {"unbounded_launches": 2, "unbounded_reasons": {"x": 2}}
     assert len(analyzer.verdict([bad], 2, tolerance_seconds=5.0)) == 2
     assert analyzer.excess_seconds(bulk, 2) == pytest.approx(0.272)
+
+
+def _subms_overshoot_group() -> dict:
+    """Two long overlapping processes plus a third that overlaps for 200 ns."""
+    intervals = [(0, 10_000_000), (0, 10_000_000), (5_000_000, 5_000_200)]
+    return {
+        "group": "sub-ms",
+        "memory": {},
+        "gate": {},
+        "native_concurrency": _load_analyzer_module().concurrency_profile(intervals),
+    }
+
+
+def test_analyzer_strict_mode_fails_a_sub_millisecond_overshoot():
+    """Issue #9152: an excursion the 3-decimal display histogram rounds to 0.000."""
+    analyzer = _load_analyzer_module()
+    group = _subms_overshoot_group()
+    profile = group["native_concurrency"]
+    assert profile["max_observed"] == 3
+    # The display figure collapsed it to zero -- the old strict test passed here.
+    assert profile["seconds_by_concurrency"]["3"] == 0.0
+    assert analyzer.excess_seconds(group, 2) == pytest.approx(200e-9)
+
+    strict = analyzer.verdict([group], 2)
+    assert len(strict) == 1 and "exceeds the configured bound 2" in strict[0]
+    assert len(analyzer.verdict([group], 2, tolerance_seconds=0.0)) == 1
+    # A tolerance larger than the true duration (still < 0.5 ms) is honoured ...
+    assert analyzer.verdict([group], 2, tolerance_seconds=1e-6) == []
+    # ... and one smaller than it is not.
+    assert len(analyzer.verdict([group], 2, tolerance_seconds=1e-7)) == 1
+
+
+def test_analyzer_tolerance_equal_to_the_true_excess_passes():
+    analyzer = _load_analyzer_module()
+    group = _subms_overshoot_group()
+    excess = analyzer.excess_seconds(group, 2)
+    assert analyzer.verdict([group], 2, tolerance_seconds=excess) == []
