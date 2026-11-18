@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import shutil
 import sys
 import tempfile
@@ -1020,10 +1021,64 @@ def _run_single_pass(
 _MASK_RULE_TYPES = (ViolationType.MASK_TO_COPPER, ViolationType.MASK_TO_COPPER_INCOMPLETE)
 
 
-def _error_key(v: DRCViolation) -> tuple:
-    """Identity of a ``kct check`` finding, comparable across two runs of it."""
-    locations = tuple((round(loc.x_mm, 3), round(loc.y_mm, 3)) for loc in v.locations)
-    return (v.type_str, tuple(sorted(v.nets)), tuple(v.items), locations)
+def _error_class(v: DRCViolation) -> tuple:
+    """Class of a ``kct check`` finding: its rule plus its net pair.
+
+    Deliberately free of ``items`` and exact locations.  This engine names a
+    track in ``items`` by its geometry (``Trace@F.Cu:w0.2:...``, issue
+    #6088) -- clearance findings carry no uuids to key on, the way
+    ``new_mask_finding`` names a mask finding by uuid -- and a clearance
+    error's ``locations`` hold the closest-approach point, so both move with
+    the copper for exactly the errors the re-centre touches (Issue #9365).
+    Rule and net pair survive the move; position is compared separately,
+    with a move-scale tolerance, by :func:`_new_errors`.
+    """
+    return (v.type_str, tuple(sorted(v.nets)))
+
+
+def _new_errors(
+    after: list[DRCViolation],
+    baseline: list[DRCViolation],
+    tolerance_mm: float,
+) -> list[DRCViolation]:
+    """After-run errors with no baseline counterpart of the same class nearby.
+
+    An after error matches a baseline error when they share a class and one
+    of the after error's reported points lies within ``tolerance_mm`` of one
+    of the baseline error's -- close enough that the mask moves' displacement
+    can account for the shift.  Each baseline error matches at most one after
+    error, so a class whose count grew always leaves its surplus flagged.
+    """
+    remaining: dict[tuple, list[DRCViolation]] = {}
+    for v in baseline:
+        remaining.setdefault(_error_class(v), []).append(v)
+    new: list[DRCViolation] = []
+    for v in after:
+        bucket = remaining.get(_error_class(v), [])
+        index = None
+        if not v.locations:
+            # Unlocatable: only an equally unlocatable baseline error of the
+            # same class can be it.
+            index = next((i for i, b in enumerate(bucket) if not b.locations), None)
+        else:
+            index = next(
+                (
+                    i
+                    for i, b in enumerate(bucket)
+                    if b.locations
+                    and any(
+                        math.hypot(a.x_mm - c.x_mm, a.y_mm - c.y_mm) <= tolerance_mm
+                        for a in v.locations
+                        for c in b.locations
+                    )
+                ),
+                None,
+            )
+        if index is None:
+            new.append(v)
+        else:
+            del bucket[index]
+    return new
 
 
 def _moves_with_new_errors(
@@ -1040,14 +1095,21 @@ def _moves_with_new_errors(
     is below a net class's clearance, so a move can land between the two and
     only ``kct check`` sees it (Issue #9365).  The baseline is ``kct check`` on
     the board with this pass's moves undone, so both sides come from the same
-    engine; an error absent from it is attributed to the moves whose copper is
-    within reach of its location, or to every move when it has no location.
+    engine.  A pre-existing error is recognised by class (rule + net pair) and
+    a location within the moves' displacement of its baseline counterpart; an
+    error without such a counterpart is attributed to the moves whose copper
+    is within reach of its location, or to every move when it has no location.
+
+    Cost: one extra pure-Python rule-set run per mask pass whose re-check
+    reports any non-mask error (the common case on a board being repaired);
+    cheaper than the re-check, which also runs kicad-cli twice for the mask
+    assessment.
     """
     candidates = [v for v in after.violations if v.is_error and v.type not in _MASK_RULE_TYPES]
     if not candidates or not actions:
         return set()
 
-    baseline_keys: set[tuple] = set()
+    baseline_errors: list[DRCViolation] = []
     with tempfile.TemporaryDirectory() as tmp:
         undo = MaskCopperRepairer(output_path)
         if all(undo.undo_action(act) for act in actions):
@@ -1060,12 +1122,16 @@ def _moves_with_new_errors(
                 project_pcb_path=pcb_path,
             )
             if baseline is not None:
-                baseline_keys = {
-                    _error_key(v)
-                    for v in baseline.violations
-                    if v.is_error and v.type not in _MASK_RULE_TYPES
-                }
-    new_errors = [v for v in candidates if _error_key(v) not in baseline_keys]
+                baseline_errors = [
+                    v for v in baseline.violations if v.is_error and v.type not in _MASK_RULE_TYPES
+                ]
+    # A pre-existing error's closest-approach point shifts by at most the
+    # copper's own displacement (plus the engine's rounding); anything farther
+    # from every baseline counterpart of its class is new.  A failed baseline
+    # run or undo leaves ``baseline_errors`` empty, so every candidate reads
+    # as new and the moves revert: fail closed.
+    tolerance_mm = max(a.displacement_mm for a in actions) + 0.1
+    new_errors = _new_errors(candidates, baseline_errors, tolerance_mm)
     if not new_errors:
         return set()
 
@@ -1077,6 +1143,11 @@ def _moves_with_new_errors(
     for v in new_errors:
         if not v.locations:
             return set(geometry)  # cannot attribute it, so keep none of the moves
+        # Attribution radius: the error's own requirement when the rule states
+        # one (copper can miss it by that much from the moved edge), floored
+        # at 0.25 mm (a rule without a requirement still sits within about a
+        # trace width of the copper that caused it) plus 0.1 mm because the
+        # reported point lies between the two copper edges, not on either.
         reach = max(v.required_value_mm or 0.0, 0.25) + 0.1
         flagged |= {
             uuid
