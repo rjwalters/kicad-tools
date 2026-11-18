@@ -101,14 +101,16 @@ actually create. With no sidecar, or no matching record, nothing changes.
 A pad of the same footprint (issue #9420)
 =========================================
 
-A stock library footprint can carry a rectangular ground pad with circular
-thermal pads on it (``RF_Module:ESP32-C3-WROOM-02``); each circular opening
-exposes the rectangular pad's copper. That is the footprint's own land pattern,
-which a consumer cannot edit. When every opening owner and the conductor are
-**pads of one footprint** on the **same identified net**, the measurement is
-``within_own_footprint`` at info (kept visible, never dropped). Pads of
-different footprints, pads on different nets, and any track, via or pour keep
-their measured verdict.
+A footprint can carry a rectangular ground pad with circular thermal pads on
+it (``RF_Module:ESP32-C3-WROOM-02``); each circular opening exposes the
+rectangular pad's copper. When the opening is a single-pad (not merged)
+opening, the relation is ``overlap``, and the conductor and every opening
+owner are **pads of one footprint** on one identical non-empty net, the
+measurement is ``within_own_footprint`` at info (kept visible, never dropped).
+A merged opening, copper beside the opening (``touching``/``disjoint``), pads
+of different footprints or nets, and any track, via or pour keep their
+measured verdict. This is a presentation change on the kct side only; no fab
+row confirms the fab passes these pads (see the issue).
 
 A pad's own pour joined by thermal spokes (issue #9284)
 =======================================================
@@ -552,16 +554,20 @@ def _same_footprint_pads(owner_items, item) -> bool:
     """True when the conductor and every opening owner are pads of one footprint.
 
     Issue #9420.  The footprint is the object's ``parent_uuid``; an empty one
-    (no identifiable footprint) never qualifies.  Net agreement is the caller's
-    ``same_net`` test, which already requires an identified conductor net.
+    (no identifiable footprint) never qualifies.  Every owner and the conductor
+    must carry one identical non-empty net (not merely overlap in nets).
     """
     footprint = item.get("parent_uuid")
+    net = item.get("net")
     return bool(
         footprint
+        and net
         and str(item.get("kind", "")).startswith("pad:")
         and owner_items
         and all(
-            str(o.get("kind", "")).startswith("pad:") and o.get("parent_uuid") == footprint
+            str(o.get("kind", "")).startswith("pad:")
+            and o.get("parent_uuid") == footprint
+            and o.get("net") == net
             for o in owner_items
         )
     )
@@ -1210,10 +1216,12 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                 if (
                     disposition in ("violation", "uncertain")
                     and same_net
+                    and kind != "merged_region"
+                    and relation == "overlap"
                     and _same_footprint_pads(owner_items, item)
                 ):
                     # Issue #9420: same-net pads of one footprint are its
-                    # land pattern, not routed copper.
+                    # footprint's own pad stack, not routed copper.
                     disposition = "within_own_footprint"
                 pour_spokes = pour_gap = pour_spoke = None
                 if (
@@ -1473,7 +1481,7 @@ def assessment_results(assessment: MaskCopperAssessment) -> DRCResults:
         # ``own_pour_thermal`` (issue #9284): the only copper under mask
         # beside the opening is the pad's own thermal spokes.
         # ``within_own_footprint`` (issue #9420): the opening and the copper
-        # are same-net pads of one footprint -- its library land pattern.
+        # are same-net pads of one footprint -- its same-footprint pad exposure.
         if measurement.disposition in (
             "intentional",
             "within_own_pad",

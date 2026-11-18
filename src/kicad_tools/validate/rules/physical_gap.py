@@ -63,11 +63,6 @@ class CopperSource:
     net: str
     identity: str
     kind: str = ""
-    # Issue #9420: for a pad, a key unique to its owning footprint within this
-    # board, so the scan can tell two pads of one footprint (a library land
-    # pattern the consumer cannot edit) from pads of different footprints.
-    # Empty for every non-pad source.
-    footprint: str = ""
 
 
 @dataclass(frozen=True)
@@ -469,10 +464,7 @@ def _collect(pcb):
                 segment_ref(segment, origin),
             )
         )
-    for fp_index, fp in enumerate(pcb.footprints):
-        # Footprint key for same-footprint pad pairs (issue #9420). The list
-        # position is unique per footprint; the uuid is not guaranteed present.
-        footprint_key = f"{fp_index}:{fp.uuid or fp.reference}"
+    for fp in pcb.footprints:
         # Filled/stroked footprint copper polygons -- a standard net tie joins
         # its pads with exactly this primitive (issue #5817). Net membership is
         # irrelevant to a physical gap, and an fp_poly carries no net, so the
@@ -508,7 +500,6 @@ def _collect(pcb):
                             net_name(pad.net_number),
                             pad.uuid or f"{fp.reference}:pad:{index}",
                             "pad",
-                            footprint_key,
                         )
                     )
     for index, via in enumerate(pcb.vias):
@@ -614,23 +605,6 @@ def _facing_edge_pairs(tree, edges, normals, distance_mm):
     return list(zip(left[order].tolist(), right[order].tolist(), strict=True))
 
 
-def _same_footprint_pads(local, owner_indices) -> bool:
-    """True when every source on both sides is a pad of one footprint and net.
-
-    Issue #9420.  Requires at least one source per side, all of kind ``pad``,
-    one shared non-empty footprint key and one shared non-empty net.
-    """
-    members = [local[k] for side in owner_indices for k in side]
-    if not all(side for side in owner_indices) or not members:
-        return False
-    return (
-        all(m.kind == "pad" and m.footprint for m in members)
-        and len({m.footprint for m in members}) == 1
-        and len({m.net for m in members}) == 1
-        and bool(members[0].net)
-    )
-
-
 def _scan_copper_gaps(pcb, minimum_mm: float, make_finding) -> DRCResults:
     """Shared slit scan; *make_finding* severity-classifies one measured gap.
 
@@ -640,13 +614,6 @@ def _scan_copper_gaps(pcb, minimum_mm: float, make_finding) -> DRCResults:
     origin ``ox`` / ``oy`` for message coordinates.  Returning ``None`` skips
     the finding (e.g. a gap the fab does not judge); a returned violation
     replaces any earlier one for the same copper pair when it measures closer.
-
-    Issue #9420: a gap whose every owning source is a pad of **one** footprint
-    on **one** non-empty net is that footprint's own land pattern, which a
-    consumer cannot edit.  It is reported at ``info`` by this shared scan, so
-    the native and fab-view paths cannot disagree, and ``make_finding`` is not
-    consulted.  Pads of different footprints, different nets, or any
-    track/via/zone owner keep the caller's verdict.
     """
     import numpy as np
     import shapely
@@ -770,24 +737,6 @@ def _scan_copper_gaps(pcb, minimum_mm: float, make_finding) -> DRCResults:
                 kinds = {local[k].kind for side in owner_indices for k in side}
                 key = ids, nets
                 if key in findings and (findings[key].actual_value or 0) <= distance:
-                    continue
-                if _same_footprint_pads(local, owner_indices):
-                    findings[key] = DRCViolation(
-                        "physical_copper_gap",
-                        "info",
-                        f"Same-footprint pad gap {distance:.4f}mm < {minimum_mm:.4f}mm; "
-                        f"closest boundaries ({a.x + ox:.6f}, {a.y + oy:.6f}) and "
-                        f"({b.x + ox:.6f}, {b.y + oy:.6f}); same-net pads of one "
-                        "footprint are its library land pattern (issue #9420)",
-                        location=((a.x + b.x) / 2, (a.y + b.y) / 2),
-                        layer=layer,
-                        actual_value=distance,
-                        required_value=minimum_mm,
-                        items=ids,
-                        nets=nets,
-                        closest_locations=((a.x, a.y), (b.x, b.y)),
-                        same_net=True,
-                    )
                     continue
                 violation = make_finding(
                     distance=distance,
