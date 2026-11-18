@@ -137,6 +137,16 @@ class Release:
     def old(self, name: str) -> bytes:
         return self._old[name]
 
+    @staticmethod
+    def dropped_files(old_names: Iterable[str], shipped_names: Iterable[str]) -> list[str]:
+        """Sorted names, of *old_names*, that *shipped_names* does not ship.
+
+        The artifacts gate's drop comparison (Issue #9243).  Pure, so the
+        KiCad-free CI replay in ``tests/test_board_package_release_9243.py``
+        runs the same check the producer does, over the committed package.
+        """
+        return sorted(set(old_names) - set(shipped_names))
+
     # -- hooks -------------------------------------------------------------
 
     def _run_checks(self, options: ReadinessOptions) -> list[CheckOutcome]:
@@ -174,7 +184,7 @@ class Release:
             "README.txt",
             "manifest.json",
         }
-        dropped = sorted(set(self._old) - shipped)
+        dropped = self.dropped_files(self._old, shipped)
         if dropped:
             raise RuntimeError(
                 "refusing to drop files the current package ships: " + ", ".join(dropped)

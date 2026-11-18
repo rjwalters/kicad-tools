@@ -181,6 +181,9 @@ bayesian = [
 # Screenshot/visualization pipeline (SVG to PNG conversion)
 screenshot = [
     "cairosvg>=2.6",
+    # `kct` screenshot-baseline comparison (pixel_drift) imports PIL directly;
+    # declared here rather than relying on transitive pins (issue #9274).
+    "pillow>=12",
 ]
 # Report generation (Jinja2 Markdown templates) and rendering (Markdown to HTML/PDF).
 # cairosvg is included because manufacturing reports embed PCB/schematic
@@ -403,8 +406,14 @@ show_error_codes = true
 namespace_packages = true
 explicit_package_bases = true
 
+# Stub-less optional dependencies (issue #9241): their import diagnostics
+# differ between environments -- `import-not-found` when the extra is not
+# installed (the dev/CI env) vs `import-untyped` when it is installed without
+# stubs (`uv sync --all-extras`). Per-module ignoring keeps the mypy baseline
+# gate's verdict identical in both environments. Targeted per module, NOT a
+# blanket ignore.
 [[tool.mypy.overrides]]
-module = ["numpy.*", "scipy.*", "rtree.*", "cupy.*", "mlx.*", "ax.*", "botorch.*", "torch.*", "cadquery.*"]
+module = ["numpy.*", "scipy.*", "rtree.*", "cupy.*", "cupyx", "mlx.*", "ax.*", "botorch.*", "torch.*", "cadquery.*", "fitz", "pynng", "playwright", "playwright.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
@@ -431,6 +440,9 @@ dev = [
     # cairosvg in the default sync, worktree exports silently shipped
     # bundles with no images/ (per-layer renders, assembly views).
     "cairosvg>=2.6",
+    # tests/test_screenshot_baseline.py imports PIL at module scope
+    # (issue #9274); mirrors the `screenshot` extra.
+    "pillow>=12",
     # C++ router build tooling (mirrors the `native` extra). This group is
     # installed by a default `uv sync`, so keeping the build deps here means
     # nanobind stays resolved in the lockfile and a later `uv sync` won't
