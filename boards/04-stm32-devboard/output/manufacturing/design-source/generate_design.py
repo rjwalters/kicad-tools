@@ -2388,6 +2388,31 @@ def _joins_acutely(pcb: Any, path: list, removed: list[Any], layer: str, net_num
     return False
 
 
+def _rule_area_blocks_tracks(zone: Any, layer: str) -> bool:
+    """True when keepout rule area ``zone`` forbids tracks on ``layer``.
+
+    Honours the zone's layer spec: a single ``layer`` name or the
+    multi-layer ``layers`` list with the wildcards KiCad writes for rule
+    areas (``*.Cu`` covers every copper layer, ``F&B.Cu`` the outer pair).
+    """
+    keepout = getattr(zone, "keepout", None)
+    if keepout is None or getattr(keepout, "tracks_allowed", True):
+        return False
+    names = list(getattr(zone, "layers", None) or [])
+    if not names:
+        single = getattr(zone, "layer", "") or ""
+        if single:
+            names = [single]
+    for name in names:
+        if name == layer:
+            return True
+        if (name == "*.Cu" and layer.endswith(".Cu")) or (
+            name == "F&B.Cu" and layer in ("F.Cu", "B.Cu")
+        ):
+            return True
+    return False
+
+
 def repair_sharp_corners(routed_path: Path) -> bool:
     """Remove every two-segment ``sharp_trace_corner`` fold-back (issue #8840).
 
@@ -2397,11 +2422,17 @@ def repair_sharp_corners(routed_path: Path) -> bool:
     repairable").  Driven by the rule's verdict, like
     :func:`compress_staircases`: for each finding, every candidate from
     :func:`_sharp_corner_candidates` is checked against foreign copper at the
-    routed net-class clearance (the larger of the two nets'), applied to a
-    scratch copy, and kept only if the rule then reports a strict subset of
-    the previous findings and no new ``redundant_copper_*`` finding appears.
-    The fewest resulting segments win, then the shortest copper.  No board
-    geometry is hard-coded, so a fresh re-route is repaired the same way.
+    routed net-class clearance (the larger of the two nets'), against the
+    board outline at the manufacturer profile's copper-to-edge minimum and
+    against track-blocking keepout rule areas, applied to a scratch copy,
+    and kept only if the rule then reports a strict subset of the previous
+    findings and no new ``redundant_copper_*`` finding appears.  A repair
+    that cannot be checked -- no board outline -- is refused, not assumed
+    clear (issue #9239).  The fewest resulting segments win, then the
+    shortest copper.  No board geometry is hard-coded, so a fresh re-route
+    is repaired the same way.  The repaired piece keeps the removed
+    segments' widest width; the old narrower fallback, which could silently
+    thin a trace, is gone (issue #9239).
 
     Runs after every copper-mutating pass and before
     :func:`compress_staircases` / :func:`fill_zones`, so a staircase it
@@ -2411,8 +2442,20 @@ def repair_sharp_corners(routed_path: Path) -> bool:
     """
     import tempfile
 
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.router.clearance_kernel import (
+        ALL_LAYERS,
+        CLEARANCE_EPSILON_MM,
+        KSegment,
+        copper_gap,
+    )
     from kicad_tools.router.quantize import segment_angle_census
     from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.clearance_shapes import (
+        min_gap_to_outline,
+        outline_shapes,
+        zone_shape,
+    )
     from kicad_tools.validate.rules.clearance import CopperElement, _calculate_clearance
     from kicad_tools.validate.rules.redundant_copper import RedundantCopperRule
     from kicad_tools.validate.rules.sharp_trace_corner import SharpTraceCornerRule
@@ -2422,6 +2465,9 @@ def repair_sharp_corners(routed_path: Path) -> bool:
     print("=" * 60)
 
     clearance_of = _netclass_clearance(routed_path)
+    # Issue #9239: the same copper-to-edge minimum the recipe's own DRC gate
+    # enforces, from the same manufacturer profile -- never hard-coded.
+    edge_clearance = get_profile("jlcpcb-tier1").get_design_rules().min_copper_to_edge_mm
 
     def keys(pcb: Any) -> set[tuple]:
         return {
@@ -2463,6 +2509,35 @@ def repair_sharp_corners(routed_path: Path) -> bool:
                 need = max(own, clearance_of(name_of(other.net_number)))
                 if _calculate_clearance(cand, other)[0] < need - 1e-9:
                     return False
+
+        # Issue #9239: copper clearance alone is not the whole check -- the
+        # candidate must also keep the board's copper-to-edge distance and
+        # stay out of track-blocking keepout rule areas.  An outline that
+        # cannot be read refuses the repair rather than assuming clear.
+        outline = pcb.get_board_outline_segments()
+        if not outline:
+            return False
+        edges = outline_shapes(outline)
+        keepouts = [
+            zone_shape([zone.polygon])
+            for zone in (*pcb.rule_areas, *pcb.footprint_rule_areas)
+            if _rule_area_blocks_tracks(zone, layer) and len(zone.polygon) >= 3
+        ]
+        for a, b in zip(path, path[1:], strict=False):
+            shape = KSegment(x1=a[0], y1=a[1], x2=b[0], y2=b[1], width=width, layer=ALL_LAYERS)
+            if min_gap_to_outline(shape, edges) < edge_clearance - CLEARANCE_EPSILON_MM:
+                return False
+            # The keepout test measures the candidate's copper, not its
+            # centerline: the trace's width is in ``shape``, so copper that
+            # reaches into the keepout is refused even when the centerline
+            # stays outside (issue #9239).  Boundary convention: overlap only
+            # is refused -- copper exactly touching the keepout edge (zero
+            # gap) is accepted, with the same CLEARANCE_EPSILON_MM float-noise
+            # tolerance the edge check above grants a trace that exactly
+            # meets its minimum.
+            for shape_ko in keepouts:
+                if copper_gap(shape, shape_ko) < -CLEARANCE_EPSILON_MM:
+                    return False
         return True
 
     repaired = 0
@@ -2485,43 +2560,43 @@ def repair_sharp_corners(routed_path: Path) -> bool:
                     net = removed[0].net_number
                     if _joins_acutely(pcb, path, removed, layer, net):
                         continue
-                    for width in sorted({s.width for s in removed}, reverse=True):
-                        if not clear(pcb, path, net, net_name, layer, width):
-                            continue
-                        trial = PCB.load(routed_path)
-                        drop = {(s.start, s.end, s.width) for s in removed}
-                        trial.remove_segments(
-                            [
-                                s
-                                for s in trial.segments
-                                if s.layer == layer
-                                and s.net_number == net
-                                and (s.start, s.end, s.width) in drop
-                            ]
-                        )
-                        for a, b in zip(path, path[1:], strict=False):
-                            trial.add_trace(a, b, width=width, layer=layer, net=net_name)
-                        trial.save(trial_path)
-                        trial = PCB.load(trial_path)
-                        after = keys(trial)
-                        if not after < before:
-                            continue
-                        if not redundant(trial) <= before_redundant:
-                            continue
-                        # The writer keeps 6 significant digits, so a point
-                        # like 152.3875 lands off the 45 degree grid once
-                        # saved: judge the copper as written.
-                        if not off_angle(trial_path) <= before_off_angle:
-                            continue
-                        # Fewest segments, then least copper, for this net on
-                        # this layer: comparable across every candidate.
-                        mine = [
-                            s for s in trial.segments if s.layer == layer and s.net_number == net
+                    # Issue #9239: no narrower fallback -- the repaired piece
+                    # keeps the removed segments' widest width, so a repair can
+                    # never silently thin the trace it replaces.
+                    width = max(s.width for s in removed)
+                    if not clear(pcb, path, net, net_name, layer, width):
+                        continue
+                    trial = PCB.load(routed_path)
+                    drop = {(s.start, s.end, s.width) for s in removed}
+                    trial.remove_segments(
+                        [
+                            s
+                            for s in trial.segments
+                            if s.layer == layer
+                            and s.net_number == net
+                            and (s.start, s.end, s.width) in drop
                         ]
-                        score = (len(mine), round(sum(math.dist(s.start, s.end) for s in mine), 6))
-                        if best is None or score < best[0]:
-                            best = (score, trial_path.read_text(), path, width)
-                        break
+                    )
+                    for a, b in zip(path, path[1:], strict=False):
+                        trial.add_trace(a, b, width=width, layer=layer, net=net_name)
+                    trial.save(trial_path)
+                    trial = PCB.load(trial_path)
+                    after = keys(trial)
+                    if not after < before:
+                        continue
+                    if not redundant(trial) <= before_redundant:
+                        continue
+                    # The writer keeps 6 significant digits, so a point
+                    # like 152.3875 lands off the 45 degree grid once
+                    # saved: judge the copper as written.
+                    if not off_angle(trial_path) <= before_off_angle:
+                        continue
+                    # Fewest segments, then least copper, for this net on
+                    # this layer: comparable across every candidate.
+                    mine = [s for s in trial.segments if s.layer == layer and s.net_number == net]
+                    score = (len(mine), round(sum(math.dist(s.start, s.end) for s in mine), 6))
+                    if best is None or score < best[0]:
+                        best = (score, trial_path.read_text(), path, width)
                 if best is None:
                     print(f"      {net_name} {layer} {finding.location}: no clear repair")
                     continue

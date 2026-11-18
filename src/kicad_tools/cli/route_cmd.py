@@ -11275,7 +11275,10 @@ def _apply_manufacturer_trace_width_floor(args, pcb_path, *, quiet: bool = False
     # ``__post_init__`` resolution is stackup-blind).  ``None`` (no dfm
     # table / no stackup entry) keeps the band guard OFF rather than
     # guessing an edge.
-    from kicad_tools.cli.stitch_cmd import _resolve_mfr_pad_gap_edge
+    from kicad_tools.cli.stitch_cmd import (
+        _resolve_mfr_pad_gap_edge,
+        _resolve_mfr_trace_gap_edge,
+    )
 
     # None without ``--manufacturer``: nothing to resolve from, so the band
     # guard stays OFF rather than guessing a fab -- the stitcher's
@@ -11288,6 +11291,18 @@ def _apply_manufacturer_trace_width_floor(args, pcb_path, *, quiet: bool = False
     # stackup (issue #8974 review: no fab literal on the no-``--mfr`` path).
     args._mfr_pad_gap_band_edge = (
         _resolve_mfr_pad_gap_edge(str(manufacturer), layers or 4, copper_outer or 1.0)
+        if manufacturer
+        else None
+    )
+
+    # Issue #9215 (follow-up to #9208): the trace-population sibling edge for
+    # the via-annulus-vs-own-net-trace band guard, resolved at the same
+    # single point and threaded through the same ``DesignRules(...)`` sites
+    # as the pad edge above.  Same fail-closed contract: ``None`` (no
+    # ``--manufacturer``, no dfm table, or no stackup entry) keeps the trace
+    # band guard OFF rather than guessing an edge.
+    args._mfr_trace_gap_band_edge = (
+        _resolve_mfr_trace_gap_edge(str(manufacturer), layers or 4, copper_outer or 1.0)
         if manufacturer
         else None
     )
@@ -12941,6 +12956,8 @@ def route_with_layer_escalation(
         mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
         # Issue #8974: the stackup-aware same-net pad slit-band edge.
         same_net_pad_gap_band_edge_mm=getattr(args, "_mfr_pad_gap_band_edge", None),
+        # Issue #9215: the trace-population sibling edge (the #9208 guard).
+        same_net_trace_gap_band_edge_mm=getattr(args, "_mfr_trace_gap_band_edge", None),
         # Issue #2891: forward escalation-in-progress flag so the escape
         # router demotes the #2880 ERROR log when an outer wrapper will
         # retry on a tier that supports via-in-pad.
@@ -14511,6 +14528,9 @@ def route_with_rule_relaxation(
             mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
             # Issue #8974: the stackup-aware same-net pad slit-band edge.
             same_net_pad_gap_band_edge_mm=getattr(args, "_mfr_pad_gap_band_edge", None),
+            # Issue #9215: the trace-population sibling edge (the #9208
+            # guard).
+            same_net_trace_gap_band_edge_mm=getattr(args, "_mfr_trace_gap_band_edge", None),
             # Issue #2891: forward escalation-in-progress flag.
             auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
             # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
@@ -17016,6 +17036,9 @@ def route_with_combined_escalation(
                 mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
                 # Issue #8974: the stackup-aware same-net pad slit-band edge.
                 same_net_pad_gap_band_edge_mm=getattr(args, "_mfr_pad_gap_band_edge", None),
+                # Issue #9215: the trace-population sibling edge (the #9208
+                # guard).
+                same_net_trace_gap_band_edge_mm=getattr(args, "_mfr_trace_gap_band_edge", None),
                 # Issue #2891: forward escalation-in-progress flag.
                 auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
                 # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
@@ -24121,6 +24144,8 @@ def _run_main_impl(args, parser, argv) -> int:
         mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
         # Issue #8974: the stackup-aware same-net pad slit-band edge.
         same_net_pad_gap_band_edge_mm=getattr(args, "_mfr_pad_gap_band_edge", None),
+        # Issue #9215: the trace-population sibling edge (the #9208 guard).
+        same_net_trace_gap_band_edge_mm=getattr(args, "_mfr_trace_gap_band_edge", None),
         # Issue #2891: forward escalation-in-progress flag so the escape
         # router demotes the #2880 ERROR log when an outer wrapper will
         # retry on a tier that supports via-in-pad.

@@ -84,6 +84,10 @@
       "sha256": "518e638438f7dd0cda4a45dea985a3f596339189bfd2dada5119cedf93ef36d2",
       "size": 22037
     },
+    "design-source/silk_repair.py": {
+      "sha256": "22ccd8c4c1e6167787614a78ede1cf77c26e7ad8dbb5ab8c650a3a896844e9e5",
+      "size": 34492
+    },
     "firmware/.gitignore": {
       "sha256": "692b1af4436043e2e965c8d563bbf90d648cda3a6afa9bba38e1c38af1d38919",
       "size": 6
