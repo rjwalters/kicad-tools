@@ -531,7 +531,6 @@ def _parse_kct_check_json(data: dict, source_file: str = "") -> DRCReport:
             nets=[str(n) for n in item.get("nets", [])],
             required_value_mm=item.get("required_value"),
             actual_value_mm=item.get("actual_value"),
-            waived=bool(item.get("waived", False)),
         )
         _extract_values(violation.__dict__, message)
         # Generate fix suggestions

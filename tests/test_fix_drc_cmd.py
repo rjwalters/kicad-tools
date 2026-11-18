@@ -3991,8 +3991,13 @@ def _kct_clearance_finding(waived: bool | None = None) -> dict:
 class TestWaivedDrcReportFindings:
     """``--drc-report`` must skip waived findings (Issue #9326)."""
 
-    def test_parser_preserves_waived_flag(self, tmp_path: Path):
-        """The kct-check JSON parser keeps the per-finding ``waived`` flag."""
+    def test_parser_ignores_waived_flag(self, tmp_path: Path):
+        """The shared parser ignores the per-finding ``waived`` flag (#4417).
+
+        A re-parsed finding stays severity-keyed so the ``kct audit``
+        manufacturing gate still blocks on it; ``fix-drc`` reads
+        waived-ness from the report file itself (Issue #9326).
+        """
         from kicad_tools.drc.report import DRCReport
 
         report_file = tmp_path / "kct-check.json"
@@ -4000,7 +4005,10 @@ class TestWaivedDrcReportFindings:
 
         report = DRCReport.load(report_file)
         assert report.violation_count == 1
-        assert report.violations[0].waived is True
+        violation = report.violations[0]
+        assert violation.waived is False
+        assert violation.is_error is True
+        assert report.error_count == 1
 
     def test_parser_defaults_waived_false(self, tmp_path: Path):
         """A report without a ``waived`` key parses as before (not waived)."""
