@@ -726,7 +726,7 @@ def _dru_loosenings(before: Mapping[str, Any], after: Mapping[str, Any]) -> list
             scopes.update(("F.Cu", "B.Cu"))
         if has_inner:
             scopes.add("In1.Cu")
-        probe_layers = sorted(scopes)
+        probe_layers = [*sorted(scopes)]
     else:
         probe_layers = [None, *sorted(scopes)]
 
