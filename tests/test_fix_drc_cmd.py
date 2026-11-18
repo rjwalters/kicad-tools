@@ -3948,3 +3948,142 @@ class TestFixDrcRecheck6431:
         engines = {e["engine"]: e for e in data["recheck"]["engines"]}
         assert engines["kicad-cli"]["ran"] and engines["kicad-cli"]["targeted_errors"] == 0
         assert engines["kct-check"]["targeted_errors"] == 0
+
+
+# ── Waived findings in --drc-report (Issue #9326) ────────────────────
+
+
+def _kct_json_report(violations: list[dict]) -> str:
+    """Build a kct-check JSON report body (``kct check --output`` schema)."""
+    return json.dumps(
+        {
+            "file": "test.kicad_pcb",
+            "manufacturer": "jlcpcb",
+            "layers": 2,
+            "summary": {
+                "errors": len(violations),
+                "warnings": 0,
+                "rules_checked": 4,
+                "passed": not violations,
+            },
+            "violations": violations,
+        }
+    )
+
+
+def _kct_clearance_finding(waived: bool | None = None) -> dict:
+    """One track-track clearance finding matching PCB_WITH_CLEARANCE geometry."""
+    finding = {
+        "rule_id": "clearance",
+        "severity": "error",
+        "message": "Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1500 mm)",
+        "location": [105.0, 100.2],
+        "layer": "F.Cu",
+        "actual_value": 0.15,
+        "required_value": 0.2,
+        "items": ["Track [GND] on F.Cu", "Track [+3.3V] on F.Cu"],
+    }
+    if waived is not None:
+        finding["waived"] = waived
+    return finding
+
+
+class TestWaivedDrcReportFindings:
+    """``--drc-report`` must skip waived findings (Issue #9326)."""
+
+    def test_parser_preserves_waived_flag(self, tmp_path: Path):
+        """The kct-check JSON parser keeps the per-finding ``waived`` flag."""
+        from kicad_tools.drc.report import DRCReport
+
+        report_file = tmp_path / "kct-check.json"
+        report_file.write_text(_kct_json_report([_kct_clearance_finding(waived=True)]))
+
+        report = DRCReport.load(report_file)
+        assert report.violation_count == 1
+        assert report.violations[0].waived is True
+
+    def test_parser_defaults_waived_false(self, tmp_path: Path):
+        """A report without a ``waived`` key parses as before (not waived)."""
+        from kicad_tools.drc.report import DRCReport
+
+        report_file = tmp_path / "kct-check.json"
+        report_file.write_text(_kct_json_report([_kct_clearance_finding()]))
+
+        report = DRCReport.load(report_file)
+        assert report.violation_count == 1
+        assert report.violations[0].waived is False
+
+    def test_dry_run_excludes_waived_from_repair_targets(
+        self, pcb_clearance: Path, tmp_path: Path, capsys
+    ):
+        """Waived findings are neither repair targets nor in the counts."""
+        report_file = tmp_path / "kct-check.json"
+        report_file.write_text(
+            _kct_json_report(
+                [
+                    _kct_clearance_finding(waived=False),
+                    _kct_clearance_finding(waived=True),
+                ]
+            )
+        )
+
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_file),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        assert result in (0, 1, 2)
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # Only the unwaived finding counts as a repair target.
+        assert data["total_violations"] == 1
+        # Output states how many waived findings were skipped.
+        assert "1 waived" in captured.err
+
+    def test_all_waived_nothing_to_repair(self, pcb_clearance: Path, tmp_path: Path, capsys):
+        """A report whose findings are all waived exits 0 with nothing to repair."""
+        report_file = tmp_path / "kct-check.json"
+        report_file.write_text(_kct_json_report([_kct_clearance_finding(waived=True)]))
+
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_file),
+                "--dry-run",
+            ]
+        )
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "nothing to repair" in captured.out.lower() or "no targeted" in captured.out.lower()
+        assert "1 waived" in captured.err
+
+    def test_report_without_waived_key_counts_all_targets(
+        self, pcb_clearance: Path, tmp_path: Path, capsys
+    ):
+        """A report lacking ``waived`` fields behaves as before (all targets)."""
+        report_file = tmp_path / "kct-check.json"
+        report_file.write_text(_kct_json_report([_kct_clearance_finding()]))
+
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_file),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["total_violations"] == 1
+        assert "waived" not in captured.err

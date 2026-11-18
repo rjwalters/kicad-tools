@@ -1131,10 +1131,23 @@ def _get_drc_report(
             print(f"Error: DRC report not found: {report_path}", file=sys.stderr)
             return None
         try:
-            return DRCReport.load(report_path)
+            report = DRCReport.load(report_path)
         except Exception as e:
             print(f"Error loading DRC report: {e}", file=sys.stderr)
             return None
+        # Issue #9326: a ``kct check`` JSON report carries ``waived`` per
+        # finding; those findings must not become repair targets (the
+        # no-report path already drops waived results -- see
+        # ``_run_python_drc``).  Reports without the flag are unchanged.
+        waived = [v for v in report.violations if getattr(v, "waived", False)]
+        if waived:
+            report.violations = [v for v in report.violations if not v.waived]
+            print(
+                f"Skipping {len(waived)} waived finding(s) from the DRC report "
+                f"(waivers are not repair targets).",
+                file=sys.stderr,
+            )
+        return report
 
     # Try to run DRC using kicad-cli
     try:
