@@ -320,9 +320,22 @@ KCT_KICAD_DOCKER=1 uv run kct check \
 
 ## Board 06's residual baselined by net signature; its diffpair-gate skip removed (2026-11-18, main `304c70e2c`)
 
-The operator ruling sanctions per-board baselining alongside repair, so the
-diff-pair gate's `--skip mask_to_copper` (#8842) is replaced by identity
-entries rather than waiting for the #9326/#9332 repair path. Measured on the
+The authorisation for baselining this fixture gate is #7270 Q3 -- a known
+finding on a synthetic regression-fixture gate is excepted by identity plus
+a tracking issue number, never by count -- together with #8858's curated
+acceptance criteria ("If real: baseline the findings ... Either way remove
+the `--skip mask_to_copper` gates") and the Curator's 2026-11-18
+re-curation ("Remove them only per board, once that board's residual is
+repaired or baselined"). This does not conflict with the operator ruling's
+"no allowance entries" condition (#8858 comment 6938665789, restated on
+#8900): that condition governs the release surface -- board check/readiness
+output, where it sits beside "no acknowledgement of fiducial or board-ID
+warnings" -- not this synthetic regression-fixture gate, and the same
+ruling also prohibits the interim `--skip mask_to_copper` this change
+removes. `check_routed_drc.py`, the release surface, keeps its skip
+untouched. On that basis the diff-pair gate's `--skip mask_to_copper`
+(#8842) is replaced by identity entries rather than waiting for the
+#9326/#9332 repair path. Measured on the
 pinned toolchain (`KCT_KICAD_DOCKER=1`; `kicad-cli` **10.0.6** in
 `kicad/kicad@sha256:18693567` — the digest CI's `KICAD_IMAGE` pins), fresh
 seed-42 regeneration of board 06:

@@ -263,9 +263,11 @@ DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     # opening/conductor UUIDs, re-minted by every regeneration; the rule
     # now names ``nets`` on each finding).  A net that starts carrying
     # mask errors still fails the gate; a net the router stops exposing
-    # goes stale and forces its entry out.  The counts below are the
-    # measured populations at entry time, for verification only -- the
-    # gate judges identity, never count.  Verify with:
+    # goes stale and forces its entry out.  Each entry's value is the
+    # tracking issue number (#8858), the same convention as the
+    # physical_copper_gap entries' 8962 -- the gate judges identity,
+    # never count; the measured per-net populations are recorded in the
+    # research note.  Verify with:
     #   KCT_KICAD_DOCKER=1 uv run kct check \
     #     boards/06-diffpair-test/regression-output/diffpair_test_routed.kicad_pcb \
     #     --mfr jlcpcb --errors-only --format json

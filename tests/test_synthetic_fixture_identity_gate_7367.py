@@ -472,7 +472,9 @@ def test_mask_identity_is_the_net_signature():
     the opening and conductor UUIDs the native geometry pass re-mints on
     every synthetic-board regeneration; the owner + conductor net names in
     ``nets`` are what reproduces, so the identity (and the allowance slot)
-    must key on them."""
+    must key on them.  An empty ``nets`` falls back to the ephemeral
+    ``items``, so such a finding fails closed: no stable allowance slot
+    can cover it."""
     identity = load("identity_allowance")
     assert "mask_to_copper" in identity.NET_IDENTITY_RULES
     one = mask_violation("USB2_D-")
@@ -480,6 +482,21 @@ def test_mask_identity_is_the_net_signature():
     assert identity.violation_identity(one) == "USB2_D-"
     assert identity.violation_identity(one) == identity.violation_identity(regen)
     assert identity.violation_identity(mask_violation("USB2_D-", uuids=())) == "USB2_D-"
+    empty = {
+        "rule_id": "mask_to_copper",
+        "severity": "error",
+        "nets": [],
+        "items": ["4ea1b8f0-b43c-4e0a-ba9f-c10e52daf681", "729d5602-2572-4c4a-a80c-e4a36f48410c"],
+    }
+    assert identity.violation_identity(empty) == (
+        "4ea1b8f0-b43c-4e0a-ba9f-c10e52daf681/729d5602-2572-4c4a-a80c-e4a36f48410c"
+    )
+    assert identity.violation_identity(empty) != identity.violation_identity(
+        dict(
+            empty,
+            items=("00000000-1111-2222-3333-444444444444", "729d5602-2572-4c4a-a80c-e4a36f48410c"),
+        )
+    )
 
 
 def test_board06_measured_mask_population_passes_and_drains():
