@@ -527,8 +527,10 @@ _LCSC_CSV_HEADERS = ("lcsc", "lcscpart", "jlcpart")
 def _norm_csv_header(header: str) -> str:
     """Normalise a CSV column header for lookup.
 
-    Mirrors ``kicad_tools.pcb.lcsc_bom._norm`` so both readers accept the
-    same spellings case- and punctuation-insensitively.
+    Mirrors ``kicad_tools.pcb.lcsc_bom._norm`` — the same normaliser only.
+    The two readers accept different spellings: the CSV loader matches
+    ``_LCSC_CSV_HEADERS`` while the KiCad sidecar reader matches the wider
+    ``kicad_tools.pcb.lcsc_bom._LCSC_PROPERTY_NAMES`` (Issue #9402).
     """
     return re.sub(r"[^a-z0-9]", "", header.lower())
 
@@ -572,7 +574,16 @@ def load_bom_csv(path: str | Path) -> BOM:
                 or row.get("package")
                 or ""
             )
-            norm_row = {_norm_csv_header(k): v for k, v in row.items() if k}
+            norm_row: dict[str, str] = {}
+            for k, v in row.items():
+                if not k:
+                    continue
+                key = _norm_csv_header(k)
+                # First non-empty value wins when distinct headers normalise
+                # to the same key (Issue #9402); a dict comprehension would
+                # let a blank later column discard a populated earlier one.
+                if key not in norm_row or not norm_row[key]:
+                    norm_row[key] = v
             lcsc = next((norm_row[h] for h in _LCSC_CSV_HEADERS if norm_row.get(h)), "")
             mpn = (
                 row.get("MPN")

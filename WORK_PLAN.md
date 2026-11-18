@@ -7,14 +7,15 @@ Prioritized roadmap generated from current GitHub label state. Maintained by the
 ---
 
 <!-- guide:plan-body:start -->
-_Generated: 2026-11-18T14:44:17Z (snapshot; compare against live labels)_
+_Generated: 2026-11-18T19:26:09Z (snapshot; compare against live labels)_
 ## Operator Attention: Merge-Risk-Hold Pileup
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
 - **#8623**: build(deps-dev): bump @astrojs/check from 0.9.11 to 0.9.12 in /site
-- **#9303**: ci: qualify PR checks for GitHub merge queues
 - **#9312**: ci: drop single-value matrices so regression check-runs keep their job names
+- **#9392**: ci: single-source the gate commands in scripts/ci/jobs/<id>.sh
+- **#9416**: ci: hoist !cancelled() in the two merge-group gates that bypassed it
 
 ## Very Important
 
@@ -26,7 +27,7 @@ Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a h
 
 `loom:important`; taken before unlabelled work.
 
-- **#8858**: Verify default-on mask_to_copper on native KiCad 10.0.5 and baseline 543/670 board findings (PR #8849)
+_None._
 
 ## Ready
 
@@ -34,12 +35,13 @@ Human-approved issues (`loom:issue`) ready for implementation — excluding held
 
 - **#9031**: tests: nested pytest.approx() at test_expand_route_experiment.py:166 blocks any pytest >= 9.2 bump
 - **#9305**: mask_to_copper: decide whether an area tolerance belongs on the 'beyond owner pad copper' test (112 of 144 consumer errors are sub-1e-6 mm² residue)
+- **#9381**: Committed demo-board BOMs still carry the pre-#9323 duplicate-LCSC lines
+- **#9421**: Fab DFM limits that differ from the parity table: tht to smd 2.03/3.05 mm, a separate via-to-pad row, silk-to-hole clearance
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#8858**: Verify default-on mask_to_copper on native KiCad 10.0.5 and baseline 543/670 board findings (PR #8849)
 - **#8979**: CI red on main: Routed PCB DRC Check fails on boards 01/02 physical_copper_gap (2 + 14 blocking errors)
 - **#9000**: Router: barrier-closure diagnostic (predict severed nets when a routing loop closes)
 - **#9019**: Grid router (Python + C++): keep own-net pad-vs-trace legs and neck-down taper out of the slit band (#9011, board 06)
@@ -48,12 +50,15 @@ Issues currently being built (`loom:building`).
 - **#9097**: Board 04 fresh regen: raw route carries 13 advisory warnings (pour_slot x10, staircase, fragments, silk_hole_overlap) - reviewed gate leg 3 red
 - **#9138**: Match-group skew producer measures summed PCB copper: dead-end loops and duplicates mask real skew
 - **#9298**: Repository moved to the 2AMLogic organization: update hard-coded owner slug and the PyPI trusted publisher
-- **#9299**: ci: qualify PR checks for GitHub merge queues
 - **#9306**: Merge-queue rollout: two required contexts are matrix-expanded names the audit cannot match
 - **#9332**: Repair path for same-net fab-parity findings (physical_copper_gap, mask_to_copper own-pad)
 - **#9340**: Local CI gate: convert the jobs that can be a script call, record the rest, retire the job-manifest drift test
-- **#9381**: Committed demo-board BOMs still carry the pre-#9323 duplicate-LCSC lines
-- **#9402**: load_bom_csv and pcb/lcsc_bom accept different LCSC header spellings (shared normaliser, divergent accept-lists)
+- **#9345**: ci: two merge-group job gates bypass `!cancelled()`, unlike the other 14
+- **#9418**: Optimizer-unwind test no longer detects a lost first deadline raise after #9297
+- **#9419**: mask_to_copper after #9315: no way to record hand-adjusted wires, and 138 same-net errors remain at opposite-side anchor openings and under attributed strips
+- **#9420**: Same-net pads inside one library footprint are reported as errors by physical_copper_gap and mask_to_copper (stock RF_Module:ESP32-C3-WROOM-02 ground pad array)
+- **#9422**: kct export refuses a 2 oz board: merge_dru_floors wants to write the 1 oz clearance floor (0.1016 mm) over a project at 0.15 mm
+- **#9424**: Board 05 unattended gate: repair route, then drop the last --skip mask_to_copper
 
 ## PRs Awaiting Review
 
@@ -61,17 +66,20 @@ PRs waiting on Judge (`loom:review-requested`).
 
 - **#9083**: fix(board03): clip silk off drilled holes in the recipe and gate silk_hole_overlap = 0 *(held)*
 - **#9179**: fix(validate): report off-path copper alongside derived match-group skew *(held)*
-- **#9392**: ci: single-source the gate commands in scripts/ci/jobs/<id>.sh
+- **#9277**: fix(board01): slide same-net vias out of pad mask apertures in the recipe
 - **#9396**: feat: repair same-net physical_copper_gap slits in fix-drc (#9332) *(held)*
-- **#9405**: fix: prefer first non-empty LCSC column when CSV headers collide
+- **#9423**: test: make optimizer-unwind fixture SIGTERM handler one-shot to catch a lost first deadline raise
+- **#9425**: fix: treat same-net pads of one footprint as info in gap and mask checks
+- **#9427**: feat: add reinforce --adopt and excuse far-side/same-net mask openings of recorded runs
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
 - **#8623**: build(deps-dev): bump @astrojs/check from 0.9.11 to 0.9.12 in /site
-- **#9303**: ci: qualify PR checks for GitHub merge queues — closes #9299
 - **#9312**: ci: drop single-value matrices so regression check-runs keep their job names — closes #9306
+- **#9392**: ci: single-source the gate commands in scripts/ci/jobs/<id>.sh — closes #9340
+- **#9416**: ci: hoist !cancelled() in the two merge-group gates that bypassed it — closes #9345
 
 ## Proposed
 
@@ -88,7 +96,6 @@ Issues carrying `loom:curated`.
 - **#8610**: route --complete chain pass commits ~282 shorts against Net 0 copper on dense mains board (rc 4) *(curated)* *(held)*
 - **#8620**: Find the real cause of the 10-12x pure-Python routing slowdown with all extras on macOS *(curated)* *(held)*
 - **#8629**: submit-jlcpcb --website: SELECTORS are placeholders that match nothing on the live quote page; CDP attach fails on a Chrome with no open tabs *(curated)* *(held)*
-- **#8858**: Verify default-on mask_to_copper on native KiCad 10.0.5 and baseline 543/670 board findings (PR #8849) *(curated)*
 - **#8900**: CI red on main: board 03 gates fail on default-on mask_to_copper (334 errors) *(curated)* *(held)*
 - **#8943**: Record JLCDFM silkscreen line-width selection criterion and per-item rows (residue of #8844) *(curated)* *(held)*
 - **#8948**: kct's own managed .kicad_dru makes mask_to_copper incomplete: admit physical_hole_clearance, text_thickness and text_height to the native context allowlist *(curated)* *(held)*
@@ -102,21 +109,27 @@ Issues carrying `loom:curated`.
 - **#9058**: Board 01: re-pin readiness evidence after PR #8848 on a host where mask_to_copper completes *(curated)* *(held)*
 - **#9065**: Wire the silk-vs-drill tools into board 03's recipe and gate silk_hole_overlap = 0 in CI *(curated)*
 - **#9068**: Board 05: clear the strict-gate flood (29 physical_copper_gap errors, 13 silk_hole_overlap, 348 provisional mask_to_copper) and re-pin readiness *(curated)* *(held)*
+- **#9091**: Board 07: scripted repair of 29 same-net physical_copper_gap errors on the hand-reviewed release copper (ruling on #8979) *(curated)* *(held)*
 - **#9093**: submit-jlcpcb: attended, exact-total-approved JLC parts purchase leg *(curated)* *(held)*
 - **#9097**: Board 04 fresh regen: raw route carries 13 advisory warnings (pour_slot x10, staircase, fragments, silk_hole_overlap) - reviewed gate leg 3 red *(curated)*
-- **#9103**: Dead `material mismatch` assertion in the pinched-zone-fill regression (PR #9084) *(curated)*
 - **#9138**: Match-group skew producer measures summed PCB copper: dead-end loops and duplicates mask real skew *(curated)*
 - **#9235**: Slow-suite test test_armc_route_gives_usb_d_equal_vias_with_every_gate fails on main (USB_D+ 2 vias, USB_D- 3) *(curated)* *(held)*
 - **#9273**: Same-net trace slit band sees only committed segments: measure whether any producer routes a via before the trace that skirts it *(curated)* *(held)*
 - **#9298**: Repository moved to the 2AMLogic organization: update hard-coded owner slug and the PyPI trusted publisher *(curated)*
 - **#9305**: mask_to_copper: decide whether an area tolerance belongs on the 'beyond owner pad copper' test (112 of 144 consumer errors are sub-1e-6 mm² residue) *(curated)*
 - **#9306**: Merge-queue rollout: two required contexts are matrix-expanded names the audit cannot match *(curated)*
-- **#9307**: Declare merge_group in select_routed_pcbs.py and pin the merge-group CI invariants with a test *(curated)* *(held)*
+- **#9307**: Declare merge_group in select_routed_pcbs.py and pin the merge-group CI invariants with a test *(curated)*
 - **#9332**: Repair path for same-net fab-parity findings (physical_copper_gap, mask_to_copper own-pad) *(curated)*
 - **#9340**: Local CI gate: convert the jobs that can be a script call, record the rest, retire the job-manifest drift test *(curated)*
+- **#9345**: ci: two merge-group job gates bypass `!cancelled()`, unlike the other 14 *(curated)*
 - **#9381**: Committed demo-board BOMs still carry the pre-#9323 duplicate-LCSC lines *(curated)*
 - **#9387**: Out-of-band: confirm no cancelled Changelog Fragment Check rows after #9383's per-run concurrency group *(curated)* *(held)*
-- **#9402**: load_bom_csv and pcb/lcsc_bom accept different LCSC header spellings (shared normaliser, divergent accept-lists) *(curated)*
+- **#9418**: Optimizer-unwind test no longer detects a lost first deadline raise after #9297 *(curated)*
+- **#9419**: mask_to_copper after #9315: no way to record hand-adjusted wires, and 138 same-net errors remain at opposite-side anchor openings and under attributed strips *(curated)*
+- **#9420**: Same-net pads inside one library footprint are reported as errors by physical_copper_gap and mask_to_copper (stock RF_Module:ESP32-C3-WROOM-02 ground pad array) *(curated)*
+- **#9421**: Fab DFM limits that differ from the parity table: tht to smd 2.03/3.05 mm, a separate via-to-pad row, silk-to-hole clearance *(curated)*
+- **#9422**: kct export refuses a 2 oz board: merge_dru_floors wants to write the 1 oz clearance floor (0.1016 mm) over a project at 0.15 mm *(curated)*
+- **#9424**: Board 05 unattended gate: repair route, then drop the last --skip mask_to_copper *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -133,14 +146,14 @@ _None._
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 3 |
+| Operator merge-risk holds | 4 |
 | Very important | 1 |
-| Important | 1 |
-| Ready (`loom:issue`, net of holds/building/merge-pending) | 2 |
-| In Progress (`loom:building`) | 15 |
-| PRs awaiting review | 5 |
-| Approved PRs awaiting merge | 3 |
-| Curated | 40 |
+| Important | 0 |
+| Ready (`loom:issue`, net of holds/building/merge-pending) | 4 |
+| In Progress (`loom:building`) | 17 |
+| PRs awaiting review | 7 |
+| Approved PRs awaiting merge | 4 |
+| Curated | 45 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->

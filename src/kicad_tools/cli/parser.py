@@ -2610,7 +2610,7 @@ def _add_pcb_parser(subparsers) -> None:
     pcb_reinforce.add_argument("pcb", help="Path to .kicad_pcb file")
     pcb_reinforce.add_argument(
         "--net",
-        help="Net name to reinforce (must have routed copper; required unless --list-wires)",
+        help="Net name to reinforce (must have routed copper; required unless --list-wires or --adopt)",
     )
     pcb_reinforce.add_argument(
         "--list-wires",
@@ -2618,6 +2618,16 @@ def _add_pcb_parser(subparsers) -> None:
         action="store_true",
         help="Read-only: print the wire list from BOARD's .reinforcement.json sidecar "
         "(#8744) and exit; --net filters it. Honours --format json.",
+    )
+    pcb_reinforce.add_argument(
+        "--adopt",
+        action="store_true",
+        help="Record the wires ALREADY on BOARD in its .reinforcement.json sidecar "
+        "(#9419): each solder-mask strip chain between two same-net anchor holes of a "
+        "wire gauge's drill becomes a record (net, layer, anchors, length). Moves no "
+        "copper and writes no board; --net restricts it, --dry-run reports without "
+        "writing. Wires already in the sidecar are kept; strips that cannot be "
+        "resolved are reported, never guessed.",
     )
     pcb_reinforce.add_argument(
         "--wire-gauge",

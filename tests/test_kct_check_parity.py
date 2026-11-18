@@ -147,6 +147,43 @@ BOARD_07_EXPECTED_FAMILY_DELTA = {
 # did not change.
 BOARD_07_EXPECTED_GAP_ERRORS = 101
 
+# Issue #8858: the committed board 07 fixture carries a residual
+# ``mask_to_copper`` population (162 errors on 22 net signatures, measured
+# 2026-11-18 on main @ ea0c5e2a1, pinned image kicad-cli 10.0.6).  The CI
+# release gate judges such populations by IDENTITY
+# (``.github/routed-drc-tolerance.yml`` ``identity_allowances:``); the
+# matchgroup coverage gate does the same for its own REGENERATED population.
+# This test excludes the committed fixture's population the same way so the
+# gate-count pin below stays about the families it has always pinned.  A
+# fixture refresh that changes this set re-derives it with:
+#   KCT_KICAD_DOCKER=1 uv run kct check <fixture> --mfr jlcpcb --format json
+# then ``identity_allowance.violation_identity`` over the mask_to_copper
+# error records.
+BOARD_07_FIXTURE_M2C_IDENTITIES: tuple[str, ...] = (
+    "+1V2",
+    "+1V8",
+    "A0",
+    "A1",
+    "A2",
+    "A5",
+    "A7",
+    "DQ0",
+    "DQ1",
+    "DQ5",
+    "DQ6",
+    "DQ7",
+    "DQS_N",
+    "DQS_P",
+    "GND",
+    "MIPI_CLK_N",
+    "MIPI_DAT0_N",
+    "MIPI_DAT1_P",
+    "TMDS_D0_P",
+    "TMDS_D1_P",
+    "TMDS_D2_N",
+    "TMDS_D2_P",
+)
+
 
 def _load_resolver_module():
     """Import ``scripts/ci/net_class_map_resolver.py`` as a module."""
@@ -175,8 +212,9 @@ def _run_kct_check(pcb: Path, sidecar: Path | None) -> dict:
         str(pcb),
         "--mfr",
         "jlcpcb",
-        "--skip",
-        "mask_to_copper",
+        # Issue #8858: the CI gate no longer skips mask_to_copper (it is
+        # judged by identity instead), so this mirror runs it too -- the
+        # parity comparison must see the same findings both sides do.
         "--errors-only",
         "--format",
         "json",
@@ -459,11 +497,23 @@ class TestCiGateCountsGatedFamilies:
         ``BOARD_07_EXPECTED_FAMILY_DELTA`` (#6802; the DQS timing error
         only since the #7913 cap removal).
         These are preserved fixture findings, not manufacturing waivers.
+
+        Issue #8858: the gate's ``mask_to_copper`` population on this
+        fixture is excluded by a test-local identity allowance (see
+        ``BOARD_07_FIXTURE_M2C_IDENTITIES``) so the pin keeps measuring
+        the families it always measured; an m2c finding on a NEW net
+        still shifts the count and re-derives the list.
         """
         if not BOARD_07_PCB.is_file():
             pytest.skip("board 07 regression fixture not present")
         gate = self._load_gate()
-        blocking, advisory = gate.count_errors(BOARD_07_PCB)
+        allowance = {("mask_to_copper", ident): 8858 for ident in BOARD_07_FIXTURE_M2C_IDENTITIES}
+        blocking, advisory, outcome = gate.count_errors(BOARD_07_PCB, allowance=allowance)
+        assert outcome.applied, "allowance was not applied (violations missing from payload?)"
+        assert not outcome.stale, (
+            f"BOARD_07_FIXTURE_M2C_IDENTITIES is stale: {outcome.stale} -- "
+            f"re-derive it after a fixture refresh."
+        )
         assert (
             blocking
             == 5 + sum(BOARD_07_EXPECTED_FAMILY_DELTA.values()) + BOARD_07_EXPECTED_GAP_ERRORS

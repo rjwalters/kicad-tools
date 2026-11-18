@@ -98,6 +98,20 @@ clips, or a trace wholly under an unrelated opening elsewhere on the
 board) stays at its current severity: that is the hazard a strip can
 actually create. With no sidecar, or no matching record, nothing changes.
 
+A pad of the same footprint (issue #9420)
+=========================================
+
+A footprint can carry a rectangular ground pad with circular thermal pads on
+it (``RF_Module:ESP32-C3-WROOM-02``); each circular opening exposes the
+rectangular pad's copper. When the opening is a single-pad (not merged)
+opening, the relation is ``overlap``, and the conductor and every opening
+owner are **pads of one footprint** on one identical non-empty net, the
+measurement is ``within_own_footprint`` at info (kept visible, never dropped).
+A merged opening, copper beside the opening (``touching``/``disjoint``), pads
+of different footprints or nets, and any track, via or pour keep their
+measured verdict. This is a presentation change on the kct side only; no fab
+row confirms the fab passes these pads (see the issue).
+
 A pad's own pour joined by thermal spokes (issue #9284)
 =======================================================
 
@@ -264,6 +278,7 @@ class MaskCopperMeasurement:
             "within_own_pad",
             "within_reinforce_run",
             "own_pour_thermal",
+            "within_own_footprint",
         ) or self.relation not in ("overlap", "touching", "disjoint"):
             raise ValueError("Invalid mask measurement disposition/relation")
         if self.mask_side not in (
@@ -535,6 +550,29 @@ def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearanc
     return True, excess
 
 
+def _same_footprint_pads(owner_items, item) -> bool:
+    """True when the conductor and every opening owner are pads of one footprint.
+
+    Issue #9420.  The footprint is the object's ``parent_uuid``; an empty one
+    (no identifiable footprint) never qualifies.  Every owner and the conductor
+    must carry one identical non-empty net (not merely overlap in nets).
+    """
+    footprint = item.get("parent_uuid")
+    net = item.get("net")
+    return bool(
+        footprint
+        and net
+        and str(item.get("kind", "")).startswith("pad:")
+        and owner_items
+        and all(
+            str(o.get("kind", "")).startswith("pad:")
+            and o.get("parent_uuid") == footprint
+            and o.get("net") == net
+            for o in owner_items
+        )
+    )
+
+
 @dataclass
 class _ReinforceRun:
     """One ``<board>.reinforcement.json`` record resolved for attribution (#9315).
@@ -643,8 +681,16 @@ def _reinforce_runs(objects: dict[str, Any], wires: Any) -> list[_ReinforceRun]:
     return runs
 
 
-def _attribute_reinforce_openings(runs, openings, objects, uncertainty):
+def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs=()):
     """Attribute mask openings of one side to runs; ``(uuid -> run, id -> strip union)``.
+
+    ``runs`` are the runs whose own copper layer is this mask side. ``far_runs``
+    are runs on the *opposite* outer layer (#9419): ``pcb reinforce`` opens the
+    mask on both sides at each anchor and end hole (the wire tail and its
+    fillet exit on the far side), so the far side's anchor flashes and end
+    holes belong to the run too. A far run claims only non-strip openings --
+    ``gr_line`` strips on its far side belong to whatever run owns that side --
+    and still only through its confirmed anchors and net gates.
 
     An opening belongs to a run when its convex hull lies within the strip
     tolerance of one of the run's *confirmed* anchor points -- the hull, not
@@ -671,6 +717,7 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty):
     from .rules.reinforcement_incomplete import MASK_TOLERANCE_MM
 
     tolerance = MASK_TOLERANCE_MM + uncertainty
+    claimants = [(run, False) for run in runs] + [(run, True) for run in far_runs]
     candidates: dict[str, list[tuple[_ReinforceRun, float]]] = {}
     strip_materials: dict[str, Any] = {}
     for owners, material, kind, *_ in openings:
@@ -687,8 +734,10 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty):
         if kind == "via" or kind.startswith("pad"):
             owner = objects.get(uuid) if len(owners) == 1 else None
             owner_net = (owner.get("net") if owner else "") or ""
-        for run in runs:
+        for run, far in claimants:
             if not run.confirmed_anchors:
+                continue
+            if far and kind == "gr_line":
                 continue
             if (kind == "via" or kind.startswith("pad")) and owner_net != run.net:
                 continue
@@ -742,17 +791,22 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty):
     return run_by_uuid, strips
 
 
-def _conductor_on_reinforce_run(run, item, copper, opening, strip_union, uncertainty) -> bool:
+def _conductor_on_reinforce_run(
+    run, item, copper, opening, strip_union, uncertainty, opening_kind=""
+) -> bool:
     """``True`` when the conductor is copper the run exposes on purpose (#9315).
 
     The run's own track -- the strip lies along it (the opening is covered by
     this segment's copper), or the segment is wholly under the strip union,
     or the segment reaches one of the run's anchors --, its anchor vias, and
     a same-net pad standing on the run (the strip passes over its copper, or
-    the pad is itself an anchor) qualify. Everything else keeps its measured
-    verdict: different-net copper, a zone, an arc, and same-net copper off
-    the run (a neighbour the strip clips pokes past it, so neither
-    containment holds).
+    the pad is itself an anchor) qualify. Since #9419 so does any same-net
+    track, via or pad that an anchor flash / end hole of the run exposes
+    (``opening_kind`` is not a strip), on either mask side, and any that
+    intersects the attributed strip: a tee branch, the adjoining wire's anchor,
+    a layer-change via, a wider or doubled segment. Everything else keeps its
+    measured verdict: different-net copper, a zone, an arc, and same-net
+    copper that neither lies under the strip nor sits at an anchor opening.
     """
     from shapely.geometry import Point
 
@@ -761,6 +815,22 @@ def _conductor_on_reinforce_run(run, item, copper, opening, strip_union, uncerta
     if (item.get("net") or "") != run.net:
         return False
     kind = item["kind"]
+    if kind == "via" or kind == "segment" or kind.startswith("pad"):
+        # Same-net copper the run's own openings expose is the wire's
+        # attachment, not a defect (#9419). An anchor flash or end hole is
+        # tied to a confirmed anchor of this net, so whatever same-net track,
+        # via or pad it uncovers -- on either mask side -- is copper the wire
+        # is soldered to. Under the strip the same holds for a branch teeing
+        # off the run, the adjoining wire's anchor, a layer-change via and a
+        # wider or doubled segment. Different-net copper never reaches here.
+        if opening_kind not in ("gr_line", "merged_region"):
+            return True
+        if (
+            strip_union is not None
+            and copper.intersection(strip_union.buffer(MASK_TOLERANCE_MM + uncertainty)).area
+            > _AREA_EPSILON_MM2
+        ):
+            return True
     anchor_points = [Point(a) for a in run.anchors]
     if kind == "via":
         return any(
@@ -1060,9 +1130,14 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
         # Issue #9315: attribute this side's openings to the reinforce runs
         # before measuring, so the run's own copper can be classified below.
         side_runs = [run for run in runs if run.mask_side == side]
+        # Issue #9419: the opposite side's anchor flashes and end holes belong
+        # to the run too (``pcb reinforce`` opens both sides at each anchor).
+        far_runs = [run for run in runs if run.mask_side != side]
         run_by_uuid, run_strips = (
-            _attribute_reinforce_openings(side_runs, openings, geometry.objects, uncertainty)
-            if side_runs
+            _attribute_reinforce_openings(
+                side_runs, openings, geometry.objects, uncertainty, far_runs
+            )
+            if side_runs or far_runs
             else ({}, {})
         )
         # Every opening is measured against every object's copper on this layer.
@@ -1175,6 +1250,16 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                     )
                     if qualifies:
                         disposition = "within_own_pad"
+                if (
+                    disposition in ("violation", "uncertain")
+                    and same_net
+                    and kind != "merged_region"
+                    and relation == "overlap"
+                    and _same_footprint_pads(owner_items, item)
+                ):
+                    # Issue #9420: same-net pads of one footprint are its
+                    # footprint's own pad stack, not routed copper.
+                    disposition = "within_own_footprint"
                 pour_spokes = pour_gap = pour_spoke = None
                 if (
                     disposition in ("violation", "uncertain")
@@ -1253,6 +1338,7 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                         opening,
                         run_strips.get(id(attributed_run)),
                         uncertainty,
+                        kind,
                     ):
                         disposition = "within_reinforce_run"
                 point = (
@@ -1432,11 +1518,14 @@ def assessment_results(assessment: MaskCopperAssessment) -> DRCResults:
         # copper beyond what its reinforce run puts there on purpose.
         # ``own_pour_thermal`` (issue #9284): the only copper under mask
         # beside the opening is the pad's own thermal spokes.
+        # ``within_own_footprint`` (issue #9420): the opening and the copper
+        # are same-net pads of one footprint -- its same-footprint pad exposure.
         if measurement.disposition in (
             "intentional",
             "within_own_pad",
             "within_reinforce_run",
             "own_pour_thermal",
+            "within_own_footprint",
         ):
             severity = "info"
         # Warning-disposition measurements and provisional (incomplete-run)

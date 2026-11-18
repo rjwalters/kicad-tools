@@ -29,7 +29,7 @@ REQUIRED_NAME = "Changelog Fragment Check"
 # --- the concurrency group (issue #9383) -----------------------------------
 
 
-def test_concurrency_group_is_per_run_for_every_event() -> None:
+def test_concurrency_preserves_per_run_pr_isolation() -> None:
     group = WORKFLOW["concurrency"]["group"]
     # One group per run: no run of this workflow can cancel another, so no
     # `cancelled` check-run can exist under the required name for an
@@ -192,3 +192,57 @@ def test_other_label_events_are_skipped_off_the_required_name() -> None:
         context = {"github": {"event": event}}
         assert _evaluate(_unwrap("if"), context) is False
         assert _evaluate(_unwrap("name"), context) == "ignored label event"
+
+
+def _concurrency(event_name: str, run_id: str, sha: str, action: str = "opened") -> tuple[str, Any]:
+    context = {
+        "github": {
+            "event_name": event_name,
+            "run_id": run_id,
+            "sha": sha,
+            "event": {"action": action, "pull_request": {"number": 9303}},
+        }
+    }
+    group = re.sub(
+        r"\$\{\{(.*?)\}\}",
+        lambda match: str(_evaluate(match[1], context)),
+        WORKFLOW["concurrency"]["group"],
+    )
+    cancel = WORKFLOW["concurrency"]["cancel-in-progress"]
+    return group, _evaluate(cancel[3:-2], context)
+
+
+def test_every_pr_event_has_its_own_group_isolated_from_merge_groups() -> None:
+    groups = []
+    for n, action in enumerate(
+        ("opened", "synchronize", "reopened", "edited", "labeled", "unlabeled")
+    ):
+        for occurrence in (0, 1):
+            group, cancel = _concurrency("pull_request", str(n * 2 + occurrence), "a" * 40, action)
+            assert cancel is True
+            groups.append(group)
+    assert len(set(groups)) == len(groups)
+    assert _concurrency("merge_group", "0", "a" * 40, "checks_requested")[0] not in groups
+
+
+def test_merge_group_keys_are_sha_scoped_and_never_cancel() -> None:
+    first = _concurrency("merge_group", "1", "a" * 40, "checks_requested")
+    repeat = _concurrency("merge_group", "2", "a" * 40, "checks_requested")
+    next_group = _concurrency("merge_group", "3", "b" * 40, "checks_requested")
+    assert first == repeat
+    assert first[0] != next_group[0]
+    assert first[1] is False and next_group[1] is False
+
+
+def test_merge_group_runs_tree_check_and_preserves_pr_only_gap_report() -> None:
+    context = {"github": {"event_name": "merge_group", "event": {"action": "checks_requested"}}}
+    assert _evaluate(_unwrap("if"), context) is True
+    assert _evaluate(_unwrap("name"), context) == REQUIRED_NAME
+    tree_check = next(
+        step for step in JOB["steps"] if "changelog_assemble.py --check" in step.get("run", "")
+    )
+    assert "if" not in tree_check or _evaluate(tree_check["if"], context) is True
+    gap = next(step for step in JOB["steps"] if "changelog_gap_report.py" in step.get("run", ""))
+    assert _evaluate(gap["if"], context) is False
+    assert '--pr "${{ github.event.pull_request.number }}"' in gap["run"]
+    assert "--pr-event" not in gap["run"]
