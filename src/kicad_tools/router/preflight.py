@@ -36,6 +36,9 @@ class PreflightOffGridPad:
         offset_mm: Euclidean (L2) distance from the pad to the nearest grid point.
         footprint_name: Library footprint name
             (e.g. ``"Package_QFP:TQFP-32_7x7mm_P0.8mm"``).
+        threshold_mm: The tolerance this pad was held to, in mm.  With the
+            auto-derived threshold this is the owning footprint's own
+            tolerance (issue #9434); ``None`` when unknown.
     """
 
     ref: str
@@ -44,6 +47,7 @@ class PreflightOffGridPad:
     y: float
     offset_mm: float
     footprint_name: str
+    threshold_mm: float | None = None
 
     @property
     def label(self) -> str:
@@ -88,6 +92,11 @@ class OffGridReport:
         grid_resolution: Router grid resolution that was checked, in mm.
         threshold: Maximum L2 deviation considered "on-grid", in mm
             (defaults to :data:`DEFAULT_PAD_GRID_TOLERANCE_MM` = 0.05 mm).
+            With the auto-derived threshold each footprint has its own
+            tolerance (see :func:`compute_component_pad_grid_tolerances`);
+            this field is then the largest of them and is informational --
+            each pad's applied tolerance is
+            :attr:`PreflightOffGridPad.threshold_mm`.
         grid_origin: ``(x_offset, y_offset)`` in mm; grid points are at
             ``offset + k * resolution`` for integer ``k``.
         off_grid_pads: List of :class:`PreflightOffGridPad` records, one per pad
@@ -225,9 +234,9 @@ DEFAULT_PAD_GRID_TOLERANCE_MM: float = 0.05
 
 #: Absolute hard cap on auto-derived tolerance, in millimeters.
 #:
-#: The auto-derive logic builds the tolerance from each board's pad-offset
-#: histogram (``p99(offsets) + safety margin``).  This cap prevents truly
-#: pathological boards from pushing the threshold so high that real placement
+#: The auto-derive logic builds the tolerance from each footprint's own
+#: pad-offset distribution (``p99(offsets) + safety margin``, issue #9434).
+#: This cap prevents truly pathological boards from pushing the threshold so high that real placement
 #: errors slip through.  ``0.15`` mm is the smallest clearance routed boards
 #: typically run with, so anything above this would be a routing problem
 #: irrespective of grid alignment.
@@ -285,6 +294,69 @@ def _percentile(values: list[float], percentile: float) -> float:
     return sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * frac
 
 
+def compute_component_pad_grid_tolerances(
+    pads: list[Pad],
+    grid_resolution: float = 0.1,
+    percentile: float = AUTO_DERIVED_TOLERANCE_PERCENTILE,
+    margin: float = AUTO_DERIVED_TOLERANCE_MARGIN_MM,
+    floor: float = AUTO_DERIVED_TOLERANCE_FLOOR_MM,
+    cap: float = AUTO_DERIVED_TOLERANCE_HARD_CAP_MM,
+) -> dict[str, float]:
+    """Auto-derive one pad_grid tolerance per footprint (issue #9434).
+
+    For each footprint the tolerance is
+    ``clamp(floor, cap, p99(intrinsic offsets) + margin)``, where a pad's
+    *intrinsic offset* is the L2 distance to the grid of its position
+    relative to the footprint origin (``pad - origin``; rotation already
+    applied by the loader).  That is the offset the footprint's own pad
+    lattice would have if its origin were snapped onto the grid, i.e. the
+    library/metric-rounding noise that the footprint carries by design
+    (issue #3061).
+
+    The tolerance depends **only on that footprint's own pads**.  Moving,
+    adding or removing any other part cannot change it, so a finding on
+    one part never depends on where unrelated parts sit.  A footprint
+    whose origin is itself off-grid shifts every pad's *actual* offset
+    away from the intrinsic one, so a whole-part placement error is still
+    flagged once it exceeds the footprint's own tolerance.
+
+    This replaces the earlier board-wide p99 of every pad's offset, which
+    made the tolerance (and therefore the verdict on untouched parts)
+    move whenever a few other pads moved on or off the grid.
+
+    Args:
+        pads: Pads from :func:`~kicad_tools.router.io.load_pads_for_analysis`.
+        grid_resolution: Router grid resolution in mm.
+        percentile: Fraction (0..1) of a footprint's intrinsic offsets to
+            absorb below its threshold (default ``0.99``).
+        margin: Safety margin added on top of the percentile, in mm.
+        floor: Minimum tolerance, in mm (never stricter than the
+            post-#3057 default).
+        cap: Maximum tolerance, in mm.
+
+    Returns:
+        Mapping from :attr:`Pad.component_key` to that footprint's
+        tolerance in mm.
+    """
+    intrinsic: dict[str, list[float]] = {}
+    for pad in pads:
+        if pad.footprint_origin is not None:
+            vx = pad.x - pad.footprint_origin[0]
+            vy = pad.y - pad.footprint_origin[1]
+        else:
+            # No origin known (programmatic pad): fall back to the pad's own
+            # absolute offset -- still per-footprint, never board-wide.
+            vx, vy = pad.x, pad.y
+        intrinsic.setdefault(pad.component_key, []).append(
+            _l2_distance_to_grid(vx, vy, grid_resolution, 0.0, 0.0)
+        )
+
+    return {
+        key: float(min(cap, max(floor, _percentile(offsets, percentile) + margin)))
+        for key, offsets in intrinsic.items()
+    }
+
+
 def compute_pad_grid_tolerance(
     pcb_path: str | Path,
     grid_resolution: float = 0.1,
@@ -294,55 +366,41 @@ def compute_pad_grid_tolerance(
     floor: float = AUTO_DERIVED_TOLERANCE_FLOOR_MM,
     cap: float = AUTO_DERIVED_TOLERANCE_HARD_CAP_MM,
 ) -> float:
-    """Auto-derive the pad_grid tolerance from a board's offset histogram.
+    """Largest auto-derived pad_grid tolerance any footprint on a board gets.
 
-    Builds the per-pad L2-distance-to-grid distribution for ``pcb_path``
-    and returns ``max(floor, min(cap, p99(offsets) + margin))``.  The
-    result is the smallest tolerance that absorbs ~99% of the intrinsic
-    library/metric-rounding noise on the board while leaving the top
-    ~1% of pads (genuine placement errors, gross library bugs) above
-    the threshold.
-
-    The threshold is *board-specific*: a board with only metric-on-metric
-    footprints lands near :data:`AUTO_DERIVED_TOLERANCE_FLOOR_MM`; a
-    board with fine-pitch QFN/BGA whose pad lattice naturally sits 0.07
-    mm off the 0.1 mm grid lands near 0.08 mm; both still flag a 0.15 mm
-    placement error.  See issue #3061 for context.
+    The tolerance applied to a pad is *per footprint* (see
+    :func:`compute_component_pad_grid_tolerances`, issue #9434); this
+    summary returns the maximum over footprints (``floor`` when the board
+    has no pads) for reporting and for callers that want a single number.
+    It is **not** used to judge any pad, so it never makes one part's
+    verdict depend on another part.  See issue #3061 for the original
+    auto-derive rationale.
 
     Args:
         pcb_path: Path to a ``.kicad_pcb`` file (or the file contents).
-        grid_resolution: Router grid resolution in mm.  Defaults to the
-            same ``0.1`` mm used by :func:`check_pad_grid_alignment`.
-        grid_origin: Grid origin offset ``(x, y)`` in mm.
-        percentile: Fraction (0..1) of the offset distribution to absorb
-            below the threshold.  Defaults to
-            :data:`AUTO_DERIVED_TOLERANCE_PERCENTILE` (``0.99``).
-        margin: Safety margin added on top of the percentile, in mm.
-            Defaults to :data:`AUTO_DERIVED_TOLERANCE_MARGIN_MM`
-            (``0.005``).
-        floor: Minimum tolerance to return, in mm.  Defaults to
-            :data:`AUTO_DERIVED_TOLERANCE_FLOOR_MM` (``0.05``) so the
-            auto-derived rule is never stricter than the post-#3057
-            default.
-        cap: Maximum tolerance to return, in mm.  Defaults to
-            :data:`AUTO_DERIVED_TOLERANCE_HARD_CAP_MM` (``0.15``) so a
-            pathological board cannot push the threshold above the
-            typical minimum trace clearance.
+        grid_resolution: Router grid resolution in mm.
+        grid_origin: Accepted for API compatibility.  The intrinsic
+            offsets are measured relative to each footprint's own origin,
+            so the grid origin does not enter the derivation.
+        percentile: See :func:`compute_component_pad_grid_tolerances`.
+        margin: See :func:`compute_component_pad_grid_tolerances`.
+        floor: See :func:`compute_component_pad_grid_tolerances`.
+        cap: See :func:`compute_component_pad_grid_tolerances`.
 
     Returns:
-        The derived tolerance in mm.  Falls back to ``floor`` when the
-        board has no pads (the answer is vacuous either way).
+        The largest per-footprint tolerance in mm, or ``floor`` for an
+        empty board.
     """
     pads = load_pads_for_analysis(pcb_path)
-    if not pads:
-        return floor
-
-    x_off, y_off = grid_origin
-    offsets = [_l2_distance_to_grid(pad.x, pad.y, grid_resolution, x_off, y_off) for pad in pads]
-
-    raw = _percentile(offsets, percentile) + margin
-    bounded = min(cap, max(floor, raw))
-    return float(bounded)
+    tolerances = compute_component_pad_grid_tolerances(
+        pads,
+        grid_resolution=grid_resolution,
+        percentile=percentile,
+        margin=margin,
+        floor=floor,
+        cap=cap,
+    )
+    return max(tolerances.values(), default=floor)
 
 
 def check_pad_grid_alignment(
@@ -378,8 +436,10 @@ def check_pad_grid_alignment(
             :func:`auto_select_grid_resolution` analysis when computing a
             "finer grid" suggestion.
         auto_derive_threshold: When ``True`` and ``threshold`` is
-            ``None``, derive the threshold from the board's pad-offset
-            histogram via :func:`compute_pad_grid_tolerance`.  Defaults
+            ``None``, derive a tolerance *per footprint* from that
+            footprint's own pad lattice via
+            :func:`compute_component_pad_grid_tolerances` (issue #9434;
+            other parts never influence it).  Defaults
             to ``False`` to preserve backwards-compatibility with the
             constant-default behaviour introduced in PR #3057.  The CLI
             (``kct check``) overrides this to ``True`` by default.
@@ -394,30 +454,36 @@ def check_pad_grid_alignment(
         >>> if not report.passed:
         ...     print(report.summary())
     """
+    pads = load_pads_for_analysis(pcb_path)
+
+    # ``component_tolerances`` is only populated for the auto-derived path;
+    # otherwise every pad is held to the single scalar ``threshold``.
+    component_tolerances: dict[str, float] | None = None
     if threshold is None:
         if auto_derive_threshold:
-            threshold = compute_pad_grid_tolerance(
-                pcb_path,
-                grid_resolution=grid_resolution,
-                grid_origin=grid_origin,
+            component_tolerances = compute_component_pad_grid_tolerances(
+                pads, grid_resolution=grid_resolution
             )
+            threshold = max(component_tolerances.values(), default=AUTO_DERIVED_TOLERANCE_FLOOR_MM)
         else:
             threshold = DEFAULT_PAD_GRID_TOLERANCE_MM
 
-    pads = load_pads_for_analysis(pcb_path)
-
     x_off, y_off = grid_origin
-
-    # Add a small floating-point tolerance to the threshold so pads exactly
-    # on the boundary (e.g. ``124.49 mm`` on a ``0.1 mm`` grid -- the FP
-    # round-off makes the residue ``0.0100000000005``) are not falsely
-    # flagged.  ~1 nm is well below any meaningful PCB tolerance.
-    fp_eps = max(1e-9, threshold * 1e-6)
 
     off_grid: list[PreflightOffGridPad] = []
     for pad in pads:
+        pad_threshold = (
+            component_tolerances[pad.component_key]
+            if component_tolerances is not None
+            else threshold
+        )
+        # Add a small floating-point tolerance to the threshold so pads
+        # exactly on the boundary (e.g. ``124.49 mm`` on a ``0.1 mm`` grid
+        # -- the FP round-off makes the residue ``0.0100000000005``) are not
+        # falsely flagged.  ~1 nm is well below any meaningful PCB tolerance.
+        fp_eps = max(1e-9, pad_threshold * 1e-6)
         dist = _l2_distance_to_grid(pad.x, pad.y, grid_resolution, x_off, y_off)
-        if dist <= threshold + fp_eps:
+        if dist <= pad_threshold + fp_eps:
             continue
 
         off_grid.append(
@@ -428,6 +494,7 @@ def check_pad_grid_alignment(
                 y=pad.y,
                 offset_mm=dist,
                 footprint_name=pad.footprint_name,
+                threshold_mm=pad_threshold,
             )
         )
 
@@ -454,5 +521,6 @@ __all__ = [
     "PreflightOffGridPad",
     "OffGridReport",
     "check_pad_grid_alignment",
+    "compute_component_pad_grid_tolerances",
     "compute_pad_grid_tolerance",
 ]

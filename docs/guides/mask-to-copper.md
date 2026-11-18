@@ -175,6 +175,19 @@ and can differ from the class for very wide or very short tracks. The class uses
 the track's authored ends. Evidence and per-board counts:
 [mask-to-copper-own-pad-8858](../research/mask-to-copper-own-pad-8858.md).
 
+### Pads of one footprint: `within_own_footprint`
+
+A footprint can put a rectangular ground pad under circular ground pads
+(`RF_Module:ESP32-C3-WROOM-02`), so each circular opening exposes the rectangular
+pad. When the opening is a single-pad opening (not a merged region), the
+relation is `overlap`, and the conductor and the opening's owner are pads of
+**one** footprint on one identical non-empty net, the measurement reads
+`within_own_footprint` at **info** (issue #9420), so the evidence stays listed.
+Merged openings, copper beside an opening, pads of different footprints or nets,
+and any track, via or pour keep their measured verdict. The fab's own DFM view
+cannot see footprints or nets, so this changes how kct reports the finding, not
+whether the fab accepts the board. `physical_copper_gap` is unchanged.
+
 ### A pad's own pour joined by thermal spokes: `own_pour_thermal`
 
 A pad inside its own same-net pour, joined to it by thermal spokes, has spoke

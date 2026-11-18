@@ -113,6 +113,11 @@ keeps the measured verdict, which is an error for an overlap. Sweeps (in
   at the time; #9085's declaration is the route for a reviewed own pour). Since
   #9284 a pad joined to its own pour by thermal spokes is `own_pour_thermal`
   info; see "Family B revisited" below;
+- pads of one footprint: since #9420 a single plain-pad opening that overlaps
+  only same-net pads of its own footprint (every owner and the exposed pad on
+  one identical non-empty net) is `within_own_footprint` info. This is
+  presentation-only: no fab row locates the fab's verdict on those pads, and
+  the finding stays listed with its distance;
 - custom, padstack and chamfered pads;
 - solder-mask-defined pads;
 - any expansion ring wider than `u`.
@@ -362,7 +367,8 @@ mask exposure of the ring beside the opening, so family C stays an error.
 - Pour clearance is not fab-judged (#8938), but that result is about pour gaps.
   It is not about pour beside a mask opening, which is why B fails closed.
 - Fab parity table row `solder_mask_opening_exposing_trace`; #9284 added the
-  `own_pour_thermal` class and the different-net parity check. The table has no
+  `own_pour_thermal` class and the different-net parity check; #9420 added
+  `within_own_footprint` (presentation-only, no located fab row). The table has no
   integer version: `fab_dfm_parity.TABLE_VERSION` is a content hash of the rows
   (`3559f167` as of 2026-11-18 on main `f2347f38d`; re-read
   `fab_dfm_parity.TABLE_VERSION` for the current value).
