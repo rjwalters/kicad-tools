@@ -14,6 +14,89 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-18
+
+- **Issue #9334** (closed): Repair path for mask_to_copper own-pad findings (track off-centre entry, via in mask band)
+- **PR #9349**: feat: add fix-drc --only mask-copper to re-centre own-pad track entries
+- **Issue #9287** (closed): test flake: test_expensive_optimizer_unwinds_and_saves_only_raw_partial[True] fails the 4 s post-arm budget on the Test job
+- **PR #9297**: test: drop runner-load-sensitive 4 s elapsed bound in optimizer unwind test
+- **Issue #9327** (closed): add-board-info --auto places text across a graphic mask opening; place-silk-refs board-text candidates mix frames and collide with other text
+- **PR #9343**: fix: share silk obstacle set between add-board-info and place-silk-refs
+- **Issue #9322** (closed): CPL: no per-project rotation correction, and pin headers / an SMT audio jack come out a quarter turn off at JLCPCB
+- **PR #9335**: feat: per-project CPL rotation sidecar (cpl_rotations.yaml) with readiness provenance
+- **Issue #9352** (closed): Research note still names integer fab-parity table versions (v11/v12) after #9242 made TABLE_VERSION a content hash
+- **PR #9361**: docs: cite parity table row by name and content hash, not integer v11/v12
+- **Issue #9320** (closed): test_cardinal_rotation_bbox_is_unchanged[90.0] asserts CHANGED behaviour; its comment misdescribes the pad it builds
+- **PR #9336**: test: split cardinal-rotation pad-gap test; name the unswapped 90-degree case
+- **Issue #9210** (closed): acute_foldback: cross-net clearance veto keeps copper a later same-group repair removed
+- **PR #9318**: fix(router): drop superseded chords from the fold-back cross-net veto list
+- **Issue #9152** (closed): Tighten analyze_native_observations tolerance: strict mode rounds, and the allowance is degree-blind
+- **PR #9350**: fix: make native-concurrency strict tolerance use unrounded excess time
+- **Issue #9357** (closed): analyze_native_observations: _format_overshoot still prints 0 for a sub-microsecond overshoot
+- **Issue #9140** (closed): Coupled-pair pose/stub-tail legs: keep own-net pad legs out of the slit band (#9011, board 06 LVDS)
+- **PR #9347**: docs: record the #9140 all-boards identity re-measurement in the diffpair fixture baseline
+- **Issue #9255** (closed): Residual Dependabot alerts on the python <3.11 resolution fork after the #9237 lock bump
+- **Issue #9319** (closed): Escape in-pad via nudge slides along a board axis using pre-rotation long dim, so a non-cardinal pad's via can land off its own copper
+- **PR #9333**: fix: slide escape in-pad via nudge along the pad's board-space long axis
+- **Issue #9284** (closed): mask_to_copper: stop reporting a spoke-connected own pour beside its own pad as an error (fab DFM does not list it)
+- **PR #9292**: fix(mask_copper): report a pad's thermal-spoke own pour as own_pour_thermal info
+- **Issue #9244** (closed): kct route --report-detour-ratio: the alone-on-empty probe spends the real run's --timeout and wall-deadline budget
+- **PR #9270**: fix: exclude the detour probe's wall-clock cost from routing budgets
+- **Issue #9288** (closed): Test Gerber oracle can still drop a non-zero-area ArcPoly region (gerbonara is_zero_size ignores two-arc circles)
+- **PR #9311**: test: retain arc-bearing KiCad regions in the gerbonara oracle (issue #9288)
+- **Issue #9314** (closed): Stale `BUILD_VERSION 68` references: the shipped router build version is 70
+- **PR #9329**: docs: correct stale BUILD_VERSION 68 references to 70
+- **Issue #9216** (closed): board 07: no test asserts validation.json's new off_path_mm field, and the committed evidence copies lack it
+- **PR #9342**: test: assert board 07 validation report emits off_path_mm
+- **Issue #9223** (closed): Stale USB2_D- allowance rationale in test_board06_via_overlap_legalization docstring
+- **PR #9321**: test: restate board-06 same-net slit residual rationale post-#9212
+- **PR #9337**: docs: plot-verify the mask_to_copper disjoint class; record post-repair residual
+- **Issue #9281** (closed): deps: pillow>=12 bound is not expressed for `pip install kicad-tools[all]`
+- **PR #9313**: chore(deps): declare pillow>=12 in the all extra
+- **Issue #9120** (closed): CI: native-diagnostics opt-in is a substring match on the PR body, so a PR that merely mentions the marker inherits the native-workload audit gate
+- **PR #9123**: ci: anchor native-diagnostics opt-in to its own line and state the audit tolerance
+- **Issue #9245** (closed): ci flake: 'Detect Changes' paths-filter fails on GitHub 'diff temporarily unavailable' listFiles error
+- **PR #9256**: ci: tolerate transient paths-filter failures in Detect Changes
+- **Issue #9316** (closed): main's uv.lock does not parse (bare pillow ref vs. 12.3.0/13.0.0 fork) — every CI job fails at Install dependencies
+- **PR #9324**: fix: qualify bare pillow edges in uv.lock so the lockfile parses
+- **Issue #9073** (closed): Board 05: clear the 29 physical_copper_gap errors in the reviewed routing recipe
+- **PR #9181**: fix(board05): re-seat pad-hugging fanout vias so the strict gate reads zero physical_copper_gap findings
+- **Issue #9107** (closed): mask_to_copper: per-object distance on a jogged pad exit counts copper already inside the entry track
+- **PR #9266**: test: pin per-object mask_to_copper distance for jogged pad exits
+- **Issue #9242** (closed): fab parity TABLE_VERSION is a merge-conflict hotspot: concurrent PRs keep claiming the same number
+- **PR #9293**: refactor: derive fab parity TABLE_VERSION from table contents
+- **Issue #9182** (closed): off_path_length_mm charges length-matching staircase copper, so OFF_PATH_TOLERANCE_MM tracks staircase density rather than defect presence
+- **PR #9194**: docs: record measured off-path decomposition at board-07's OFF_PATH_TOLERANCE_MM
+- **Issue #9268** (closed): board 04 repair_sharp_corners: _rule_area_blocks_tracks does not handle the *.In.Cu layer wildcard
+- **PR #9290**: fix(board04): resolve *.In.Cu keepout rule areas in repair_sharp_corners
+- **Issue #9236** (closed): Escape router's same-net pad slit check builds pad boxes from raw width/height, ignoring rotation
+- **PR #9295**: fix: use rotation-aware pad boxes in escape via placement
+- **Issue #9302** (closed): Add changelog.d/9234.upgrade.md — mask_to_copper completion on keepout boards can newly fail kct check
+- **PR #9308**: docs: add upgrade changelog fragment for mask_to_copper severity promotion
+- **Issue #9124** (closed): Board 06 drain remainder: same-net via-vs-trace slits and the face-aligned corner-wedge seat the slit-band predicate accepts
+- **PR #9209**: fix(router): reject tangent via seats in the same-net pad slit-band guard
+- **Issue #9261** (closed): mask_to_copper: an on-pad track whose end cap pokes past the pad edge is an error while a full exit is info
+- **PR #9264**: fix(mask_copper): grant entry allowance to any segment with an end inside its pad
+- **Issue #9274** (closed): deps: declare pillow as a direct dependency (kct imports PIL but pillow is only transitive)
+- **PR #9278**: chore(deps): declare pillow>=12 in screenshot extra and dev group
+- **Issue #9269** (closed): mask_to_copper: print beside_owner_excess_mm2 in the finding message
+- **PR #9283**: feat(mask_to_copper): print beside owner excess in the finding message
+- **Issue #9267** (closed): design-source/ archive can omit a live board recipe entirely (measured: board 03 silk_repair.py)
+- **PR #9280**: fix(boards): archive board 03 silk_repair.py and assert design-source completeness
+- **Issue #9300** (closed): ci: mass-cancelled Actions runs at 00:01 UTC kill the Test job mid-suite (no test failed), making PRs read red
+- **Issue #9234** (closed): mask_to_copper stays incomplete on a footprint-embedded keepout rule area (missing/ambiguous native object)
+- **PR #9250**: fix: keep keepout rule areas from blocking mask-to-copper attribution
+- **Issue #9276** (closed): Host-path scan does not cover docs/ outside docs/diagnostics/
+- **PR #9282**: test: scan docs/** for absolute host paths, allowlisting docs/mcp placeholders
+- **Issue #9301** (closed): ci: self-hosted lane shutdown cancelled 7 in-flight CI runs at 00:01Z and no CI run has started since
+
+### 2026-11-17
+
+- **Issue #9215** (closed): Same-net trace slit-band guard reaches only board 06: kct route, the Python pathfinders and the via-then-trace order are unguarded
+- **PR #9275**: fix: resolve the same-net trace slit-band edge on the kct route path
+- **Issue #9241** (closed): mypy reports 8 errors in optional-extra modules that the CI Type Check never sees
+- **PR #9263**: fix: make mypy baseline gate pass identically with and without optional extras
+
 ### 2026-11-17
 
 - **PR #9262**: test: replay the package-release drop gate over committed packages
