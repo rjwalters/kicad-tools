@@ -2206,7 +2206,9 @@ class DRCChecker:
                         message=message,
                         location=(pad.x, pad.y),
                         actual_value=pad.offset_mm,
-                        required_value=report.threshold,
+                        required_value=(
+                            pad.threshold_mm if pad.threshold_mm is not None else report.threshold
+                        ),
                         items=(ref_label,) if ref_label else (),
                     )
                 )
@@ -2262,7 +2264,11 @@ class DRCChecker:
                     message=message,
                     location=(example.x, example.y),
                     actual_value=max_offset,
-                    required_value=report.threshold,
+                    required_value=(
+                        example.threshold_mm
+                        if example.threshold_mm is not None
+                        else report.threshold
+                    ),
                     items=(ref,) if ref else (),
                 )
             )

@@ -2008,6 +2008,43 @@ def check_silk_edge_clearance(
     return results
 
 
+def _has_replacement_silk_text(
+    pcb: PCB,
+    footprint: Any,
+    layer: str,
+    Polygon: Any,
+) -> bool:
+    """True if a visible board silk text on ``layer``'s side is centred in the courtyard (#9435).
+
+    ``gr_text`` positions are sheet-absolute while footprints are already
+    shifted by the board origin, so the text centre is shifted here, as in
+    :func:`_iter_board_frame_texts`.  Returns ``False`` when the footprint has
+    no resolvable courtyard on that side -- nothing to prove, so keep flagging.
+    """
+    from shapely.geometry import Point
+
+    from kicad_tools.geometry.courtyard import _courtyard_polygon, _side_has_geometry
+
+    side = _silk_side(layer)
+    if side is None or not _side_has_geometry(footprint, side):
+        return False
+    courtyard = _courtyard_polygon(footprint, side, Polygon)
+    if courtyard is None:
+        return False
+    courtyard = courtyard.buffer(_CLEARANCE_EPSILON_MM)
+    ox, oy = getattr(pcb, "_board_origin", (0.0, 0.0))
+    for text in pcb.texts:
+        if text.hidden or not text.text or _silk_side(text.layer) != side:
+            continue
+        center = (text.position[0] - ox, text.position[1] - oy)
+        geom = _text_bbox_geometry(
+            text.text, text.font_size, text.font_thickness, center, text.rotation
+        )
+        if geom is not None and courtyard.contains(Point(geom.centroid.x, geom.centroid.y)):
+            return True
+    return False
+
+
 def check_silk_ref_obscured(
     pcb: PCB,
     design_rules: DesignRules,
@@ -2020,6 +2057,15 @@ def check_silk_ref_obscured(
     containment test is the one ``kct place-silk-refs`` plans against
     (:func:`~kicad_tools.silkscreen.place_refs._courtyard_polygon`), so the
     fix it offers clears this finding.
+
+    A hidden reference is **not** reported when the board replaces it with a
+    visible board-level silkscreen text (``gr_text``, e.g. a function label such
+    as "PWR") on the same side whose box centre lies inside the footprint's
+    courtyard (#9435).  The designator is then hidden on purpose and something
+    readable sits where it was.  The test is deliberately geometric and cheap:
+    any unrelated visible silk text centred inside the courtyard also exempts
+    the footprint.  A hidden reference with no such text, and a visible
+    reference inside its own courtyard, are still flagged.
     """
     del design_rules  # no manufacturer threshold
     require_shapely("silk-ref-obscured geometry")
@@ -2046,6 +2092,8 @@ def check_silk_ref_obscured(
         if ref_text.hidden:
             if is_fiducial_footprint(footprint):
                 continue  # hiding fiducial references is the convention (#8540)
+            if _has_replacement_silk_text(pcb, footprint, ref_text.layer, Polygon):
+                continue  # hidden on purpose, replaced by a function label (#9435)
             results.add(
                 DRCViolation(
                     rule_id="silk_ref_obscured",
