@@ -72,12 +72,29 @@ read as proof of zero OOM events. Startup failures may abort before launch.
 
 ## Opt-in Test job wiring
 
-The Test job enables observation only for a pull request whose body contains
-`<!-- kct:native-diagnostics -->`. The body is evaluated as a boolean GitHub
-expression, never interpolated into shell or written to diagnostics. Do not
-add the marker or activate a run until the wiring has independent review.
-Without it (including push events), `run_observed.py` directly execs the
-original command; no diagnostics directory or plugin environment is added.
+The Test job enables observation only for a pull request whose body carries
+`<!-- kct:native-diagnostics -->` **alone on its own line, outside a fenced code
+block** (Issue #9120). The "Resolve native diagnostics opt-in" step runs
+`scripts/ci/native_diagnostics_optin.py`, which reads the body from the event
+JSON (`GITHUB_EVENT_PATH`), never interpolates it into shell or writes it to
+diagnostics, and writes only `KCT_NATIVE_DIAGNOSTICS=true|false` to
+`$GITHUB_ENV`. A body that merely *mentions* the marker (inline in a sentence,
+in a `>` quote, in backticks, or inside a code fence) does not opt in; a CRLF
+line ending or trailing blanks after the marker still do. To quote the marker
+in a PR body, keep it off a line of its own or write "the
+`kct:native-diagnostics` comment". `on: pull_request` has no `edited` type, so
+editing the body does not re-run CI; push a commit after adding or removing the
+marker. Do not add the marker or activate a run until the wiring has
+independent review. Without it (including push events), `run_observed.py`
+directly execs the original command; no diagnostics directory or plugin
+environment is added.
+
+The audit step passes `--tolerance-seconds 1` to
+`analyze_native_observations.py` (default `0`, strict). The gate wraps
+`subprocess.Popen` only, so a `kicad-cli` started from a shell (the sign-off
+skill gate blocks in `tests/test_signoff_skill_e2e.py`) can briefly overlap two
+gated launches; 0.272 s of a 2041.6 s bulk run was measured. A green audit
+therefore means no OOM, no unbounded launch and at most 1 s above the bound.
 
 The five existing acceptance/bulk commands retain their argument arrays,
 pipelines, selections and timeout flags. Each observed invocation uses a new
