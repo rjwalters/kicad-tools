@@ -25,7 +25,7 @@ through `export/submission_workflow.py`. It prepares and verifies; by default a 
 4. **Optional API leg** (`--upload --reviewer NAME`, credentials in the environment, or `JLCPCB_*` keys in the project `.env`, which `submit-jlcpcb` loads without overriding the shell): uploads the exact Gerber bytes, fetches the audit preview and records the receipt in `upload-ledger.jsonl`. Refused when the stock gate is blocked.
 
 Without JLC credentials the stock gate reads stock from LCSC's anonymous public API (`provenance.source` is `lcsc-anonymous`), which is enough for `--dry-run`, `--website` and `--guided`; `--upload` still requires the OpenAPI credentials. `--guided` runs whatever the stock gate says and prints the stock state beside the checklist; `--website` stays gated.
-5. **Review page** under `<output>/review-page`, with distinct states prepared → stock-checked → uploaded.
+5. **Review page** under `<output>/review-page`, with distinct states prepared → stock-checked → uploaded. After the BOM upload, check JLCPCB's BOM page: **every line must be ticked**. The warning "Multiple lines in the BOM have been matched to the same part. Please check if the matching is correct." leaves every affected line **unticked**, and proceeding leaves those parts unfitted. It means two BOM lines share one LCSC part number — kct merges such lines (same footprint) since issue #9323; if you still see the warning, merge or fix the matching by hand before saving the cart.
 
 ```bash
 kct submit-jlcpcb <dir> --board <pcb> --schematic <sch> \
