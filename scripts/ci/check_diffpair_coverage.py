@@ -265,11 +265,12 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # guard.  Boards 00/01/07 are green in CI at dc51c4b6 (#9195's merge:
 # Board 00/01 End-to-End, Board 07 End-to-End, Match-Group) and boards
 # 00/07 again at #9209's PR run; boards 02/03/04/05 fail on main from
-# pre-existing out-of-scope floods (red since <= 2026-11-13, before
-# #9156: board 03 mask_to_copper #8900, board 05 strict-gate flood
-# #9068, board 02 same-net gap + tht_smd_spacing #9325/#9332, board 04
-# unaccepted silk_hole_overlap advisories #9097).  CI's regeneration
-# remains the authority on the final counts (host-sensitive board).
+# pre-existing out-of-scope floods (boards 02/03/05 red since
+# <= 2026-11-13 and board 04 since 2026-11-14, all before #9156: board
+# 03 mask_to_copper #8900, board 05 strict-gate flood #9068, board 02
+# same-net gap + tht_smd_spacing #9325/#9332, board 04 unaccepted
+# silk_hole_overlap advisories #9097).  CI's regeneration remains the
+# authority on the final counts (host-sensitive board).
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("physical_copper_gap", "GND"): 8962,
     ("physical_copper_gap", "MIPI_CLK+"): 8962,
