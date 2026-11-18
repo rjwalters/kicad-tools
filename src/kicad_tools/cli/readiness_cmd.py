@@ -3653,7 +3653,7 @@ def _cpl_rotation_state(options: ReadinessOptions) -> tuple[Any, str | None]:
     # the fab default (#9346).
     pnp_config = resolve_pnp_config(
         get_fab_family(options.manufacturer),
-        PnPExportConfig(exclude_tht=False) if getattr(options, "include_tht", False) else None,
+        PnPExportConfig(exclude_tht=False) if options.include_tht else None,
     )
     try:
         names: dict[str, str] = {}

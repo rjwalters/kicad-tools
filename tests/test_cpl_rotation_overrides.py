@@ -314,7 +314,9 @@ def test_invalid_sidecar_fails_the_cpl_instead_of_shipping_uncorrected(board, tm
 def _readiness_options(board: Path, out: Path):
     from types import SimpleNamespace
 
-    return SimpleNamespace(assembly=True, pcb=board, output_dir=out, manufacturer="jlcpcb")
+    return SimpleNamespace(
+        assembly=True, pcb=board, output_dir=out, manufacturer="jlcpcb", include_tht=False
+    )
 
 
 def _ship_bundle(board: Path, out: Path) -> None:
