@@ -377,7 +377,9 @@ def test_predicate_semantics_unchanged():
     # pins the shared contract so a fork would fail here first.
     y = PAD_TOP + R + 0.0891
     assert not same_net_pad_gap_acceptable(0.0, y, VIA, [PAD_BBOX], EDGE_1OZ)
-    assert same_net_pad_gap_acceptable(0.0, PAD_TOP + R, VIA, [PAD_BBOX], EDGE_1OZ)
+    # Issue #9124: tangent (gap == 0) is a one-point touch, not a union.
+    assert not same_net_pad_gap_acceptable(0.0, PAD_TOP + R, VIA, [PAD_BBOX], EDGE_1OZ)
+    assert same_net_pad_gap_acceptable(0.0, PAD_TOP + R - 0.01, VIA, [PAD_BBOX], EDGE_1OZ)
     assert same_net_pad_gap_acceptable(
         0.0, PAD_TOP + R + EDGE_1OZ + 1e-6, VIA, [PAD_BBOX], EDGE_1OZ
     )

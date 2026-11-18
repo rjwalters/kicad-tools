@@ -364,13 +364,17 @@ namespace router {
 // inside ``Grid3D::get_negotiated_cost``.  A v66 .so prices negotiated cells
 // without the term (and lacks the two verbs), so Python/C++ cost parity
 // breaks silently; it must be rejected.
+// v68 (Issue #9124): ``same_net_pad_gap_in_band`` rejects the tangent
+// ``gap == 0`` seat (centre exactly one radius from a pad face/corner) it used
+// to accept as a union.  (Number reserved while #9124 / PR #9209 was open.)
 // v69 (Issue #9208): ``DesignRules::same_net_trace_gap_band_edge_mm`` + the
 // same-net via-annulus-vs-own-trace slit-band refusal in both A* via checks
 // (``same_net_segment_gap_in_band``).  A v67 .so seats via annuli in the
-// ``(0, edge)`` slit band beside their own net's stored trace copper.  (v68 is
-// reserved by the open #9124 / PR #9209 tangent fix; skipping a number is
-// harmless, two builds sharing one is not.)
-constexpr int ROUTER_CPP_BUILD_VERSION = 69;
+// ``(0, edge)`` slit band beside their own net's stored trace copper.
+// v70 (Issues #9124 + #9208, merged): the first build carrying BOTH fixes --
+// a v69 .so still seats the tangent wedge (no #9124 fix) and a v68 .so lacks
+// the trace-slit refusal, so both older builds must be rejected.
+constexpr int ROUTER_CPP_BUILD_VERSION = 70;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -903,9 +907,10 @@ inline void same_net_pad_aabb_half_extents(const PadInfo& pad, float& half_w,
 // Issue #8994: the same-net pad slit-band verdict, the faithful C++ mirror of
 // Python ``via_clearance.same_net_pad_gap_acceptable`` for a via ANNULUS of
 // radius ``annulus_half_mm`` at world ``(wx, wy)`` against one same-net SMD
-// pad.  Two acceptable regions, not a floor: ``gap <= 0`` (annulus unions
-// with its own pad -- one copper body, no slit) and ``gap >= edge_mm`` are
-// both ACCEPTED; only the open band ``(0, edge_mm)`` in between is rejected.
+// pad.  Two acceptable regions, not a floor: ``gap < 0`` (annulus overlaps
+// its own pad -- one copper body, no slit) and ``gap >= edge_mm`` are both
+// ACCEPTED; only ``[0, edge_mm)`` in between is rejected, tangent ``gap == 0``
+// included (#9124: touch-at-a-point is not a union).
 // The 1e-9 slack on both band edges mirrors the Python predicate's
 // float-noise tolerance for a gap computed as exactly 0 or exactly the edge.
 // Computed in double: Python measures in float64, and a float32 gap could
@@ -921,7 +926,17 @@ inline bool same_net_pad_gap_in_band(double wx, double wy, double annulus_half_m
         {static_cast<double>(pad.y - half_h) - wy,
          wy - static_cast<double>(pad.y + half_h), 0.0});
     const double gap = std::hypot(dx, dy) - annulus_half_mm;
-    return 1e-9 < gap && gap < edge_mm - 1e-9;
+    // Issue #9124: the lower edge is the TANGENT tolerance, not ``0``.  An
+    // annulus whose centre sits exactly one radius from a pad face or corner
+    // (``gap == 0``) touches the pad at a single point; the receding arc
+    // leaves a sub-edge wedge the fab-view checker grades, so it is a slit,
+    // not a union -- only real overlap (``gap`` below ``-tangent_eps``) is
+    // accepted.  Mirrors the Python point branch's ``-1e-9``, widened to
+    // ``kTangentEpsMm`` because the pad box edges arrive as float32 (ulp
+    // ~1.5e-5 mm at 174 mm), so an exactly-tangent seat measures a few
+    // 1e-5 off 0 here where Python's float64 reads ~1e-14.
+    constexpr double kTangentEpsMm = 1e-4;
+    return -kTangentEpsMm < gap && gap < edge_mm - 1e-9;
 }
 
 // Stored segment for validation (Issue #2439)

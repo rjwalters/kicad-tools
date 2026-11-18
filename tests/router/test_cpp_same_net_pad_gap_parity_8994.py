@@ -126,7 +126,7 @@ def _rect_pad(rotation: float = 0.0, net: int = NET):
     [
         (10.0, 10.0, True),  # annulus centred on the pad: overlap, union
         (10.5, 10.0, True),  # annulus swallows the edge: overlap, union
-        (10.75, 10.0, True),  # gap == 0 exactly: accepted (open band)
+        (10.75, 10.0, False),  # gap == 0 exactly: tangent, a one-point touch (#9124)
         (10.8, 10.0, False),  # gap 0.05 inside (0, 0.25): slit
         (11.0, 10.0, True),  # gap == edge exactly: accepted (open band)
         (11.25, 10.0, True),  # gap 0.50 beyond the edge: clear
