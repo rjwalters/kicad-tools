@@ -2618,7 +2618,7 @@ def _pre_merge_clearance_findings(p: Path):
     return [v for v in results.violations if v.rule_id == _CLEARANCE_RULE]
 
 
-def _write_waiver_sidecar(p: Path, finding, name: str) -> None:
+def _write_waiver_sidecar(p: Path, finding, name: str) -> Path:
     """Keyed, evidence-bound sidecar naming exactly ``finding``."""
     import json
 

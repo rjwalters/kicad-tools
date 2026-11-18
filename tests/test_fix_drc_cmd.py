@@ -4028,7 +4028,7 @@ class TestInvalidatedWaiverReport:
         assert "Waiver report" not in captured.out
         assert "Waiver report" not in captured.err
 
-    def test_no_repair_is_silent(self, pcb_clearance, report_clearance, capsys):
+    def test_no_repair_is_silent(self, pcb_clearance, report_empty, capsys):
         """Nothing repaired -> nothing invalidated -> no report (and no
         waiver sidecar load)."""
         from kicad_tools.validate.rules.waivers import discover_waivers_sidecar
