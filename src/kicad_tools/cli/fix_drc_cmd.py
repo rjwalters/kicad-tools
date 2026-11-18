@@ -1017,6 +1017,76 @@ def _run_single_pass(
     return clearance_result, drill_result
 
 
+_MASK_RULE_TYPES = (ViolationType.MASK_TO_COPPER, ViolationType.MASK_TO_COPPER_INCOMPLETE)
+
+
+def _error_key(v: DRCViolation) -> tuple:
+    """Identity of a ``kct check`` finding, comparable across two runs of it."""
+    locations = tuple((round(loc.x_mm, 3), round(loc.y_mm, 3)) for loc in v.locations)
+    return (v.type_str, tuple(sorted(v.nets)), tuple(v.items), locations)
+
+
+def _moves_with_new_errors(
+    *,
+    after: DRCReport,
+    actions: list,
+    output_path: Path,
+    pcb_path: Path,
+    args: argparse.Namespace,
+) -> set[str]:
+    """Segment uuids of mask moves that a new non-mask error sits next to.
+
+    The mask repairer gates a move on the manufacturer's clearance floor, which
+    is below a net class's clearance, so a move can land between the two and
+    only ``kct check`` sees it (Issue #9365).  The baseline is ``kct check`` on
+    the board with this pass's moves undone, so both sides come from the same
+    engine; an error absent from it is attributed to the moves whose copper is
+    within reach of its location, or to every move when it has no location.
+    """
+    candidates = [v for v in after.violations if v.is_error and v.type not in _MASK_RULE_TYPES]
+    if not candidates or not actions:
+        return set()
+
+    baseline_keys: set[tuple] = set()
+    with tempfile.TemporaryDirectory() as tmp:
+        undo = MaskCopperRepairer(output_path)
+        if all(undo.undo_action(act) for act in actions):
+            base_path = Path(tmp) / output_path.name
+            undo.save(base_path)
+            baseline = _run_python_drc(
+                base_path,
+                manufacturer=args.mfr,
+                layers=args.layers,
+                project_pcb_path=pcb_path,
+            )
+            if baseline is not None:
+                baseline_keys = {
+                    _error_key(v)
+                    for v in baseline.violations
+                    if v.is_error and v.type not in _MASK_RULE_TYPES
+                }
+    new_errors = [v for v in candidates if _error_key(v) not in baseline_keys]
+    if not new_errors:
+        return set()
+
+    from shapely.geometry import Point  # type: ignore[import-untyped]
+
+    moved = MaskCopperRepairer(output_path)
+    geometry = {act.uuid: moved.moved_geometry(act) for act in actions}
+    flagged: set[str] = set()
+    for v in new_errors:
+        if not v.locations:
+            return set(geometry)  # cannot attribute it, so keep none of the moves
+        reach = max(v.required_value_mm or 0.0, 0.25) + 0.1
+        flagged |= {
+            uuid
+            for uuid, geom in geometry.items()
+            if geom is None
+            or any(geom.distance(Point(loc.x_mm, loc.y_mm)) <= reach for loc in v.locations)
+        }
+    return flagged
+
+
 def _run_mask_pass(
     *,
     report: DRCReport,
@@ -1034,11 +1104,15 @@ def _run_mask_pass(
     board is re-checked with ``kct check``'s rules (Issue #9334).  A move is
     reverted when the segment still carries a ``mask_to_copper`` error, or when
     a finding appears that was not in ``report`` and names the moved segment or
-    its pad.  If the re-check cannot run, every move of this pass is reverted:
-    an unverified move is never kept.
+    its pad.  It is also reverted when a non-mask error appears that the
+    pre-move board did not have and sits next to the moved copper: the
+    repairer's own gate uses the manufacturer floor, which is below a net
+    class's clearance (Issue #9365).  If the re-check cannot run, every move of
+    this pass is reverted: an unverified move is never kept.
     """
     result = MaskRepairResult()
     saved = False
+    snapshot: bytes | None = None
     try:
         load_path = pcb_path
         if not args.dry_run and output_path.exists() and (pass_number > 1 or earlier_saved):
@@ -1052,6 +1126,9 @@ def _run_mask_pass(
         )
         if args.dry_run or result.repaired == 0:
             return result
+        # Byte-exact copy of the board this pass started from, for the
+        # double-fault path below.
+        snapshot = load_path.read_bytes()
         repairer.save(output_path)
         saved = True
 
@@ -1073,6 +1150,17 @@ def _run_mask_pass(
         new_keys = {finding_key(v) for v in after_errors} - before_keys
         touched = {u for key in new_keys for u in key}
         persisting = {key[-1] for key in (finding_key(v) for v in after_errors) if key}
+        regressed = (
+            _moves_with_new_errors(
+                after=after,
+                actions=result.actions,
+                output_path=output_path,
+                pcb_path=pcb_path,
+                args=args,
+            )
+            if after is not None
+            else set()
+        )
 
         keep = []
         revert = []
@@ -1083,6 +1171,8 @@ def _run_mask_pass(
                 revert.append((act, "finding_not_cleared"))
             elif act.uuid in touched or act.pad_uuid in touched:
                 revert.append((act, "new_mask_finding"))
+            elif act.uuid in regressed:
+                revert.append((act, "new_drc_error"))
             else:
                 keep.append(act)
         if revert:
@@ -1096,15 +1186,19 @@ def _run_mask_pass(
             result.repaired = len(keep)
     except Exception as e:
         print(f"Error during mask-to-copper repair: {e}", file=sys.stderr)
-        if saved:
-            # Saved but not verified: never keep an unverified move.
+        if saved and snapshot is not None:
+            # Saved but not verified: never keep an unverified move.  Restore
+            # the board this pass started from rather than undoing move by
+            # move: ``undo_action`` can return False, which would leave a move
+            # in the file that the result reports as not made.
             try:
-                undo = MaskCopperRepairer(output_path)
-                for act in result.actions:
-                    undo.undo_action(act)
-                undo.save(output_path)
-            except Exception as undo_error:
-                print(f"Error reverting mask-to-copper moves: {undo_error}", file=sys.stderr)
+                output_path.write_bytes(snapshot)
+            except OSError as undo_error:
+                print(
+                    f"Error reverting mask-to-copper moves: {undo_error}; "
+                    f"{output_path} may still contain {len(result.actions)} unverified move(s)",
+                    file=sys.stderr,
+                )
             result.actions = []
             result.repaired = 0
     return result

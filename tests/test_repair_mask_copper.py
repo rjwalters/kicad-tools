@@ -313,3 +313,63 @@ def test_fix_drc_dry_run_leaves_the_board_alone(tmp_path, monkeypatch):
     original = board.read_text()
     _run(monkeypatch, board, [_report(_finding("trk-a"))], extra=("--dry-run",))
     assert board.read_text() == original
+
+
+# ---------------------------------------------------------------------------
+# Issue #9365: net-class clearance gate (post-save) and double-fault revert
+# ---------------------------------------------------------------------------
+
+
+def _clearance_error(x: float = 99.0, y: float = 100.3) -> DRCViolation:
+    return DRCViolation(
+        type=ViolationType.from_string("clearance"),
+        type_str="clearance",
+        severity=Severity.ERROR,
+        message="Clearance violation (0.150mm < 0.200mm)",
+        locations=[Location(x_mm=x, y_mm=y, layer="F.Cu")],
+        items=["Track [N1] on F.Cu", "Track [N2] on F.Cu"],
+        nets=["N1", "N2"],
+        required_value_mm=0.2,
+        actual_value_mm=0.15,
+    )
+
+
+def test_fix_drc_reverts_a_move_that_creates_a_new_clearance_error(tmp_path, monkeypatch, capsys):
+    board = _board(tmp_path, ENTRY)
+    before = _report(_finding("trk-a"))
+    after = _report(_clearance_error())  # mask finding cleared, new net-class error beside it
+    clean = _report()
+    # calls: detection, mask verification, baseline with the move undone, final re-check
+    _run(monkeypatch, board, [before, after, clean, after])
+    assert _end(board, "trk-a")[1] == (100.7, 100.3)  # reverted
+    assert "new_drc_error" in capsys.readouterr().out
+
+
+def test_fix_drc_keeps_a_move_when_the_error_was_already_there(tmp_path, monkeypatch):
+    board = _board(tmp_path, ENTRY)
+    before = _report(_finding("trk-a"))
+    existing = _report(_clearance_error())  # present before and after the move
+    code = _run(monkeypatch, board, [before, existing, existing, existing])
+    assert _end(board, "trk-a")[1] == (100.0, 100.0)
+    assert code != 0  # the pre-existing error is still reported, not hidden
+
+
+def test_fix_drc_keeps_a_move_when_the_new_error_is_far_from_it(tmp_path, monkeypatch):
+    board = _board(tmp_path, ENTRY)
+    before = _report(_finding("trk-a"))
+    elsewhere = _report(_clearance_error(x=50.0, y=50.0))
+    clean = _report()
+    _run(monkeypatch, board, [before, elsewhere, clean, elsewhere])
+    assert _end(board, "trk-a")[1] == (100.0, 100.0)
+
+
+def test_fix_drc_restores_the_snapshot_when_undo_action_fails(tmp_path, monkeypatch, capsys):
+    board = _board(tmp_path, ENTRY)
+    original = board.read_text()
+    before = _report(_finding("trk-a"))
+    still = _report(_finding("trk-a"))  # forces the revert, whose undo then fails
+    monkeypatch.setattr(MaskCopperRepairer, "undo_action", lambda self, action: False)
+    _run(monkeypatch, board, [before, still, still])
+    assert _end(board, "trk-a")[1] == (100.7, 100.3)  # the move is not left in the file
+    assert board.read_text() == original  # restored byte for byte
+    assert "could not revert mask recentre" in capsys.readouterr().err
