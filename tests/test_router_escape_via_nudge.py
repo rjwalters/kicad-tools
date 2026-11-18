@@ -28,6 +28,8 @@ the LQFP perimeter route at all.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from kicad_tools.router.escape import (
@@ -453,6 +455,218 @@ class TestSelectInPadViaPositionFallback:
         )
         # Fall back to dead-centre with ``nudged=False`` so the caller
         # emits the PR #2945 diagnostic warning and proceeds.
+        assert nudged is False
+        assert via_x == pytest.approx(ANCHOR_X, abs=1e-6)
+        assert via_y == pytest.approx(ANCHOR_Y, abs=1e-6)
+
+
+def _board_long_axis(rotation: float, local_long_is_x: bool) -> tuple[float, float]:
+    """Board-space direction of the pad's local long axis.
+
+    Uses the same ``board = centre + R(-rotation) . local`` mapping as
+    ``io.py:_pad_copper_polygon``: local x -> ``(cos, -sin)``, local y
+    -> ``(sin, cos)``.  This is the direction the nudge slide MUST
+    follow for the via to stay on an oblong pad's copper (Issue #9319).
+    """
+    angle = math.radians(rotation)
+    c, s = math.cos(angle), math.sin(angle)
+    return (c, -s) if local_long_is_x else (s, c)
+
+
+def _to_local(pad_center: tuple[float, float], rotation: float, x: float, y: float):
+    """Inverse of the ``_pad_copper_polygon`` mapping: board -> local."""
+    angle = math.radians(rotation)
+    c, s = math.cos(angle), math.sin(angle)
+    dx, dy = x - pad_center[0], y - pad_center[1]
+    return c * dx - s * dy, s * dx + c * dy
+
+
+class TestSelectInPadViaPositionRotatedPadContainment:
+    """Issue #9319: the nudge slide must follow the pad's BOARD-space
+    long axis, not a grid axis.
+
+    A 1.4 x 0.3 mm oblong pad at a non-cardinal ``Pad.rotation`` keeps
+    its pre-rotation dims locally, so sliding ``max_offset`` along a
+    board grid axis drifts the via centre off the strip through a short
+    edge (0.2 mm off copper at 45 deg, measured in the issue).  The
+    stencil-safety contract -- drill centre inside pad copper -- is
+    then broken by the very routine that documents it.
+
+    Fixture (per rotation): the target pad at the anchor, a 0.3 x 0.3
+    foreign pad 0.10 mm along the board-space long axis (``u``), via
+    diameter 0.3 / min annular 0.05 -> budget
+    ``(1.4 - 0.3)/2 - 0.05 = 0.50`` mm, clearance 0.15 -> the first
+    passing offset must travel |t| >= 0.35, deep enough that the
+    pre-#9319 grid-axis slide exits the copper strip while the fixed
+    board-axis slide stays on it.  Rotation 0 is included as the
+    control: grid axis == board axis there, so both code paths agree.
+    """
+
+    @pytest.mark.parametrize("rotation", [0, 30, 45, 90, 135, 270])
+    def test_nudged_via_stays_on_own_copper(self, rotation):
+        rules = _make_rules()
+        grid = _make_grid(rules)
+        router = EscapeRouter(grid, rules, component_holes=())
+
+        # Wide pad: local long axis is local X (1.4 > 0.3).
+        target = Pad(
+            x=ANCHOR_X,
+            y=ANCHOR_Y,
+            width=1.4,
+            height=0.3,
+            net=5,
+            net_name="OSC_OUT",
+            ref="U2",
+            pin="5",
+            layer=Layer.F_CU,
+            rotation=float(rotation),
+        )
+        ux, uy = _board_long_axis(float(rotation), local_long_is_x=True)
+        neighbor = Pad(
+            x=ANCHOR_X + ux * 0.10,
+            y=ANCHOR_Y + uy * 0.10,
+            width=0.3,
+            height=0.3,
+            net=9,
+            net_name="NRST",
+            ref="U2",
+            pin="9",
+            layer=Layer.F_CU,
+        )
+        package = _make_package([target, neighbor])
+
+        via_x, via_y, nudged = router._select_in_pad_via_position(
+            pad=target,
+            via_diameter=0.3,
+            min_annular=0.05,
+            effective_clearance=0.15,
+            package=package,
+        )
+        assert nudged is True
+
+        # Drill CENTRE must sit inside the pad copper rectangle (the
+        # same rotated-rect convention ``io.py:_pad_copper_polygon``
+        # draws).  The #9319 defect put it up to 0.28 mm off the strip
+        # through a short edge.
+        lx, ly = _to_local((ANCHOR_X, ANCHOR_Y), float(rotation), via_x, via_y)
+        assert abs(lx) <= target.width / 2 + 1e-9
+        assert abs(ly) <= target.height / 2 + 1e-9
+
+        # Stencil budget honoured in the pad-local frame: the long-axis
+        # travel plus via radius plus annular ring stays inside the
+        # long dim.
+        assert abs(lx) + 0.15 + 0.05 <= target.width / 2 + 1e-9
+
+        # And the chosen placement actually clears the neighbor.
+        assert router._can_place_via(
+            x=via_x,
+            y=via_y,
+            net=target.net,
+            foreign_pads=[neighbor],
+            clearance=0.15,
+            via_diameter=0.3,
+        )
+
+    @pytest.mark.parametrize("rotation", [30, 45])
+    def test_nudged_via_stays_on_copper_tall_pad(self, rotation):
+        """``height > width`` pads at non-cardinal angles: the local long
+        axis is local Y, and its board image ``(sin, cos)`` -- not the Y
+        grid axis -- must carry the slide.
+        """
+        rules = _make_rules()
+        grid = _make_grid(rules)
+        router = EscapeRouter(grid, rules, component_holes=())
+
+        # Tall pad: local long axis is local Y (1.4 > 0.3).
+        target = Pad(
+            x=ANCHOR_X,
+            y=ANCHOR_Y,
+            width=0.3,
+            height=1.4,
+            net=5,
+            net_name="OSC_OUT",
+            ref="U2",
+            pin="5",
+            layer=Layer.F_CU,
+            rotation=float(rotation),
+        )
+        ux, uy = _board_long_axis(float(rotation), local_long_is_x=False)
+        neighbor = Pad(
+            x=ANCHOR_X + ux * 0.10,
+            y=ANCHOR_Y + uy * 0.10,
+            width=0.3,
+            height=0.3,
+            net=9,
+            net_name="NRST",
+            ref="U2",
+            pin="9",
+            layer=Layer.F_CU,
+        )
+        package = _make_package([target, neighbor])
+
+        via_x, via_y, nudged = router._select_in_pad_via_position(
+            pad=target,
+            via_diameter=0.3,
+            min_annular=0.05,
+            effective_clearance=0.15,
+            package=package,
+        )
+        assert nudged is True
+
+        lx, ly = _to_local((ANCHOR_X, ANCHOR_Y), float(rotation), via_x, via_y)
+        assert abs(lx) <= target.width / 2 + 1e-9
+        assert abs(ly) <= target.height / 2 + 1e-9
+        assert abs(ly) + 0.15 + 0.05 <= target.height / 2 + 1e-9
+        assert router._can_place_via(
+            x=via_x,
+            y=via_y,
+            net=target.net,
+            foreign_pads=[neighbor],
+            clearance=0.15,
+            via_diameter=0.3,
+        )
+
+    def test_no_room_to_nudge_unchanged_for_rotated_pad(self):
+        """The ``max_offset <= 0`` early return fires before any board- or
+        grid-axis geometry matters: a rotated pad with a vanishing budget
+        still falls back to dead-centre with ``nudged=False``.
+        """
+        rules = _make_rules()
+        grid = _make_grid(rules)
+        router = EscapeRouter(grid, rules, component_holes=())
+
+        target = Pad(
+            x=ANCHOR_X,
+            y=ANCHOR_Y,
+            width=0.65,
+            height=0.65,
+            net=5,
+            net_name="A",
+            ref="U2",
+            pin="5",
+            layer=Layer.F_CU,
+            rotation=45.0,
+        )
+        neighbor = Pad(
+            x=ANCHOR_X + 0.50,
+            y=ANCHOR_Y,
+            width=0.3,
+            height=0.3,
+            net=9,
+            net_name="B",
+            ref="U2",
+            pin="9",
+            layer=Layer.F_CU,
+        )
+        package = _make_package([target, neighbor])
+
+        via_x, via_y, nudged = router._select_in_pad_via_position(
+            pad=target,
+            via_diameter=0.6,
+            min_annular=0.05,
+            effective_clearance=0.15,
+            package=package,
+        )
         assert nudged is False
         assert via_x == pytest.approx(ANCHOR_X, abs=1e-6)
         assert via_y == pytest.approx(ANCHOR_Y, abs=1e-6)
