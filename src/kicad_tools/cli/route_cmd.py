@@ -8683,15 +8683,44 @@ def _apply_ripup_strategy(router: "Autorouter", args) -> None:
         router._ripup_strategy = strategy
 
 
+def _wire_detour_probe_deadline_shift(router: "Autorouter", args) -> None:
+    """Keep probe time out of the CLI wall-clock deadlines (issue #9244).
+
+    The detour probe pre-pass runs real A* searches before the real route;
+    without compensation its cost came off ``args._routing_deadline`` /
+    ``args._wall_clock_deadline``, so a binding ``--timeout`` could change
+    which real searches time out and therefore the routed copper -- with the
+    flag on vs off.  This installs the router's ``on_probe_elapsed`` hook
+    (fired once per probe, i.e. once per Autorouter): every probe shifts
+    both deadline stamps forward by its measured seconds and accumulates
+    the total on ``args._detour_probe_shift_s`` (the per-tier budget context
+    manager folds the shift that grew inside its block back into the
+    original it restores).  Unbounded runs (``None`` deadlines) are a no-op.
+    """
+
+    def _shift_probe_time(elapsed: float) -> None:
+        if elapsed <= 0.0:
+            return
+        args._detour_probe_shift_s = getattr(args, "_detour_probe_shift_s", 0.0) + float(elapsed)
+        for attr in ("_routing_deadline", "_wall_clock_deadline"):
+            deadline = getattr(args, attr, None)
+            if deadline is not None:
+                setattr(args, attr, float(deadline) + float(elapsed))
+
+    router.on_probe_elapsed = _shift_probe_time
+
+
 def _apply_detour_ratio_report(router: "Autorouter", args) -> None:
     """Enable the ``--report-detour-ratio`` probe pre-pass (issue #9003).
 
     Off by default (mirrors the ``_ripup_strategy`` attribute-on-router
     pattern above): without the flag no probe runs, no sidecar is written
-    and the run is byte-identical.  With it, routed output is still
-    identical unless a wall-clock limit cuts the run short (the probe's
-    searches count against ``--timeout``).  When passed, sets
-    ``router.report_detour_ratio`` so ``route_all`` /
+    and the run is byte-identical.  With it, routed output stays identical
+    even under a binding ``--timeout``: the probe measures its own cost and
+    the CLI's deadline stamps are shifted past it (issue #9244, see
+    :func:`_wire_detour_probe_deadline_shift`; the hard supervisor kill
+    ``KCT_ROUTE_INVOCATION_DEADLINE`` is still a whole-invocation cap).
+    When passed, sets ``router.report_detour_ratio`` so ``route_all`` /
     ``route_all_negotiated`` run the read-only alone-on-empty probe
     pre-pass; the report itself is printed/written post-settle by
     :func:`_report_detour_ratio`.  A no-op when the flag is absent, so
@@ -8699,6 +8728,7 @@ def _apply_detour_ratio_report(router: "Autorouter", args) -> None:
     """
     if getattr(args, "report_detour_ratio", False):
         router.report_detour_ratio = True
+        _wire_detour_probe_deadline_shift(router, args)
 
 
 def _apply_detour_repair(router: "Autorouter", args) -> None:
@@ -8730,6 +8760,10 @@ def _apply_detour_repair(router: "Autorouter", args) -> None:
             )
             return
         router.detour_repair = True
+        # Issue #9244: the repair pass's probe pre-pass must not consume the
+        # CLI wall-clock deadlines either -- a --detour-repair-only run
+        # probes without --report-detour-ratio, so wire the shift here too.
+        _wire_detour_probe_deadline_shift(router, args)
 
 
 def _apply_airwire_separation(router: "Autorouter", args) -> None:
@@ -11275,7 +11309,10 @@ def _apply_manufacturer_trace_width_floor(args, pcb_path, *, quiet: bool = False
     # ``__post_init__`` resolution is stackup-blind).  ``None`` (no dfm
     # table / no stackup entry) keeps the band guard OFF rather than
     # guessing an edge.
-    from kicad_tools.cli.stitch_cmd import _resolve_mfr_pad_gap_edge
+    from kicad_tools.cli.stitch_cmd import (
+        _resolve_mfr_pad_gap_edge,
+        _resolve_mfr_trace_gap_edge,
+    )
 
     # None without ``--manufacturer``: nothing to resolve from, so the band
     # guard stays OFF rather than guessing a fab -- the stitcher's
@@ -11288,6 +11325,18 @@ def _apply_manufacturer_trace_width_floor(args, pcb_path, *, quiet: bool = False
     # stackup (issue #8974 review: no fab literal on the no-``--mfr`` path).
     args._mfr_pad_gap_band_edge = (
         _resolve_mfr_pad_gap_edge(str(manufacturer), layers or 4, copper_outer or 1.0)
+        if manufacturer
+        else None
+    )
+
+    # Issue #9215 (follow-up to #9208): the trace-population sibling edge for
+    # the via-annulus-vs-own-net-trace band guard, resolved at the same
+    # single point and threaded through the same ``DesignRules(...)`` sites
+    # as the pad edge above.  Same fail-closed contract: ``None`` (no
+    # ``--manufacturer``, no dfm table, or no stackup entry) keeps the trace
+    # band guard OFF rather than guessing an edge.
+    args._mfr_trace_gap_band_edge = (
+        _resolve_mfr_trace_gap_edge(str(manufacturer), layers or 4, copper_outer or 1.0)
         if manufacturer
         else None
     )
@@ -12941,6 +12990,8 @@ def route_with_layer_escalation(
         mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
         # Issue #8974: the stackup-aware same-net pad slit-band edge.
         same_net_pad_gap_band_edge_mm=getattr(args, "_mfr_pad_gap_band_edge", None),
+        # Issue #9215: the trace-population sibling edge (the #9208 guard).
+        same_net_trace_gap_band_edge_mm=getattr(args, "_mfr_trace_gap_band_edge", None),
         # Issue #2891: forward escalation-in-progress flag so the escape
         # router demotes the #2880 ERROR log when an outer wrapper will
         # retry on a tier that supports via-in-pad.
@@ -14511,6 +14562,9 @@ def route_with_rule_relaxation(
             mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
             # Issue #8974: the stackup-aware same-net pad slit-band edge.
             same_net_pad_gap_band_edge_mm=getattr(args, "_mfr_pad_gap_band_edge", None),
+            # Issue #9215: the trace-population sibling edge (the #9208
+            # guard).
+            same_net_trace_gap_band_edge_mm=getattr(args, "_mfr_trace_gap_band_edge", None),
             # Issue #2891: forward escalation-in-progress flag.
             auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
             # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
@@ -17016,6 +17070,9 @@ def route_with_combined_escalation(
                 mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
                 # Issue #8974: the stackup-aware same-net pad slit-band edge.
                 same_net_pad_gap_band_edge_mm=getattr(args, "_mfr_pad_gap_band_edge", None),
+                # Issue #9215: the trace-population sibling edge (the #9208
+                # guard).
+                same_net_trace_gap_band_edge_mm=getattr(args, "_mfr_trace_gap_band_edge", None),
                 # Issue #2891: forward escalation-in-progress flag.
                 auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
                 # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
@@ -21710,9 +21767,12 @@ def _route_parser() -> argparse.ArgumentParser:
             "sidecar. Roughly doubles search work (one extra A* per "
             "connection). Diagnostic only: the probe restores all router "
             "state it touches and never changes the exit code, so routed "
-            "copper is identical with and without the flag -- except when "
-            "a wall-clock limit (--timeout) cuts the run short, since the "
-            "probe's searches count against that limit (issue #9003). "
+            "copper is identical with and without the flag, including "
+            "under a binding --timeout (the probe's cost is excluded from "
+            "the routing budgets, issue #9244). The hard supervisor cap "
+            "(KCT_ROUTE_INVOCATION_DEADLINE) still bounds the whole "
+            "invocation: under a binding hard cap the flag can change the "
+            "output exactly as a slower machine would. "
             "Grid engine only; a no-op on the mesh/lattice engines."
         ),
     )
@@ -24121,6 +24181,8 @@ def _run_main_impl(args, parser, argv) -> int:
         mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
         # Issue #8974: the stackup-aware same-net pad slit-band edge.
         same_net_pad_gap_band_edge_mm=getattr(args, "_mfr_pad_gap_band_edge", None),
+        # Issue #9215: the trace-population sibling edge (the #9208 guard).
+        same_net_trace_gap_band_edge_mm=getattr(args, "_mfr_trace_gap_band_edge", None),
         # Issue #2891: forward escalation-in-progress flag so the escape
         # router demotes the #2880 ERROR log when an outer wrapper will
         # retry on a tier that supports via-in-pad.

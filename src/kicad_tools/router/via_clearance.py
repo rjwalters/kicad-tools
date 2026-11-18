@@ -31,11 +31,14 @@ Design notes:
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any, Protocol
 
 from kicad_tools.core.geometry import point_in_polygon as _core_point_in_polygon
 from kicad_tools.core.geometry import point_to_segment_distance
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Duck-typed protocols so the helper works with both stitcher and router
@@ -448,6 +451,8 @@ def same_net_segment_pad_gap_acceptable(
     half_width: float,
     same_net_pad_bboxes: list[tuple[float, float, float, float]] | None,
     min_gap_mm: float,
+    *,
+    tangent_is_union: bool = False,
 ) -> bool:
     """True iff a trace segment from ``a`` to ``b`` keeps the fab-view copper
     gap to every same-net SMD pad out of the slit band.
@@ -468,7 +473,13 @@ def same_net_segment_pad_gap_acceptable(
       leave ``[error_edge, detection_edge)`` gaps graded as warnings
       (issue #8976, ``## Verified corrections``).
 
-    and the band ``(0, min_gap_mm)`` in between is rejected.
+    and the band in between is rejected: ``(0, min_gap_mm)`` for a segment
+    (its ``gap == 0`` means the centerline reaches the rectangle, a genuine
+    overlap), ``[0, min_gap_mm)`` for a degenerate point/annulus seat, whose
+    tangent locus (``gap == 0``) is a one-point touch rather than a union
+    (Issue #9124).  The tangent-union exception of the trace population
+    (Issue #9208) is opt-in via ``tangent_is_union`` -- see
+    :func:`same_net_segment_trace_gap_acceptable`.
 
     The gap is exact segment-vs-rectangle geometry: the copper-to-pad air
     gap is ``max(0, centerline-to-rect distance - half_width)``, computed
@@ -491,6 +502,14 @@ def same_net_segment_pad_gap_acceptable(
             must not include them; ``None`` or empty disables the test.
         min_gap_mm: The fab-view pad-population detection edge in mm.
             ``<= 0`` disables the test (every position acceptable).
+        tangent_is_union: Accept the tangent seat (``gap == 0``) of a
+            degenerate point as a copper union.  ``False`` (default) is the
+            pad population's contract (Issue #9124); ``True`` mirrors the
+            trace population's C++ band ``same_net_segment_gap_in_band``
+            (Issue #9208), where an annulus tangent to its own trace is one
+            copper piece.  Only the degenerate-point branch is affected: a
+            segment's ``gap == 0`` is a centerline-reaches-rectangle
+            overlap, a union for both populations.
 
     Returns:
         True when the segment's gap is acceptable for every pad (union or
@@ -500,8 +519,25 @@ def same_net_segment_pad_gap_acceptable(
         return True
     ax, ay = a
     bx, by = b
+    is_point = ax == bx and ay == by
+    # The band's lower edge is a property of the copper POPULATION, not of
+    # the primitive.  Pad population (default, Issue #9124): a point (via
+    # annulus) gap is SIGNED -- ``hypot - r`` is negative on real overlap
+    # and exactly 0 on the tangent locus (centre exactly ``r`` from a pad
+    # face or corner), where the disc touches the rectangle only at one
+    # point and the receding arc leaves a wedge the fab-view checker grades
+    # (touch-at-a-point is not a copper union), so the point branch rejects
+    # from ``-1e-9`` up, accepting only real overlap (``gap <= -1e-9``) or
+    # clearance.  Trace population (``tangent_is_union=True``, Issue #9208):
+    # the C++ band ``same_net_segment_gap_in_band`` measures the same signed
+    # point gap and still treats ``gap == 0`` as a copper union, so it keeps
+    # the ``1e-9`` float-noise edge.  The segment gap is ``max(0, ...)``:
+    # ``0`` there means the centerline REACHES the rectangle (genuine
+    # overlap, a union for both populations), so the segment branch always
+    # keeps ``1e-9``.
+    lower = 1e-9 if (tangent_is_union or not is_point) else -1e-9
     for bbox in same_net_pad_bboxes:
-        if ax == bx and ay == by:
+        if is_point:
             # Point primitive: the annulus form's arithmetic exactly.
             dx = max(0.0, bbox[0] - ax, ax - bbox[2])
             dy = max(0.0, bbox[1] - ay, ay - bbox[3])
@@ -511,9 +547,33 @@ def same_net_segment_pad_gap_acceptable(
         # The two acceptable regions: unioned with the pad, or clear of the
         # fab detection edge.  The 1e-9 slack mirrors _pad_conflict's
         # float-noise tolerance for a gap computed as exactly ``min_gap_mm``.
-        if 1e-9 < gap < min_gap_mm - 1e-9:
+        if lower < gap < min_gap_mm - 1e-9:
             return False
     return True
+
+
+def same_net_segment_trace_gap_acceptable(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    half_width: float,
+    same_net_seg_bboxes: list[tuple[float, float, float, float]] | None,
+    min_gap_mm: float,
+) -> bool:
+    """True iff a seat keeps the copper gap to every same-net TRACE out of
+    the trace population's slit band (Issue #9208).
+
+    The Python mirror of the C++ ``same_net_segment_gap_in_band`` band
+    (``DesignRules.same_net_trace_gap_band_edge_mm``): unlike the pad
+    population, the trace population accepts a tangent seat -- ``gap == 0``
+    (e.g. a via annulus whose centre sits exactly one radius from the
+    trace's swept edge) is one copper union, matching the C++ band's
+    ``1e-9 < gap`` lower edge.  Same geometry and acceptable regions as
+    :func:`same_net_segment_pad_gap_acceptable`, called with
+    ``tangent_is_union=True``.
+    """
+    return same_net_segment_pad_gap_acceptable(
+        a, b, half_width, same_net_seg_bboxes, min_gap_mm, tangent_is_union=True
+    )
 
 
 def _segment_box_gap_mm(
@@ -608,9 +668,12 @@ def same_net_pad_gap_acceptable(
 
     The constraint is two acceptable regions, not one floor:
 
-    * ``gap <= 0`` -- the annulus touches or overlaps its own pad, so the
-      copper is one union and there is no slit (the drill must still clear
-      the pad bbox, which is what ``--avoid-pad-overlap`` enforces);
+    * ``gap < 0`` -- the annulus overlaps its own pad, so the copper is one
+      union and there is no slit (the drill must still clear the pad bbox,
+      which is what ``--avoid-pad-overlap`` enforces).  Issue #9124: a
+      TANGENT seat (``gap == 0``: centre exactly one radius from a pad face
+      or corner) is NOT a union -- the disc touches the pad at one point and
+      the receding arc leaves a sub-edge wedge -- so it is rejected;
     * ``gap >= min_gap_mm`` -- the fab's detection edge for the pad
       population, read from the resolved stackup (the ``pad_spacing`` dfm
       entry's ``GapBand.detection_edge_mm``; e.g. 0.15 mm on the jlcpcb
@@ -621,8 +684,9 @@ def same_net_pad_gap_acceptable(
       ``error_edge_mm`` here would leave ``[error_edge, detection_edge)``
       gaps graded as warnings by the fab-view checker.
 
-    and the band ``(0, min_gap_mm)`` in between is rejected -- the caller's
-    placement ladder goes on trying candidates.
+    and the band ``[0, min_gap_mm)`` in between is rejected, tangent locus
+    included (Issue #9124) -- the caller's placement ladder goes on trying
+    candidates.
 
     Args:
         x, y: Proposed via center (mm, world coordinates).
@@ -671,7 +735,8 @@ def same_net_pad_gap_band_ring(
     definition feeds both forms: a seat this ring covers is exactly a seat
     the predicate rejects.  The predicate's 1e-9 float-noise epsilon is
     finer than any rasteriser's cell, so the geometric boundary is the
-    shared band ``(0, min_gap_mm)``.
+    shared band ``[0, min_gap_mm)`` -- tangent locus included (Issue #9124,
+    the inner buffer's ``-1e-9`` keeps it inside the ring).
 
     Args:
         bbox: Same-net SMD pad bounding box ``(min_x, min_y, max_x, max_y)``.
@@ -692,8 +757,14 @@ def same_net_pad_gap_band_ring(
     # true disk, so the ring agrees with the point predicate finer than any
     # rasterised mask can resolve (the default 8 segments sag ~1.5e-3 mm at
     # the corners, which IS visible at mask resolution).
+    #
+    # Issue #9124: the inner boundary sits ``1e-9`` INSIDE the radius so the
+    # ring covers the tangent locus (``gap == 0``, centre exactly one radius
+    # from a pad face) the point predicate now rejects -- the ring's
+    # difference would otherwise leave that one-point-wide locus on the
+    # inner polygon's boundary, where a mask can read it either way.
     return pad.buffer(radius + min_gap_mm, quad_segs=64).difference(
-        pad.buffer(radius, quad_segs=64)
+        pad.buffer(radius - 1e-9, quad_segs=64)
     )
 
 
@@ -712,27 +783,47 @@ SAME_NET_BAND_UNION_EPS_MM = 1e-6
 #: axis) on both sides of the pair (#8975).
 SAME_NET_BAND_WRITE_SLACK_MM = 1.5e-3
 
+#: How far outside the rejected band ``(eps, edge + slack)`` a seat's ANALYTIC
+#: gap may sit before :func:`via_annulus_trace_band_ok` skips the shapely
+#: grading for that segment (issue #9279).  The ``quad_segs=64`` buffer arcs
+#: sag ~1e-4 mm from the true round cap (measured 7.1e-5 mm over 3,000 random
+#: configurations), so a segment whose analytic gap clears the band by this
+#: margin can never flip the shared predicate's verdict -- anything closer is
+#: still handed to :func:`same_net_trace_band_clear`, which stays the sole
+#: authority.  This is a skip-filter, not a second distance test.
+SAME_NET_BAND_PREFILTER_SLACK_MM = 1e-3
+
 
 def same_net_band_edges(
-    profile: str, layers: int, copper_oz: float, inner_oz: float
+    profile: str, layers: int, outer_oz: float, inner_oz: float
 ) -> tuple[float, float]:
     """``(pad_edge_mm, trace_edge_mm)`` of the fab-view same-net slit band.
 
-    Resolved from the caller's stackup: ``profile``, ``layers``, ``copper_oz``
+    Resolved from the caller's stackup: ``profile``, ``layers``, ``outer_oz``
     and ``inner_oz`` name the fab entry to grade against -- required, no
     defaults, so a caller cannot silently inherit another board's stackup
     (#9188).  Edges are never literals, so a repair pass's acceptance bands
     match the fab-view checker by construction (#8957, #8975).  The pad
     population's error edge grades via-annulus-to-SMD-pad slits; the trace
-    population's grades annulus/segment pairs.  A missing profile entry yields
-    ``(0.0, 0.0)``, which disables the band rather than guessing an edge.
+    population's grades annulus/segment pairs.  A missing profile entry
+    logs a warning and yields ``(0.0, 0.0)``, which disables the band
+    rather than guessing an edge.
     """
     from kicad_tools.manufacturers import get_profile
     from kicad_tools.validate.rules.physical_gap import fab_gap_policy_from_entry
 
-    entry = get_profile(profile).get_dfm_entry(layers, copper_oz, inner_oz)
+    entry = get_profile(profile).get_dfm_entry(layers, outer_oz, inner_oz)
     policy = fab_gap_policy_from_entry(entry) if entry else None
     if policy is None:
+        logger.warning(
+            "same_net_band_edges: no fab gap policy for stackup "
+            "profile=%r layers=%r outer_oz=%r inner_oz=%r; "
+            "same-net slit band disabled (#9226)",
+            profile,
+            layers,
+            outer_oz,
+            inner_oz,
+        )
         return 0.0, 0.0
     return policy.pad.error_edge_mm, policy.trace.error_edge_mm
 
@@ -760,6 +851,69 @@ def same_net_trace_band_clear(
     )
 
 
+def via_annulus_trace_band_ok(
+    x: float,
+    y: float,
+    diameter: float,
+    same_net_segments: Any,
+    trace_edge_mm: float,
+) -> bool:
+    """True iff a via annulus at ``(x, y)`` opens no slit against own-net traces.
+
+    The router-engine form of :func:`same_net_trace_band_clear` (Issue #9272):
+    the pure-Python twin of the C++ ``same_net_trace_gap_band_edge_mm`` via
+    guard (#9208).  ``same_net_segments`` is an iterable of
+    ``(x1, y1, x2, y2, width)`` centrelines of the via's OWN net's stored
+    segments on ANY layer (the annulus exists on every layer).  Each is built
+    as a round-capped outline -- the exact shape the C++ gap measures -- and
+    graded by the shared predicate, so overlap/touch (one copper union) and
+    clear-of-edge seats stay accepted.  ``trace_edge_mm <= 0`` (or no
+    segments) disables the test.
+
+    Perf (issue #9279): the lattice via gate calls this per A* candidate with
+    dozens of segments in reach, and a ``quad_segs=64`` buffer pair per
+    segment measured ~21 ms per call -- a ~19x whole-file routing regression.
+    Each segment's analytic gap
+    (``point_to_segment_distance - diameter/2 - width/2``) is exact for a disc
+    against a round-capped segment, up to the ~1e-4 mm arc sag, so segments
+    whose analytic gap clears the rejected band by
+    ``SAME_NET_BAND_PREFILTER_SLACK_MM`` (10x that sag) are skipped without
+    building any geometry; only band-adjacent segments reach the shared
+    predicate, unchanged.
+    """
+    if trace_edge_mm <= 0:
+        return True
+    segs = list(same_net_segments)
+    if not segs:
+        return True
+    limit = trace_edge_mm + SAME_NET_BAND_WRITE_SLACK_MM
+    lower = SAME_NET_BAND_UNION_EPS_MM - SAME_NET_BAND_PREFILTER_SLACK_MM
+    upper = limit + SAME_NET_BAND_PREFILTER_SLACK_MM
+    near = [
+        seg
+        for seg in segs
+        if lower
+        < point_to_segment_distance(x, y, seg[0], seg[1], seg[2], seg[3])
+        - diameter / 2.0
+        - seg[4] / 2.0
+        < upper
+    ]
+    if not near:
+        return True
+    from shapely.geometry import LineString, Point
+
+    # A fine ``quad_segs`` keeps the polygonal arcs within ~1e-4 mm of the
+    # true circle, well inside the 1e-9-scale union epsilon's practical use.
+    annulus = Point(x, y).buffer(diameter / 2.0, quad_segs=64)
+    outlines = [
+        (Point(x1, y1) if (x1 == x2 and y1 == y2) else LineString([(x1, y1), (x2, y2)])).buffer(
+            width / 2.0, quad_segs=64
+        )
+        for x1, y1, x2, y2, width in near
+    ]
+    return same_net_trace_band_clear(annulus, outlines, trace_edge_mm)
+
+
 def same_net_band_seat_ok(
     x: float,
     y: float,
@@ -777,8 +931,11 @@ def same_net_band_seat_ok(
     ``same_net_copper`` is an iterable of shapely geometries of the via's own
     net (the via being moved excluded by the caller); pads grade on the pad
     population's edge via :func:`same_net_pad_gap_acceptable`, everything else
-    on the trace population's via :func:`same_net_trace_band_clear`.  An edge
-    of ``0`` disables that test.
+    on the trace population's via :func:`same_net_trace_band_clear`.  For
+    pads the rejected band is ``[0, edge)``: a tangent seat (``gap == 0``,
+    Issue #9124) is a one-point touch, not a copper union, so it is
+    rejected; for trace copper overlap/touch is still one copper union (no
+    slit).  An edge of ``0`` disables that test.
     """
     if not same_net_pad_gap_acceptable(x, y, diameter, same_net_pad_bboxes, pad_edge_mm):
         return False

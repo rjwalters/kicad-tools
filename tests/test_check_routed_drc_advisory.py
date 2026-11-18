@@ -74,13 +74,16 @@ def test_vendored_gate_has_no_reference_board_logic():
         assert needle not in text, needle
 
 
-def _make_violation(rule_id: str, severity: str = "error", message: str = "synthetic") -> dict:
+def _make_violation(
+    rule_id: str, severity: str = "error", message: str = "synthetic", nets: list[str] | None = None
+) -> dict:
     """Synthesize a single violation dict matching ``DRCViolation.to_dict()``.
 
     Only the fields the gate reads (``rule_id`` and ``severity``) are
     load-bearing; the rest are filled in so the payload looks like real
     ``kct check`` JSON output for any future caller that inspects more
-    fields.
+    fields.  ``nets`` feeds ``identity_allowance.violation_identity`` (the
+    Issue #8858 net-signature keying) for the allowance tests.
     """
     return {
         "rule_id": rule_id,
@@ -92,6 +95,7 @@ def _make_violation(rule_id: str, severity: str = "error", message: str = "synth
         "actual_value": 0.1,
         "required_value": 0.127,
         "items": [],
+        "nets": nets if nets is not None else [],
     }
 
 
@@ -370,7 +374,7 @@ class TestStdoutPrefixTolerance:
             "Run 'kct sync --analyze foo.kicad_pcb' to inspect.\n" + payload
         )
         with self._stub_kct(polluted):
-            blocking, advisory = self.helper.count_errors(Path("synthetic.kicad_pcb"))
+            blocking, advisory, _identity = self.helper.count_errors(Path("synthetic.kicad_pcb"))
         assert blocking == 1
         assert advisory == {}
 
@@ -380,7 +384,7 @@ class TestStdoutPrefixTolerance:
         is present."""
         payload = _make_kct_json([_make_violation("clearance_segment_via")])
         with self._stub_kct(payload):
-            blocking, advisory = self.helper.count_errors(Path("synthetic.kicad_pcb"))
+            blocking, advisory, _identity = self.helper.count_errors(Path("synthetic.kicad_pcb"))
         assert blocking == 1
         assert advisory == {}
 
@@ -441,7 +445,7 @@ class TestCrossScriptCounterParity:
 
         # check_routed_drc.py path
         with self._stub_kct(payload):
-            drc_blocking, drc_advisory = self.drc.count_errors(
+            drc_blocking, drc_advisory, _identity = self.drc.count_errors(
                 Path("boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb")
             )
         # check_matchgroup_coverage.py path
@@ -476,12 +480,155 @@ class TestCrossScriptCounterParity:
         assert json.loads(payload)["summary"]["errors"] == 3
 
         with self._stub_kct(payload):
-            drc_blocking, _ = self.drc.count_errors(Path("synthetic.kicad_pcb"))
+            drc_blocking, _advisory, _identity = self.drc.count_errors(Path("synthetic.kicad_pcb"))
         with self._stub_kct(payload):
             coverage_blocking = self.coverage.count_errors_via_kct_check(
                 Path("synthetic.kicad_pcb"), sidecar=None
             )
         assert drc_blocking == coverage_blocking == 0
+
+
+class TestIdentityAllowance:
+    """Issue #8858: ``mask_to_copper`` is judged by net-signature identity.
+
+    The gate no longer passes ``--skip mask_to_copper``; boards with a
+    ``RELEASE_BOARD_ALLOWANCES`` entry get their residual population
+    excepted by identity (#7270 Q3 model), a new net fails the gate, and a
+    stale entry fails it until deleted.
+    """
+
+    def setup_method(self) -> None:
+        self.helper = _load_helper_module()
+
+    def _stub_kct(self, json_payload: str, returncode: int = 2):
+        mock_proc = MagicMock()
+        mock_proc.returncode = returncode
+        mock_proc.stdout = json_payload
+        mock_proc.stderr = ""
+        return patch.object(subprocess, "run", return_value=mock_proc)
+
+    def test_cmd_no_longer_skips_mask_to_copper(self) -> None:
+        """The ``--skip mask_to_copper`` of #8849 is gone (#8858): the gate
+        runs the rule and judges it by identity instead."""
+        captured: list[list[str]] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            captured.append(list(cmd))
+            mock_proc = MagicMock()
+            mock_proc.returncode = 0
+            mock_proc.stdout = _make_kct_json([])
+            mock_proc.stderr = ""
+            return mock_proc
+
+        with patch.object(subprocess, "run", side_effect=fake_run):
+            self.helper.count_errors(Path("synthetic.kicad_pcb"))
+        assert captured, "subprocess.run was never invoked"
+        cmd = captured[0]
+        assert "--skip" not in cmd, f"gate still skips a rule: {cmd}"
+
+    def test_allowed_identity_never_uses_budget(self) -> None:
+        """3 mask_to_copper errors on allowance nets -> 0 counted, and the
+        OK message names how many findings the identity excluded."""
+        violations = [
+            _make_violation("mask_to_copper", nets=["GND"]),
+            _make_violation("mask_to_copper", nets=["GND"]),
+            _make_violation("mask_to_copper", nets=["VOUT"]),
+        ]
+        allowance = {("mask_to_copper", "GND"): 8858, ("mask_to_copper", "VOUT"): 8858}
+        with self._stub_kct(_make_kct_json(violations)):
+            passed, msg, errors = self.helper.check_file(
+                Path("synthetic.kicad_pcb"), allowed=0, allowance=allowance
+            )
+        assert passed
+        assert errors == 0
+        assert "identity-allowed" in msg
+
+    def test_new_net_outside_allowance_fails(self) -> None:
+        """A mask error on a net with NO entry counts and fails strict-0."""
+        violations = [
+            _make_violation("mask_to_copper", nets=["GND"]),
+            _make_violation("mask_to_copper", nets=["MYSTERY_NET"]),
+        ]
+        allowance = {("mask_to_copper", "GND"): 8858}
+        with self._stub_kct(_make_kct_json(violations)):
+            passed, msg, errors = self.helper.check_file(
+                Path("synthetic.kicad_pcb"), allowed=0, allowance=allowance
+            )
+        assert not passed
+        assert errors == 1
+        assert "outside this board's identity allowance" in msg
+        assert "MYSTERY_NET" in msg
+
+    def test_other_rules_never_get_mask_treatment(self) -> None:
+        """An allowance entry cannot excuse a finding of a DIFFERENT rule:
+        identity is ``(rule, net)``-keyed, so a clearance error on GND
+        still counts."""
+        violations = [_make_violation("clearance_segment_via", nets=["GND"])]
+        allowance = {("mask_to_copper", "GND"): 8858}
+        with self._stub_kct(_make_kct_json(violations)):
+            passed, _msg, errors = self.helper.check_file(
+                Path("synthetic.kicad_pcb"), allowed=0, allowance=allowance
+            )
+        assert not passed
+        assert errors == 1
+
+    def test_stale_entry_fails_the_gate(self) -> None:
+        """An entry whose net stopped carrying the finding is stale: the
+        check fails with format_stale output until the entry is deleted
+        (#7367 ratchet -- spare identity headroom must not linger)."""
+        violations = [_make_violation("mask_to_copper", nets=["GND"])]
+        allowance = {("mask_to_copper", "GND"): 8858, ("mask_to_copper", "REPAIRED_NET"): 8858}
+        with self._stub_kct(_make_kct_json(violations)):
+            passed, msg, _errors = self.helper.check_file(
+                Path("synthetic.kicad_pcb"), allowed=0, allowance=allowance
+            )
+        assert not passed
+        assert "Stale identity allowance" in msg
+        assert "REPAIRED_NET" in msg
+        assert "delete its allowance entry" in msg
+
+    def test_advisory_findings_are_never_unallowed(self) -> None:
+        """Advisory connectivity records carry no identity judgment: they
+        stay out of the unallowed list (and the count) entirely."""
+        violations = [
+            _make_violation("connectivity", nets=["GND"]),
+            _make_violation("mask_to_copper", nets=["GND"]),
+        ]
+        allowance = {("mask_to_copper", "GND"): 8858}
+        with self._stub_kct(_make_kct_json(violations)):
+            passed, msg, errors = self.helper.check_file(
+                Path("synthetic.kicad_pcb"), allowed=0, allowance=allowance
+            )
+        assert passed
+        assert errors == 0
+        assert "connectivity=1" in msg
+
+    def test_release_allowances_cite_the_tracker(self) -> None:
+        """Every shipped identity_allowances entry cites issue #8858 (the
+        umbrella that stays open until the last gate skip is gone), keys a
+        rule the identity model covers, and points at a release PCB that
+        exists in the tree."""
+        import yaml
+
+        data = yaml.safe_load((REPO_ROOT / ".github" / "routed-drc-tolerance.yml").read_text())
+        raw = data.get("identity_allowances", {})
+        assert raw, "identity_allowances block disappeared from the YAML"
+        for key, rules in raw.items():
+            assert (REPO_ROOT / key).is_file(), f"allowance keys a missing PCB: {key}"
+            for rule_id, identities in rules.items():
+                assert rule_id in self.helper_identity_rules(), (
+                    f"{key}: rule {rule_id!r} is not identity-keyed by "
+                    f"identity_allowance.NET_IDENTITY_RULES"
+                )
+                for _identity, issue in identities.items():
+                    assert issue == 8858
+
+    @staticmethod
+    def helper_identity_rules() -> frozenset:
+        """The identity-keyed rule set the shared module declares."""
+        import identity_allowance
+
+        return identity_allowance.NET_IDENTITY_RULES
 
 
 class TestMfrCliOverride:
@@ -582,7 +729,7 @@ def test_reviewed_paid_drill_gate_requires_complete_meta_checks(monkeypatch, met
 
     monkeypatch.setattr(module.subprocess, "run", run)
     if meta_status == "PASSED":
-        assert module.count_errors(module.PAID_DRILL_BOARD, "jlcpcb-tier1") == (0, {})
+        assert module.count_errors(module.PAID_DRILL_BOARD, "jlcpcb-tier1")[0] == 0
     else:
         with pytest.raises(RuntimeError, match="meta-checks"):
             module.count_errors(module.PAID_DRILL_BOARD, "jlcpcb-tier1")

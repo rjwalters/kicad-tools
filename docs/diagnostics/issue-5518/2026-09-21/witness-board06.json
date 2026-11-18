@@ -3,7 +3,7 @@
   "board": "06",
   "runs": {
     "on-1": {
-      "out_dir": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/06-on-1",
+      "out_dir": ".loom/worktrees/issue-5518/5508-1c-scratch/out/06-on-1",
       "present": true,
       "times": [
         "START 2026-09-21T06:46:09Z arm=on repeat=1",
@@ -161,7 +161,7 @@
       "net_status_why": {
         "source": "captured:board06-on-1.json",
         "payload": {
-          "pcb": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/06-on-1/diffpair_test_routed.kicad_pcb",
+          "pcb": ".loom/worktrees/issue-5518/5508-1c-scratch/out/06-on-1/diffpair_test_routed.kicad_pcb",
           "connectivity_model": "strict",
           "summary": {
             "stuck_nets": 0,
@@ -180,7 +180,7 @@
       "kct_route_sidecar_note": "no <stem>.access_witness.json written for this run"
     },
     "on-2": {
-      "out_dir": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/06-on-2",
+      "out_dir": ".loom/worktrees/issue-5518/5508-1c-scratch/out/06-on-2",
       "present": true,
       "times": [
         "START 2026-09-21T06:58:38Z arm=on repeat=2",
@@ -338,7 +338,7 @@
       "net_status_why": {
         "source": "captured:board06-on-1.json",
         "payload": {
-          "pcb": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/06-on-1/diffpair_test_routed.kicad_pcb",
+          "pcb": ".loom/worktrees/issue-5518/5508-1c-scratch/out/06-on-1/diffpair_test_routed.kicad_pcb",
           "connectivity_model": "strict",
           "summary": {
             "stuck_nets": 0,
@@ -357,7 +357,7 @@
       "kct_route_sidecar_note": "no <stem>.access_witness.json written for this run"
     },
     "off-1": {
-      "out_dir": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/06-off-1",
+      "out_dir": ".loom/worktrees/issue-5518/5508-1c-scratch/out/06-off-1",
       "present": true,
       "times": [
         "START 2026-09-21T09:04:59Z arm=off repeat=1",
@@ -370,7 +370,7 @@
       "kct_route_sidecar_note": "no <stem>.access_witness.json written for this run"
     },
     "off-2": {
-      "out_dir": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/06-off-2",
+      "out_dir": ".loom/worktrees/issue-5518/5508-1c-scratch/out/06-off-2",
       "present": true,
       "times": [
         "START 2026-09-21T09:05:09Z arm=off repeat=2",

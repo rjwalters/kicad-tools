@@ -160,9 +160,11 @@ def test_grid_escape_seat_is_graded_through_the_band():
 
     pad = [(-1.0, -1.0, 1.0, 1.0)]
     dia = 0.5
-    # Annulus edge 0.05 from the pad (in band) / touching / clear of the band.
+    # Annulus edge 0.05 from the pad (in band) / tangent / clear of the band.
     assert not via_clearance.same_net_band_seat_ok(1.3, 0, dia, [], pad, 0.15, 0.15)
-    assert via_clearance.same_net_band_seat_ok(1.25, 0, dia, [], pad, 0.15, 0.15)
+    # Tangent (Issue #9124): a one-point touch is a wedge, not a union.
+    assert not via_clearance.same_net_band_seat_ok(1.25, 0, dia, [], pad, 0.15, 0.15)
+    assert via_clearance.same_net_band_seat_ok(1.2, 0, dia, [], pad, 0.15, 0.15)
     assert via_clearance.same_net_band_seat_ok(1.5, 0, dia, [], pad, 0.15, 0.15)
     # Same-net segment / via copper grade on the trace edge.
     seg = LineString([(0, 1.65), (3, 1.65)]).buffer(0.075)
@@ -325,9 +327,13 @@ def test_fixture_relocation_same_net_slit_residual_is_the_accepted_one(tmp_path,
     wedge whose first non-touching chain pieces sit 0.0841 / 0.0664 mm from
     the leg (trace band ``(0, 0.1016)``).  It is accepted, not drained:
 
-    * same net -- no short, only the fab-view notch warning, and
-      ``(physical_copper_gap, USB2_D-)`` is already an acknowledged identity
-      in ``DIFFPAIR_FIXTURE_ALLOWED_FINDINGS``;
+    * same net -- no short, and it needs no allowance route either: #9212
+      deleted the last USB2_D- ``physical_copper_gap`` identity (the
+      annulus-vs-own-net-TRACE slit #9208 drained), and on the seed-42 regen
+      the CI gate judges, ``USB2_D-`` now carries no ``physical_copper_gap``
+      finding at any severity (re-measured 2026-11-18, 0 unallowed /
+      0 stale) -- this wedge is a committed-fixture geometry the gate's
+      regen does not reproduce;
     * the notch is the junction itself: halving the chain reach in
       ``_same_net_leg_band_ok`` leaves it (0.0945 / 0.0768 mm), and a reach
       of 0 leaves two vias unrepairable (``RuntimeError``), so no cheap

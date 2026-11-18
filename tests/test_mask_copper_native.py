@@ -6,6 +6,7 @@ The selected native CLI and Python must both see the scratch paths unchanged.
 
 import hashlib
 import json
+import math
 import os
 import uuid
 from pathlib import Path
@@ -488,6 +489,36 @@ def test_final_native_intent_and_exposure_outcomes(tmp_path, native_options, cas
         assert intended.measurements[0].disposition == "intentional"
 
 
+def test_rule_area_keepouts_do_not_block_native_attribution(tmp_path, native_options):
+    """Issue #9234: rule areas are not mask-attribution objects, end to end.
+
+    A keepout embedded in a footprint (the stock RF-module shape) was never
+    found by the worker, and a board-level keepout was reported as
+    uninventoried native material; either one made ``mask_to_copper`` read
+    incomplete for the whole board. Both must now be invisible to the
+    object comparison: the pad alone carries the plotted material.
+    """
+    body = """(footprint "RF" (layer "F.Cu") (at 10 10)
+      (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask"))
+      (zone (layers "F.Cu" "B.Cu")
+        (keepout (tracks not_allowed) (vias not_allowed) (pads not_allowed)
+          (copperpour not_allowed) (footprints not_allowed))
+        (name "") (hatch edge 0.508)
+        (polygon (pts (xy -2 -2) (xy 2 -2) (xy 2 2) (xy -2 2)))))
+      (zone (layers "F.Cu" "B.Cu")
+        (keepout (tracks not_allowed) (vias not_allowed) (pads not_allowed)
+          (copperpour not_allowed) (footprints not_allowed))
+        (name "") (hatch edge 0.508)
+        (polygon (pts (xy 20 20) (xy 24 20) (xy 24 24) (xy 20 24))))"""
+    path = _board(tmp_path / "keepout.kicad_pcb", body, setup="(pad_to_mask_clearance .05)")
+    before = path.read_bytes()
+    result = check_mask_to_copper(path, POLICY, **native_options)
+    assert result.coverage == "complete", result.reasons
+    assert result.passed, result.to_dict()
+    assert path.read_bytes() == before
+    assert not [r for r in result.reasons if "keepout" in r or "uninventoried" in r]
+
+
 #: Issue #8858 native cases: (copper source, expansion, expected disposition).
 #: Pad: 1x1 mm rect at (10, 10); its top edge is y = 9.5. Track width 0.2 mm.
 _OWN_PAD_NATIVE = {
@@ -502,6 +533,10 @@ _OWN_PAD_NATIVE = {
     "entry_exp0.015": ("segment", ((10.0, 10.0), (12.0, 10.0)), "0.015", "violation"),
     # Family C: a via ring overlapping the pad leaves ring copper beside it.
     "via_ring": ("via", (10.75, 10.0), "0", "violation"),
+    # Both authored ends inside the pad; only the round cap pokes 0.05 mm
+    # past the right edge (issue #9261). Was a violation before the
+    # allowance change.
+    "poke_cap": ("segment", ((10.0, 10.0), (10.45, 10.0)), "0", "within_own_pad"),
 }
 
 
@@ -549,6 +584,167 @@ def test_native_own_pad_class_is_only_a_clean_entry(tmp_path, native_options, ca
     else:
         # Copper beyond the pad, or more beside it than one clean crossing.
         assert beyond > 0.001 or beside > 0.2 * 0.09 * 1.1
+
+
+#: Issue #9284 native cases: (pad net, zone connect_pads, zone clearance,
+#: thermal gap, spoke width, mask expansion, expected disposition). Pad: 1x1 mm
+#: rect at (10, 10) in a 6x6 mm F.Cu pour of net GND, filled by the native
+#: pcbnew zone filler (the worker itself never refills).
+_OWN_POUR_NATIVE = {
+    # The shape the fab evidence covers: thermal spokes, 0 mm expansion, the
+    # pour body a relief gap (board 01: 0.2 mm) away.
+    "thermal": ("GND", "", 0.2, 0.2, 0.3, "0", "own_pour_thermal"),
+    "thermal_gap0.3": ("GND", "", 0.2, 0.3, 0.4, "0", "own_pour_thermal"),
+    # Solid connection: untested by the fab.
+    "solid": ("GND", " yes", 0.2, 0.2, 0.3, "0", "violation"),
+    # Same-net pour not connected to the pad, 0.05 mm beside the opening.
+    "unconnected": ("GND", " no", 0.05, 0.2, 0.3, "0", "violation"),
+    # Thermal, but spokes exposed through a 0.05 mm expansion ring.
+    "thermal_exp0.05": ("GND", "", 0.2, 0.2, 0.3, "0.05", "violation"),
+    # Thermal, but the pour body 0.1 mm from the opening (inside 0.15 mm).
+    "thermal_gap0.1": ("GND", "", 0.2, 0.1, 0.3, "0", "violation"),
+    # Different-net pour 0.12 mm from the opening: a warning, as before.
+    "different_net": ("VOUT", "", 0.12, 0.2, 0.3, "0", "warning"),
+}
+
+
+def _native_fill(path, native_options):
+    """Fill the board's zones with the selected native pcbnew, in place."""
+    import subprocess
+
+    script = (
+        "import pcbnew,sys; b=pcbnew.LoadBoard(sys.argv[1]); "
+        "assert pcbnew.ZONE_FILLER(b).Fill(b.Zones()); pcbnew.SaveBoard(sys.argv[1], b)"
+    )
+    subprocess.run(
+        [*native_options["native_python_command"], "-c", script, str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+@pytest.mark.parametrize("case", sorted(_OWN_POUR_NATIVE))
+def test_native_own_pour_thermal_only_for_spokes(tmp_path, native_options, case):
+    """Issue #9284: ``own_pour_thermal`` only for a spoke-connected own pour.
+
+    The pour is filled by native pcbnew; the plotted mask and copper, read by
+    Gerbonara, must show what the class claims: nothing exposed beyond the
+    pad, and within 0.15 mm of the opening only spoke crossings.
+    """
+    from shapely.geometry import box
+
+    pad_net, connect, clearance, gap, spoke, expansion, expected = _OWN_POUR_NATIVE[case]
+    nets = {"GND": 1, "VOUT": 2}
+    body = f"""(net 1 "GND") (net 2 "VOUT")
+      (footprint "P" (layer "F.Cu") (at 10 10)
+       (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask")
+        (net {nets[pad_net]} "{pad_net}")))
+      (zone (net 1) (net_name "GND") (layer "F.Cu") (hatch edge .5)
+       (connect_pads{connect} (clearance {clearance})) (min_thickness .1)
+       (filled_areas_thickness no)
+       (fill yes (thermal_gap {gap}) (thermal_bridge_width {spoke}))
+       (polygon (pts (xy 7 7) (xy 13 7) (xy 13 13) (xy 7 13))))"""
+    path = _board(
+        tmp_path / f"{case}.kicad_pcb", body, setup=f"(pad_to_mask_clearance {expansion})"
+    )
+    # A 0.1 mm netclass clearance, so the zone clearance decides the gap.
+    path.with_suffix(".kicad_pro").write_text(
+        json.dumps(
+            {
+                "meta": {"filename": path.with_suffix(".kicad_pro").name, "version": 3},
+                "net_settings": {
+                    "classes": [{"name": "Default", "clearance": 0.1}],
+                    "meta": {"version": 4},
+                },
+            }
+        )
+    )
+    _native_fill(path, native_options)
+    result = check_mask_to_copper(
+        path, MaskCopperPolicy(0.09, "fixture", "test", "rev1", 0.15), **native_options
+    )
+    assert result.coverage == "complete", result.reasons
+    zone = [m for m in result.measurements if m.conductor_kind == "zone"]
+    assert len(zone) == 1, result.to_dict()
+    measurement = zone[0]
+    assert measurement.disposition == expected, result.to_dict()
+    assert result.passed is (expected in ("own_pour_thermal", "warning")), result.to_dict()
+    mask = read_native_gerber(native_options["artifact_dir"] / f"{case}-F_Mask.gbr")
+    copper = read_native_gerber(native_options["artifact_dir"] / f"{case}-F_Cu.gbr")
+    pad = box(9.5, 9.5, 10.5, 10.5)
+    beyond = mask.intersection(copper).difference(pad).area
+    pieces = copper.difference(mask.buffer(0.00001)).intersection(mask.buffer(0.15))
+    pieces = [p for p in getattr(pieces, "geoms", [pieces]) if p.area > 1e-6]
+    if expected == "own_pour_thermal":
+        assert measurement.pour_spokes == 4
+        assert measurement.pour_relief_gap_mm == pytest.approx(gap)
+        assert measurement.pour_spoke_width_mm == pytest.approx(spoke)
+        # The plot: nothing beyond the pad, and only four spoke crossings
+        # (each one spoke width across the 0.15 mm band) beside it.
+        assert beyond < 0.000002
+        assert len(pieces) == 4
+        assert all(p.area <= spoke * 0.15 * 1.05 for p in pieces)
+    elif case == "solid":
+        assert len(pieces) == 1 and pieces[0].area > 4 * 1.0 * 0.15 * 0.95
+    elif case == "thermal_exp0.05":
+        assert beyond > 0.001
+    elif case in ("thermal_gap0.1", "unconnected"):
+        assert sum(p.area for p in pieces) > 4 * spoke * 0.15 * 1.1
+
+
+#: Issue #9261 native corner cases: a 45-degree diagonal entry whose both
+#: authored ends sit inside a roundrect pad (r = 0.25 mm corner arcs, the
+#: issue's measured shape) and whose round cap pokes *poke* mm past the
+#: corner arc centred at (10.25, 10.25) toward corner (10.5, 10.5).
+_ROUNDRECT_POKE_NATIVE = {
+    "corner_poke0.02": 0.02,
+    "corner_poke0.05": 0.05,
+}
+
+
+@pytest.mark.parametrize("case", sorted(_ROUNDRECT_POKE_NATIVE))
+def test_native_roundrect_corner_cap_poke_is_within_own_pad(tmp_path, native_options, case):
+    """Issue #9261: a cap poking past the corner arc is ``within_own_pad``.
+
+    The issue measured a roundrect-corner cap about 0.02 mm past the corner
+    arc as the reported error; after the allowance change the entry budget
+    must cover it, from KiCad's own plot. The authored end stays strictly
+    inside the pad (0.1 mm short of the arc minus the poke), so only the
+    round cap crosses the arc.
+    """
+    from shapely.geometry import box
+
+    poke = _ROUNDRECT_POKE_NATIVE[case]
+    radius = 0.25
+    centre = (10.5 - radius, 10.5 - radius)
+    reach = radius + poke - 0.1  # cap tip lands *poke* past the arc
+    along = math.sqrt(0.5)
+    start, end = (10.0, 10.0), (centre[0] + reach * along, centre[1] + reach * along)
+    trace_uuid = "00000000-0000-0000-0000-000000000099"
+    body = f"""(net 1 "N")
+      (footprint "P" (layer "F.Cu") (at 10 10)
+       (pad "1" smd roundrect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask")
+        (roundrect_rratio 0.25) (net 1 "N")))
+      (segment (start {start[0]} {start[1]}) (end {end[0]} {end[1]}) (width .2)
+        (layer "F.Cu") (net 1) (uuid "{trace_uuid}"))"""
+    path = _board(tmp_path / f"{case}.kicad_pcb", body, setup="(pad_to_mask_clearance 0)")
+    result = check_mask_to_copper(
+        path, MaskCopperPolicy(0.09, "fixture", "test", "rev1", 0.15), **native_options
+    )
+    assert result.coverage == "complete", result.reasons
+    measurement = next(m for m in result.measurements if m.conductor_uuid == trace_uuid)
+    assert measurement.disposition == "within_own_pad", result.to_dict()
+    assert result.passed, result.to_dict()
+    # Independent oracle: only the cap lens may lie under mask beside the
+    # opening (one crossing's budget), and nothing beyond the pad's bbox.
+    copper = LineString([start, end]).buffer(0.1, quad_segs=4096)
+    mask = read_native_gerber(native_options["artifact_dir"] / f"{case}-F_Mask.gbr")
+    beyond = mask.intersection(copper).difference(box(9.5, 9.5, 10.5, 10.5)).area
+    beside = copper.difference(mask).intersection(mask.buffer(0.09)).area
+    assert beyond < 0.000002
+    assert beside <= 0.2 * 0.09 * 1.01
 
 
 def test_native_merged_bridge_exposes_third_copper_with_multiple_contributors(
@@ -1101,6 +1297,12 @@ def test_refilled_zone_fill_pinch_repairs_instead_of_dropping(monkeypatch, tmp_p
     The extraction used to drop the whole layer for such a zone
     (``invalid native object polygon``) and then flag the per-object/full-layer
     mismatch, capping every board 05 finding at a provisional warning.
+
+    The fake export supplies the full-layer unions for both copper layers, so
+    the per-object/full-layer comparison actually executes: the ``material
+    mismatch`` assertion pins the repaired geometry against the layer union
+    (falsifiable via a wrong union), and ``B.Cu`` being present but empty must
+    not false-positive.
     """
     from shapely.validation import explain_validity
 
@@ -1133,6 +1335,12 @@ def test_refilled_zone_fill_pinch_repairs_instead_of_dropping(monkeypatch, tmp_p
             rules_sha256=None,
             native_version=_QUALIFIED_VERSION,
             export_identity={},
+            # Full-layer unions consistent with the repaired payload: F.Cu is
+            # the extraction's own repair product, B.Cu is authored empty.
+            # Without these, layers defaults to {} and the per-object/full-layer
+            # comparison skips both layers, leaving the "material mismatch"
+            # assertion below vacuous (issue #9103).
+            layers={"F.Cu": repaired, "B.Cu": Polygon()},
         ),
     )
 
