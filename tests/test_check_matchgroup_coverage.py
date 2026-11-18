@@ -423,16 +423,23 @@ class TestMatchgroupJobContainer:
             None,
         )
         assert probe_idx is not None, "no kicad-cli --version probe step found"
+        # Issue #9340: the re-route + check command lives in the shared job
+        # script (2am#7561 ruling); the workflow step that calls it is what
+        # must stay after the probe.
         reroute_idx = next(
             (
                 i
                 for i, s in enumerate(steps)
-                if "check_matchgroup_coverage.py" in (s.get("run") or "")
+                if "scripts/ci/jobs/matchgroup-routing-regression.sh" in (s.get("run") or "")
             ),
             None,
         )
         assert reroute_idx is not None, "no re-route step found"
         assert probe_idx < reroute_idx
+        job_script = (
+            REPO_ROOT / "scripts" / "ci" / "jobs" / "matchgroup-routing-regression.sh"
+        ).read_text()
+        assert "check_matchgroup_coverage.py" in job_script
 
     def test_job_timeout_has_container_headroom(self):
         """Container pull + apt + real fills need more than the prior

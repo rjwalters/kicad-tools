@@ -137,17 +137,24 @@ class TestWorkflowYAML:
         )
 
     def test_job_invokes_check_routed_drc_helper_script(self, workflow: dict) -> None:
-        """Both the ordinary and native paths must invoke
-        scripts/ci/check_routed_drc.py. Pinning the call sites prevents an
-        inadvertent refactor from silently dropping the allowlist
-        comparison."""
+        """Both the ordinary and native paths must route through
+        scripts/ci/check_routed_drc_internal.py. Issue #9340: the ordinary
+        path's call lives in the shared job script the workflow calls (the
+        local gate runs the same file, 2am#7561 ruling); assert both legs.
+        Pinning the call sites prevents an inadvertent refactor from
+        silently dropping the allowlist comparison."""
         steps = workflow["jobs"][JOB_NAME]["steps"]
         run_blocks = [s.get("run", "") for s in steps if isinstance(s, dict) and "run" in s]
         joined = "\n".join(run_blocks)
-        assert "scripts/ci/check_routed_drc_internal.py" in joined, (
-            "routed-pcb-drc-check must invoke scripts/ci/check_routed_drc.py "
-            "(the helper that reads the per-board allowlist and emits "
-            "::error:: annotations)."
+        assert "scripts/ci/jobs/routed-pcb-drc-check.sh" in joined, (
+            "routed-pcb-drc-check must call scripts/ci/jobs/"
+            "routed-pcb-drc-check.sh (the shared job script)."
+        )
+        job_script = (REPO_ROOT / "scripts" / "ci" / "jobs" / "routed-pcb-drc-check.sh").read_text()
+        assert "scripts/ci/check_routed_drc_internal.py" in job_script, (
+            "scripts/ci/jobs/routed-pcb-drc-check.sh must invoke "
+            "scripts/ci/check_routed_drc_internal.py (the helper that reads "
+            "the per-board allowlist and emits ::error:: annotations)."
         )
 
     def test_job_has_short_circuit_on_no_files(self, workflow: dict) -> None:
