@@ -34,12 +34,13 @@
 # Board 05 (Issue #9033 regrade, PR #9112): the jlcpcb profiles grade
 # silk_hole_overlap as an error, and the committed artifact's pre-existing
 # geometry (6 reference designators + 7 footprint graphics over routed
-# vias) reports 13. Fresh routes clear them via the recipe's Step 7b
+# vias) reports 13. They are excepted by IDENTITY (identity_allowances
+# below, the #7270 Q3 model), not by a count, so a new non-silk error
+# cannot hide under them. Fresh routes clear them via the recipe's Step 7b
 # (kicad_tools.recipes.silk_clearance), but the committed artifact is
 # manifest-bound: re-issuing its evidence chain is tracked in #9134,
-# which also retires this entry.
-tolerances:
-  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: 13
+# which also retires these entries.
+tolerances: {}
 
 # Preserve the fabrication processes selected by the reviewed real designs.
 manufacturers:
@@ -131,6 +132,20 @@ identity_allowances:
       V3P3: 8858
       VCP: 8858
       VM: 8858
+    silk_hole_overlap:
+      "C16 (fp_line)/via at (174.400, 85.200)": 9134
+      "C2 (reference)/via at (130.880, 97.430)": 9134
+      "C4 (fp_line)/via at (130.200, 91.100)": 9134
+      "C8 (fp_line)/via at (167.400, 74.200)": 9134
+      "D1 (fp_line)/via at (133.100, 69.100)": 9134
+      "R11 (fp_line)/via at (172.600, 94.700)": 9134
+      "R11 (reference)/via at (171.500, 96.200)": 9134
+      "R12 (reference)/via at (173.400, 105.900)": 9134
+      "R2 (reference)/via at (135.800, 112.800)": 9134
+      "R4 (fp_line)/via at (131.400, 114.700)": 9134
+      "R5 (reference)/via at (161.200, 88.000)": 9134
+      "U1 (reference)/via at (160.100, 94.638)": 9134
+      "U1 (reference)/via at (160.900, 94.638)": 9134
   boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb:
     mask_to_copper:
       +3V3: 8858
