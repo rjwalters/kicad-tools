@@ -148,3 +148,42 @@ def test_different_net_via_on_the_strip_is_not_attributed_to_the_run():
         for m in result.measurements
         if m.conductor_net == "OTHER" and m.mask_side == "F.Mask"
     )
+
+
+def test_same_net_via_beside_the_run_is_not_attributed():
+    """Centre 0.6 mm off the centreline: its opening touches the strip edge only."""
+    result = _run(_run_pieces() + [_mid_via(at=(20.0, 10.6))])
+    # As on main: the via's own opening is measured, not excused.
+    assert not result.passed
+    assert any(m.disposition == "violation" and m.owner_run is None for m in result.measurements)
+
+
+def test_same_net_via_just_short_of_the_strip_is_not_attributed():
+    result = _run(_run_pieces() + [_mid_via(at=(20.0, 10.69))])
+    assert not result.passed
+    assert any(m.disposition == "violation" and m.owner_run is None for m in result.measurements)
+
+
+def test_oversize_gr_circle_tangent_to_the_strip_is_not_attributed():
+    big = ("gr_circle", "", {"F.Mask": _disk(20.0, 13.0, 3.0), "B.Mask": _disk(20.0, 13.0, 3.0)})
+    result = _run(_run_pieces() + [big])
+    assert all(m.owner_run is None for m in _near(result, (20.0, 13.0), radius=0.3))
+
+
+def test_gr_circle_beside_the_strip_is_not_attributed():
+    result = _run(_run_pieces() + [_mid_circle(at=(20.0, 10.9))])
+    assert all(m.owner_run is None for m in _near(result, (20.0, 10.9), radius=0.3))
+
+
+def test_run_track_in_a_different_net_via_opening_stays_an_error():
+    """A different-net via on the strip must not hand the run's own copper an owner."""
+    pieces = _run_pieces() + [_mid_via(net="OTHER", at=(24.0, 10.0))]
+    result = _run(pieces)
+    inside = [
+        m
+        for m in _near(result, (24.0, 10.0), radius=0.5)
+        if m.conductor_net == "PWR" and m.mask_side == "F.Mask"
+    ]
+    assert inside
+    assert {m.disposition for m in inside} == {"violation"}
+    assert all(m.owner_run is None for m in inside)

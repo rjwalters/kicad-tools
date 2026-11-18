@@ -87,9 +87,9 @@ lies within the strip tolerance of a recorded anchor point or of a piece
 already in the run's chain, seeded at anchors a same-net hole really
 stands on -- anchor flashes and end-hole rings sit within the strip
 tolerance of a recorded anchor point -- and the measurement's owner net
-becomes the run's net instead of ``null``. A same-net via or an
-anchor-size ``gr_circle`` hole standing on the strip mid-run (and its mask
-circle on the far side) is attributed through the same continuity (#9444). The run's own track (wholly
+becomes the run's net instead of ``null``. A same-net via or a
+gauge-sized ``gr_circle`` hole whose centre stands on the strip mid-run (and
+its mask circle on the far side) is attributed (#9444). The run's own track (wholly
 under its strip, or entering one of its anchors), its anchor vias, and a
 same-net pad standing on the run (the strip passes over its copper, or
 the pad is itself an anchor) measure as disposition
@@ -559,6 +559,7 @@ class _ReinforceRun:
     mask_side: str
     anchors: tuple[tuple[float, float], ...]
     confirmed_anchors: tuple[tuple[float, float], ...]
+    wire_gauge_awg: int | None = None
 
 
 def _reinforce_run_label(record: dict[str, Any]) -> str:
@@ -640,9 +641,36 @@ def _reinforce_runs(objects: dict[str, Any], wires: Any) -> list[_ReinforceRun]:
                 mask_side=mask_side,
                 anchors=tuple(anchors),
                 confirmed_anchors=confirmed,
+                wire_gauge_awg=_record_awg(record),
             )
         )
     return runs
+
+
+# Largest mid-run ``gr_circle`` a run may attribute: the anchor drill for the
+# record's gauge plus this much flash on each side (#9444). A bigger circle is
+# a board feature, not a wire-end hole, and would excuse unbounded copper.
+_MID_RUN_CIRCLE_FLASH_MM = 0.5
+_CENTRE_EPS_MM = 1e-6
+
+
+def _record_awg(record):
+    awg = record.get("wire_gauge_awg")
+    if isinstance(awg, bool) or not isinstance(awg, (int, float)):
+        return None
+    return int(awg)
+
+
+def _mid_run_circle_limit_mm(awg):
+    """Max diameter of a ``gr_circle`` hole attributable mid-run; ``None`` = never."""
+    if awg is None:
+        return None
+    from kicad_tools.physics.wire_gauge import anchor_drill_for_awg
+
+    try:
+        return anchor_drill_for_awg(awg) + 2 * _MID_RUN_CIRCLE_FLASH_MM
+    except ValueError:
+        return None
 
 
 def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs=()):
@@ -669,9 +697,9 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs
     anchors. An opening that is merely over the same net's copper elsewhere
     on the board is not continuous with any anchor flash and attributes to
     nothing (#9315). A same-net ``via`` (a layer change) or a ``gr_circle``
-    (an anchor-size hole) standing on the strip mid-run joins the run the same
-    way: its hull lies within the strip tolerance of an admitted strip piece
-    (#9444), on either mask side. An anchor-flash ``via`` or ``pad`` must also carry the
+    (a hole no wider than the record's anchor drill plus flash) joins the run
+    when its centre lies on an admitted strip piece (#9444), on either mask
+    side; a hole merely beside the strip does not. An anchor-flash ``via`` or ``pad`` must also carry the
     run's net (#9348); board graphics have none to check. Ties between records of one net go
     to the run with the nearest anchor, first recorded winning a tie, so
     attribution is deterministic. ``merged_region`` openings attribute
@@ -771,10 +799,18 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs
                 continue
             if kind == "via" and owner_net != run.net:
                 continue
+            if kind == "gr_circle":
+                limit = _mid_run_circle_limit_mm(run.wire_gauge_awg)
+                minx, miny, maxx, maxy = hull.bounds
+                if limit is None or max(maxx - minx, maxy - miny) > limit + 2 * _CENTRE_EPS_MM:
+                    continue
             if any(r is run for r, _ in candidates.get(uuid, ())):
                 continue
-            distance = min(hull.distance(other) for other in hulls)
-            if distance <= tolerance:
+            # The hole must stand ON the run: its centre lies in the admitted
+            # strip, not merely within tolerance of its edge.
+            centre = hull.centroid
+            distance = min(other.distance(centre) for other in hulls)
+            if distance <= _CENTRE_EPS_MM:
                 candidates.setdefault(uuid, []).append((run, distance))
 
     run_by_uuid: dict[str, _ReinforceRun] = {}
