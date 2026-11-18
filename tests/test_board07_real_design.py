@@ -486,6 +486,15 @@ def test_external_load_gate_and_report_scope(tmp_path, monkeypatch):
         assert validate.check(source / "sdram_demo.kicad_pcb", source, evidence) is expected
         report = json.loads((evidence / "validation.json").read_text())
         assert report["trace_capacitance_pf"][name] == pytest.approx(trace_pf)
+        # The off-path margin the OFF_PATH_TOLERANCE_MM comment tells a
+        # maintainer to re-derive from must be reported for every matched net
+        # (Issue #9216).
+        off_path = report["off_path_mm"]
+        assert off_path.keys() == report["lengths_including_vias_mm"].keys()
+        assert all(
+            isinstance(value, float) and value <= validate.OFF_PATH_TOLERANCE_MM
+            for value in off_path.values()
+        )
         estimate = report["external_load_estimates"][name]
         assert estimate["via_allowance_pf"] == 2
         assert estimate["passes"] is expected
