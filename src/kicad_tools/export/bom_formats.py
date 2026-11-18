@@ -375,6 +375,9 @@ def read_existing_lcsc_assignments(csv_path: Path) -> dict[tuple[str, str], str]
     Returns:
         A dict mapping ``(value, footprint)`` to the LCSC part number
         string.  Only rows with a non-empty LCSC value are included.
+        Rows whose value joins distinct values with ``"; "`` (merged
+        JLCPCB rows, issue #9323) additionally register each
+        constituent value, so fresh per-value items still match.
     """
     assignments: dict[tuple[str, str], str] = {}
     try:
@@ -400,6 +403,14 @@ def read_existing_lcsc_assignments(csv_path: Path) -> dict[tuple[str, str], str]
                 lcsc = (row.get(lcsc_col) or "").strip()
                 if value and footprint and lcsc:
                     assignments[(value, footprint)] = lcsc
+                    # A merged JLCPCB row joins distinct values with
+                    # "; " (issue #9323); register each constituent so
+                    # the read-back merge still finds per-value items
+                    # on regeneration.
+                    if "; " in value:
+                        for part in value.split("; "):
+                            if part:
+                                assignments[(part, footprint)] = lcsc
     except (OSError, UnicodeDecodeError, csv.Error):
         # If the file can't be read or parsed, return empty — the
         # caller will simply regenerate without merging.

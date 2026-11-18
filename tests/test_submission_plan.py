@@ -146,6 +146,44 @@ def test_quantity_is_positive_integer(inputs, quantity):
     assert not inputs["destination"].exists()
 
 
+def test_population_accepts_merged_lcsc_bom_row():
+    # JLCPCBBOMFormatter merges rows sharing an LCSC number into one line
+    # whose Comment joins the distinct values (issue #9323); the CPL keeps
+    # per-placement values, so agreement must accept a constituent value.
+    bom = csv_bytes(
+        ["Comment", "Designator", "Footprint", "LCSC Part #", "Quantity"],
+        [["Green; LED green", "D1,D2,D3", "LED_0603", "C229417", 3]],
+    )
+    cpl = csv_bytes(
+        ["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"],
+        [
+            [ref, val, "LED_0603", "1.0000mm", "2.0000mm", "0.0", "Top"]
+            for ref, val in [("D1", "Green"), ("D2", "Green"), ("D3", "LED green")]
+        ],
+    )
+    matches = sp._population(bom, cpl, ("top",), {})
+    assert [m["reference"] for m in matches] == ["D1", "D2", "D3"]
+    # Each placement records its own value, not the row's composite Comment.
+    assert [m["value"] for m in matches] == ["Green", "Green", "LED green"]
+    assert {m["catalog_id"] for m in matches} == {"C229417"}
+
+
+def test_population_rejects_value_outside_merged_row():
+    bom = csv_bytes(
+        ["Comment", "Designator", "Footprint", "LCSC Part #", "Quantity"],
+        [["Green; LED green", "D1,D2", "LED_0603", "C229417", 2]],
+    )
+    cpl = csv_bytes(
+        ["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"],
+        [
+            [ref, val, "LED_0603", "1.0000mm", "2.0000mm", "0.0", "Top"]
+            for ref, val in [("D1", "Green"), ("D2", "Blue")]
+        ],
+    )
+    with pytest.raises(sp.SubmissionError, match="value disagrees"):
+        sp._population(bom, cpl, ("top",), {})
+
+
 @pytest.mark.parametrize(
     "mutation", ["missing", "changed", "extra", "hash", "size", "source", "source-evidence"]
 )
