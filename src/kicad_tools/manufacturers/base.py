@@ -286,6 +286,14 @@ class DesignRules:
     # behaviour driven by ``min_silk_to_pad_clearance_mm``.
     silk_to_pad_danger_mm: float | None = None
     silk_to_pad_warning_mm: float | None = None
+    # Fab-graded silk-to-hole severity (Issue #9033): when set, the
+    # ``silk_hole_overlap`` rule buffers the drilled hole by this clearance
+    # and emits an **error** instead of the legacy warning.  ``None`` keeps
+    # the advisory behaviour for profiles without a recorded fab band.
+    # JLCPCB's JLCDFM reports only danger items for silkscreen-to-hole
+    # (0 warnings on both recorded boards), so its profiles set 0.0 -- the
+    # drill-overlap threshold the rule has used since #8844.
+    silk_to_hole_danger_mm: float | None = None
     min_smd_pad_clearance_mm: float | None = None
     min_pth_hole_to_track_mm: float | None = None
     min_inner_pth_hole_to_copper_mm: float | None = None
@@ -410,6 +418,7 @@ class DesignRules:
             "min_silk_to_pad_clearance_mm": self.min_silk_to_pad_clearance_mm,
             "silk_to_pad_danger_mm": self.silk_to_pad_danger_mm,
             "silk_to_pad_warning_mm": self.silk_to_pad_warning_mm,
+            "silk_to_hole_danger_mm": self.silk_to_hole_danger_mm,
             "min_smd_pad_clearance_mm": self.min_smd_pad_clearance_mm,
             "min_pth_hole_to_track_mm": self.min_pth_hole_to_track_mm,
             "min_inner_pth_hole_to_copper_mm": self.min_inner_pth_hole_to_copper_mm,

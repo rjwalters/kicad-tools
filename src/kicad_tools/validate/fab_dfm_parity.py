@@ -246,10 +246,27 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         ("silk_hole_overlap",),
         "`silk_hole_overlap` (#8844) flags silk that *overlaps* a via/PTH/NPTH drill "
         "circle, tented vias included -- a rule id under the `silkscreen` category. "
-        "Threshold is 0 mm, so a silk-to-hole gap narrower than JLCDFM's clearance "
-        "but not touching is still unchecked, and text is tested as its bounding box "
-        "rather than glyph outlines. Observed 75 danger, not reproduced against the "
-        "live tool.",
+        "Since #9033 the jlcpcb profiles set `silk_to_hole_danger_mm: 0.0` (the fab's "
+        "band for this category is danger-only: 0 warnings on both recorded boards), "
+        "which makes every finding an error at the same 0 mm threshold; other "
+        "manufacturers keep the warning. The count gap is explained, not closed -- "
+        "only aggregate fab counts are recorded, the per-item list was never "
+        "captured. Of the candidates: (a) a fab clearance > 0 mm is supported by "
+        "measurement (board 05 silk-to-drill-edge gaps of 0.005-0.287 mm report 0 "
+        "findings at 0 mm, and silk registration is ~+-0.1 mm) but no fab-published "
+        "or per-item-derived figure exists to adopt, so the threshold stays 0 mm; "
+        "(b) kct's hole set covers vias (tented included), PTH and NPTH with real "
+        "drill geometry (this repo's board 05 yields 187 holes; it is not a JLCDFM-"
+        "recorded board), with no evidence of misses; (c) counting granularity is an "
+        "untested hypothesis: this repo's board 01 has only 7 reference-designator "
+        "silk texts against 6 holes, which would make a per-(silk, hole) count "
+        "unable to reach the fab's 75 items at any threshold if the fab counts finer "
+        "units (per stroke segment or gerber feature), but board 01 is not the "
+        "board JLCDFM graded and no same-board per-item comparison is possible, so "
+        "(c) cannot be concluded from it. The only same-gerber pair recorded is "
+        "kct 16 findings vs the fab's 50 on the 4-layer 1 oz board (issue #9033, "
+        "not in-tree). For scale, board 05 reports 13 findings. "
+        "Text is still tested as its bounding box.",
     ),
     ParityRow(
         "annular_ring",

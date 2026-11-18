@@ -45,6 +45,7 @@ from kicad_tools.dev import warn_if_stale
 from kicad_tools.lvs import write_lvs_report
 from kicad_tools.recipes.gate import evaluate_pipeline_gate
 from kicad_tools.recipes.precondition import require_spec
+from kicad_tools.recipes.silk_clearance import clear_silk_over_holes
 from kicad_tools.router.rules import NET_CLASS_HIGH_SPEED, NET_CLASS_POWER, NetClassRouting
 
 # Re-export net definitions and footprint generators from generate_pcb.
@@ -4852,6 +4853,17 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # ZERO new clearance violations or the whole step is rolled back.
     print("\n13. Same-net via legalization + off-angle mid-split (gallery-ready)...")
     _finalize_signal_copper(output_path, fill_argv, _run_pour_audit)
+
+    # Step 14 (Issue #9033): clear silk the routed vias landed on.  The
+    # JLCPCB profiles grade ``silk_hole_overlap`` as an error, and the
+    # seed-42 re-route puts a via under U2's reference designator, so the
+    # regenerated bundle would fail the coverage gates on it.  Runs after
+    # the last via-producing step (13) and reads the rule's own findings,
+    # so it tracks whatever via population this run produced.
+    print("\n14. Silkscreen clearance (silk_hole_overlap, Issue #9033)...")
+    graphics_clipped, refs_moved = clear_silk_over_holes(output_path, log=print)
+    if not graphics_clipped and not refs_moved:
+        print("   no silk over holes -- nothing to clear")
 
     total_signal_nets = len([n for n in router.nets if n > 0])
     success = stats["nets_routed"] == total_signal_nets

@@ -20,6 +20,7 @@ from kicad_tools.dev import warn_if_stale
 from kicad_tools.pcb.center_sheet import centered_origin
 from kicad_tools.recipes.gate import evaluate_pipeline_gate
 from kicad_tools.recipes.precondition import require_spec
+from kicad_tools.recipes.silk_clearance import clear_silk_over_holes
 from kicad_tools.router.partial_rescue import CompletionResult, RescueConfig
 from kicad_tools.router.partial_rescue import (
     complete_unfinished_nets as shared_complete_unfinished_nets,
@@ -3834,6 +3835,23 @@ def legacy_main() -> int:
         # measure the repaired geometry).
         if routed_path.exists():
             repair_shorts_in_routed_pcb(routed_path)
+
+        # Step 7b (Issue #9033): clear silk the routed vias landed on.
+        # The JLCPCB profiles grade ``silk_hole_overlap`` as an error, so a
+        # fresh route whose vias land on generator-authored silk fails the
+        # manufacturing gates.  The committed artifact's pre-existing 13
+        # findings (6 reference designators, 7 footprint graphics) are
+        # excepted by identity in .github/routed-drc-tolerance.yml until the
+        # #9134 repair + evidence re-issue retires those entries.  Runs after the last
+        # via-producing step (7a can relocate vias; Step 7's fix-drc is
+        # disabled) and before the zone fill + DRC, reading the rule's own
+        # findings so the pass tracks whatever via population this run
+        # produced.
+        if routed_path.exists():
+            print("\nStep 7b: Silkscreen clearance (silk_hole_overlap, Issue #9033)...")
+            graphics_clipped, refs_moved = clear_silk_over_holes(routed_path, log=print)
+            if not graphics_clipped and not refs_moved:
+                print("   no silk over holes -- nothing to clear")
 
         # Step 7: Repair DRC clearance violations introduced by routing.
         # Issue #3096: tried calling fix-drc as a separate subprocess
