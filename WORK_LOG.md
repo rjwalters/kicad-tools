@@ -16,6 +16,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-18
 
+- **PR #9353**: feat: report waiver keys invalidated by pcb prune and fix-drc edits
+- **Issue #9331** (closed): Waiver keys silently orphaned when prune/fix-drc move or merge copper
+- **PR #9328**: test: pin the removed mask-copper u-band arm with discriminating geometry
+- **Issue #9310** (closed): mask_copper tests: two own-pad cases pass on pre-#9261 code (one asserts a removed arm that was already dead)
+- **PR #9354**: fix: stop board recipe sibling imports shadowing across boards in one process
+- **Issue #9351** (closed): Board recipe loader: bare `import generate_pcb` lets one board's siblings shadow another's in-process
+- **PR #9309**: ci: skip changelog check on non-changelog:skip label events
+- **Issue #8434** (closed): Changelog Fragment Check re-runs on every label change; Loom role label churn keeps it queued
 - **Issue #9334** (closed): Repair path for mask_to_copper own-pad findings (track off-centre entry, via in mask band)
 - **PR #9349**: feat: add fix-drc --only mask-copper to re-centre own-pad track entries
 - **Issue #9287** (closed): test flake: test_expensive_optimizer_unwinds_and_saves_only_raw_partial[True] fails the 4 s post-arm budget on the Test job

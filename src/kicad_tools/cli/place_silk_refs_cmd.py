@@ -24,12 +24,20 @@ Examples:
 
     # Move only the references sitting on a drilled hole (Issue #9054)
     kct place-silk-refs board.kicad_pcb --over-holes
+
+Coordinate frames: ``old/new_position_mm`` (JSON) and the text report's
+moved positions are board-relative; ``reason`` obstacle labels quote
+sheet-absolute coordinates -- the frame the KiCad editor shows -- when they
+carry any (Issue #9364).  The JSON output names the frame and carries
+``origin_mm``, so ``origin_mm + position_mm`` recovers the sheet point a
+reason quotes.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -119,6 +127,19 @@ def _print_fixed_text_conflicts(result: PlaceSilkRefsResult) -> None:
             print("    no clear position found within the search radius")
 
 
+_SHEET_COORDS_RE = re.compile(r"\(-?\d+\.\d+, -?\d+\.\d+\)")
+
+
+def _reason_frame_suffix(reason: str) -> str:
+    """Label naming the frame of coordinates quoted in a placement *reason*.
+
+    Aperture/obstacle labels embed ``({x:.3f}, {y:.3f})`` sheet-absolute
+    points (Issue #9364); a reason quoting one names its frame so it can sit
+    beside a board-relative position unnamed no longer.
+    """
+    return " [sheet coords]" if _SHEET_COORDS_RE.search(reason) else ""
+
+
 def _print_text(result: PlaceSilkRefsResult, dry_run: bool) -> None:
     if not result.placements:
         print("No visible reference designators found.")
@@ -136,7 +157,10 @@ def _print_text(result: PlaceSilkRefsResult, dry_run: bool) -> None:
                 if p.new_rotation != p.old_rotation
                 else ""
             )
-            print(f"  {p.footprint_ref}: ({ox:.3f}, {oy:.3f}) -> ({nx:.3f}, {ny:.3f}){rot}")
+            print(
+                f"  {p.footprint_ref}: ({ox:.3f}, {oy:.3f}) -> ({nx:.3f}, {ny:.3f})"
+                f" [board-relative]{rot}"
+            )
     elif not result.unplaceable and not result.under_component_fallback:
         print("No collisions found -- every visible reference is already clear.")
     else:
@@ -147,12 +171,12 @@ def _print_text(result: PlaceSilkRefsResult, dry_run: bool) -> None:
             f"\n{len(result.under_component_fallback)} reference(s) fell back under their own component body:"
         )
         for p in sorted(result.under_component_fallback, key=lambda p: p.footprint_ref):
-            print(f"  {p.footprint_ref}: {p.reason}")
+            print(f"  {p.footprint_ref}: {p.reason}{_reason_frame_suffix(p.reason)}")
 
     if result.unplaceable:
         print(f"\n{len(result.unplaceable)} reference(s) could not be placed cleanly:")
         for p in sorted(result.unplaceable, key=lambda p: p.footprint_ref):
-            print(f"  {p.footprint_ref}: {p.reason}")
+            print(f"  {p.footprint_ref}: {p.reason}{_reason_frame_suffix(p.reason)}")
 
     _print_fixed_text_conflicts(result)
 

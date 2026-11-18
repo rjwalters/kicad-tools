@@ -35,11 +35,18 @@ name: Changelog
 # `changelog:skip` runs too (on `main` they share `changelog-<PR>` with
 # `cancel-in-progress`) is a deliberate trade-off (PR #9309 round 4, finding
 # 3): label events no longer cancel each other, so two quick flips on one
-# head can finish out of order and the later-finishing run's verdict wins
-# the name rollup -- accepted because the alternative strands a `cancelled`
-# check run under the required name at that commit, which gates read as red
-# until the next push, and the operator flow is a single flip after a red
-# run.
+# head can finish out of order. The verdict itself is not taken from the
+# event payload: the job re-reads the PR's *live* labels via
+# `gh pr view` (`--pr <number> --repo <repository>`, issue #9371), so an
+# out-of-order finish still computes the PR's current label state instead of
+# the stale one its event carried. Residual window: a run that reads the
+# labels before the second flip but finishes after the later run could still
+# win the name rollup with a just-stale verdict -- the few seconds between
+# the `gh pr view` read and job completion, not the whole ~20-25 s run.
+# The alternative (a shared group with `cancel-in-progress`) was rejected on
+# purpose: it strands a `cancelled` check run under the required name at
+# that commit, which gates read as red until the next push, and the operator
+# flow is a single flip after a red run.
 #
 # `timeout-minutes` is a ceiling for a slow checkout, not an expected runtime
 # (issue #9246): one slow full-history fetch once consumed a 5-minute budget,
@@ -95,7 +102,10 @@ jobs:
 
       - name: Check this PR has a changelog fragment (or is internal)
         env:
-          # Only for a commit whose subject ends in `(#PR)` (resolved to that
-          # PR's branch issue, as the release gate does); usually unused.
+          # Required: the job reads the PR's live title/body/labels through
+          # `gh pr view` rather than the event payload (issue #9371), so the
+          # verdict always reflects the label state at run time. Also used
+          # for a commit whose subject ends in `(#PR)` (resolved to that
+          # PR's branch issue, as the release gate does).
           GH_TOKEN: ${{ github.token }}
-        run: python scripts/changelog_gap_report.py --pr-event "$GITHUB_EVENT_PATH" --base HEAD^1
+        run: python scripts/changelog_gap_report.py --pr "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" --base HEAD^1

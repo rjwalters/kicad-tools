@@ -539,9 +539,12 @@ def load_bom_csv(path: str | Path) -> BOM:
     Recognises the common column spellings (Reference/Designator, Value/Comment,
     Footprint/Package, MPN/Part Number); the LCSC column is matched
     case/punctuation-insensitively (``LCSC``, ``LCSC Part``, ``LCSC Part #``,
-    ``JLC Part``, ...).  Rows without a reference are skipped.  Raises
-    ``OSError`` / ``UnicodeDecodeError`` / ``csv.Error`` for unreadable input;
-    an input with no usable rows yields an empty BOM.
+    ``JLC Part``, ...).  Rows without a reference are skipped.  A
+    comma-separated Reference/Designator cell (the grouped-row shape
+    ``bom_jlcpcb.csv`` writes) expands to one item per reference, each
+    sharing the row's value/footprint/LCSC/MPN.  Raises ``OSError`` /
+    ``UnicodeDecodeError`` / ``csv.Error`` for unreadable input; an input with
+    no usable rows yields an empty BOM.
     """
     items: list[BOMItem] = []
     with open(path, newline="", encoding="utf-8-sig") as f:
@@ -580,15 +583,18 @@ def load_bom_csv(path: str | Path) -> BOM:
             )
 
             if reference:
-                items.append(
-                    BOMItem(
-                        reference=reference,
-                        value=value,
-                        footprint=footprint,
-                        lib_id="",
-                        lcsc=lcsc,
-                        mpn=mpn,
+                for ref in (part.strip() for part in reference.split(",")):
+                    if not ref:
+                        continue
+                    items.append(
+                        BOMItem(
+                            reference=ref,
+                            value=value,
+                            footprint=footprint,
+                            lib_id="",
+                            lcsc=lcsc,
+                            mpn=mpn,
+                        )
                     )
-                )
 
     return BOM(items=items, source=str(path))

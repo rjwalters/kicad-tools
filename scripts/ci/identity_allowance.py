@@ -31,7 +31,10 @@ Allowance = dict[tuple[str, str], int]
 #: UUIDs) rather than net names, so their allowance identity is the ``nets``
 #: signature (Issue #8957: those refs are re-minted by every synthetic-board
 #: regeneration, but the net signature is stable run to run).
-NET_IDENTITY_RULES = frozenset({"physical_copper_gap"})
+#: Issue #8858: ``mask_to_copper`` joins them -- its ``items`` are the opening
+#: and conductor UUIDs the native geometry pass re-mints per regeneration,
+#: while the violation's ``nets`` (owner pad + exposed conductor) reproduce.
+NET_IDENTITY_RULES = frozenset({"physical_copper_gap", "mask_to_copper"})
 
 
 def violation_identity(violation: dict[str, Any]) -> str:
