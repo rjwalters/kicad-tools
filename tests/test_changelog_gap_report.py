@@ -677,3 +677,81 @@ def test_cli_pr_event_mode_checks_the_pr_commits(tmp_path: Path, monkeypatch, ca
     _git(tmp_path, "commit", "-q", "-am", "fix(router): cite the epic")
     assert gap_report.main(args) == 0
     assert "RESULT: PASS" in capsys.readouterr().out
+
+
+def test_cli_pr_mode_reads_live_labels_via_gh(tmp_path: Path, monkeypatch, capsys) -> None:
+    """``--pr N --repo OWNER/NAME`` evaluates the PR's *live* state (issue #9371).
+
+    The Changelog workflow passes these flags instead of ``--pr-event``, so a
+    run finishing out of order after a `changelog:skip` flip still computes
+    the label state current at its read rather than the stale event payload.
+    A user-visible PR with no fragment and a `Closes` body fails without the
+    label and passes with it -- here the label arrives through the stubbed
+    ``gh pr view`` response, proving it flows from the live read. A failed
+    ``gh pr view`` exits 2 (the job goes red, fails closed).
+    """
+    import json
+
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _git(tmp_path, "config", "user.email", "t@example.com")
+    _git(tmp_path, "config", "user.name", "t")
+    (tmp_path / "CHANGELOG.md").write_text("# Changelog\n\n## [Unreleased]\n")
+    (tmp_path / "changelog.d").mkdir()
+    (tmp_path / "changelog.d" / "README.md").write_text("x\n")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "chore: base")
+    _git(tmp_path, "commit", "-q", "--allow-empty", "-m", "fix: q")
+    monkeypatch.setattr(gap_report, "REPO_ROOT", tmp_path)
+    gh_json = json.dumps(
+        {
+            "number": 5,
+            "title": "fix: q",
+            "body": "Closes #900",
+            "labels": [{"name": "changelog:skip"}],
+            "author": {"login": "someone"},
+            "headRefName": "feature/issue-900",
+        }
+    )
+    seen: list[list[str]] = []
+    real_run = gap_report._run
+
+    def fake_run(cmd: list[str], check: bool = True) -> str | None:
+        if cmd[:2] != ["gh", "pr"]:
+            return real_run(cmd, check=check)
+        seen.append(cmd)
+        return gh_json
+
+    monkeypatch.setattr(gap_report, "_run", fake_run)
+    args = [
+        "--pr",
+        "5",
+        "--repo",
+        "owner/repo",
+        "--base",
+        "HEAD^1",
+        "--changelog",
+        str(tmp_path / "CHANGELOG.md"),
+        "--fragments-dir",
+        str(tmp_path / "changelog.d"),
+    ]
+
+    assert gap_report.main(args) == 0
+    out = capsys.readouterr().out
+    assert "RESULT: PASS" in out
+    assert "changelog:skip" in out
+    assert seen == [
+        [
+            "gh",
+            "pr",
+            "view",
+            "5",
+            "--json",
+            "number,title,body,labels,author,headRefName",
+            "--repo",
+            "owner/repo",
+        ]
+    ]
+
+    monkeypatch.setattr(gap_report, "_run", lambda cmd, check=True: None)
+    assert gap_report.main(args) == 2
+    assert "`gh pr view 5` failed" in capsys.readouterr().err
