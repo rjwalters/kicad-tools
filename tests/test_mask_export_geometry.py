@@ -1,5 +1,6 @@
 """Independent native-export comparisons and fail-closed Gerber controls."""
 
+import math
 import uuid
 from pathlib import Path
 
@@ -169,6 +170,32 @@ def test_native_advanced_layer_matches_independent_gerber(tmp_path, case):
         center = Point(10, 10)
         assert actual.layers["F.Mask"].contains(center)
         assert actual.layers["F.Cu"].contains(center)
+
+
+def test_native_round_pads_stay_in_the_independent_oracle(tmp_path):
+    # Issue #9232: KiCad 10.0.6 plots a round pad -- an obround with equal
+    # width and height -- as a zero-length line with a width, which
+    # gerbonara reports as zero-size, so the oracle used to drop the pad
+    # and native comparisons could pass vacuously. The circle and the
+    # equal-sided oval must both open the mask at their full pad area.
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    if find_kicad_cli() is None:
+        pytest.skip("native KiCad required")
+    pytest.importorskip("gerbonara", minversion="1.6.3")
+    path = _board(
+        tmp_path / "round.kicad_pcb",
+        """(footprint "Round" (layer "F.Cu") (at 10 10)
+      (pad "1" smd circle (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask"))
+      (pad "2" smd oval (at 2 0) (size 1.7 1.7) (layers "F.Cu" "F.Mask")))""",
+    )
+    artifact = tmp_path / "export"
+    actual = inspect_exported_mask_geometry(path, artifact_dir=artifact)
+    assert actual.complete, actual.unsupported
+    opening = read_native_gerber(artifact / "round-F_Mask.gbr")
+    expected = math.pi * (0.5**2 + 0.85**2)
+    assert opening.area == pytest.approx(expected, abs=1e-5)
+    assert actual.layers["F.Mask"].area == pytest.approx(expected, abs=1e-5)
 
 
 @pytest.mark.parametrize("command", ["%TD*ZZignored*%", "%ADD10C,1X-1*%", "%TDunknown*%"])

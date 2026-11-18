@@ -130,6 +130,23 @@ def test_stranded_pour_unknown_is_unverified(
     assert "stranded-pour check" in out
 
 
+# Issue #9115: this test times out under CI's global ``--timeout=60`` on slow
+# runners. Phase timings measured on the dispatch host (``--no-cov``, single
+# test, no ``-n``, C++ backend built) show the cost is the route itself, not
+# the native tail: 5 unbounded runs 10.6/8.7/7.9/7.8/7.6 s and 5 runs under
+# CI's ``KCT_NATIVE_MAX_CONCURRENCY=2`` 17.6/24.1/11.3/9.5/9.2 s (the routing
+# phase alone ranged 6.5-21.1 s with load, ~3x), while the real post-route
+# kicad-cli DRC cost only 1.1-2.7 s uncontended and the zone fill is a no-op
+# (the fixture board has no zones). Under ``KCT_NATIVE_MAX_CONCURRENCY=1``
+# with a competing 20 s slot-holder the DRC phase reached 8.5-14.8 s but
+# 6.9-12.8 s of that was permit queue wait, which the gate credits back to
+# the armed pytest-timeout deadline (#5572/#6716) -- so queueing alone cannot
+# trip the cap. Stubbing the DRC (the #6644 remedy next door) would save only
+# ~1-3 s and break the ``rc == 0`` intent; the smallest honest fix is this
+# evidence-sized override. 180 s follows the #5573 convention
+# (tests/test_fill_order_sensitivity_6115.py, tests/router/mesh/test_negotiation.py)
+# and leaves ~7x headroom over the worst measured own-work sample (24.1 s).
+@pytest.mark.timeout(180)
 def test_stranded_pour_unknown_ignored_when_pads_are_advisory(
     tmp_path, capsys, stranded_pour_unknown
 ) -> None:

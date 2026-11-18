@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -486,6 +486,10 @@ def _benchmark_reduction(backend_module: any, size: int = 10_000_000) -> float:
     # Create test array
     rng = np.random.default_rng(42)
     data_np = rng.random(size).astype(np.float32)
+
+    # The two branches assign different array flavors (MLX array vs NumPy
+    # ndarray); all downstream use is duck-typed reductions (issue #9241).
+    arr: Any
 
     if hasattr(backend_module, "_mx"):
         import mlx.core as mx

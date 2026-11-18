@@ -933,16 +933,18 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
 
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
     from kicad_tools.core.schematic_uuids import UuidMinter, uuids_in_text
-    from kicad_tools.manufacturers import get_profile
     from kicad_tools.router.clearance_kernel import (
         CLEARANCE_EPSILON_MM,
         KSegment,
         KVia,
         copper_gap,
     )
-    from kicad_tools.router.via_clearance import same_net_pad_gap_acceptable
+    from kicad_tools.router.via_clearance import (
+        same_net_band_edges,
+        same_net_band_seat_ok,
+        same_net_trace_band_clear,
+    )
     from kicad_tools.validate.clearance_shapes import pad_shape as kernel_pad_shape
-    from kicad_tools.validate.rules.physical_gap import fab_gap_policy_from_entry
     from kicad_tools.zones.pour_bridge import BridgeSide, plan_via_hop_bridge
 
     text = pcb_path.read_text()
@@ -1033,18 +1035,10 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         smd_bboxes_by_net.setdefault(pnet, []).append(
             (min(xs) - cr, min(ys) - cr, max(xs) + cr, max(ys) + cr)
         )
-    # Issue #8975: the same-net band edges the fab-view grader resolves for
-    # this board's stackup (jlcpcb ``4layer_1oz``): the pad population's
-    # error edge grades via-annulus-to-SMD-pad slits, the trace population's
-    # grades annulus/segment pairs (measured required 0.1016 on the first
-    # band-wired regen).  Resolved from the profile table, never literals,
-    # so the repair pass's acceptance bands match the checker by
-    # construction (the stitcher's reasoning, #8957).  A missing entry
-    # disables the band guards (0.0) rather than guessing an edge.
-    _dfm_entry = get_profile("jlcpcb").get_dfm_entry(4, 1.0, 0.5)
-    _gap_policy = fab_gap_policy_from_entry(_dfm_entry) if _dfm_entry else None
-    SAME_NET_PAD_GAP_MM = _gap_policy.pad.error_edge_mm if _gap_policy else 0.0
-    SAME_NET_TRACE_GAP_MM = _gap_policy.trace.error_edge_mm if _gap_policy else 0.0
+    # Issue #8975 / #9150: the same-net band edges the fab-view grader
+    # resolves for this board's stackup, from the one shared resolver (never
+    # literals; a missing profile entry disables the band, 0.0).
+    SAME_NET_PAD_GAP_MM, SAME_NET_TRACE_GAP_MM = same_net_band_edges("jlcpcb", 4, 1.0, 0.5)
 
     # Segments: (geom, net, layer)
     seg_index: list[tuple] = []
@@ -1184,39 +1178,31 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         for geom, snet, _lay in seg_index:
             if snet != net and vgeom.distance(geom) < _pair_clear(net, snet):
                 return False
-            # Issue #8975: same-net slit band (the annulus exists on every
-            # layer, so any-layer same-net copper counts), graded on the
-            # trace population's edge; overlap is one copper union.
-            # ``+ 1.5e-3`` covers both sides' 3-decimal write rounding so a
-            # seat accepted here cannot land a hair under the edge on disk.
-            if snet == net and 1e-6 < vgeom.distance(geom) < SAME_NET_TRACE_GAP_MM + 1.5e-3:
-                return False
         for pt, vnet, radius, drill_r in via_index:
             if pt.distance(vpt) < MIN_HOLE_TO_HOLE + VIA_DRILL_R + drill_r:
                 return False
             if vnet != net and vgeom.distance(pt.buffer(radius)) < _pair_clear(net, vnet):
                 return False
-            # Issue #8975: same-net annulus-to-annulus slit band.
-            if (
-                vnet == net
-                and 1e-6 < vgeom.distance(pt.buffer(radius)) < SAME_NET_TRACE_GAP_MM + 1.5e-3
-            ):
-                return False
-        # Issue #8975: fab-view slit band vs same-net SMD pads.  A via seated
-        # a hair outside its own pad leaves two wedge-shaped notches of air
-        # beside the connecting stub, which the fab-view
-        # ``physical_copper_gap`` grading reports as errors regardless of
-        # nets (#8938).  Reject the (0, edge) band; touching/overlapping
-        # would be one copper union and at/beyond the edge is not a finding,
-        # but the annulus-level via-in-pad ban above already rejects every
-        # overlapping seat at this site, so in practice the ladder walks
-        # outward to the first rung at/beyond the fab error edge.  No-op
-        # when the resolved edge is 0 (fab ships no pad_spacing table).
-        if not same_net_pad_gap_acceptable(
-            vx, vy, 2 * VIA_R, smd_bboxes_by_net.get(net), SAME_NET_PAD_GAP_MM
-        ):
-            return False
-        return True
+        # Issue #8975 / #9150: fab-view same-net slit band, the one shared
+        # predicate.  The annulus exists on every layer, so any-layer
+        # same-net copper counts (segments + via annuli, trace population's
+        # edge); same-net SMD pads grade on the pad population's edge.  A
+        # via seated a hair outside its own pad leaves wedge-shaped notches
+        # of air that the fab-view ``physical_copper_gap`` grading reports
+        # regardless of nets (#8938).  The via-in-pad ban above already
+        # rejects every overlapping seat, so the ladder walks outward to the
+        # first rung at/beyond the fab error edge.
+        same_net_copper = [geom for geom, snet, _lay in seg_index if snet == net]
+        same_net_copper += [pt.buffer(radius) for pt, vnet, radius, _dr in via_index if vnet == net]
+        return same_net_band_seat_ok(
+            vx,
+            vy,
+            2 * VIA_R,
+            same_net_copper,
+            smd_bboxes_by_net.get(net),
+            SAME_NET_PAD_GAP_MM,
+            SAME_NET_TRACE_GAP_MM,
+        )
 
     def _path_ok(
         net: str,
@@ -1240,26 +1226,16 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         for geom, snet, lay in seg_index:
             if snet != net and lay == layer and path.distance(geom) < _pair_clear(net, snet):
                 return False
-            # Issue #8975: same-net slit band on the path's own layer, on
-            # the trace population's edge (+ the two-sided write-rounding
-            # guard) -- a stub/bridge leg grazing own-net copper at a
-            # sub-edge gap is a fab-view finding; overlap is one union.
-            if (
-                snet == net
-                and lay == layer
-                and 1e-6 < path.distance(geom) < SAME_NET_TRACE_GAP_MM + 1.5e-3
-            ):
-                return False
         for pt, vnet, radius, _drill_r in via_index:
             if vnet != net and path.distance(pt.buffer(radius)) < _pair_clear(net, vnet):
                 return False
-            # Issue #8975: same-net annulus-to-path slit band.
-            if (
-                vnet == net
-                and 1e-6 < path.distance(pt.buffer(radius)) < SAME_NET_TRACE_GAP_MM + 1.5e-3
-            ):
-                return False
-        return True
+        # Issue #8975 / #9150: same-net slit band on the path's own layer
+        # (segments) plus annuli (every layer) on the trace population's
+        # edge -- a stub/bridge leg grazing own-net copper at a sub-edge gap
+        # is a fab-view finding; overlap is one union.
+        same_net_copper = [geom for geom, snet, lay in seg_index if snet == net and lay == layer]
+        same_net_copper += [pt.buffer(radius) for pt, vnet, radius, _dr in via_index if vnet == net]
+        return same_net_trace_band_clear(path, same_net_copper, SAME_NET_TRACE_GAP_MM)
 
     directions = [(math.cos(a * math.pi / 4.0), math.sin(a * math.pi / 4.0)) for a in range(8)]
     # Near offsets first (the BGA diagonal hollow sits at 0.898 mm); the

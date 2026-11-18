@@ -26,6 +26,18 @@ Advisory-rule classification (issue #3074):
     standalone ``kct check`` CLI still reports the unfiltered count, so a
     PR may see ``kct check`` report N+1 errors while CI counts N.
 
+Identity-keyed allowances (issue #8858):
+    Boards whose committed PCB carries a reviewed residual finding
+    population are excepted by IDENTITY, not by count: an
+    ``identity_allowances:`` entry in ``.github/routed-drc-tolerance.yml``
+    names a ``(rule_id, net signature)`` plus a tracking issue, the gate counts only blocking findings no entry
+    covers, and an entry whose finding stops firing fails the gate as
+    stale until deleted (the #7270 Q3 operator ruling, shared with
+    ``check_diffpair_coverage.py`` / ``check_matchgroup_coverage.py`` via
+    ``scripts/ci/identity_allowance.py``).  ``mask_to_copper`` -- default-on
+    under ``--mfr`` since #8849 -- is judged this way since #8858 removed
+    this gate's ``--skip``; the YAML count allowlist stays empty.
+
 Exit codes:
     0 -- All inputs within tolerance (job passes).
     1 -- Tool failure (allowlist parse error, kct check crash, etc.).
@@ -42,7 +54,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import yaml
 
@@ -63,6 +75,12 @@ import yaml
 # import works whether the gate is launched as ``scripts/ci/check_routed_drc.py``
 # or imported as a module by the test suite.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from identity_allowance import (  # noqa: E402
+    error_identities,
+    format_stale,
+    stale_entries,
+    unallowed_findings,
+)
 from net_class_map_resolver import (  # noqa: E402
     count_blocking_errors,
     resolve_net_class_map_sidecar,
@@ -70,6 +88,52 @@ from net_class_map_resolver import (  # noqa: E402
 
 DEFAULT_ALLOWLIST = Path(".github/routed-drc-tolerance.yml")
 DEFAULT_MANUFACTURER = "jlcpcb"
+
+
+def _is_advisory(rule: str) -> bool:
+    """``connectivity`` and friends are reported but never block (Issue #4008)."""
+    from kicad_tools.validate.checker import DRCChecker
+
+    return rule in DRCChecker.ADVISORY_RULE_IDS
+
+
+class IdentityOutcome(NamedTuple):
+    """What an identity allowance did to one board's blocking count (#8858).
+
+    ``raw_blocking`` is the advisory-filtered count before any allowance;
+    ``unallowed`` the blocking findings no ``(rule, identity)`` entry covers
+    (``identity_allowance.unallowed_findings`` shape); ``stale`` the entries
+    whose finding no longer occurs (``stale_entries`` shape).  All three are
+    trivially empty when no allowance applies to the board.
+    """
+
+    raw_blocking: int
+    applied: bool
+    unallowed: list[tuple[str, str]]
+    stale: list[tuple[str, str, int]]
+
+
+def identity_outcome(
+    data: dict[str, Any], allowance: dict[tuple[str, str], int] | None
+) -> IdentityOutcome:
+    """Apply *allowance* to a parsed ``kct check`` payload (#8858).
+
+    Returns the raw advisory-filtered blocking count, whether the allowance
+    was actually applied, the blocking findings no entry covers, and the
+    entries whose finding no longer fires.  A payload without a
+    ``violations`` list (legacy summary-only reports) cannot be judged by
+    identity, so ``applied`` is False and the caller falls back to the raw
+    count -- failing closed, never silently excusing.
+    """
+    blocking, _advisory = count_blocking_errors(data)
+    if allowance is None:
+        return IdentityOutcome(blocking, False, [], [])
+    violations = data.get("violations")
+    if not isinstance(violations, list):
+        return IdentityOutcome(blocking, False, [], [])
+    unallowed = unallowed_findings(allowance, violations, advisory=_is_advisory)
+    stale = stale_entries(allowance, error_identities(violations))
+    return IdentityOutcome(blocking, True, unallowed, stale)
 
 
 def load_allowlist(allowlist_path: Path) -> dict[str, int]:
@@ -185,6 +249,103 @@ def load_manufacturers(allowlist_path: Path) -> dict[str, str]:
     return result
 
 
+def load_identity_allowances(allowlist_path: Path) -> dict[str, dict[tuple[str, str], int]]:
+    """Load optional per-board identity allowances from the allowlist YAML.
+
+    Issue #8858: boards whose committed PCB carries a reviewed residual
+    finding population (``mask_to_copper`` since it became default-on under
+    ``--mfr``) are excepted by IDENTITY, never by count -- the #7270 Q3
+    operator ruling shared with ``check_diffpair_coverage.py`` /
+    ``check_matchgroup_coverage.py`` via ``identity_allowance.py``.  The
+    schema is a third top-level mapping so the historic ``tolerances:`` /
+    ``manufacturers:`` semantics stay untouched::
+
+        identity_allowances:
+          boards/<group>/<board>/output/<name>_routed.kicad_pcb:
+            <rule_id>:
+              <net signature>: <tracking issue>
+
+    The ``(rule_id, net signature)`` identity is exactly
+    ``identity_allowance.violation_identity``'s keying for
+    :data:`identity_allowance.NET_IDENTITY_RULES` -- a violation's sorted
+    ``/``-joined net names -- so a plain net like ``GND`` is its own
+    signature.  The gate counts only blocking findings no entry covers,
+    and an entry whose finding stops firing fails the gate as stale until
+    deleted.
+
+    Args:
+        allowlist_path: Path to the YAML file.  Missing file or absent
+            ``identity_allowances:`` key both return an empty mapping
+            (every board keeps the strict count-only verdict).
+
+    Returns:
+        Mapping of repo-relative PCB path ->
+        ``{(rule_id, identity): tracking issue}``.
+
+    Raises:
+        ValueError: If the file exists but is malformed at the
+            ``identity_allowances:`` key.
+    """
+    if not allowlist_path.exists():
+        return {}
+
+    try:
+        data = yaml.safe_load(allowlist_path.read_text())
+    except yaml.YAMLError as e:
+        raise ValueError(f"Malformed allowlist YAML at {allowlist_path}: {e}") from e
+
+    if data is None or not isinstance(data, dict):
+        return {}
+
+    raw = data.get("identity_allowances", {})
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"Allowlist {allowlist_path} 'identity_allowances' field must be a mapping, "
+            f"got {type(raw).__name__}"
+        )
+
+    result: dict[str, dict[tuple[str, str], int]] = {}
+    for board_key, rules in raw.items():
+        if not isinstance(board_key, str):
+            raise ValueError(
+                f"Allowlist {allowlist_path}: identity_allowances key {board_key!r} "
+                f"must be a string path"
+            )
+        if not isinstance(rules, dict):
+            raise ValueError(
+                f"Allowlist {allowlist_path}: identity_allowances entry for {board_key!r} "
+                f"must be a rule mapping, got {type(rules).__name__}"
+            )
+        entries: dict[tuple[str, str], int] = {}
+        for rule_id, identities in rules.items():
+            if not isinstance(rule_id, str):
+                raise ValueError(
+                    f"Allowlist {allowlist_path}: rule key {rule_id!r} for {board_key!r} "
+                    f"must be a string rule_id"
+                )
+            if not isinstance(identities, dict):
+                raise ValueError(
+                    f"Allowlist {allowlist_path}: rule {rule_id!r} for {board_key!r} "
+                    f"must be an identity mapping, got {type(identities).__name__}"
+                )
+            for identity, issue in identities.items():
+                if not isinstance(identity, str):
+                    raise ValueError(
+                        f"Allowlist {allowlist_path}: identity key {identity!r} under "
+                        f"{board_key!r}/{rule_id!r} must be a string net signature"
+                    )
+                if not isinstance(issue, int) or isinstance(issue, bool) or issue <= 0:
+                    raise ValueError(
+                        f"Allowlist {allowlist_path}: tracking issue for "
+                        f"{board_key!r}/{rule_id!r}/{identity!r} must be a positive "
+                        f"integer, got {issue!r}"
+                    )
+                entries[(rule_id, identity)] = issue
+        result[board_key] = entries
+
+    return result
+
+
 def _count_blocking_errors(data: dict[str, Any]) -> tuple[int, dict[str, int]]:
     """Filter advisory rules out of a ``kct check --format json`` payload.
 
@@ -200,7 +361,11 @@ def _count_blocking_errors(data: dict[str, Any]) -> tuple[int, dict[str, int]]:
     return count_blocking_errors(data)
 
 
-def count_errors(pcb_path: Path, mfr: str = DEFAULT_MANUFACTURER) -> tuple[int, dict[str, int]]:
+def count_errors(
+    pcb_path: Path,
+    mfr: str = DEFAULT_MANUFACTURER,
+    allowance: dict[tuple[str, str], int] | None = None,
+) -> tuple[int, dict[str, int], IdentityOutcome]:
     """Run ``kct check`` and return the (blocking) error count.
 
     Advisory-rule violations (per :attr:`DRCChecker.ADVISORY_RULE_IDS`,
@@ -208,6 +373,17 @@ def count_errors(pcb_path: Path, mfr: str = DEFAULT_MANUFACTURER) -> tuple[int, 
     gate's verdict matches the audit pipeline's blocking-vs-advisory
     classification.  Advisory findings are returned separately so the gate
     can still surface them in diagnostic output without gating on them.
+
+    Issue #8858: the historic ``--skip mask_to_copper`` is GONE.  The rule
+    is default-on under ``--mfr`` and the release boards' residual
+    ``mask_to_copper`` population is excepted by IDENTITY (the YAML's
+    ``identity_allowances:``, see :func:`load_identity_allowances`)
+    instead -- a covered finding never
+    counts against the gate, a net that starts carrying a new mask finding
+    fails it, and an entry whose finding stops firing goes stale and fails
+    the gate until deleted (the #7270 Q3 model, the same one the
+    diffpair/matchgroup coverage gates use).  Pass ``allowance`` to apply
+    one; ``None`` (the default) counts every blocking finding.
 
     Net-class-map awareness (Issue #3151):
         ``kct check``'s diff-pair (``diffpair_length_skew``,
@@ -231,12 +407,19 @@ def count_errors(pcb_path: Path, mfr: str = DEFAULT_MANUFACTURER) -> tuple[int, 
         mfr: Manufacturer-profile name to pass via ``--mfr`` (defaults to
             ``DEFAULT_MANUFACTURER`` = "jlcpcb").  Per-board overrides
             come from ``load_manufacturers``.
+        allowance: Optional ``{(rule_id, identity): tracking_issue}`` map
+            (an ``identity_allowances:`` entry, see
+            :func:`load_identity_allowances`) to judge blocking findings by
+            identity.
 
     Returns:
-        Tuple ``(blocking_errors, advisory_by_rule)``.  ``blocking_errors``
-        is what the gate compares to the per-board allowlist;
-        ``advisory_by_rule`` maps each advisory ``rule_id`` to its
-        error-severity count for diagnostic surfacing.
+        Tuple ``(blocking_errors, advisory_by_rule, identity)``.
+        ``blocking_errors`` is what the gate compares to the per-board
+        allowlist -- with an ``allowance`` applied it is the count of
+        findings no entry covers.  ``advisory_by_rule`` maps each advisory
+        ``rule_id`` to its error-severity count for diagnostic surfacing.
+        ``identity`` is the :class:`IdentityOutcome` the verdict messages
+        and the staleness arm read.
 
     Raises:
         RuntimeError: If kct check fails to run (exit code 1) or emits
@@ -250,10 +433,6 @@ def count_errors(pcb_path: Path, mfr: str = DEFAULT_MANUFACTURER) -> tuple[int, 
         str(pcb_path),
         "--mfr",
         mfr,
-        # Issue #8842: mask_to_copper is default-on under --mfr but has no baseline
-        # in this gate; skipped until the #8839 threshold table lands.
-        "--skip",
-        "mask_to_copper",
         "--errors-only",
         "--format",
         "json",
@@ -295,9 +474,13 @@ def count_errors(pcb_path: Path, mfr: str = DEFAULT_MANUFACTURER) -> tuple[int, 
         ) from e
 
     try:
-        return _count_blocking_errors(data)
+        outcome = identity_outcome(data, allowance)
     except RuntimeError as e:
         raise RuntimeError(f"{e} (source: {pcb_path})") from e
+
+    _blocking, advisory_by_rule = count_blocking_errors(data)
+    blocking = len(outcome.unallowed) if outcome.applied else outcome.raw_blocking
+    return blocking, advisory_by_rule, outcome
 
 
 def annotate_error(file: str, message: str) -> None:
@@ -357,7 +540,10 @@ def _format_advisory_suffix(advisory_by_rule: dict[str, int]) -> str:
 
 
 def check_file(
-    pcb_path: Path, allowed: int, mfr: str = DEFAULT_MANUFACTURER
+    pcb_path: Path,
+    allowed: int,
+    mfr: str = DEFAULT_MANUFACTURER,
+    allowance: dict[tuple[str, str], int] | None = None,
 ) -> tuple[bool, str, int]:
     """Check a single PCB against its allowed error count.
 
@@ -367,6 +553,14 @@ def check_file(
     violation list emitted by ``kct check --format json``.  This mirrors
     the audit pipeline's blocking-vs-advisory classification.
 
+    Issue #8858: with an ``allowance``, the compared count is the blocking
+    findings no ``(rule, identity)`` entry covers (see
+    :func:`count_errors`), and an allowance entry whose finding no longer
+    fires is STALE -- the check fails with :func:`format_stale` output
+    telling the author to delete it, the same ratchet as the coverage
+    gates (#7367).  Without one, every blocking finding counts, exactly
+    as before this mechanism existed.
+
     Args:
         pcb_path: Path to a ``.kicad_pcb`` file.
         allowed: Maximum (blocking) error count this PCB may report before
@@ -374,20 +568,43 @@ def check_file(
             being compared, so a board listed at ``allowed=4`` with
             ``4 blocking + N connectivity`` passes regardless of ``N``.
         mfr: Manufacturer-profile name to pass via ``--mfr``.
+        allowance: Optional identity allowance (an
+            ``identity_allowances:`` entry for this board) to apply.
 
     Returns:
         ``(passed, message, errors)`` tuple. ``passed`` is True if
-        ``errors <= allowed`` (advisory-filtered count).  ``message`` is a
+        ``errors <= allowed`` (advisory-filtered, allowance-applied
+        count) and no allowance entry is stale. ``message`` is a
         human-readable summary suitable for both stdout and GitHub
         annotation; when advisory violations are present it includes a
         ``[advisory (excluded from gate): ...]`` suffix so reviewers see
-        them.  ``errors`` is the blocking-only count so callers compute
-        drift slack against the gate's actual floor.
+        them. ``errors`` is the verdict's count so callers compute drift
+        slack against the gate's actual floor.
     """
-    errors, advisory_by_rule = count_errors(pcb_path, mfr=mfr)
+    errors, advisory_by_rule, outcome = count_errors(pcb_path, mfr=mfr, allowance=allowance)
     advisory_suffix = _format_advisory_suffix(advisory_by_rule)
+
+    if outcome.stale:
+        msg = (
+            f"Stale identity allowance: {format_stale(outcome.stale)}. "
+            f"Delete the entry from the identity_allowances block of "
+            f".github/routed-drc-tolerance.yml -- the repair it tracked "
+            f"landed."
+            f"{advisory_suffix}"
+        )
+        return False, msg, errors
+
+    allowed_count = outcome.raw_blocking - errors if outcome.applied else 0
     if errors <= allowed:
-        if allowed == 0:
+        if outcome.applied:
+            msg = (
+                f"OK: {pcb_path} -- {errors} unallowed blocking error(s) "
+                f"(--mfr {mfr}; {allowed_count} identity-allowed finding(s) "
+                f"excluded by the identity_allowances block, each entry "
+                f"citing its tracking issue)."
+                f"{advisory_suffix}"
+            )
+        elif allowed == 0:
             msg = f"OK: {pcb_path} -- 0 errors (strict gate, --mfr {mfr}).{advisory_suffix}"
         else:
             msg = (
@@ -398,7 +615,17 @@ def check_file(
             )
         return True, msg, errors
 
-    if allowed == 0:
+    if outcome.applied:
+        msg = (
+            f"DRC errors detected by `kct check --mfr {mfr} --errors-only`: "
+            f"{errors} blocking error(s) outside this board's identity "
+            f"allowance: {outcome.unallowed}. Boards NOT in "
+            f".github/routed-drc-tolerance.yml must report 0 unallowed "
+            f"errors. Either fix the routing or, if grandfathering is "
+            f"justified, add an explicit identity_allowances entry with "
+            f"reviewer sign-off.{advisory_suffix}"
+        )
+    elif allowed == 0:
         msg = (
             f"DRC errors detected by `kct check --mfr {mfr} --errors-only`: "
             f"{errors} blocking error(s) (advisory rules excluded). Boards NOT "
@@ -485,6 +712,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         allowlist = load_allowlist(Path(args.allowlist))
         manufacturers = load_manufacturers(Path(args.allowlist))
+        identity_allowances = load_identity_allowances(Path(args.allowlist))
     except ValueError as e:
         print(f"::error::{e}", flush=True)
         return 1
@@ -518,6 +746,11 @@ def main(argv: list[str] | None = None) -> int:
         # every file in this invocation.  Without it, the per-board YAML value
         # (absent == strict-0) applies -- the committed-artifact ratchet.
         allowed = args.allow if args.allow is not None else allowlist.get(lookup_key, 0)
+        # Issue #8858: boards with a net-signature identity allowance are
+        # judged by identity (the YAML's identity_allowances block) on top
+        # of the strict-0 count; every other board counts every blocking
+        # finding.
+        allowance = identity_allowances.get(lookup_key)
         # Precedence for the manufacturer profile: explicit --mfr (per-invocation
         # CLI override, mirrors --allow) > YAML per-board manufacturers: map >
         # DEFAULT_MANUFACTURER.  The CLI flag is the escape hatch for vendored
@@ -529,7 +762,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         try:
-            passed, message, errors = check_file(pcb_path, allowed, mfr=mfr)
+            passed, message, errors = check_file(pcb_path, allowed, mfr=mfr, allowance=allowance)
         except RuntimeError as e:
             annotate_error(str(pcb_path), f"kct check failed: {e}")
             overall_failed = 1

@@ -37,7 +37,8 @@ from kicad_tools.validate.rules.silkscreen import (  # noqa: E402
 _HEAD = """(kicad_pcb (version 20240108) (generator "test") (generator_version "9.0")
   (general (thickness 1.6))
   (paper "A4")
-  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (36 "B.SilkS" user) (37 "F.SilkS" user)
+  (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal)
+          (36 "B.SilkS" user) (37 "F.SilkS" user)
           (38 "B.Mask" user) (39 "F.Mask" user) (44 "Edge.Cuts" user))
   (setup (pad_to_mask_clearance 0) (tenting front back))
   (net 0 "")
@@ -469,6 +470,124 @@ def test_kct_dispatch_forwards_hole_flags(tmp_path: Path):
         )
         == 0
     )
+    assert _hole_findings(path) == []
+
+
+# ---------------------------------------------------------------------------
+# Blind / buried / micro vias pierce only the silk sides they reach (#9076)
+# ---------------------------------------------------------------------------
+
+_BLIND_F = ("F.Cu", "In1.Cu")  # reaches the front outer only
+
+
+def _typed_via(x: float, y: float, via_type: str, layers: tuple[str, ...]) -> str:
+    ls = " ".join(f'"{layer}"' for layer in layers)
+    return (
+        f"  (via {via_type} (at {x} {y}) (size 0.6) (drill {DRILL}) (layers {ls})"
+        f'(net 1) (uuid "via-{via_type}-{x}-{y}"))\n'
+    )
+
+
+def test_iter_drill_holes_yields_pierced_sides_only():
+    from kicad_tools.schema.pcb import Via
+    from kicad_tools.validate.rules.silkscreen import iter_drill_holes
+
+    def via(via_type: str | None, layers: list[str]) -> Via:
+        return Via(
+            position=(0.0, 0.0),
+            size=0.6,
+            drill=DRILL,
+            layers=layers,
+            net_number=1,
+            via_type=via_type,
+        )
+
+    got = [
+        hole_sides
+        for _geom, _label, hole_sides in iter_drill_holes(
+            [
+                via(None, ["F.Cu", "B.Cu"]),  # through
+                via("blind", ["F.Cu", "In1.Cu"]),
+                via("blind", ["In1.Cu", "B.Cu"]),
+                via("blind", ["F.Cu", "B.Cu"]),  # names both outers
+                via("micro", ["F.Cu", "In1.Cu"]),
+                via("buried", ["In1.Cu", "In2.Cu"]),  # yielded? no
+            ],
+            [],
+        )
+    ]
+    assert got == [
+        frozenset("FB"),
+        frozenset("F"),
+        frozenset("B"),
+        frozenset("FB"),
+        frozenset("F"),
+    ]
+
+
+@pytest.mark.parametrize("via_type", ["blind", "micro"])
+def test_blind_via_far_side_reference_is_not_flagged_or_moved(tmp_path: Path, via_type: str):
+    body = _fp(
+        '(fp_text reference "C6" (at 0 0) (layer "B.SilkS")'
+        " (effects (font (size 1 1) (thickness 0.15))))",
+        ref="C6",
+    ) + _typed_via(130, 130, via_type, _BLIND_F)
+    path = _write(tmp_path, body)
+    assert _hole_findings(path) == []
+
+    placer = SilkRefPlacer(path)
+    result = placer.plan()
+    (placement,) = result.placements
+    assert placement.status == "unchanged", placement.reason
+    assert result.moved == []
+
+
+@pytest.mark.parametrize("via_type", ["blind", "micro"])
+def test_blind_via_far_side_silk_line_is_left_alone(tmp_path: Path, via_type: str):
+    body = _fp(_line(-3, 0, 3, 0, layer="B.SilkS")) + _typed_via(130, 130, via_type, _BLIND_F)
+    path = _write(tmp_path, body)
+    assert _hole_findings(path) == []
+    before = path.read_bytes()
+    result = _clip(path)
+    assert result.fixes == [] and result.skipped == [] and result.text_residual == []
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("via_type", ["blind", "micro"])
+def test_blind_via_near_side_silk_is_still_flagged_and_cleared(tmp_path: Path, via_type: str):
+    body = _fp(_line(-3, 0, 3, 0)) + _typed_via(130, 130, via_type, _BLIND_F)
+    path = _write(tmp_path, body)
+    assert len(_hole_findings(path)) == 1
+    (fix,) = _clip(path).fixes
+    assert (fix.layer, fix.action, fix.pieces) == ("F.SilkS", "trimmed", 2)
+    assert _hole_findings(path) == []
+
+
+@pytest.mark.parametrize("layer", ["F.SilkS", "B.SilkS"])
+def test_buried_via_under_silk_on_either_side_is_ignored(tmp_path: Path, layer: str):
+    body = _fp(_line(-3, 0, 3, 0, layer=layer)) + _typed_via(
+        130, 130, "buried", ("In1.Cu", "In2.Cu")
+    )
+    path = _write(tmp_path, body)
+    assert _hole_findings(path) == []
+    before = path.read_bytes()
+    result = _clip(path)
+    assert result.fixes == [] and result.skipped == [] and result.text_residual == []
+    assert path.read_bytes() == before
+
+
+def test_back_blind_via_far_side_is_front_silks_untouched(tmp_path: Path):
+    """In1.Cu-B.Cu blind via: B.SilkS flagged and cleared, F.SilkS alone."""
+    body = (
+        _fp(_line(-3, 0, 3, 0, layer="F.SilkS", uid="f1"))
+        + _fp(_line(-3, 0, 3, 0, layer="B.SilkS", uid="b1"))
+        + _typed_via(130, 130, "blind", ("In1.Cu", "B.Cu"))
+    )
+    path = _write(tmp_path, body)
+    violations = check_silk_hole_overlap(PCB.load(path), _rules()).violations
+    assert [v.layer for v in violations] == ["B.SilkS"]
+    result = _clip(path)
+    assert [fix.layer for fix in result.fixes] == ["B.SilkS"]
     assert _hole_findings(path) == []
 
 

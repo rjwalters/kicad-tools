@@ -75,6 +75,18 @@ _SETBACK_MAX_MM = 3.0
 _SETBACK_KEEP = 3
 _SETBACK_KEEP_SPACING_MM = 0.5
 
+# Issue #9174: the C++ centerline search is blind to the own-net pad slit band
+# (#9140), so the best path's first trunk step can graze its own pad even though
+# every end leg passed.  When the FINISHED rails fail the exact pad gate near
+# one end, retry the search without that end's endpoint (up to this many times)
+# instead of declining the pair to unguarded single-net A*.
+_MAX_ENDPOINT_RETRIES = 6
+
+# Straight trunk lead-out (mm) every candidate endpoint must keep legal under
+# the caller's exact pad gate, so the search never starts from a setback whose
+# first trunk run skirts the own pad inside the slit band (#9174).
+_LEAD_OUT_MM = 0.6
+
 # An end leg is uncoupled copper, so a cell of leg costs this many cells of
 # trunk.  Without it a setback is cost-neutral (a longer leg just shortens the
 # trunk by the same amount) and ties resolve toward the LONGEST leg.
@@ -215,19 +227,35 @@ class _Ctx:
         pad gate) is applied on top: an end leg must not graze the partner's
         pad or a neighbouring pin.
         """
+        return self.first_blocked(pts, rail) is None
+
+    def span_ok(self, pts: list[tuple[float, float]], rail: str) -> bool:
+        """The caller's exact pad gate alone (no raster), over a polyline."""
+        if self.span_check is None:
+            return True
+        net, _partner, half, _gap = self.rail_params(rail)
+        return all(
+            self.span_check(a[0], a[1], b[0], b[1], self.layer, net, 2.0 * half)
+            for a, b in zip(pts, pts[1:], strict=False)
+        )
+
+    def first_blocked(
+        self, pts: list[tuple[float, float]], rail: str
+    ) -> tuple[tuple[float, float], tuple[float, float]] | None:
+        """The first segment of a rail polyline :meth:`poly_clear` refuses."""
         net, partner, half, gap = self.rail_params(rail)
         for a, b in zip(pts, pts[1:], strict=False):
             if not self.impl.rail_segment_clear(
                 a[0], a[1], b[0], b[1], self.layer, net, partner, half, gap
             ):
                 logger.debug("pose rail %s blocked at %s -> %s", rail, a, b)
-                return False
+                return a, b
             if self.span_check is not None and not self.span_check(
                 a[0], a[1], b[0], b[1], self.layer, net, 2.0 * half
             ):
                 logger.debug("pose rail %s fails the exact pad gate at %s -> %s", rail, a, b)
-                return False
-        return True
+                return a, b
+        return None
 
 
 def _scan_endpoints(
@@ -275,6 +303,16 @@ def _scan_endpoints(
             if leg_p is None or leg_n is None:
                 continue
             if not (ctx.poly_clear(leg_p, "p") and ctx.poly_clear(leg_n, "n")):
+                continue
+            # Issue #9174: the C++ search cannot see the own-net slit band, so
+            # refuse a setback whose straight trunk lead-out would graze it.
+            sign = -1.0 if arriving else 1.0
+            tx, ty = _unit(trunk_h)
+            lead = (sign * tx * _LEAD_OUT_MM, sign * ty * _LEAD_OUT_MM)
+            if not (
+                ctx.span_ok([t_p, (t_p[0] + lead[0], t_p[1] + lead[1])], "p")
+                and ctx.span_ok([t_n, (t_n[0] + lead[0], t_n[1] + lead[1])], "n")
+            ):
                 continue
             kept.append(d)
             cost = _LEG_COST_FACTOR * (_polyline_len(leg_p) + _polyline_len(leg_n)) / 2.0 / ctx.res
@@ -370,74 +408,111 @@ def route_centerline_pose(
         }
         return None
 
-    best = None  # (cost, centerline cells, start ep, goal ep, diagnostics)
-    diag_last: dict = {}
-    for side in (1, -1):
-        s_eps = [e for e in starts if e.p_side == side]
-        g_eps = [e for e in goals if e.p_side == side]
-        if not s_eps or not g_eps:
-            continue
-        remaining = None
-        if timeout_seconds is not None and timeout_seconds > 0:
-            remaining = max(0.5, timeout_seconds - (time.monotonic() - t0))
-        path, diag = cpp.route_centerline(
-            starts=[(e.cell[0], e.cell[1], e.heading, ctx.layer, e.cost_cells) for e in s_eps],
-            goals=[(e.cell[0], e.cell[1], e.heading, ctx.layer, e.cost_cells) for e in g_eps],
-            p_net=ctx.p_net,
-            n_net=ctx.n_net,
-            half_pitch=ctx.half_pitch,
-            p_side=side,
-            p_half=ctx.p_width / 2.0,
-            p_gap=ctx.p_gap,
-            n_half=ctx.n_width / 2.0,
-            n_gap=ctx.n_gap,
-            min_radius_cells=1.0,
-            turn_penalty=float(pf.rules.cost_turn),
-            heuristic_weight=heuristic_weight,
-            max_iterations_budget=max_iterations,
-            timeout_seconds=float(remaining) if remaining else 0.0,
-        )
-        diag_last = diag
-        if path is None:
-            continue
-        cost = len(path)
-        if best is None or cost < best[0]:
-            best = (cost, path, s_eps[diag["start_index"]], g_eps[diag["goal_index"]], diag)
-    if best is None:
-        pf.last_pose_report = {
-            "applied": False,
-            "reason": "search-failed",
-            "iterations": diag_last.get("iterations", 0),
-            "starts": len(starts),
-            "goals": len(goals),
-        }
-        return None
+    def _search(
+        cur_starts: list[_Endpoint], cur_goals: list[_Endpoint]
+    ) -> tuple[tuple | None, dict]:
+        """Best ``(cost, cells, start ep, goal ep, diag)`` over both sides."""
+        best = None
+        diag_last: dict = {}
+        for side in (1, -1):
+            s_eps = [e for e in cur_starts if e.p_side == side]
+            g_eps = [e for e in cur_goals if e.p_side == side]
+            if not s_eps or not g_eps:
+                continue
+            remaining = None
+            if timeout_seconds is not None and timeout_seconds > 0:
+                remaining = max(0.5, timeout_seconds - (time.monotonic() - t0))
+            path, diag = cpp.route_centerline(
+                starts=[(e.cell[0], e.cell[1], e.heading, ctx.layer, e.cost_cells) for e in s_eps],
+                goals=[(e.cell[0], e.cell[1], e.heading, ctx.layer, e.cost_cells) for e in g_eps],
+                p_net=ctx.p_net,
+                n_net=ctx.n_net,
+                half_pitch=ctx.half_pitch,
+                p_side=side,
+                p_half=ctx.p_width / 2.0,
+                p_gap=ctx.p_gap,
+                n_half=ctx.n_width / 2.0,
+                n_gap=ctx.n_gap,
+                min_radius_cells=1.0,
+                turn_penalty=float(pf.rules.cost_turn),
+                heuristic_weight=heuristic_weight,
+                max_iterations_budget=max_iterations,
+                timeout_seconds=float(remaining) if remaining else 0.0,
+            )
+            diag_last = diag
+            if path is None:
+                continue
+            cost = len(path)
+            if best is None or cost < best[0]:
+                best = (cost, path, s_eps[diag["start_index"]], g_eps[diag["goal_index"]], diag)
+        return best, diag_last
 
-    _, path, s_ep, g_ep, diag = best
-    side = s_ep.p_side
-    centre = [(c[0], c[1], c[2], c[3]) for c in path]
-    p_mid = _derive_rail(centre, s_ep.heading, pf.grid, side * ctx.half_pitch)
-    n_mid = _derive_rail(centre, s_ep.heading, pf.grid, -side * ctx.half_pitch)
-    # End legs run pad -> trunk; the goal leg is reversed to run trunk -> pad.
-    p_pts = _simplify(s_ep.p_leg[:-1] + p_mid + list(reversed(g_ep.p_leg[:-1])))
-    n_pts = _simplify(s_ep.n_leg[:-1] + n_mid + list(reversed(g_ep.n_leg[:-1])))
-    # The leg/trunk join points are computed two ways (cell-centre offset vs
-    # miter offset); they coincide only when the first/last step keeps the
-    # endpoint heading.  Snap-check, and refuse a mismatch rather than commit
-    # a kinked join.
-    if math.dist(s_ep.p_leg[-1], p_mid[0]) > 1e-3 or math.dist(s_ep.n_leg[-1], n_mid[0]) > 1e-3:
-        pf.last_pose_report = {"applied": False, "reason": "start-join-mismatch"}
-        return None
-    if math.dist(g_ep.p_leg[-1], p_mid[-1]) > 1e-3 or math.dist(g_ep.n_leg[-1], n_mid[-1]) > 1e-3:
-        pf.last_pose_report = {"applied": False, "reason": "goal-join-mismatch"}
-        return None
+    def _blamed_end(seg: tuple[tuple[float, float], tuple[float, float]]) -> str | None:
+        """Which end's endpoint a refused finished-rail segment belongs to."""
+        mx, my = (seg[0][0] + seg[1][0]) / 2.0, (seg[0][1] + seg[1][1]) / 2.0
+        d_start = math.hypot(mx - p_start.x, my - p_start.y)
+        d_goal = math.hypot(mx - p_end.x, my - p_end.y)
+        if min(d_start, d_goal) > _SETBACK_MAX_MM + 2.0 * ctx.pitch:
+            return None  # mid-trunk: a different endpoint cannot fix it
+        return "start" if d_start <= d_goal else "goal"
 
-    # Re-verify the FINISHED copper with the kernel + raster, not just the
-    # per-step approximation the search used.
-    if not (ctx.poly_clear(p_pts, "p") and ctx.poly_clear(n_pts, "n")):
+    cur_starts, cur_goals = list(starts), list(goals)
+    retries = 0
+    while True:
+        best, diag_last = _search(cur_starts, cur_goals)
+        if best is None:
+            pf.last_pose_report = {
+                "applied": False,
+                "reason": "derived-rails-blocked" if retries else "search-failed",
+                "iterations": diag_last.get("iterations", 0),
+                "starts": len(cur_starts),
+                "goals": len(cur_goals),
+            }
+            return None
+
+        _, path, s_ep, g_ep, diag = best
+        side = s_ep.p_side
+        centre = [(c[0], c[1], c[2], c[3]) for c in path]
+        p_mid = _derive_rail(centre, s_ep.heading, pf.grid, side * ctx.half_pitch)
+        n_mid = _derive_rail(centre, s_ep.heading, pf.grid, -side * ctx.half_pitch)
+        # End legs run pad -> trunk; the goal leg is reversed to run trunk -> pad.
+        p_pts = _simplify(s_ep.p_leg[:-1] + p_mid + list(reversed(g_ep.p_leg[:-1])))
+        n_pts = _simplify(s_ep.n_leg[:-1] + n_mid + list(reversed(g_ep.n_leg[:-1])))
+        # The leg/trunk join points are computed two ways (cell-centre offset vs
+        # miter offset); they coincide only when the first/last step keeps the
+        # endpoint heading.  Snap-check, and refuse a mismatch rather than commit
+        # a kinked join.
+        if math.dist(s_ep.p_leg[-1], p_mid[0]) > 1e-3 or math.dist(s_ep.n_leg[-1], n_mid[0]) > 1e-3:
+            pf.last_pose_report = {"applied": False, "reason": "start-join-mismatch"}
+            return None
+        if (
+            math.dist(g_ep.p_leg[-1], p_mid[-1]) > 1e-3
+            or math.dist(g_ep.n_leg[-1], n_mid[-1]) > 1e-3
+        ):
+            pf.last_pose_report = {"applied": False, "reason": "goal-join-mismatch"}
+            return None
+
+        # Re-verify the FINISHED copper with the kernel + raster, not just the
+        # per-step approximation the search used.
+        blocked = ctx.first_blocked(p_pts, "p") or ctx.first_blocked(n_pts, "n")
+        if blocked is None:
+            break
         logger.debug("pose derived rails P=%s N=%s", p_pts, n_pts)
-        pf.last_pose_report = {"applied": False, "reason": "derived-rails-blocked"}
-        return None
+        # Issue #9174: the search judges steps with the raster/kernel only, so a
+        # finished rail can still be refused by the exact pad gate (e.g. the
+        # own-net slit band, #9140) right beside one end.  Drop the endpoint
+        # that produced that end and search again before giving up the pair.
+        end = _blamed_end(blocked)
+        pool = cur_starts if end == "start" else cur_goals
+        victim = s_ep if end == "start" else g_ep
+        retries += 1
+        if end is None or victim not in pool or retries > _MAX_ENDPOINT_RETRIES:
+            pf.last_pose_report = {"applied": False, "reason": "derived-rails-blocked"}
+            return None
+        pool.remove(victim)
+        if not pool:
+            pf.last_pose_report = {"applied": False, "reason": "derived-rails-blocked"}
+            return None
 
     def _route(pts: list[tuple[float, float]], pad: Pad, width: float) -> Route:
         route = Route(net=pad.net, net_name=pad.net_name)
@@ -467,6 +542,7 @@ def route_centerline_pose(
         "centerline_poses": len(path),
         "start_setback_cost": s_ep.cost_cells,
         "goal_setback_cost": g_ep.cost_cells,
+        "endpoint_retries": retries,
         "elapsed_s": time.monotonic() - t0,
     }
     return p_route, n_route

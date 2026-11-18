@@ -45,7 +45,7 @@ from kicad_tools.core.types import copper_span_contains
 
 from .layers import Layer, LayerType
 from .pad_geometry import pad_point_distance
-from .primitives import Pad, Route, Segment, Via
+from .primitives import Pad, Route, Segment, Via, pad_half_extents
 from .via_clearance import point_clear_of_copper, segment_clears_foreign_via
 from .via_in_pad_eligibility import (
     resolve_component_hole_context,
@@ -7173,18 +7173,18 @@ class EscapeRouter:
             same_net_bboxes: list[tuple[float, float, float, float]] = []
             if foreign_pads:
                 for p in foreign_pads:
+                    # Issue #9236: ``Pad.width``/``height`` are pre-rotation
+                    # local dims plus a residual ``Pad.rotation``, so a raw
+                    # ``x +/- width/2`` box under-sizes a non-cardinal pad.
+                    # ``pad_half_extents`` is the rotation-aware AABB (the
+                    # same helper ``grid.py`` uses); rotation 0 is
+                    # byte-identical to the raw box.
+                    hw, hh = pad_half_extents(p)
                     if net is not None and p.net == net:
                         if band_edge_mm > 0 and not getattr(p, "through_hole", False):
-                            same_net_bboxes.append(
-                                (
-                                    p.x - p.width / 2.0,
-                                    p.y - p.height / 2.0,
-                                    p.x + p.width / 2.0,
-                                    p.y + p.height / 2.0,
-                                )
-                            )
+                            same_net_bboxes.append((p.x - hw, p.y - hh, p.x + hw, p.y + hh))
                         continue
-                    pad_tuples.append((p.x, p.y, p.width, p.height, p.net))
+                    pad_tuples.append((p.x, p.y, 2.0 * hw, 2.0 * hh, p.net))
             if same_net_bboxes:
                 from .via_clearance import same_net_pad_gap_acceptable
 
@@ -7194,11 +7194,28 @@ class EscapeRouter:
                     return False
 
             seg_list: list[Segment] = []
+            # Issue #9272: the same-net tracks skipped below are the
+            # population the via-annulus-vs-own-trace slit band (#9208, the
+            # C++ ``is_via_blocked_diag`` twin) grades.  Collect them only
+            # when the caller-resolved edge is on (None/0 ⇒ guard off).
+            trace_band_edge_mm = float(
+                getattr(self.rules, "same_net_trace_gap_band_edge_mm", 0.0) or 0.0
+            )
+            same_net_trace_segs: list[tuple[float, float, float, float, float]] = []
             if foreign_tracks:
                 for s in foreign_tracks:
                     if net is not None and s.net == net:
+                        if trace_band_edge_mm > 0:
+                            same_net_trace_segs.append((s.x1, s.y1, s.x2, s.y2, s.width))
                         continue
                     seg_list.append(s)
+            if same_net_trace_segs:
+                from .via_clearance import via_annulus_trace_band_ok
+
+                if not via_annulus_trace_band_ok(
+                    x, y, eff_diameter, same_net_trace_segs, trace_band_edge_mm
+                ):
+                    return False
 
             # Adapt Segment (x1/y1/x2/y2) to the predicate's expected
             # start_x/start_y/end_x/end_y interface.
@@ -7322,8 +7339,9 @@ class EscapeRouter:
                 continue
 
             # Distance from via center to the pad rectangle (axis-aligned).
-            half_w = p.width / 2
-            half_h = p.height / 2
+            # Issue #9236: rotation-aware AABB (raw width/height under-size
+            # a pad at a non-cardinal ``Pad.rotation``).
+            half_w, half_h = pad_half_extents(p)
             dx_abs = abs(x - p.x)
             dy_abs = abs(y - p.y)
             outside_x = max(0.0, dx_abs - half_w)
@@ -7402,9 +7420,14 @@ class EscapeRouter:
            This preserves the existing behavior on the common case
            where no neighboring pad is close enough to violate.
         2. Otherwise iterate offsets ``[+s, -s, +2s, -2s, ...]`` with
-           ``s = 0.05 mm`` along the pad's long axis (X axis when
-           ``pad.width > pad.height``, Y axis otherwise).  The first
-           offset whose candidate via passes BOTH checks is returned.
+           ``s = 0.05 mm`` along the pad's long axis -- the board-space
+           direction of the local long axis (local X when
+           ``pad.width > pad.height``, local Y otherwise), rotated by
+           ``R(-pad.rotation)`` (Issue #9319).  A residual angle within
+           1 degree of a cardinal snaps to the exact grid axis, so
+           axis-aligned pads keep their historical candidates.  The
+           first offset whose candidate via passes BOTH checks is
+           returned.
         3. If no candidate passes, fall back to dead-centre.  The
            caller (``_try_in_pad_escape``) emits the structured warning
            in that case, preserving the PR #2945 "place anyway, defer
@@ -7458,17 +7481,49 @@ class EscapeRouter:
         ):
             return via_x, via_y, False
 
-        # Determine pad long-axis direction.  The Pad primitive does not
-        # carry rotation; ``width``/``height`` already encode the post-
-        # rotation footprint (KiCad emits oriented bounding-box extents
-        # when the loader projects pad geometry to world coordinates).
+        # Determine pad long-axis direction in BOARD space.  The io.py
+        # loaders swap ``width``/``height`` for pads within 1 degree of
+        # 90/270, so the raw dims give the LOCAL long axis for cardinal
+        # pads.  A non-cardinal pad keeps its pre-rotation dims plus a
+        # residual ``Pad.rotation`` (Issue #9236 traced this: the old
+        # "already post-rotation" claim only holds for cardinal angles),
+        # so the longer extent alone does NOT describe a board-space
+        # direction there.  Issue #9319: nudging along a grid axis with
+        # a budget derived from the pre-rotation long dim slid the via
+        # off a rotated oblong pad's copper -- the local long axis must
+        # be rotated into board space first.  The mapping below is the
+        # same ``board = centre + R(-rotation) . local`` convention
+        # ``io.py:_pad_copper_polygon`` uses: local x -> (cos, -sin),
+        # local y -> (sin, cos).  A residual angle within the 1-degree
+        # cardinal tolerance snaps the axis to an exact signed grid
+        # axis, which keeps rotation-0 pads byte-identical to the
+        # pre-#9319 behavior and avoids cos(pi/2) float noise.  The
+        # stencil-safety budget below stays in the pad-local frame:
+        # ``offset`` millimetres along this unit axis is exactly
+        # ``offset`` millimetres along the pad's local long axis, so
+        # ``abs(offset)`` remains a like-for-like local measurement.
         # The longer extent is the long axis.
         if pad.width >= pad.height:
             long_dim = pad.width
-            axis_x, axis_y = 1.0, 0.0
+            local_long_is_x = True
         else:
             long_dim = pad.height
-            axis_x, axis_y = 0.0, 1.0
+            local_long_is_x = False
+        angle = math.radians(pad.rotation)
+        c, s = math.cos(angle), math.sin(angle)
+        residual = math.fmod(abs(pad.rotation), 90.0)
+        is_cardinal = min(residual, 90.0 - residual) <= 1.0
+        raw_x, raw_y = (c, -s) if local_long_is_x else (s, c)
+        if is_cardinal:
+            # Snap to the exact signed grid axis (dominant component,
+            # sign kept: local x at a 90-degree residual is board -Y,
+            # not +X).
+            if abs(raw_x) >= abs(raw_y):
+                axis_x, axis_y = math.copysign(1.0, raw_x), 0.0
+            else:
+                axis_x, axis_y = 0.0, math.copysign(1.0, raw_y)
+        else:
+            axis_x, axis_y = raw_x, raw_y
 
         # Stencil-safety budget: the via center may travel along the
         # long axis until the via's barrel + annular ring is about to

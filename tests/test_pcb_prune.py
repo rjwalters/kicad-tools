@@ -2572,3 +2572,153 @@ def test_has_segment_counts_a_run_contained_in_a_wider_segment():
     assert not _has_segment(model(0.15), set(), "F.Cu", (2.0, 0.5), (5.0, 0.5), 0.15)  # off-line
     assert not _has_segment(model(0.15, "B.Cu"), set(), "F.Cu", *run, 0.15)  # other layer
     assert not _has_segment(model(0.15), {0}, "F.Cu", *run, 0.15)  # host removed
+
+
+# ── Issue #9331: invalidated-waiver report ──────────────────────────────────
+
+_WAIVER_BOARD = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (net 0 "")
+  (net 1 "SIG")
+  (net 2 "PWR")
+  (footprint "X:P" (layer "F.Cu") (uuid "f-A") (at 100 100)
+    (property "Reference" "A" (at 0 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "SIG"))
+  )
+  (footprint "X:P" (layer "F.Cu") (uuid "f-B") (at 110 100)
+    (property "Reference" "B" (at 0 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "SIG"))
+  )
+  (segment (start 100 100) (end 102 100) (width 0.2) (layer "F.Cu") (net 1) (uuid "s-1"))
+  (segment (start 102 100) (end 105 100) (width 0.2) (layer "F.Cu") (net 1) (uuid "s-2"))
+  (segment (start 105 100) (end 110 100) (width 0.2) (layer "F.Cu") (net 1) (uuid "s-3"))
+  (segment (start 100 100.15) (end 110 100.15) (width 0.2) (layer "F.Cu") (net 2) (uuid "s-4"))
+)
+"""
+
+_CLEARANCE_RULE = "clearance_segment_segment"
+
+
+def _waiver_board(tmp_path: Path) -> Path:
+    p = tmp_path / "wv.kicad_pcb"
+    p.write_text(_WAIVER_BOARD)
+    return p
+
+
+def _pre_merge_clearance_findings(p: Path):
+    """The ``clearance_segment_segment`` findings ``kct check`` emits pre-edit."""
+    from kicad_tools.cli.check_cmd import build_check_rule_set, run_check_rule_set
+
+    results = run_check_rule_set(build_check_rule_set(p), apply_sidecar_waivers=False)
+    return [v for v in results.violations if v.rule_id == _CLEARANCE_RULE]
+
+
+def _write_waiver_sidecar(p: Path, finding, name: str) -> Path:
+    """Keyed, evidence-bound sidecar naming exactly ``finding``."""
+    import json
+
+    from kicad_tools.validate.evidence import compute_evidence_hash
+
+    sidecar = p.with_name(name)
+    sidecar.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "waivers": [
+                    {
+                        "key": finding.key,
+                        "evidence_hash": compute_evidence_hash(finding),
+                        "reason": "reviewed overlap",
+                        "reviewer": "rj",
+                        "date": "2026-11-18",
+                    }
+                ],
+            }
+        )
+    )
+    return sidecar
+
+
+def _mid_run_finding(findings):
+    """The finding naming the 102->105 piece (the one the merge removes)."""
+    (mid,) = [f for f in findings if "102/100~105/100" in f.key]
+    return mid
+
+
+def test_prune_reports_invalidated_waiver_keys(tmp_path, capsys):
+    """A collinear merge moves copper a waiver key embeds: the command names
+    the orphaned key and the surviving finding as the re-waive candidate."""
+    from kicad_tools.cli.commands.pcb import _run_prune_command
+    from kicad_tools.cli.parser import create_parser
+
+    p = _waiver_board(tmp_path)
+    findings = _pre_merge_clearance_findings(p)
+    assert len(findings) == 3
+    mid = _mid_run_finding(findings)
+    _write_waiver_sidecar(p, mid, "wv.kct-waivers.json")
+
+    args = create_parser().parse_args(["pcb", "prune", str(p), "--no-drc", "--unverified"])
+    assert _run_prune_command(args, p) == 0
+    out = capsys.readouterr().out
+    assert "Waiver report: 1 waiver key(s) invalidated by this edit" in out
+    assert mid.key in out
+    # The merge leaves one clearance finding where three were: it is the
+    # unique re-waive candidate (same rule/nets/layer/item kinds).
+    assert "re-waive candidate:" in out
+    assert "100/100~110/100" in out.split("re-waive candidate:", 1)[1]
+
+
+def test_prune_without_waivers_sidecar_is_silent(tmp_path, capsys):
+    from kicad_tools.cli.commands.pcb import _run_prune_command
+    from kicad_tools.cli.parser import create_parser
+
+    p = _waiver_board(tmp_path)
+    args = create_parser().parse_args(["pcb", "prune", str(p), "--no-drc", "--unverified"])
+    assert _run_prune_command(args, p) == 0
+    assert "Waiver report" not in capsys.readouterr().out
+
+
+def test_prune_dry_run_reports_invalidated_waiver_keys(tmp_path, capsys):
+    from kicad_tools.cli.commands.pcb import _run_prune_command
+    from kicad_tools.cli.parser import create_parser
+
+    p = _waiver_board(tmp_path)
+    mid = _mid_run_finding(_pre_merge_clearance_findings(p))
+    _write_waiver_sidecar(p, mid, "wv.kct-waivers.json")
+    before = p.read_text()
+
+    args = create_parser().parse_args(
+        ["pcb", "prune", str(p), "--no-drc", "--unverified", "--dry-run"]
+    )
+    assert _run_prune_command(args, p) == 0
+    out = capsys.readouterr().out
+    assert "Waiver report: 1 waiver key(s) invalidated by this edit" in out
+    assert p.read_text() == before  # the preview wrote nothing
+
+
+def test_prune_json_format_report_goes_to_stderr(tmp_path, capsys):
+    """``--format json`` stdout stays a single JSON document; the waiver
+    report rides on stderr."""
+    import json
+
+    from kicad_tools.cli.commands.pcb import _run_prune_command
+    from kicad_tools.cli.parser import create_parser
+
+    p = _waiver_board(tmp_path)
+    mid = _mid_run_finding(_pre_merge_clearance_findings(p))
+    _write_waiver_sidecar(p, mid, "wv.kct-waivers.json")
+
+    args = create_parser().parse_args(
+        ["pcb", "prune", str(p), "--no-drc", "--unverified", "--format", "json"]
+    )
+    assert _run_prune_command(args, p) == 0
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)  # exactly one JSON document
+    assert result["removed"]["segments"] == 2
+    assert "Waiver report: 1 waiver key(s) invalidated by this edit" in captured.err
+    assert mid.key in captured.err

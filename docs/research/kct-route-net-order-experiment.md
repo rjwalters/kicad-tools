@@ -229,7 +229,153 @@ uv run python scripts/research/net_order_experiment.py route \
     --boards 00,01,02,03,06a --variants default,crossing \
     --work-dir /tmp/net-order --json /tmp/net-order/summary.json \
     --timeout 3600
+# regret arm (Issue #9001) — add `regret` to --variants (see the section below):
+uv run python scripts/research/net_order_experiment.py route \
+    --boards 00,01,02,03,06a --variants default,crossing,regret \
+    --work-dir /tmp/net-order --json /tmp/net-order/summary.json \
+    --timeout 3600
 ```
 
 On a loaded host, expect the timing columns to vary by several-fold between
 runs and the quality columns not to vary at all.
+
+## Follow-up: regret ordering (Issue #9001) — measured: mixed, not a default
+
+Issue #9001 adds `--order-method regret`: rank nets by **regret** —
+`cost(second-best) − cost(best)`, measured with two empty-board A\* probes per
+non-pour net on the prepared grid — and commit the biggest-loss nets first,
+descending **within** each net-class priority band (never across one). A net
+whose second probe finds no path has exactly one corridor (regret `+inf`) and
+sorts first in its band; a net whose *first* probe fails is unmeasured (regret
+`0.0`) and keeps its default position. Implementation:
+`src/kicad_tools/router/regret_order.py` (pure ranking/geometry) plus the
+`_regret_net_order` / `_probe_net_regret` bridge in `cli/route_cmd.py`; the
+`crossing_order.py` split (pure function in `router/`, thin router-reading
+bridge in the CLI) is mirrored deliberately.
+
+Provenance: ideas-only from the WeaveEngine evaluation (#8993); implemented
+from the behaviour description in #9001, never from upstream code (WeaveEngine
+is GPL-3.0, this repo is MIT).
+
+### How the second-best is forced (and why the copper is trimmed)
+
+Same-net copper does not block (`RoutingGrid.is_blocked_for_net`), so
+re-searching under the net's own id returns the first path and every regret
+is 0 — the silently-inert failure mode. Probe 2 therefore marks probe 1's
+copper under a **foreign sentinel net id** (`max(net id) + 1`) and rips it up
+afterwards. The marked copper is **trimmed 1 mm back from both pads** first:
+best and second-best legitimately share the pad-approach window, and copper
+marked into the pad halo makes the C++ post-route validator reject every
+candidate on a foreign seg-seg artifact — an artifact of the sentinel, not a
+board constraint. A unit test pins that the two probes return *different*
+paths whenever a second corridor exists.
+
+Each net is probed on its **longest Euclidean-MST flight-line edge** (reusing
+`crossing_order.minimum_spanning_skeleton`) — for a 2-pad net that is exactly
+the whole net; otherwise it is a representative-connection proxy. How often
+that proxy is load-bearing on these boards:
+
+| Board | Signal nets | Pad-count distribution (pads → nets) | 2-pad (proxy = whole net) |
+|---|---|---|---|
+| 00 | 1 | 2→1 | 100% |
+| 01 | 0 (all pour) | — | — |
+| 02 | 10 | 2→3, 3→3, 4→1, 5→1, 6→1, 7→1 | 30% |
+| 03 | 24 | 2→12, 3→5, 4→4, 5→3 | 50% |
+| 06a | 16 | 2→4, 3→12 | 25% |
+
+So on 03/06a — the two boards where ordering could matter most — the proxy
+carries 25–50% of nets outright and the rest are 3–5-pad. Summing regret over
+all MST edges (`2(N−1)` searches per net) is the filed follow-up if a re-run
+ever wants the higher-fidelity variant.
+
+Board 06a runs `--preserve-existing`: its LVDS copper is already on the
+"empty" board, so its regrets are measured **against preserved copper**, the
+same surface the real routes compete with.
+
+### Results
+
+`default` = documented recipe, no ordering flag; `regret` = same plus
+`--order-method regret`; `--seed 42` in every arm. Measured 2026-11-17 on
+commit `34bcdba84` + the #9001 branch, C++ backend active, shared 8-vCPU
+Linux host, loadavg 10–24
+throughout (other sweeps active) — the timing columns are unusable per the
+section above; **A\* calls and iteration count are the readable columns**.
+The 03 `regret` row exceeded the harness's default 1800 s cap on the first
+pass (its routing had finished; the kill landed in the post-route tail) and
+was re-run with `--timeout 3600`; that re-run's attempt-1 checkpoint is
+byte-size-identical to the first pass's, consistent with the determinism the
+tests pin.
+
+| Board | Variant | Order applied | Nets | Connections | Vias | Wirelength mm | Segments | Negotiated iters | A\* calls | Overflow trajectory |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 00 | default | — | 3/3 | 3/3 | 0 | 8.60 | 2 | 1 | 2 | [0] |
+| 00 | regret | yes | 3/3 | 3/3 | 0 | 8.60 | 2 | 1 | 6 | [0] |
+| 01 | default | — | 3/3 | 5/5 | 2 | 54.38 | 16 | 3 | 26 | [2, 2, 2] |
+| 01 | regret | yes | 3/3 | 5/5 | **0** | **54.09** | **11** | 3 | 26 | [2, 2, 2] |
+| 02 | default | — | 12/12 | 36/36 | 26 | 394.88 | 128 | 3 | 142 | [17, 19, 33] |
+| 02 | regret | yes | 12/12 | 36/36 | **23** | **393.62** | **121** | 3 | 199 | [16, 18, 32] |
+| 03 | default | — | 25/27 | 113/115 | 68 | 748.41 | 329 | 3 | 302 | [38, 38] |
+| 03 | regret | yes | 25/27 | 113/115 | **63** | 749.43 | **1710** | **6** | **965** | [59, 59, 60, 60] |
+| 06a | default | — | 18/18 | 90/90 | 55 | 489.20 | 165 | 3 | 56 | [4, 4] |
+| 06a | regret | yes | 18/18 | 90/90 | 55 | 489.20 | 165 | 3 | 101 | [4, 4] |
+
+(The `crossing` arm was re-measured alongside at the same commit for a
+common baseline; its rows are omitted here. Note the router has moved since
+the `5ab1cbd0e`-era table above — 02 is now 12/12 at 26 vias — so this
+table is self-contained and **not comparable** to the #5787-era one.)
+
+Reading it:
+
+- **Completion: unchanged on every board**, in both directions. Same gate as
+  `crossing`.
+- **02: genuine improvement.** Vias 26 → 23, wirelength −1.26 mm, segments
+  128 → 121 — regret is the first order in this note's history that improves
+  the busier of the two target boards.
+- **03: better vias, expensive.** Vias 68 → 63 (−7%) at equal completion —
+  but 6 negotiated iterations instead of 3, **965 A\* calls instead of 302
+  (3.2×)**, and 1710 segments instead of 329 (5×: the same copper in many
+  more, shorter pieces). The overflow trajectory runs hotter
+  ([59, 59, 60, 60] vs [38, 38]) for two more iterations before settling.
+  Wall-clock exceeded the 1800 s harness cap on the contended host (re-run at
+  3600 s); with 3.2× the load-independent search work, that is a real cost,
+  not only contention.
+- **00 and 06a: exactly inert.** The routed outputs are **byte-identical** to
+  the `default` arms — on 06a the regret order displaces nets (A\* calls
+  56 → 101, of which 32 are probes) yet produces identical copper,
+  reproducing the `crossing` lesson that ordering only matters where
+  corridors are actually contested.
+- **01: the delta is the handoff, not the ranking.** Board 01 has **zero
+  signal nets** (all pour), so `regret_order` provably returns the default
+  sort and no probes run — yet its output is byte-identical to the `crossing`
+  arm's and *differs* from `default` (vias 2 → 0). The perturbation is the
+  pre-existing forced-order handoff (`_forced_net_order` set ⇒ the negotiated
+  loop seeds from it instead of the default pipeline), not regret. Same story
+  as `crossing`'s own 01 row; pre-existing behaviour, out of scope for #9001.
+- **Pre-pass cost (A\* calls added, per the load-independent rule):** 00: +4
+  (67% of its run's total), 01: +0, 02: +57 (29%), 03: +663 (69% — 48 of
+  those are the probes; the other ~615 are the reorder's effect on routing
+  itself), 06a: +45 (45%, 32 of them probes). Two probe searches per
+  non-pour net are cheap everywhere; what the ordering does to the negotiated
+  loop afterwards is not, and that is where 03's cost lives.
+
+### No-regression evidence (acceptance criterion)
+
+With `--order-method` **omitted**, the branch's `default` arms were compared
+byte-for-byte against the same recipe run at base `34bcdba84`: boards 00, 03
+and 06a byte-identical; boards 01 and 02 differ in exactly one run-generated
+footprint-annotation UUID each (a write-time identifier, no geometry). The
+diff touches no default-path behaviour: the `regret` branch in
+`_apply_order_method` is dead when the flag is absent, and
+`_apply_crossing_order_escalation`'s new set-membership test is equivalent
+for `None`.
+
+### Verdict
+
+**`--order-method regret` is NOT proposed as a default.** It ships opt-in,
+like `crossing`. The measurement is genuinely mixed, not null: a real copper
+win on 02 and better vias on 03, bought with 3.2× search work and a 5×
+segment-count blow-up on 03, and exact inertness on 00/06a. Whether a
+higher-fidelity regret (sum over all MST edges, or reading it from
+#8998-style candidate data instead of probing) keeps the 02 win without 03's
+cost is unmeasured. Probe hygiene (journal, failure store, grid restore) and
+determinism are pinned by `tests/test_router_regret_order.py`.

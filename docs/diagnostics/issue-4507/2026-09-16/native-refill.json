@@ -12,8 +12,8 @@
     "--save-board",
     "--exit-code-violations",
     "-o",
-    "/Users/rwalters/GitHub/kicad-tools/.loom/sweep-checkpoint/evidence/issue-4507/planner-full/native-stage3/drc.json",
-    "/Users/rwalters/GitHub/kicad-tools/.loom/sweep-checkpoint/evidence/issue-4507/planner-full/native-stage3/step3.kicad_pcb"
+    ".loom/sweep-checkpoint/evidence/issue-4507/planner-full/native-stage3/drc.json",
+    ".loom/sweep-checkpoint/evidence/issue-4507/planner-full/native-stage3/step3.kicad_pcb"
   ],
   "original_hashes": {
     ".kicad_pcb": "98a73b55d89b3109178671d613f39aa4747631b366b9d16c134cec606c0f8c36",

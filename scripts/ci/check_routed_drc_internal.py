@@ -33,7 +33,9 @@ PAID_DRILL_BOARD = REPO_ROOT / "boards/04-stm32-devboard/output/stm32_devboard_r
 _generic_count_errors = _generic.count_errors
 
 
-def _run_paid_drill_check(pcb_path: Path) -> tuple[int, dict[str, int]]:
+def _run_paid_drill_check(
+    pcb_path: Path, allowance: dict[tuple[str, str], int] | None
+) -> tuple[int, dict[str, int], _generic.IdentityOutcome]:
     checker = REPO_ROOT / "boards/04-stm32-devboard/check_manufacturing.py"
     with tempfile.TemporaryDirectory(prefix="kct-paid-drill-check-") as tmp:
         report = Path(tmp) / "check.json"
@@ -62,21 +64,34 @@ def _run_paid_drill_check(pcb_path: Path) -> tuple[int, dict[str, int]]:
             data = json.loads(report.read_text())
             if data.get("meta_checks", {}).get("overall") != "PASSED":
                 raise ValueError("reviewed process meta-checks did not pass")
-            return _generic._count_blocking_errors(data)
+            outcome = _generic.identity_outcome(data, allowance)
+            _blocking, advisory = _generic.count_blocking_errors(data)
+            blocking = len(outcome.unallowed) if outcome.applied else outcome.raw_blocking
+            return blocking, advisory, outcome
         except (ValueError, TypeError, KeyError) as exc:
             raise RuntimeError(f"Invalid reviewed paid-drill report: {exc}") from exc
 
 
 def count_errors(
-    pcb_path: Path, mfr: str = _generic.DEFAULT_MANUFACTURER
-) -> tuple[int, dict[str, int]]:
-    """Generic ``count_errors`` plus the board04 paid-drill dispatch."""
+    pcb_path: Path,
+    mfr: str = _generic.DEFAULT_MANUFACTURER,
+    allowance: dict[tuple[str, str], int] | None = None,
+) -> tuple[int, dict[str, int], _generic.IdentityOutcome]:
+    """Generic ``count_errors`` plus the board04 paid-drill dispatch.
+
+    The paid-drill report is judged by the same identity machinery
+    (:func:`check_routed_drc.identity_outcome`) as the generic path, so an
+    allowance applies uniformly.  (Board 04's reviewed rule selection does
+    not currently include ``mask_to_copper``, so it carries no
+    ``RELEASE_BOARD_ALLOWANCES`` entry; the plumbing stays symmetric for
+    the day it does.)
+    """
     if pcb_path.resolve() == PAID_DRILL_BOARD:
         if mfr != "jlcpcb-tier1":
             raise RuntimeError("Board04 requires its reviewed tier1 paid-drill process")
         print("Using board04 reviewed paid mechanical-drill validator (#5009).", file=sys.stderr)
-        return _run_paid_drill_check(pcb_path)
-    return _generic_count_errors(pcb_path, mfr)
+        return _run_paid_drill_check(pcb_path, allowance)
+    return _generic_count_errors(pcb_path, mfr, allowance)
 
 
 def main(argv: list[str] | None = None) -> int:

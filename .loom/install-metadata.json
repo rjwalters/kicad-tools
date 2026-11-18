@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1302",
-  "loom_commit": "d70c39dda609d184f36e44793e7cdb63475989a2",
+  "loom_version": "0.19.1306",
+  "loom_commit": "e7af83ea29897351d216cdfd4036ecf628cb96cc",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -693,9 +693,12 @@
     ".loom/scripts/tests/test-spawn-codex-sandbox-noop.sh",
     ".loom/scripts/tests/test-spawn-generic-launch.sh",
     ".loom/scripts/tests/test-spawn-session-env.sh",
-    ".loom/scripts/tests/test-sweep-lease-renew-fd-hygiene.sh"
+    ".loom/scripts/tests/test-sweep-lease-renew-fd-hygiene.sh",
+    ".loom/scripts/sweep-lease-fence.sh",
+    ".loom/scripts/sweep-lease-publish.sh",
+    ".loom/scripts/tests/test-sweep-lease-publish.sh"
   ],
-  "last_resync": "2026-11-16",
+  "last_resync": "2026-11-17",
   "loom_source_remote": "https://github.com/rjwalters/loom.git",
   "requires_daemon": "0.19.1146"
 }

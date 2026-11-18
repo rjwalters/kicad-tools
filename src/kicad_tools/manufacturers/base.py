@@ -367,6 +367,25 @@ class DesignRules:
     # existing profiles' shared annular-ring behavior.
     min_pth_annular_ring_mm: float | None = None
 
+    def __post_init__(self) -> None:
+        """Enforce ``min_inner_clearance_mm <= min_clearance_mm`` (Issue #9113).
+
+        The inner floor models lighter inner copper, so it is never stricter
+        than the outer floor.  The project DRU generator's skip predicates
+        (the class arm and ``_zone_clearance_floor``) rely on that ordering:
+        with an inverted profile they would treat an outer-layer authored
+        clearance as redundant while no rule protects it.  Checking here,
+        rather than in the YAML loader, also covers ``dataclasses.replace``
+        and hand-built profiles.
+        """
+        inner = self.min_inner_clearance_mm
+        if inner is not None and inner > self.min_clearance_mm:
+            raise ValueError(
+                f"min_inner_clearance_mm ({inner}) must not exceed "
+                f"min_clearance_mm ({self.min_clearance_mm}): the inner-layer "
+                "floor is the looser one (lighter inner copper)"
+            )
+
     @property
     def min_trace_width_mil(self) -> float:
         """Trace width in mils (thousandths of an inch)."""

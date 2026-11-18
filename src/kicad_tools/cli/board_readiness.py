@@ -164,6 +164,15 @@ def read_readiness(board_dir: Path) -> dict:
             sidecar_resolved = sidecar.resolve()
             if sidecar_resolved.is_relative_to(root):
                 required.add(sidecar_resolved.relative_to(root).as_posix())
+        # Issue #9322: the CPL rotation sidecar shapes the shipped CPL.
+        from kicad_tools.export.rotation_overrides import discover_rotation_overrides
+
+        for name in inputs:
+            if not name.endswith(".kicad_pcb"):
+                continue
+            rotations = discover_rotation_overrides(root / name)
+            if rotations is not None and rotations.resolve().is_relative_to(root):
+                required.add(rotations.resolve().relative_to(root).as_posix())
         if not required.issubset(inputs):
             raise ValueError("Evidence omits current project or rule files")
         if "manufacturer" in data and (
