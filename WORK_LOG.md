@@ -16,6 +16,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-18
 
+- **PR #9414**: test(ci): verify per-PR changelog admission before enabling a merge queue
+- **Issue #9413** (closed): Verify the per-PR changelog admission check before enabling a merge queue
 - **PR #9410**: ci: judge mask_to_copper by identity in the routed-DRC release gate
 - **PR #9303**: ci: qualify PR checks for GitHub merge queues
 - **Issue #9299** (closed): ci: qualify PR checks for GitHub merge queues
