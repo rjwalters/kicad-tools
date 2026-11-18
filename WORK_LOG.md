@@ -16,6 +16,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-17
 
+- **PR #9262**: test: replay the package-release drop gate over committed packages
+- **PR #9259**: ci: raise changelog fragment-check timeout from 5 to 15 minutes
+- **PR #9253**: fix(board04): check board-edge and keepout clearance in repair_sharp_corners; drop the narrower-width fallback
+- **PR #9252**: test: keep zero-length round-pen flashes as disks in the native Gerber oracle
+- **Issue #9246** (closed): ci flake: 'Changelog Fragment Check' cancelled by its 5-minute job timeout inside actions/checkout, reported as a fragment failure
+- **Issue #9243** (closed): No test runs a board's package producer, so a textually clean merge can leave it refusing
+- **Issue #9239** (closed): Board 04 repair_sharp_corners: clearance check ignores board edge and keepouts, and can fall back to a narrower trace
+- **Issue #9232** (closed): test oracle drops round/oval Gerber flashes plotted as zero-length lines (native mask comparisons can pass vacuously)
 - **PR #9265**: docs: correct within_own_pad index figure, allowance wording and evidence
 - **PR #9258**: test: pin design-source.zip recipe members to the live recipe
 - **PR #9254**: test: pin CoupledPathfinder own-net trace slit-band gate directly
