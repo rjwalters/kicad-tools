@@ -219,9 +219,19 @@ def _silk_text(node):
 
 def physical_contract(path):
     """Ignore UUID/format churn, bind placement, every land/net, stack and pours."""
+    from kicad_tools.cli.pcb_add_fiducials import _is_fiducial
+
     pcb, doc = PCB.load(path), parse_file(path)
     footprints = []
     for fp in sorted(pcb.footprints, key=lambda f: f.reference):
+        # Issue #9143 / #8532: global fiducials are netless, board-only
+        # assembly aids the recipe adds after routing -- no land, no net,
+        # nothing the reviewed copper binds to (remap_routed already treats
+        # FID* footprints as the expected unrouted-vs-routed diff). Binding
+        # them would force every routing-plan recapture onto fiducial
+        # placement churn.
+        if _is_fiducial(fp):
+            continue
         pads = [
             {
                 "number": p.number,

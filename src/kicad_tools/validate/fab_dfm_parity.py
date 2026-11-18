@@ -23,16 +23,20 @@ Rules for editing the table:
   pad fab bands (issue #8938) divides across the ``trace_spacing`` /
   ``pad_spacing`` rows; the bare id still matches the bandless emit sites
   (the legacy opt-in pass, zone-fill ``info`` findings), which stay on
-  ``pad_spacing``.  ``kct_rules`` is coverage *provenance*
+  ``pad_spacing``.  A ``#corner_class`` qualifier works the same way
+  (``sharp_trace_corner#bend``, issue #9037).  ``kct_rules`` is coverage *provenance*
   at mixed granularity (mostly category ids) and is deliberately NOT the
   attribution key.  Ids deliberately unattributed: ``*_incomplete`` run-state
   infos, ``clearance_net0_bridge`` and the zone-clearance ids (the fab does
-  not judge zone-fill clearance), and the kct-only silk advisories
+  not judge zone-fill clearance), the kct-only silk advisories
   (``silk_over_mask_opening``, ``silk_edge_clearance``, ``silk_overlap``,
-  ``silk_ref_obscured``, ``silkscreen_text_height``).
+  ``silk_ref_obscured``, ``silkscreen_text_height``), and the
+  ``sharp_trace_corner#junction`` population (issue #9037: 3-or-more-segment
+  vertices are kct-only over-reporting under the #8848 operator ruling --
+  the fab flagged none of them).
   ``count_rule_ids`` adds no parity *claim*; re-keying an existing row's
-  attribution (as #8972 did) does bump :data:`TABLE_VERSION`, which moves
-  the stanza header's version with it.
+  attribution (as #8972 did) changes the row's content, which moves
+  :data:`TABLE_VERSION` (and the stanza header) with it automatically.
 * Every rule named in ``kct_rules`` of a ``covered`` / ``partial`` row must be
   something ``kct check`` can actually emit -- a real category
   (``cli/check_categories.py``) or a finer rule id registered in
@@ -45,27 +49,22 @@ Rules for editing the table:
   so registering one fails the test until this row is flipped.  A rule PR that
   forgets its row therefore cannot merge green; add the new id to the mapping
   in the same PR.
-* Bump :data:`TABLE_VERSION` on any row change.
+* Do not hand-edit a version: :data:`TABLE_VERSION` is a content hash of the
+  rows (see :func:`compute_table_version`), so it changes by itself on any row
+  change and two PRs editing different rows cannot collide on it (issue #9242).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import json
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, Mapping, Sequence
 
 from .violations import DRCViolation
 
 Status = Literal["covered", "partial", "not_covered"]
-
-#: Version of the table below; bump on any row change.
-#: 6: #8938 -- fab-view gap bands come from the resolved stackup's
-#:    ``dfm_thresholds`` entry; same-net sub-danger pad gaps are errors;
-#:    zone-fill (pour) gaps report at info (not fab-judged).
-#: 7: #8972 -- trace-band vs pad-band ``physical_copper_gap`` findings are
-#:    attributed to their own rows (``trace_spacing`` / ``pad_spacing``) via
-#:    the ``rule_id#fab_band`` qualified key; the rule id itself is unchanged.
-TABLE_VERSION = 7
 
 #: Where the observed categories/thresholds came from (counts are hand-recorded).
 SOURCE = "https://github.com/rjwalters/kicad-tools/issues/8838"
@@ -157,7 +156,14 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "edge is an ERROR -- the fab cannot see nets and flags it regardless "
         "(the 4-layer 1 oz board's 6 danger are same-net via/track at "
         "0.065-0.099 mm from a pad edge); the finding is labelled `same_net` "
-        "so the class can be waived deliberately. Zone-fill (pour) gaps are "
+        "so the class can be waived deliberately. Reported, not reproduced "
+        "(#9034): on one further 4-layer board (not committed) kct reported "
+        "19 errors against the fab's 6 danger + 1 warning; the surplus cause "
+        "is unmeasured, but kct emits at most one finding per copper-source "
+        "pair per layer (closest measurement wins -- measured on the #9034 "
+        "fixture), so it cannot come from per-edge inflation within a pair. "
+        "No fab-sourced edge justifies a threshold change, so the stricter "
+        "same-net error stays (#8938). Zone-fill (pour) gaps are "
         "kct's own advisory only and report at info, not tiered: JLCDFM does "
         "not judge pour clearance -- 1,516 pour-to-pad gaps at 0.10-0.13 mm "
         "went unflagged on the #8938 board -- so kct's warning count for this "
@@ -172,12 +178,31 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "`mask_to_copper` is default-on for an explicit --mfr `jlcpcb*` since #8842 "
         "(interim 0.09 mm danger / 0.15 mm warning); a bare `kct check` with no "
         "--mfr does not engage it, and the native path needs an unmodified saved "
-        "source. Observed 5 danger. The rule has no same-net exclusion and traces "
-        "are in its comparison set, so the fab's same-net track-in-pad-opening "
-        "items are in scope; since #8914 an assessment that could not complete "
-        "reports `mask_to_copper_incomplete` at info, so zero findings no longer "
-        "read as a clean board. Whether the #8914 report's zero count was an "
-        "incomplete run or a measurement gap is still unresolved.",
+        "source. Observed 5 danger, all same-net: a track running beside, along, or "
+        "leaving and jogging beside its own pad at 0-0.08 mm (#8914); those shapes "
+        "stay errors at the 0.09 mm band. Since #8858 one shape is `within_own_pad` "
+        "at info: a straight track entering its own plain pad once, at 45 degrees or "
+        "steeper, exposing nothing beyond the pad and leaving no more copper under "
+        "mask beside the opening than that one crossing (or a track lying wholly on "
+        "the pad). The fab did not flag plain entries (#8914; 655 entries on the "
+        "consumer board, 0 flagged). On boards 00-07 (0 mm expansion) that was 963 "
+        "of 1,542 errors. Pass-through, along-edge and straddling tracks, shallow "
+        "entries, arcs, vias and pours touching the pad, expansion rings wider than "
+        "the construction budget, and different-net copper keep their verdict. "
+        "Since #9284 a second shape is `own_pour_thermal` at info: a plain pad "
+        "tied to its own same-net pour by thermal spokes, as pcbnew declares and "
+        "the fill shows, at 0 mm expansion with nothing beyond the pad, and within "
+        "the 0.15 mm examined band only 1-4 spoke crossings (pour body farther "
+        "out). JLCDFM listed no item for the four such pads on board 01 (relief "
+        "gaps 0.2 and 0.3 mm; #8858, 2026-11-17); same-net pairs were absent, not "
+        "rated Good. Solid connections, unconnected same-net pour, a pour body "
+        "inside 0.15 mm, and pour exposed by a positive expansion keep their "
+        "verdict. Different-net pour on that board agrees with the fab: R2.1 at "
+        "0.1275 mm is a kct warning (fab: warning, 0.13 mm); R1.1 and R1.2 at "
+        "0.2 mm get no finding (fab: good). "
+        "Since #8914 an assessment that could not complete reports "
+        "`mask_to_copper_incomplete` at info, so zero findings no longer read as a "
+        "clean board.",
     ),
     ParityRow(
         "tht_to_smd",
@@ -192,9 +217,13 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "judged against any exposed (untented) via annulus -- the fab's `smd` side "
         "counts a small exposed via pad (#8914 item 5); THT component pads are not "
         "paired with via annuli, and tented annuli are skipped (the fab's exact "
-        "tenting test is unverified). Still skipped: same-footprint pad pairs and "
-        "sub-1.0 mm fan-out vias as the hole side. A "
-        "pad shape the rule "
+        "tenting test is unverified). Since #9325 a same-net pair of "
+        "anchor-sized vias is exempt (the fab counted none of the `kct pcb "
+        "reinforce` anchor pairs on the #9325 board -- one-board evidence, not a "
+        "general fab-rule confirmation); a pair colliding on net 0 is not exempt "
+        "(net 0 is the no-net sentinel every unconnected hole resolves to, not a "
+        "shared net). Still skipped: same-footprint pad pairs and "
+        "sub-1.0 mm fan-out vias as the hole side. A pad shape the rule "
         "cannot measure now reports `tht_smd_spacing_incomplete` at info instead of "
         "vanishing. Fab-view gated -- runs only when the effective --mfr is exactly "
         "`jlcpcb`. Observed 5 danger.",
@@ -263,19 +292,36 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
     ),
     ParityRow(
         "sharp_trace_corner",
-        (),
-        "not_covered",
+        ("sharp_trace_corner",),
+        "covered",
         False,
-        (),
-        "no rule; `sharp_trace_corner` is in flight on #8840. Observed 3 warnings.",
+        # Only the two-segment open-air bend is the fab-equivalent subset
+        # (issue #9037); the junction population (``#junction``) is kct-only
+        # over-reporting, reported by operator ruling on PR #8848 and left
+        # deliberately unattributed so the tallies cannot read as fab-aligned.
+        ("sharp_trace_corner#bend",),
+        "`sharp_trace_corner` (#8840) reports all 3 observed vertices (pinned in its "
+        "tests). Only its two-segment open-air bend population maps to JLCDFM's "
+        "category (``#bend``): the fab flagged 3 of the 8 bends on that board, and "
+        "no criterion separates the other 5 (leg length and width do not), so they "
+        "are recorded as unexplained, not covered (#9037). The rule's junction "
+        "findings (3+ segments at the vertex) are kct-only over-reporting -- 39 on "
+        "that board, 0 flagged -- carried as warnings under the #8848 operator "
+        "ruling, separable since #9037 via ``corner_class='junction'`` and not "
+        "attributed here. A vertex inside same-net pad copper is not reported "
+        "since #8848 (the board's 5 in-pad findings should be gone; pinned by "
+        "tests, not re-measured on the board).",
     ),
     ParityRow(
         "missing_plated_through_hole",
-        (),
-        "not_covered",
+        ("missing_plated_hole",),
+        "partial",
         False,
-        (),
-        "no rule; `missing_plated_hole` is in flight on #8840. Observed 2 warnings.",
+        ("missing_plated_hole",),
+        "`missing_plated_hole` (#8840) flags same-net top/bottom SMD pads whose "
+        "centres coincide (0.05 mm) with no same-net plated hole inside both; "
+        "overlapping pads with offset centres are not checked. The observed 2 "
+        "warnings were not re-measured.",
     ),
     ParityRow(
         "silkscreen_line_width",
@@ -300,6 +346,25 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "checked; no finding on the board.",
     ),
 )
+
+
+def compute_table_version(rows: Sequence[ParityRow]) -> str:
+    """Content-derived identifier for a parity table (issue #9242).
+
+    The first 8 hex chars of the SHA-256 of the rows' canonical JSON.  Every
+    :class:`ParityRow` field is included (``dataclasses.asdict``, not
+    :meth:`ParityRow.to_dict`, which omits ``count_rule_ids``), keys are
+    sorted and tuples serialize as lists, so the value is identical across
+    runs, processes and Python versions and changes iff a row changes.
+    """
+    canonical = json.dumps([asdict(r) for r in rows], sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:8]
+
+
+#: Content hash of :data:`PARITY_TABLE`; derived, never hand-edited, so two PRs
+#: touching different rows cannot claim the same number.  Row history lives in
+#: git and ``changelog.d/``.
+TABLE_VERSION: str = compute_table_version(PARITY_TABLE)
 
 
 @dataclass(frozen=True)
@@ -337,6 +402,14 @@ class ParityReport:
 
     manufacturer: str
     rows: tuple[ParityRow, ...]
+    #: The JLCDFM parity categories that are danger-capable and whose
+    #: kct-vs-fab comparison is unavailable: either ``not_covered`` by this
+    #: static table (#9062) or backed by a kct rule that did not complete
+    #: this run (#9234, via :func:`evaluate_parity`'s ``incomplete_rules``).
+    #: The static subset alone -- the one that drives the ``fab_dfm_parity``
+    #: entry in ``meta_checks.incomplete_categories`` and the verdict -- is
+    #: :attr:`table_incomplete_categories`; the run-state subset is
+    #: :attr:`run_incomplete_categories`.
     incomplete_categories: tuple[str, ...]
     #: Per-category kct-vs-fab counts; ``None`` unless a recorded result was
     #: supplied (issue #8940).
@@ -346,11 +419,29 @@ class ParityReport:
     unmapped_recorded: tuple[str, ...] = ()
 
     @property
+    def table_incomplete_categories(self) -> tuple[str, ...]:
+        """The static ``not_covered`` subset (#9062's table-only contract)."""
+        return tuple(
+            r.category for r in self.rows if r.danger_capable and r.status == "not_covered"
+        )
+
+    @property
+    def run_incomplete_categories(self) -> tuple[str, ...]:
+        """Categories named only because their kct rule did not complete (#9234)."""
+        table = set(self.table_incomplete_categories)
+        return tuple(c for c in self.incomplete_categories if c not in table)
+
+    @property
+    def table_incomplete(self) -> bool:
+        """A danger-capable row kct has no rule for (#8845, run-independent)."""
+        return bool(self.table_incomplete_categories)
+
+    @property
     def incomplete(self) -> bool:
         return bool(self.incomplete_categories)
 
     def to_dict(self) -> dict:
-        data = {
+        data: dict[str, object] = {
             "table_version": TABLE_VERSION,
             "source": SOURCE,
             "retrieved": RETRIEVED,
@@ -422,11 +513,18 @@ def attribution_key(v: DRCViolation) -> str:
     ``rule_id#fab_band`` for a fab-band-graded finding (issue #8972:
     ``physical_copper_gap`` is one rule id spanning the trace and pad fab
     bands of issue #8938, and the band it was graded against is carried on
-    :attr:`DRCViolation.fab_band`), the bare ``rule_id`` otherwise.  The
-    qualifier is attribution-only -- the rule id, and so
-    ``DRCViolation.key`` / every ``.kct_waivers.json`` entry, is unchanged.
+    :attr:`DRCViolation.fab_band`), ``rule_id#corner_class`` for a classified
+    ``sharp_trace_corner`` finding (issue #9037: the bend population maps to
+    JLCDFM's category, the junction population is kct-only), the bare
+    ``rule_id`` otherwise.  The qualifier is attribution-only -- the rule
+    id, and so ``DRCViolation.key`` / every ``.kct_waivers.json`` entry, is
+    unchanged.
     """
-    return f"{v.rule_id}#{v.fab_band}" if v.fab_band else v.rule_id
+    if v.fab_band:
+        return f"{v.rule_id}#{v.fab_band}"
+    if v.corner_class:
+        return f"{v.rule_id}#{v.corner_class}"
+    return v.rule_id
 
 
 def evaluate_parity(
@@ -435,11 +533,20 @@ def evaluate_parity(
     *,
     findings: Sequence[DRCViolation] = (),
     recorded_counts: Mapping[str, Mapping[str, int]] | None = None,
+    incomplete_rules: Sequence[str] = (),
 ) -> ParityReport | None:
     """Evaluate the parity table for *manufacturer*; ``None`` when it does not apply.
 
     A danger-capable ``not_covered`` row makes the report ``incomplete``;
-    ``partial`` rows are listed but never trigger it.
+    ``partial`` rows are listed but never trigger it.  With
+    *incomplete_rules* (#9234) -- kct rule ids whose check did not complete
+    this run, e.g. ``("mask_to_copper",)`` -- every danger-capable row that
+    counts findings from one of those rules (``count_rule_ids``, ignoring any
+    ``#band`` qualifier) is also named in ``incomplete_categories``: the
+    fab-parity comparison for that category is unavailable on this run.  That
+    run-state subset does not by itself reach ``meta_checks`` or the verdict
+    (see :attr:`ParityReport.table_incomplete`), which stay keyed on the
+    static ``not_covered`` rows as in #9062.
 
     With *recorded_counts* (issue #8940) the report also carries a
     :class:`RowComparison` per row: kct error/warning counts over *findings*
@@ -450,7 +557,16 @@ def evaluate_parity(
     """
     if not applies_to(manufacturer):
         return None
-    incomplete = tuple(r.category for r in table if r.danger_capable and r.status == "not_covered")
+    rule_gaps = {rule.split("#", 1)[0] for rule in incomplete_rules}
+    incomplete = tuple(
+        r.category
+        for r in table
+        if r.danger_capable
+        and (
+            r.status == "not_covered"
+            or any(rule.split("#", 1)[0] in rule_gaps for rule in r.count_rule_ids)
+        )
+    )
     comparisons: tuple[RowComparison, ...] | None = None
     unmapped: tuple[str, ...] = ()
     if recorded_counts is not None:
@@ -504,8 +620,8 @@ def format_parity_stanza(report: ParityReport) -> str:
     lines = [
         "",
         f"Fab DFM parity (JLCDFM, table v{TABLE_VERSION}, {RETRIEVED}): "
-        f"{len(report.incomplete_categories)} danger-capable categor"
-        f"{'y' if len(report.incomplete_categories) == 1 else 'ies'} not covered",
+        f"{len(report.table_incomplete_categories)} danger-capable categor"
+        f"{'y' if len(report.table_incomplete_categories) == 1 else 'ies'} not covered",
     ]
     comparisons = (
         {c.category: c for c in report.comparisons} if report.comparisons is not None else None
@@ -533,9 +649,20 @@ def format_parity_stanza(report: ParityReport) -> str:
         lines.append(
             "  recorded categories not in the parity table: " + ", ".join(report.unmapped_recorded)
         )
-    if report.incomplete:
+    if report.table_incomplete:
         lines.append(
             "  INCOMPLETE: kct has no rule for the categories above; a pass here does "
             "not mean JLCDFM is clean (use --allow-incomplete to exit 0)."
+        )
+    if report.run_incomplete_categories:
+        # Run-state incompleteness (#9234): kct HAS a rule for these
+        # categories, but it did not complete this run, so the counts beside
+        # them are not comparable and a zero must not read as parity.
+        lines.append(
+            "  INCOMPLETE (this run): "
+            + ", ".join(report.run_incomplete_categories)
+            + ": the kct check behind this category did not complete, so its "
+            "kct-vs-fab comparison is unavailable (see "
+            "meta_checks.incomplete_categories; use --allow-incomplete to exit 0)"
         )
     return "\n".join(lines)

@@ -7,6 +7,7 @@ Extracts component information from schematics for manufacturing.
 from __future__ import annotations
 
 import csv
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -516,13 +517,34 @@ def backfill_footprints_from_pcb(items: list[BOMItem], pcb_path: str | Path) -> 
     return filled
 
 
+#: Normalised (case/punctuation-stripped) CSV header spellings that carry an
+#: LCSC part number, checked in fallback order.  Covers ``LCSC``, ``LCSC
+#: Part``, ``LCSC Part #`` (the repo's own ``JLCPCBBOMFormatter`` header,
+#: Issue #9368) and ``JLC Part``.
+_LCSC_CSV_HEADERS = ("lcsc", "lcscpart", "jlcpart")
+
+
+def _norm_csv_header(header: str) -> str:
+    """Normalise a CSV column header for lookup.
+
+    Mirrors ``kicad_tools.pcb.lcsc_bom._norm`` so both readers accept the
+    same spellings case- and punctuation-insensitively.
+    """
+    return re.sub(r"[^a-z0-9]", "", header.lower())
+
+
 def load_bom_csv(path: str | Path) -> BOM:
     """Load a BOM from a CSV file.
 
     Recognises the common column spellings (Reference/Designator, Value/Comment,
-    Footprint/Package, LCSC/JLC Part, MPN/Part Number).  Rows without a reference
-    are skipped.  Raises ``OSError`` / ``UnicodeDecodeError`` / ``csv.Error`` for
-    unreadable input; an input with no usable rows yields an empty BOM.
+    Footprint/Package, MPN/Part Number); the LCSC column is matched
+    case/punctuation-insensitively (``LCSC``, ``LCSC Part``, ``LCSC Part #``,
+    ``JLC Part``, ...).  Rows without a reference are skipped.  A
+    comma-separated Reference/Designator cell (the grouped-row shape
+    ``bom_jlcpcb.csv`` writes) expands to one item per reference, each
+    sharing the row's value/footprint/LCSC/MPN.  Raises ``OSError`` /
+    ``UnicodeDecodeError`` / ``csv.Error`` for unreadable input; an input with
+    no usable rows yields an empty BOM.
     """
     items: list[BOMItem] = []
     with open(path, newline="", encoding="utf-8-sig") as f:
@@ -550,13 +572,8 @@ def load_bom_csv(path: str | Path) -> BOM:
                 or row.get("package")
                 or ""
             )
-            lcsc = (
-                row.get("LCSC")
-                or row.get("lcsc")
-                or row.get("LCSC Part")
-                or row.get("JLC Part")
-                or ""
-            )
+            norm_row = {_norm_csv_header(k): v for k, v in row.items() if k}
+            lcsc = next((norm_row[h] for h in _LCSC_CSV_HEADERS if norm_row.get(h)), "")
             mpn = (
                 row.get("MPN")
                 or row.get("mpn")
@@ -566,15 +583,18 @@ def load_bom_csv(path: str | Path) -> BOM:
             )
 
             if reference:
-                items.append(
-                    BOMItem(
-                        reference=reference,
-                        value=value,
-                        footprint=footprint,
-                        lib_id="",
-                        lcsc=lcsc,
-                        mpn=mpn,
+                for ref in (part.strip() for part in reference.split(",")):
+                    if not ref:
+                        continue
+                    items.append(
+                        BOMItem(
+                            reference=ref,
+                            value=value,
+                            footprint=footprint,
+                            lib_id="",
+                            lcsc=lcsc,
+                            mpn=mpn,
+                        )
                     )
-                )
 
     return BOM(items=items, source=str(path))

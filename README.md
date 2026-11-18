@@ -609,7 +609,7 @@ full list (every command and subcommand) lives in
 
 | Command | Description |
 |---------|-------------|
-| `kct fix-drc <pcb>` | Automated DRC violation repair (clearance + drill) |
+| `kct fix-drc <pcb>` | Automated DRC violation repair (clearance + drill + mask-copper) |
 | `kct fix-erc <schematic>` | Automated ERC violation repair (PWR_FLAG + no-connect) |
 | `kct fix-vias <pcb>` | Fix vias to meet manufacturer specifications (incl. off-pad relocation) |
 | `kct pipeline <input>` | End-to-end repair pipeline for existing PCBs |
@@ -885,7 +885,7 @@ uv run ruff format . --check && uv run ruff check . && uv run pytest
 
 ## Agent Skills (`kct` namespace)
 
-kicad-tools ships its own Claude agent skills under `.claude/commands/kct/` (invoked as `/kct:<name>`), a harness-agnostic namespace kept separate from any installed orchestration framework. Nine skills ship today — `/kct:tapeout` (complete fab-ready export bundle or loud refusal), `/kct:manufacturing-readiness` (sign-off gates), `/kct:hv-isolation-loop` (mains/HV creepage design loop), `/kct:board-recipe-scaffold`, `/kct:layout-journal`, `/kct:ee-review` (advisory EE decision document for analog/placement-blocked boards), `/kct:circuit-review` (schematic-vs-datasheet review before layout), `/kct:submit-jlcpcb` (JLCPCB PCBA submission prep from a signed-off tapeout bundle; never orders), and `/kct:help` (introspective guide to the namespace). See [.claude/commands/kct/README.md](.claude/commands/kct/README.md) for the full contracts. The skill text is harness-neutral; [docs/agent-surfaces.md](docs/agent-surfaces.md) lists what each skill needs from Claude Code, Codex CLI or opencode.
+kicad-tools ships its own Claude agent skills under `.claude/commands/kct/` (invoked as `/kct:<name>`), a harness-agnostic namespace kept separate from any installed orchestration framework. Nine skills ship today — `/kct:tapeout` (complete fab-ready export bundle or loud refusal), `/kct:manufacturing-readiness` (sign-off gates), `/kct:hv-isolation-loop` (mains/HV creepage design loop), `/kct:board-recipe-scaffold`, `/kct:layout-journal`, `/kct:ee-review` (advisory EE decision document for analog/placement-blocked boards), `/kct:circuit-review` (schematic-vs-datasheet review before layout), `/kct:submit-jlcpcb` (JLCPCB PCBA submission prep from a signed-off tapeout bundle; orders only through an opt-in, attended checkout leg the operator runs for a total they approve exactly), and `/kct:help` (introspective guide to the namespace). See [.claude/commands/kct/README.md](.claude/commands/kct/README.md) for the full contracts. The skill text is harness-neutral; [docs/agent-surfaces.md](docs/agent-surfaces.md) lists what each skill needs from Claude Code, Codex CLI or opencode.
 
 The skills ship inside the `kicad-tools` wheel (`kicad_tools/agent_skills/kct/`), so a plain `pip install kicad-tools` is enough; no clone of this repository is needed. Install them with `kct skills install`:
 

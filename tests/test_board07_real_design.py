@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import math
 import sys
 from pathlib import Path
 
@@ -408,7 +409,14 @@ def test_external_load_gate_and_report_scope(tmp_path, monkeypatch):
     monkeypatch.setattr(
         validate,
         "TraceLengthAnalyzer",
-        lambda: NS(analyze_net=lambda *a: NS(segment_count=1, total_length_mm=105, via_count=2)),
+        lambda: NS(
+            analyze_net=lambda *a: NS(segment_count=1, total_length_mm=105, via_count=2),
+            measure_net_path=lambda *a: NS(
+                path_length_mm=math.dist(segment.start, segment.end),
+                off_path_length_mm=0.0,
+                path_via_indices=(),
+            ),
+        ),
     )
     stack = NS(
         has_explicit_data=False,
@@ -478,6 +486,15 @@ def test_external_load_gate_and_report_scope(tmp_path, monkeypatch):
         assert validate.check(source / "sdram_demo.kicad_pcb", source, evidence) is expected
         report = json.loads((evidence / "validation.json").read_text())
         assert report["trace_capacitance_pf"][name] == pytest.approx(trace_pf)
+        # The off-path margin the OFF_PATH_TOLERANCE_MM comment tells a
+        # maintainer to re-derive from must be reported for every matched net
+        # (Issue #9216).
+        off_path = report["off_path_mm"]
+        assert off_path.keys() == report["lengths_including_vias_mm"].keys()
+        assert all(
+            isinstance(value, float) and value <= validate.OFF_PATH_TOLERANCE_MM
+            for value in off_path.values()
+        )
         estimate = report["external_load_estimates"][name]
         assert estimate["via_allowance_pf"] == 2
         assert estimate["passes"] is expected
@@ -568,3 +585,133 @@ def test_dq_asymmetric_driver_budgets():
     assert report["passes"] is False
     assert report["external_limit_pf"] == 20
     assert report["margin_pf"] == -1.5
+
+
+def test_off_path_error_names_net_and_amount():
+    validate = load("validate")
+    message = validate.off_path_error("DQ7", 8.138)
+    assert message.startswith("DQ7: 8.138 mm")
+    assert "dead-end loop" in message
+    assert f"limit {validate.OFF_PATH_TOLERANCE_MM:.1f} mm" in message
+
+
+def test_match_lengths_measure_path_not_summed_copper():
+    """#9117: matched length uses the pad-to-pad path, never summed copper.
+
+    The DQ7/LDQM dead-end loops the issue evidence named were repaired
+    on main (#9118, PR #9139) after this measurement landed, so on the
+    committed copper their off-path residual sits inside the tolerance
+    like every other defect-free net (they measure up to 2.08 mm, #9175)
+    and both byte groups' matched-length spreads stay inside the 5 mm
+    budget (Issue #9217).
+    The regression the loops anchored -- summed copper counting a loop
+    the signal never travels as matched length -- is covered where a
+    board repair cannot remove it: on reconstructed pre-repair copper in
+    test_board07_byte0_physical_spread and on the synthetic
+    loop/duplicate/stub fixtures in test_trace_length.py.  What this test
+    pins on the live artifact is that the path measurement tracks the
+    board as committed and that SDCKE1, the net with the largest
+    residual (2.08 mm, measured defect-free in #9175 -- one simple
+    pad-to-pad chain, the residual distributed over staircase
+    micro-steps), sits inside the tolerance with the other defect-free
+    nets.
+    """
+    from kicad_tools.analysis.trace_length import TraceLengthAnalyzer
+    from kicad_tools.physics import Stackup
+    from kicad_tools.schema.pcb import PCB
+
+    board = PCB.load(ROOT / "reviewed-routing/sdram_demo.kicad_pcb")
+    analyzer = TraceLengthAnalyzer()
+    validate = load("validate")
+    tolerance = validate.OFF_PATH_TOLERANCE_MM
+    elevations = validate.copper_elevations(Stackup.from_pcb(board))
+    vias_by_index = dict(enumerate(board.vias))
+
+    paths = {}
+    off_paths = {}
+    matched = {}
+    for name in (
+        "DQ0",
+        "DQ1",
+        "DQ2",
+        "DQ3",
+        "DQ4",
+        "DQ5",
+        "DQ6",
+        "DQ7",
+        "DQ8",
+        "DQ9",
+        "DQ10",
+        "DQ11",
+        "DQ12",
+        "DQ13",
+        "DQ14",
+        "DQ15",
+        "LDQM",
+        "UDQM",
+        "SDCKE1",
+    ):
+        measurement = analyzer.measure_net_path(board, name)
+        assert measurement.path_length_mm is not None, name
+        paths[name] = measurement.path_length_mm
+        off_paths[name] = measurement.off_path_length_mm
+        # path_via_indices is documented in board.vias index space; each
+        # entry must name one of this net's own vias (not a contact-graph
+        # item position, which would point at foreign copper).
+        net = board.get_net_by_name(name)
+        for index in measurement.path_via_indices:
+            assert board.vias[index].net_number == net.number, (name, index)
+        # The gate's quantity, not raw copper: pad-to-pad path plus the
+        # via travel of every path via (Issue #9217), so the byte-spread
+        # assertion below grades the same length validate.timing_errors
+        # and test_board07_byte0_physical_spread do.
+        segments = list(board.segments_in_net(net.number))
+        matched[name] = validate.matched_length_mm(measurement, segments, vias_by_index, elevations)
+
+    # Nets whose copper the issue evidence calls loop-free stay clean;
+    # the measured residual is barrel-overlap copper under pads/vias,
+    # in-pad joints and staircase micro-steps (defect-free nets on
+    # this board measure up to 2.08 mm, Issue #9175).
+    for name in ("DQ0", "DQ1", "DQ11"):
+        assert off_paths[name] < 1.0, (name, off_paths[name])
+
+    # The DQ7/LDQM loops the evidence named were repaired in #9118
+    # (PR #9139): their off-path residual now sits inside the tolerance
+    # with the other defect-free nets, so they raise no off-path error.
+    assert off_paths["DQ7"] < tolerance, ("DQ7", off_paths["DQ7"])
+    assert off_paths["LDQM"] < tolerance, ("LDQM", off_paths["LDQM"])
+
+    # SDCKE1 carries the largest defect-free residual (2.08 mm): its 360
+    # segments form one simple pad-to-pad chain with no dead end and no
+    # branch, and the residual distributes over 322 staircase micro-steps
+    # of <= 0.13 mm (Issue #9175), so it sits inside the tolerance like
+    # every other defect-free net instead of raising the off-path error.
+    assert off_paths["SDCKE1"] < tolerance, ("SDCKE1", off_paths["SDCKE1"])
+
+    # Both byte groups' matched-length spreads -- per-net pad-to-pad
+    # copper path plus via travel, built with validate.matched_length_mm,
+    # the same quantity the gate's timing_errors and
+    # test_board07_byte0_physical_spread grade (Issue #9217) -- stay
+    # inside the 5 mm budget on the repaired copper (byte 0: 1.65 mm,
+    # byte 1: 3.38 mm; before #9217 this block graded the raw copper
+    # path only, 1.18 mm and 3.28 mm, and via travel does not cancel
+    # within a group, so each spread moves by its own amount: in byte 0
+    # DQ2 and LDQM carry no path vias against 0.573 mm for the other
+    # seven, and in byte 1 DQ15 and UDQM carry one path via, 0.287 mm,
+    # against 0.573 mm for the other seven). The
+    # pre-repair byte-0 violation (> 5 mm physical while summed copper
+    # hid it) is asserted there against reconstructed pre-repair copper,
+    # and the 10.9 mm byte-1 spread once reported here was the
+    # zero-weight contact-link artifact, not physical copper.
+    constraints_path = ROOT.parent / "output/sdram_constraints.json"
+    import json
+
+    constraints = json.loads(constraints_path.read_text())
+    limit = constraints["group_skew_mm"]
+    for byte, members in (
+        ("SDRAM_BYTE0", constraints["groups"]["SDRAM_BYTE0"]),
+        ("SDRAM_BYTE1", constraints["groups"]["SDRAM_BYTE1"]),
+    ):
+        values = [matched[name] for name in members if name in matched]
+        spread = max(values) - min(values)
+        assert spread < limit, (byte, spread, values)

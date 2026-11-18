@@ -261,6 +261,33 @@ class TestNonPerturbation:
         assert payload["schema"] == "kct-detour-ratio/1"
         assert payload["summary"]["probed"] >= 4
 
+    def test_cli_default_drc_path_reports_once(
+        self, board_path: Path, tmp_path: Path, capsys
+    ) -> None:
+        """Default path (no ``--skip-drc``): exactly one report block.
+
+        The four post-save ``_report_detour_ratio`` calls already cover
+        every flow that reaches DRC; the extra call inside
+        ``run_post_route_drc`` printed the block and rewrote the sidecar a
+        second time on every default run (issue #9047).
+        """
+        out = tmp_path / "drc.kicad_pcb"
+        argv = [
+            str(board_path),
+            "-o",
+            str(out),
+            "--strategy",
+            "basic",
+            "--seed",
+            "7",
+            "--report-detour-ratio",
+        ]
+        route_cmd.main(argv)
+
+        captured = capsys.readouterr().out
+        assert captured.count("=== Detour ratio") == 1
+        assert (tmp_path / "drc.detour_ratio.json").exists()
+
     def test_plain_route_all_identical_and_journal_untouched(self, board_path: Path) -> None:
         """Plain ``route_all`` driver: identical copper, identical journal."""
         from kicad_tools.router.io import load_pcb_for_routing
@@ -419,6 +446,10 @@ class TestSidecarContract:
             "StubRouter",
             (),
             {
+                # Issue #9013: the report is flag-gated -- a probe that ran
+                # for --detour-repair alone must not print/write it.  This
+                # stub exercises the report path, so it opts in.
+                "report_detour_ratio": True,
                 "detour_probe_records": [
                     DetourConnectionRecord(net_name="N1", connection_index=0, alone_mm=10.0)
                 ],
@@ -582,8 +613,15 @@ class TestProbeLeavesNoTrace:
             if before.get(key, "<absent>") != after.get(key, "<absent>")
         }
         # The records are the probe's output; the #4794 occupancy
-        # generation must move FORWARD so occupancy-keyed caches miss.
-        assert moved == {"auto.detour_probe_records", "grid._occupancy_generation"}
+        # generation must move FORWARD so occupancy-keyed caches miss.  The
+        # probe's measured wall-clock cost (#9244) is likewise a deliberate
+        # persisted output -- the budgets that must not see it are re-based
+        # from it.
+        assert moved == {
+            "auto.detour_probe_records",
+            "auto.detour_probe_elapsed_s",
+            "grid._occupancy_generation",
+        }
 
     @pytest.mark.parametrize("driver", ["route_all", "route_all_negotiated"])
     def test_unroutable_net_failure_records_identical(self, tmp_path: Path, driver: str) -> None:

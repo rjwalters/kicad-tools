@@ -97,6 +97,20 @@ lost a cycle each to a phantom failure.
 anything else, `rm -rf .mypy_cache` and re-run **before** investigating. Never
 use `--update` to make a phantom error go away; it bakes it into the baseline.
 
+`--all-extras` environments type-check differently from the CI dev env:
+installing the optional packages makes mypy resolve them, which both removes
+the missing-import entries the dev baseline carries and surfaces typed
+diagnostics (Ax/CuPy/MLX/PyMuPDF parameter and attribute checks) the dev env
+never sees. As of issue #9241 the baseline gate passes **identically** under
+`uv sync --frozen --extra dev` (what the CI Type Check job installs) and
+`uv sync --frozen --all-extras` — the stub-less optional modules (`cupyx`,
+`fitz`, `pynng`, `playwright`) are silenced by targeted per-module
+`[[tool.mypy.overrides]]` in `pyproject.toml`, and the extras-typed call sites
+are fixed rather than baselined. If the gate starts failing only under one of
+the two environments, an environment-dependent diagnostic crept back in: fix
+the call site (narrow the optional, annotate the duck-typed variable) or
+extend the per-module override — do not split the baseline per environment.
+
 ## Slow single-test runs: check coverage overhead before suspecting a hang
 
 `pyproject.toml`'s default `addopts` (`--cov=kicad_tools --cov-report=term-missing

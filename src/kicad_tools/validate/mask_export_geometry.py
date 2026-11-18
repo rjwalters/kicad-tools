@@ -160,6 +160,16 @@ def _inventory(tree):
                 "layer": node.find_child("layer").get_string(0) if node.find_child("layer") else "",
                 "coordinate_frame": "board",
             }
+        # A rule area (a zone carrying a ``(keepout ...)`` child) plots no
+        # copper and has no mask presence, whatever layers it spans or whether
+        # it sits at board level or inside a footprint (#9234). Requiring a
+        # native object for it made every board using a stock module
+        # footprint with a built-in antenna keepout read incomplete, so it is
+        # not part of the plotted-object inventory at all; the worker's
+        # reverse scan skips it symmetrically. No zone child is itself a
+        # plotted object, so the subtree needs no visit.
+        if node.name == "zone" and node.find_child("keepout") is not None:
+            return
         is_object = node.name in object_tags or node.name.startswith(("fp_", "gr_"))
         if is_object:
             layer = node.find_child("layer")
@@ -206,6 +216,33 @@ def _inventory(tree):
     return result
 
 
+def _resolve_native_kicad_cli_command(scratch_dir: str | Path | None) -> list[str] | None:
+    """The pinned image's kicad-cli when the Docker fallback is enabled (#9009).
+
+    Mirrors ``_resolve_native_python_command`` in ``mask_copper_geometry``: with
+    ``KCT_KICAD_DOCKER=1`` and docker on PATH, the per-object worker already
+    runs in the pinned image, so the full-layer export must run there too --
+    otherwise a host kicad-cli of a different release plots the layers and the
+    two halves can never agree (``Native object/export versions differ``).
+    The temporary root the export stages under is bind-mounted at its own
+    path, so the staged board and the Gerber output directory are visible to
+    the container. ``None`` means "not in Docker mode": the caller falls back
+    to host discovery, as before.
+    """
+    import shutil
+
+    from kicad_tools.cli.kicad_toolchain import (
+        docker_fallback_enabled,
+        docker_kicad_cli_prefix,
+        process_config_home,
+    )
+
+    if not (docker_fallback_enabled() and shutil.which("docker")):
+        return None
+    root = Path(scratch_dir) if scratch_dir is not None else Path(tempfile.gettempdir())
+    return docker_kicad_cli_prefix([root], process_config_home())
+
+
 def inspect_exported_mask_geometry(
     pcb_path: str | Path,
     *,
@@ -221,12 +258,15 @@ def inspect_exported_mask_geometry(
     ``artifact_dir`` retains exact native outputs and the source-bound manifest.
     No zone refill, source write, manufacturer policy or exposure waiver occurs.
     """
+    from kicad_tools.cli.kicad_toolchain import is_docker_shim, portable_native_command
     from kicad_tools.cli.runner import find_kicad_cli
     from kicad_tools.sexp import parse_string
 
     options = options or MaskExportOptions()
     if not math.isfinite(options.timeout_seconds) or options.timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
+    if native_command is None:
+        native_command = _resolve_native_kicad_cli_command(scratch_dir)
     if native_command is None:
         executable = find_kicad_cli()
         if executable is None:
@@ -273,7 +313,10 @@ def inspect_exported_mask_geometry(
         _sha(siblings[".kicad_dru"]) if siblings[".kicad_dru"] is not None else None,
         version,
         {
-            "command": list(native_command),
+            # Recorded form is host-independent (#9055): docker prefixes keep
+            # only the image and entrypoint, other commands only the basename.
+            # The argv actually executed stays in *native_command* untouched.
+            "command": portable_native_command(native_command),
             "arguments": args,
             "profile": "macro-free-native-gerber",
             "board_plot_params": options.board_plot_params,
@@ -281,7 +324,10 @@ def inspect_exported_mask_geometry(
         },
     )
     command_file = Path(native_command[0])
-    if command_file.is_file():
+    # A docker shim's bytes embed per-run mounts and the scratch config home,
+    # so their digest would differ on every run and pin no tool identity
+    # (#9055); the pinned image is the identity on that path.
+    if command_file.is_file() and not is_docker_shim(command_file):
         snapshot.export_identity["command_file_sha256"] = _sha(command_file.read_bytes())
     if not re.match(r"^10\.", version):
         snapshot.unsupported.append(

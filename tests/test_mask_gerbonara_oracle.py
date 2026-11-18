@@ -11,6 +11,7 @@ pytest.importorskip("gerbonara", minversion="1.6.3")
 
 
 def _gerber(tmp_path, commands):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     path = tmp_path / "control.gbr"
     path.write_text("%FSLAX46Y46*%\n%MOMM*%\n%LPD*%\n" + commands + "\nM02*\n")
     return path
@@ -57,6 +58,87 @@ def test_clear_layer_object_erases_prior_copper(tmp_path):
     assert not shape.covers(Point(0, 0))
     assert shape.covers(Point(0.75, 0))
     assert shape.area == pytest.approx(math.pi * 0.75, abs=1e-5)
+
+
+def test_circle_and_obround_flash_areas_match_analytic_shapes(tmp_path):
+    from shapely.geometry import Point
+
+    circle = _gerber(tmp_path / "circle", "%ADD10C,1*%\nD10*\nX0Y0D03*")
+    assert read_native_gerber(circle).area == pytest.approx(math.pi * 0.25, abs=1e-5)
+
+    stadium = math.pi * 0.25 + 0.5
+    obround = _gerber(tmp_path / "obround", "%ADD10O,1.5X1*%\nD10*\nX0Y0D03*")
+    shape = read_native_gerber(obround)
+    assert shape.area == pytest.approx(stadium, abs=1e-5)
+    assert shape.covers(Point(-0.7, 0))
+    assert not shape.covers(Point(0, 0.76))
+
+    # A rotated stadium: the same round pen drawn along a 30-degree line.
+    rotated = _gerber(tmp_path / "rotated", "%ADD10C,1*%\nD10*\nX0Y0D02*\nX433013Y250000D01*")
+    assert read_native_gerber(rotated).area == pytest.approx(stadium, abs=1e-5)
+
+
+def test_zero_length_round_pen_renders_disk_not_dropped(tmp_path):
+    # KiCad 10.0.6 plots round pads -- an obround with equal width and
+    # height carries no straight segment -- as a zero-length line with a
+    # width. Gerbonara 1.6.3 reports that as zero-size, so the oracle used
+    # to drop the whole pad or opening and native comparisons could pass
+    # vacuously (issue #9232). Both sources must render the full disk.
+    from shapely.geometry import Point
+
+    drawn = _gerber(tmp_path / "drawn", "%ADD10C,1.7*%\nD10*\nX0Y0D02*\nX0Y0D01*")
+    assert read_native_gerber(drawn).area == pytest.approx(math.pi * 0.85**2, abs=1e-5)
+
+    flashed = _gerber(tmp_path / "flashed", "%ADD10O,1.7X1.7*%\nD10*\nX0Y0D03*")
+    shape = read_native_gerber(flashed)
+    assert shape.area == pytest.approx(math.pi * 0.85**2, abs=1e-5)
+    assert shape.covers(Point(0, 0))
+    assert not shape.covers(Point(0.86, 0))
+
+
+def test_zero_width_round_pen_is_still_skipped(tmp_path):
+    path = _gerber(tmp_path, "%ADD10C,0*%\nD10*\nX0Y0D02*\nX1000000Y0D01*")
+    assert read_native_gerber(path).is_empty
+
+
+def test_clear_zero_length_flash_erases_dark_disk(tmp_path):
+    path = _gerber(
+        tmp_path,
+        "%ADD10C,1.7*%\nD10*\nX0Y0D02*\nX0Y0D01*\n%LPC*%\nX0Y0D02*\nX0Y0D01*",
+    )
+    assert read_native_gerber(path).is_empty
+
+
+def test_two_arc_circle_region_is_retained_not_dropped(tmp_path):
+    # Issue #9288: a full circle drawn as a G36..G37 region from exactly
+    # two semicircular arcs has a two-point outline, so gerbonara 1.6.3's
+    # is_zero_size() -- which tests the polygon area of the linear outline
+    # -- calls it zero-size and the oracle used to silently drop a real
+    # 2.27 mm^2 disk. KiCad 10.0.6 emits such arc-bearing regions for
+    # graphic polygons with (arc ...) corners (measured; zone fills are
+    # polygonized and carry no arcs). The skip must test the
+    # arc-approximated outline's area instead.
+    from shapely.geometry import Point
+
+    path = _gerber(
+        tmp_path,
+        "G36*\nX-850000Y0D02*\nG75*\n"
+        "G02*X850000Y0I850000J0D01*\n"
+        "G02*X-850000Y0I-850000J0D01*\n"
+        "G37*",
+    )
+    shape = read_native_gerber(path)
+    assert shape.area == pytest.approx(math.pi * 0.85**2, rel=5e-3)
+    assert shape.covers(Point(0, 0))
+    assert not shape.covers(Point(0, 0.86))
+
+
+def test_zero_area_region_is_still_skipped(tmp_path):
+    # The mirrored arm of the two-arc circle fix: the approximated-area
+    # skip must keep dropping genuinely degenerate regions. A one-segment
+    # region closes on its own start point and encloses no area.
+    path = _gerber(tmp_path, "G36*\nX0Y0D02*\nG01*\nX1000000Y0D01*\nG37*")
+    assert read_native_gerber(path).is_empty
 
 
 def test_oracle_repairs_self_touching_region_like_production_reader():

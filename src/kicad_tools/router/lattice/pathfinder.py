@@ -71,7 +71,7 @@ from ..pairplan.via_pair import ViaPair, via_pair_sites
 from ..primitives import Pad, Route, Segment, Via, pad_half_extents
 from ..quantize import dogleg_points
 from ..rules import DesignRules, layer_permitted
-from ..via_clearance import same_net_pad_gap_acceptable
+from ..via_clearance import same_net_pad_gap_acceptable, via_annulus_trace_band_ok
 from .coupled import CoupledConnection
 from .escape_plan import EscapeChoice, chosen_stub, foreign_reservations, plan_tapered_escapes
 from .geometry import Pt, Rect, dist, pt_in_rect, seg_pt_dist, seg_seg_dist
@@ -1563,6 +1563,29 @@ class LatticePathfinder:
             if not layer_permitted(self.rules, net_class, ld.index, ld.name)
         )
 
+    # -- own-net pad slit band (issue #9018) -----------------------------------
+
+    def _own_net_pad_band_ok(self, a: Pt, b: Pt, layer: int, net: int, half: float = 0.0) -> bool:
+        """True when leg ``a-b`` keeps the fab slit band clear of own-net SMD pads.
+
+        Issue #9018: same-net copper is exempt from every other leg-legality
+        predicate (``seg_clear`` clears other-net copper; the pad masks are
+        foreign-only), so this is the one predicate that looks at the leg's
+        OWN pads.  Two-region acceptance -- union with the pad or clear of the
+        ``pad_spacing`` detection edge -- via
+        :meth:`LatticeObstacleModel.same_net_pad_band_blocked`.  The edge is
+        the caller-resolved ``DesignRules.same_net_pad_gap_band_edge_mm``
+        (read at CALL time, like ``_via_ok_at``: escalation mutates ``rules``
+        in place between rungs); ``None``/0 keeps the guard off.  ``half <= 0``
+        measures the board-default copper, matching the legacy board-default
+        probe width the same callers fall back to.
+        """
+        edge_mm = float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
+        if edge_mm <= 0.0:
+            return True
+        eff_half = half if half > 0.0 else self._trace_half
+        return not self.obstacles.same_net_pad_band_blocked(a, b, layer, net, eff_half, edge_mm)
+
     # -- pad stubs ------------------------------------------------------------
 
     def pad_stubs(
@@ -1745,6 +1768,14 @@ class LatticePathfinder:
                                 ok = False
                                 break
                             if not committed.seg_clear(a, b, layer, net, half, clr):
+                                ok = False
+                                break
+                            # Issue #9018: the stub's own dogleg legs may not
+                            # skirt an own-net pad inside the fab slit band
+                            # (the first leg unions the origin pad and passes
+                            # by construction; the corner leg and any OTHER
+                            # same-net pad are what this catches).
+                            if not self._own_net_pad_band_ok(a, b, layer, net, half):
                                 ok = False
                                 break
                     if ok:
@@ -2009,6 +2040,11 @@ class LatticePathfinder:
                 and obstacles.pairwise_pad_blocked(ea, eb, layer, net, half, extra, pw)
             )
             and committed.seg_clear(ea, eb, layer, net, half, clr)
+            # Issue #9018: lattice body edges are never masked away from an
+            # OWN-net pad, so A* freely picked band-interior parallels; hold
+            # them to the two-region rule.  Cheap when the guard is off
+            # (unresolvable stackup) -- one getattr, no pad query.
+            and self._own_net_pad_band_ok(ea, eb, layer, net, half)
         )
         return ok, ko_hit
 
@@ -2314,7 +2350,24 @@ class LatticePathfinder:
         # of the area's layers (the barrel spans the whole stack).
         if self._keepouts is not None and self._keepouts.via_blocked(point, net, via_radius):
             return False
-        return committed.via_clear(point, net, clearance)
+        # Issue #9272: the own-net TRACE slit band (#9208).  The through-via
+        # annulus exists on every layer, so an own-net committed segment on
+        # ANY layer is held to the fab-view ``(0, edge)`` band -- the
+        # pure-Python twin of the C++ ``is_via_blocked_diag`` guard.  None/0
+        # keeps it off; committed (stored) segments only, like C++.
+        # Ordered AFTER ``via_clear`` (issue #9279): the predicates are
+        # independent, so a seat the cheaper foreign-copper check rejects
+        # never pays the band query.
+        if not committed.via_clear(point, net, clearance):
+            return False
+        trace_edge_mm = float(getattr(self.rules, "same_net_trace_gap_band_edge_mm", 0.0) or 0.0)
+        if trace_edge_mm > 0:
+            own_segments = committed.same_net_segments_near(point, net, via_radius + trace_edge_mm)
+            if own_segments and not via_annulus_trace_band_ok(
+                point[0], point[1], self.rules.via_diameter, own_segments, trace_edge_mm
+            ):
+                return False
+        return True
 
     # -- the route contract ------------------------------------------------------
 
@@ -3753,6 +3806,15 @@ class LatticePathfinder:
                     blocker = "committed-copper"
                     ok = False
                     break
+                # Issue #9018: the attach dogleg may not skirt an own-net pad
+                # inside the fab slit band (its first leg unions the origin
+                # pad; a second same-net pad or the corner leg can still sit
+                # in the band).  Named separately so a ``pair-pad-attach``
+                # decline says the band fired.
+                if not self._own_net_pad_band_ok(a, b, layer, net, half):
+                    blocker = "own-net-pad-band"
+                    ok = False
+                    break
                 # Issue #6697: the other dogleg orientation may clear a
                 # reserved via site / rule area the first one clips.
                 if self._keepouts is not None and self._keepouts.segment_blocked(
@@ -4199,6 +4261,12 @@ class LatticePathfinder:
                         committed, a, b, layer, pair_nets, trace_w / 2.0, leg_clr
                     ):
                         return None, "pair-leg-blocked"
+                    # Issue #9018: the emitted offset/attach legs (post
+                    # ``clip_to_pad_entry``) are held to the two-region rule
+                    # against their OWN net's pads -- the band the fat search
+                    # cannot see because pair pads are "self" there.
+                    if not self._own_net_pad_band_ok(a, b, layer, net, trace_w / 2.0):
+                        return None, "pair-leg-own-net-pad-band"
                     # Issue #4507: the fat centerline SEARCH deliberately skips
                     # HV pairwise widening (see ``coupled.committed_seg_clear_
                     # grown``'s docstring) so a genuine same-domain diff pair
@@ -4689,6 +4757,10 @@ class LatticePathfinder:
                         return None, "pair-leg-blocked"
                     if not self._pair_leg_clear(committed, a, b, layer, pair_nets, half, leg_clr):
                         return None, "pair-leg-blocked"
+                    # Issue #9018: own-net pad slit band, as the planar finish
+                    # gate above (these pieces are post-jog, post-clip legs).
+                    if not self._own_net_pad_band_ok(a, b, layer, net, half):
+                        return None, "pair-leg-own-net-pad-band"
                     if self._pairwise is not None and self.obstacles.pairwise_pad_blocked(
                         a, b, layer, net, half, 0.0, self._pairwise
                     ):
@@ -4970,6 +5042,11 @@ class LatticePathfinder:
             if pads_block_segment_grown(self.obstacles, a, b, layer, {net}, extra):
                 return False
             if not committed.seg_clear(a, b, layer, net, half, clr):
+                return False
+            # Issue #9018: the fan leg may not skirt its own pad inside the
+            # fab slit band (a plain single trace, so its own pads are the
+            # band's only same-net audience).
+            if not self._own_net_pad_band_ok(a, b, layer, net, half):
                 return False
             if self._keepouts is not None and self._keepouts.segment_blocked(
                 a, b, layer, net, half

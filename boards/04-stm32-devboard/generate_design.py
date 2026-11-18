@@ -2257,6 +2257,372 @@ def compress_staircases(routed_path: Path) -> bool:
     return False
 
 
+#: How far (in segments) a ``sharp_trace_corner`` repair may walk along the
+#: leg it re-joins, and how many apply/re-check rounds it runs.
+_SHARP_CORNER_CHAIN_DEPTH = 8
+_SHARP_CORNER_MAX_ROUNDS = 4
+_SHARP_CORNER_TOL = 0.01  # mm, the rule's own junction tolerance
+
+
+def _netclass_clearance(routed_path: Path) -> Any:
+    """``net name -> clearance (mm)`` from the routed project's net classes.
+
+    A repair path must clear foreign copper by the larger of the two nets'
+    class clearances, the pairing the routed ``.kicad_dru``'s ``kct net class
+    clearance`` rules encode.  Unassigned nets take the ``Default`` class.
+    """
+    project = json.loads(routed_path.with_suffix(".kicad_pro").read_text())
+    settings = project["net_settings"]
+    by_class = {c["name"]: float(c.get("clearance") or 0.0) for c in settings["classes"]}
+    default = by_class.get("Default", 0.0)
+    assigned = settings.get("netclass_assignments") or {}
+
+    def clearance(net_name: str | None) -> float:
+        return by_class.get(assigned.get(net_name or "", ""), default)
+
+    return clearance
+
+
+def _two_leg_paths(
+    start: tuple[float, float], end: tuple[float, float]
+) -> list[list[tuple[float, float]]]:
+    """Straight, else diagonal-first and orthogonal-first 45 degree doglegs."""
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    diag = min(abs(dx), abs(dy))
+    mid_diagonal = (start[0] + math.copysign(diag, dx), start[1] + math.copysign(diag, dy))
+    mid_orthogonal = (end[0] - math.copysign(diag, dx), end[1] - math.copysign(diag, dy))
+    if diag < 1e-6 or math.dist(mid_diagonal, end) < 1e-6:
+        return [[start, end]]
+    return [[start, mid_diagonal, end], [start, mid_orthogonal, end]]
+
+
+def _sharp_corner_candidates(pcb: Any, finding: Any) -> list[tuple[list[Any], list]]:
+    """Replacement candidates for one two-segment ``sharp_trace_corner`` vertex.
+
+    Every fold-back the router leaves on this board (issue #8919: committed
+    NRST and SWCLK, fresh-regen USER_LED) has one leg ending at a terminal --
+    a pad centre or a via -- and the vertex has exactly two segments.  Keep
+    one leg's far end ``A`` and walk the other leg's chain while it stays a
+    plain degree-2 path; for each point ``C`` on it, propose the 45 degree
+    path ``A -> C`` in place of everything between them.  Returns
+    ``(removed segments, path points)``; junctions of three or
+    more segments yield nothing (they are not this repair's shape).
+    """
+    loc = finding.location
+    layer = finding.layer
+    net_name = finding.nets[0]
+    net = pcb.get_net_by_name(net_name)
+    if net is None:
+        return []
+    number = net.number
+    same = [s for s in pcb.segments if s.layer == layer and s.width > 0 and s.net_number == number]
+
+    def touching(pt: tuple[float, float]) -> list[Any]:
+        return [
+            s for s in same if min(math.dist(pt, s.start), math.dist(pt, s.end)) < _SHARP_CORNER_TOL
+        ]
+
+    def far_end(seg: Any, pt: tuple[float, float]) -> tuple[float, float]:
+        if math.dist(pt, seg.start) < _SHARP_CORNER_TOL:
+            return (float(seg.end[0]), float(seg.end[1]))
+        return (float(seg.start[0]), float(seg.start[1]))
+
+    terminals = [via.position for via in pcb.vias if via.net_name == net_name]
+    from kicad_tools.core.geometry import rotate_pad_offset
+
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if pad.net_name == net_name:
+                dx, dy = rotate_pad_offset(pad.position[0], pad.position[1], fp.rotation)
+                terminals.append((fp.position[0] + dx, fp.position[1] + dy))
+
+    def is_terminal(pt: tuple[float, float]) -> bool:
+        return any(math.dist(pt, t) < _SHARP_CORNER_TOL for t in terminals)
+
+    legs = touching(loc)
+    if len(legs) != 2:
+        return []
+    candidates: list[tuple[list[Any], list]] = []
+    for fixed, walked in ((legs[0], legs[1]), (legs[1], legs[0])):
+        anchor = far_end(fixed, loc)
+        chain, points, cur = [walked], [far_end(walked, loc)], walked
+        pt = points[0]
+        while len(chain) < _SHARP_CORNER_CHAIN_DEPTH and not is_terminal(pt):
+            onward = [s for s in touching(pt) if s is not cur]
+            if len(onward) != 1:
+                break
+            cur = onward[0]
+            pt = far_end(cur, pt)
+            chain.append(cur)
+            points.append(pt)
+        for k, target in enumerate(points):
+            for path in _two_leg_paths(anchor, target):
+                candidates.append(([fixed, *chain[: k + 1]], path))
+    return candidates
+
+
+def _joins_acutely(pcb: Any, path: list, removed: list[Any], layer: str, net_number: int) -> bool:
+    """True if ``path`` would meet kept same-net copper below 90 degrees.
+
+    Checked at both ends, even where the rule would call the joint
+    width-filled: a repair should not trade one acute joint for another.
+    """
+    gone = {id(s) for s in removed}
+    for end, inner in ((path[0], path[1]), (path[-1], path[-2])):
+        out = (inner[0] - end[0], inner[1] - end[1])
+        for seg in pcb.segments:
+            if id(seg) in gone or seg.layer != layer or seg.net_number != net_number:
+                continue
+            if math.dist(end, seg.start) < _SHARP_CORNER_TOL:
+                other = (seg.end[0] - end[0], seg.end[1] - end[1])
+            elif math.dist(end, seg.end) < _SHARP_CORNER_TOL:
+                other = (seg.start[0] - end[0], seg.start[1] - end[1])
+            else:
+                continue
+            norm = math.hypot(*out) * math.hypot(*other)
+            if norm < 1e-12:
+                continue
+            cos = max(-1.0, min(1.0, (out[0] * other[0] + out[1] * other[1]) / norm))
+            if math.degrees(math.acos(cos)) < 89.0:
+                return True
+    return False
+
+
+def _rule_area_blocks_tracks(zone: Any, layer: str) -> bool:
+    """True when keepout rule area ``zone`` forbids tracks on ``layer``.
+
+    Honours the zone's layer spec: a single ``layer`` name or the
+    multi-layer ``layers`` list with the wildcards KiCad writes for rule
+    areas (``*.Cu`` covers every copper layer, ``F&B.Cu`` the outer pair,
+    ``*.In.Cu`` the inner layers).
+    """
+    keepout = getattr(zone, "keepout", None)
+    if keepout is None or getattr(keepout, "tracks_allowed", True):
+        return False
+    names = list(getattr(zone, "layers", None) or [])
+    if not names:
+        single = getattr(zone, "layer", "") or ""
+        if single:
+            names = [single]
+    for name in names:
+        if name == layer:
+            return True
+        if (
+            (name == "*.Cu" and layer.endswith(".Cu"))
+            or (name == "F&B.Cu" and layer in ("F.Cu", "B.Cu"))
+            or (name == "*.In.Cu" and layer.startswith("In") and layer.endswith(".Cu"))
+        ):
+            return True
+    return False
+
+
+def repair_sharp_corners(routed_path: Path) -> bool:
+    """Remove every two-segment ``sharp_trace_corner`` fold-back (issue #8840).
+
+    ``sharp_trace_corner`` gates board 04's strict manufacturing check
+    (operator ruling on PR #8848), and the router's own #8919 fold-back pass
+    leaves the shapes it cannot express (it reports them as "NOT
+    repairable").  Driven by the rule's verdict, like
+    :func:`compress_staircases`: for each finding, every candidate from
+    :func:`_sharp_corner_candidates` is checked against foreign copper at the
+    routed net-class clearance (the larger of the two nets'), against the
+    board outline at the manufacturer profile's copper-to-edge minimum and
+    against track-blocking keepout rule areas, applied to a scratch copy,
+    and kept only if the rule then reports a strict subset of the previous
+    findings and no new ``redundant_copper_*`` finding appears.  A repair
+    that cannot be checked -- no board outline -- is refused, not assumed
+    clear (issue #9239).  The fewest resulting segments win, then the
+    shortest copper.  No board geometry is hard-coded, so a fresh re-route
+    is repaired the same way.  The repaired piece keeps the removed
+    segments' widest width; the old narrower fallback, which could silently
+    thin a trace, is gone (issue #9239).
+
+    Runs after every copper-mutating pass and before
+    :func:`compress_staircases` / :func:`fill_zones`, so a staircase it
+    leaves is compressed and the re-pour backs off the new copper.  New legs
+    are on the 0/45/90/135 grid by construction.  Returns False (fails the
+    recipe) if a finding remains.
+    """
+    import tempfile
+
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.router.clearance_kernel import (
+        ALL_LAYERS,
+        CLEARANCE_EPSILON_MM,
+        KSegment,
+        copper_gap,
+    )
+    from kicad_tools.router.quantize import segment_angle_census
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.clearance_shapes import (
+        min_gap_to_outline,
+        outline_shapes,
+        zone_shape,
+    )
+    from kicad_tools.validate.rules.clearance import CopperElement, _calculate_clearance
+    from kicad_tools.validate.rules.redundant_copper import RedundantCopperRule
+    from kicad_tools.validate.rules.sharp_trace_corner import SharpTraceCornerRule
+
+    print("\n" + "=" * 60)
+    print("Repairing sharp trace corners (issue #8840)...")
+    print("=" * 60)
+
+    clearance_of = _netclass_clearance(routed_path)
+    # Issue #9239: the same copper-to-edge minimum the recipe's own DRC gate
+    # enforces, from the same manufacturer profile -- never hard-coded.
+    edge_clearance = get_profile("jlcpcb-tier1").get_design_rules().min_copper_to_edge_mm
+
+    def keys(pcb: Any) -> set[tuple]:
+        return {
+            (v.nets[0], v.layer, round(v.location[0], 3), round(v.location[1], 3))
+            for v in SharpTraceCornerRule().check(pcb, None).violations
+        }
+
+    def redundant(pcb: Any) -> set[tuple]:
+        return {
+            (v.rule_id, v.message)
+            for v in RedundantCopperRule().check(pcb, None).violations
+            if v.rule_id != "redundant_copper_staircase"
+        }
+
+    def off_angle(path: Path) -> set[tuple]:
+        return {(b["start"], b["end"]) for b in segment_angle_census(path)[1]}
+
+    def clear(pcb: Any, path: list, net: int, net_name: str, layer: str, width: float) -> bool:
+        oracle = RedundantCopperRule()
+        oracle._pcb = pcb
+        oracle._foreign_cache = {}
+
+        def name_of(number: int) -> str:
+            found = pcb.get_net(number)
+            return found.name if found else ""
+
+        own = clearance_of(net_name)
+        for a, b in zip(path, path[1:], strict=False):
+            cand = CopperElement(
+                element_type="segment",
+                layer=layer,
+                net_number=net,
+                geometry=(a[0], a[1], b[0], b[1], width),
+                reference="",
+            )
+            for other in oracle._foreign_elements(layer):
+                if other.net_number == net:
+                    continue
+                need = max(own, clearance_of(name_of(other.net_number)))
+                if _calculate_clearance(cand, other)[0] < need - 1e-9:
+                    return False
+
+        # Issue #9239: copper clearance alone is not the whole check -- the
+        # candidate must also keep the board's copper-to-edge distance and
+        # stay out of track-blocking keepout rule areas.  An outline that
+        # cannot be read refuses the repair rather than assuming clear.
+        outline = pcb.get_board_outline_segments()
+        if not outline:
+            return False
+        edges = outline_shapes(outline)
+        keepouts = [
+            zone_shape([zone.polygon])
+            for zone in (*pcb.rule_areas, *pcb.footprint_rule_areas)
+            if _rule_area_blocks_tracks(zone, layer) and len(zone.polygon) >= 3
+        ]
+        for a, b in zip(path, path[1:], strict=False):
+            shape = KSegment(x1=a[0], y1=a[1], x2=b[0], y2=b[1], width=width, layer=ALL_LAYERS)
+            if min_gap_to_outline(shape, edges) < edge_clearance - CLEARANCE_EPSILON_MM:
+                return False
+            # The keepout test measures the candidate's copper, not its
+            # centerline: the trace's width is in ``shape``, so copper that
+            # reaches into the keepout is refused even when the centerline
+            # stays outside (issue #9239).  Boundary convention: overlap only
+            # is refused -- copper exactly touching the keepout edge (zero
+            # gap) is accepted, with the same CLEARANCE_EPSILON_MM float-noise
+            # tolerance the edge check above grants a trace that exactly
+            # meets its minimum.
+            for shape_ko in keepouts:
+                if copper_gap(shape, shape_ko) < -CLEARANCE_EPSILON_MM:
+                    return False
+        return True
+
+    repaired = 0
+    with tempfile.TemporaryDirectory() as scratch:
+        trial_path = Path(scratch) / routed_path.name
+        for round_number in range(1, _SHARP_CORNER_MAX_ROUNDS + 1):
+            pcb = PCB.load(routed_path)
+            findings = SharpTraceCornerRule().check(pcb, None).violations
+            if not findings:
+                print(f"   No sharp trace corners ({repaired} repaired)")
+                return True
+            print(f"   Round {round_number}: {len(findings)} sharp trace corner(s)")
+            before, before_redundant = keys(pcb), redundant(pcb)
+            before_off_angle = off_angle(routed_path)
+            changed = False
+            for finding in findings:
+                net_name, layer = finding.nets[0], finding.layer
+                best = None
+                for removed, path in _sharp_corner_candidates(pcb, finding):
+                    net = removed[0].net_number
+                    if _joins_acutely(pcb, path, removed, layer, net):
+                        continue
+                    # Issue #9239: no narrower fallback -- the repaired piece
+                    # keeps the removed segments' widest width, so a repair can
+                    # never silently thin the trace it replaces.
+                    width = max(s.width for s in removed)
+                    if not clear(pcb, path, net, net_name, layer, width):
+                        continue
+                    trial = PCB.load(routed_path)
+                    drop = {(s.start, s.end, s.width) for s in removed}
+                    trial.remove_segments(
+                        [
+                            s
+                            for s in trial.segments
+                            if s.layer == layer
+                            and s.net_number == net
+                            and (s.start, s.end, s.width) in drop
+                        ]
+                    )
+                    for a, b in zip(path, path[1:], strict=False):
+                        trial.add_trace(a, b, width=width, layer=layer, net=net_name)
+                    trial.save(trial_path)
+                    trial = PCB.load(trial_path)
+                    after = keys(trial)
+                    if not after < before:
+                        continue
+                    if not redundant(trial) <= before_redundant:
+                        continue
+                    # The writer keeps 6 significant digits, so a point
+                    # like 152.3875 lands off the 45 degree grid once
+                    # saved: judge the copper as written.
+                    if not off_angle(trial_path) <= before_off_angle:
+                        continue
+                    # Fewest segments, then least copper, for this net on
+                    # this layer: comparable across every candidate.
+                    mine = [s for s in trial.segments if s.layer == layer and s.net_number == net]
+                    score = (len(mine), round(sum(math.dist(s.start, s.end) for s in mine), 6))
+                    if best is None or score < best[0]:
+                        best = (score, trial_path.read_text(), path, width)
+                if best is None:
+                    print(f"      {net_name} {layer} {finding.location}: no clear repair")
+                    continue
+                routed_path.write_text(best[1])
+                repaired += 1
+                changed = True
+                print(
+                    f"      {net_name} {layer} {finding.location}: "
+                    f"{' -> '.join(f'({x:.4f},{y:.4f})' for x, y in best[2])} at {best[3]} mm"
+                )
+                # Re-derive candidates from the edited board.
+                break
+            if not changed:
+                break
+
+    remaining_findings = SharpTraceCornerRule().check(PCB.load(routed_path), None).violations
+    if not remaining_findings:
+        print(f"   No sharp trace corners ({repaired} repaired)")
+        return True
+    print("\n   FAILED: sharp trace corners remain after repair")
+    return False
+
+
 def fill_zones(routed_path: Path) -> bool:
     """
     Re-pour the copper zones (GND B.Cu plane) after stitching.
@@ -2672,6 +3038,13 @@ def main() -> int:
         # leave behind, rather than recording them as ``known_issues``.  Runs
         # after every copper-mutating pass and the #8399 prune, and before the
         # re-pour below so the GND plane backs off the compressed copper.
+        # Issue #8840 (operator ruling on PR #8848): ``sharp_trace_corner``
+        # gates this board, and the router's #8919 fold-back pass leaves the
+        # shapes it cannot express.  Repair them here, before the staircase
+        # compression and the re-pour, so both see the final copper.
+        if not repair_sharp_corners(routed_path):
+            raise RuntimeError("repair_sharp_corners did not pass (#8840)")
+
         staircase_success = compress_staircases(routed_path)
         if not staircase_success:
             raise RuntimeError("compress_staircases did not pass (#8844)")

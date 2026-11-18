@@ -996,6 +996,16 @@ class _CellView:
         self._grid._history_cost[self._layer, self._y, self._x] = value
 
     @property
+    def airwire_count(self) -> int:
+        """Issue #8999: how many still-unrouted nets' desire lines cover this cell.
+
+        Read-only: the plane is owned by
+        :mod:`kicad_tools.router.airwire_cost`, which recomputes it as a
+        pure function of the committed set (never mutated per-cell).
+        """
+        return int(self._grid._airwire_cost[self._y, self._x])
+
+    @property
     def is_obstacle(self) -> bool:
         return bool(self._grid._is_obstacle[self._layer, self._y, self._x])
 
@@ -1525,6 +1535,14 @@ class RoutingGrid:
         self._net = xp.zeros(grid_shape, dtype=np.int32)
         self._usage_count = xp.zeros(grid_shape, dtype=np.int16)
         self._history_cost = xp.zeros(grid_shape, dtype=np.float32)
+        # Issue #8999: airwire-separation crossing-count plane.  2-D
+        # (rows, cols) -- a desire line is layer-less, so the same count
+        # column applies to every layer.  Integer counts (deterministic
+        # accumulation); the float weight is applied at read time in
+        # ``get_negotiated_cost``.  All-zero unless the
+        # ``--airwire-separation-weight`` flag builds it.
+        self._airwire_cost = xp.zeros((grid_shape[1], grid_shape[2]), dtype=np.int16)
+        self._airwire_weight = 0.0
         self._present_cost_ema: np.ndarray | None = (
             None  # Lazy; allocated on first use (Issue #2333)
         )
@@ -1863,6 +1881,7 @@ class RoutingGrid:
         self._net = empty_i32
         self._usage_count = xp.zeros((0, 0, 0), dtype=np.int16)
         self._history_cost = xp.zeros((0, 0, 0), dtype=np.float32)
+        self._airwire_cost = xp.zeros((0, 0), dtype=np.int16)  # Issue #8999
         self._is_obstacle = xp.zeros((0, 0, 0), dtype=np.bool_)
         self._is_zone = xp.zeros((0, 0, 0), dtype=np.bool_)
         self._pad_blocked = empty_bool
@@ -1892,6 +1911,7 @@ class RoutingGrid:
         self._net = to_numpy(self._net)
         self._usage_count = to_numpy(self._usage_count)
         self._history_cost = to_numpy(self._history_cost)
+        self._airwire_cost = to_numpy(self._airwire_cost)  # Issue #8999
         if self._present_cost_ema is not None:
             self._present_cost_ema = to_numpy(self._present_cost_ema)
         self._is_obstacle = to_numpy(self._is_obstacle)
@@ -1974,6 +1994,7 @@ class RoutingGrid:
             self._net = backend.asarray(self._net)
             self._usage_count = backend.asarray(self._usage_count)
             self._history_cost = backend.asarray(self._history_cost)
+            self._airwire_cost = backend.asarray(self._airwire_cost)  # type: ignore[attr-defined]  # Issue #8999; same known ArrayBackend FP as the neighbours
             if self._present_cost_ema is not None:
                 self._present_cost_ema = backend.asarray(self._present_cost_ema)
             self._is_obstacle = backend.asarray(self._is_obstacle)
@@ -7792,6 +7813,22 @@ class RoutingGrid:
             present_cost = present_cost_factor * cell.usage_count
         history_cost = cell.history_cost
 
+        # Issue #8999: prospective airwire-separation term -- how many
+        # still-unrouted nets' desire lines cover this cell, weighted by
+        # the flag-supplied scalar.  All-zero (and the multiply a no-op
+        # ``+0.0``) unless ``--airwire-separation-weight`` built the
+        # plane, so the flag-off value is byte-identical to
+        # ``present_cost + history_cost``.  Read through ``getattr`` so
+        # ``__new__``-constructed stand-in grids (issue #5240) without the
+        # plane keep the legacy value.
+        airwire_plane = getattr(self, "_airwire_cost", None)
+        if airwire_plane is not None:
+            return (
+                present_cost
+                + history_cost
+                + float(self._airwire_weight) * int(airwire_plane[gy, gx])
+            )
+
         return present_cost + history_cost
 
     def get_layer_fill_ratios(self) -> np.ndarray:
@@ -8557,6 +8594,7 @@ class RoutingGrid:
                 self._net,
                 self._usage_count,
                 self._history_cost,
+                self._airwire_cost,  # Issue #8999
                 self._is_obstacle,
                 self._is_zone,
                 self._pad_blocked,

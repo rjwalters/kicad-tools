@@ -46,7 +46,9 @@ A body that doesn't start with `- ` is made into one bullet.
 ## The per-PR check
 
 `.github/workflows/changelog.yml` runs
-`scripts/changelog_gap_report.py --pr-event ...` on every PR. It judges the PR
+`scripts/changelog_gap_report.py --pr <N>` on every PR; the verdict comes from
+a live `gh pr view` read of the PR, not the triggering event payload
+(`--pr-event ...` remains a supported offline/test mode). It judges the PR
 the way its squash commit will look: type from the **PR title**, issue from the
 PR body's `Closes #N` (then the `feature/issue-<N>` branch, then `Part of #N`).
 A PR passes when any of these hold:

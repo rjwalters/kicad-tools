@@ -296,6 +296,21 @@ def board03_receipt(base_commit: str, checked_at: str | None, known: tuple[str, 
     log(f"  readiness: {receipt['status']} {receipt.get('blockers')}")
 
 
+def receipt_argv(args: argparse.Namespace) -> tuple[str, ...]:
+    """Extra ``kct readiness`` arguments built from the ack/known-issue flags (#7261, #9143).
+
+    ``kct readiness`` takes ONE comma-separated ``--ack-warnings`` value
+    (readiness_cmd splits on ","), not repeatable flags;
+    ``--ack-trace-quality`` IS repeatable and forwards verbatim.
+    """
+    return (
+        *(arg for spec in args.known_issue for arg in ("--known-issue", spec)),
+        *(arg for n in args.resolve_known_issue for arg in ("--resolve-known-issue", n)),
+        *(("--ack-warnings", ",".join(args.ack_warnings)) if args.ack_warnings else ()),
+        *(arg for spec in args.ack_trace_quality for arg in ("--ack-trace-quality", spec)),
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--board", action="append", choices=["03"])
@@ -324,6 +339,24 @@ def main() -> int:
         metavar="N",
         help="board 03: drop a recorded known issue from the receipt (#7261)",
     )
+    parser.add_argument(
+        "--ack-warnings",
+        action="append",
+        default=[],
+        metavar="RULE",
+        help=(
+            "board 03: acknowledge an assembly-affecting warning rule in the receipt "
+            "(forwarded to kct readiness --ack-warnings; each becomes a per-rule "
+            "accepted-risk line, #9143)"
+        ),
+    )
+    parser.add_argument(
+        "--ack-trace-quality",
+        action="append",
+        default=[],
+        metavar="RULE=REASON",
+        help="board 03: accept a residual redundant_copper_*/via_dangling count with a reason",
+    )
     parser.add_argument("--log", help=argparse.SUPPRESS)  # consumed by regenerate_uuids_6076
     args = parser.parse_args()
     os.chdir(REPO_ROOT)
@@ -332,10 +365,7 @@ def main() -> int:
         parser.error("--receipt-only applies to --board 03 alone")
     from kicad_tools.cli.kicad_toolchain import KiCadEnvironmentError, evidence_toolchain
 
-    known: tuple[str, ...] = (
-        *(arg for spec in args.known_issue for arg in ("--known-issue", spec)),
-        *(arg for n in args.resolve_known_issue for arg in ("--resolve-known-issue", n)),
-    )
+    known: tuple[str, ...] = receipt_argv(args)
 
     try:
         with evidence_toolchain(mounts=[REPO_ROOT]):

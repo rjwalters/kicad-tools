@@ -5201,6 +5201,22 @@ def _add_fix_silkscreen_parser(subparsers) -> None:
         ),
     )
     fix_silk_parser.add_argument(
+        "--clip-to-holes",
+        action="store_true",
+        help=(
+            "Also clip footprint silk lines/polygons/rects off drilled holes "
+            "(every via, tented or not, and PTH/NPTH), clearing silk_hole_overlap. "
+            "Run after routing; text is left for place-silk-refs --over-holes"
+        ),
+    )
+    fix_silk_parser.add_argument(
+        "--hole-clearance",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="Silk-to-hole clearance for --clip-to-holes (default: the silk_hole_overlap rule's, 0)",
+    )
+    fix_silk_parser.add_argument(
         "--min-width",
         type=float,
         help="Minimum silkscreen line width in mm (overrides manufacturer rules)",
@@ -5296,6 +5312,14 @@ def _add_place_silk_refs_parser(subparsers) -> None:
         "--refs",
         metavar="REF[,REF...]",
         help="Comma-separated reference designators to move; others stay put as obstacles",
+    )
+    place_refs_parser.add_argument(
+        "--over-holes",
+        action="store_true",
+        help=(
+            "Move only references whose text overlaps a drilled hole (the "
+            "silk_hole_overlap findings); combined with --refs, the intersection"
+        ),
     )
     place_refs_parser.add_argument(
         "-o", "--output", help="Output file path (default: overwrite input)"
@@ -5437,8 +5461,11 @@ def _add_fix_drc_parser(subparsers) -> None:
     )
     fix_drc_parser.add_argument(
         "--only",
-        choices=["clearance", "drill-clearance"],
-        help="Only fix a specific violation type",
+        choices=["clearance", "drill-clearance", "mask-copper"],
+        help=(
+            "Only fix a specific violation type ('mask-copper' re-centres a "
+            "track entering its own pad off-centre; detected with kct check's rules)"
+        ),
     )
     fix_drc_parser.add_argument(
         "-o",
@@ -7373,7 +7400,7 @@ def _add_submit_jlcpcb_parser(subparsers) -> None:
     add_arguments(
         subparsers.add_parser(
             "submit-jlcpcb",
-            help="Prepare a JLCPCB PCBA submission from a tapeout bundle (never orders)",
+            help="Prepare a JLCPCB PCBA submission from a tapeout bundle (orders only via the opt-in, attended --checkout leg)",
         )
     )
 

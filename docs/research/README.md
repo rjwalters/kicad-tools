@@ -57,6 +57,7 @@ Measured experiments on `kct route`; several record negative results.
 |------|-------------|
 | [Escape-flow assignment](kct-route-escape-flow-experiment.md) | Joint min-cost-flow escape assignment: no gain |
 | [Net ordering](kct-route-net-order-experiment.md) | Crossing-aware net ordering: no gain |
+| [Airwire separation](kct-route-airwire-separation-experiment.md) | Prospective airwire-crossing cost term for the negotiated router: no gain, flag stays opt-in (Issue #8999) |
 | [Nogood cache](kct-route-nogood-cache-experiment.md) | Validity-aware nogood cache for negotiated retries |
 | [Phase profile](kct-route-phase-profile.md) | Where `kct route` time goes on boards 02 and 03 |
 | [GPU / batched routing design](gpu-routing-design.md) | Profile-first GPU routing go/no-go: don't build (Amdahl ceilings below 2x) |
@@ -74,6 +75,8 @@ Measured experiments on `kct route`; several record negative results.
 | [Board 05 unattended route](board-05-unattended-route.md) | `kct route` from scratch at seeds 42/7/1337: 37/37, both DRC engines 0 errors, LVS clean, byte-identical across seeds; which wall clocks stay live; the nightly gate (Issue #7834) |
 | [kct check vs kicad-cli lengths](kicad-length-bench-6725.md) | Per-net length and pair skew comparison |
 | [Detour-ratio fleet measurement](detour-ratio-fleet-measurement-9003.md) | `kct route --report-detour-ratio` drawn vs alone-on-empty length over the fleet: median 1.001, 10.9% of 147 connections above 1.25x, max 3.7x, but only 2 at 2x or more, at most 91.7 mm avoidable, and 20% of probed connections unmatched -- a borderline tail that justifies trying the targeted repair pass (Issue #9003) |
+| [Pour-skeleton fit fleet measurement](pour-skeleton-fit-results-9002.md) | Straight pad-joining skeleton corridors vs the kicad-cli refill gate on all routed fleet boards: 0 actual `isolated_copper`/`unconnected_items` anywhere, 6/6 predictions false -- pour-cutting is not real on the fleet, no router-reservation follow-up (Issue #9002) |
+| [Joint candidate selection](kct-route-joint-candidate-selection-experiment.md) | Decide corridor assignment jointly on the empty grid before Iteration 0 (Issue #8998): overflow entering rip-up regressed on board 02 (25→49), tied on the mains fixture with a fatal HV-clearance failure; kill criterion fired, feature not merged |
 
 ## Calibration notes
 
@@ -95,6 +98,7 @@ Measured experiments on `kct route`; several record negative results.
 | [Clearance-kernel acceptance audit](clearance-kernel-acceptance-audit.md) | Epic #5509 criterion-to-evidence reconciliation (#7577) |
 | [Connectivity contact paths](connectivity-contact-paths-5133.md) | Existing physical contact paths in the Board06 extractor |
 | [Copper LVS zone suppression](copper-lvs-zone-suppression.md) | Independent Board05 evidence |
+| [Mask-to-copper own-pad findings](mask-to-copper-own-pad-8858.md) | Boards 00-07 `mask_to_copper` errors classified against the pinned KiCad 10.0.6 plot: 963 of 1,542 are a clean entry into their own pad (now `within_own_pad` info); same-net copper beside a pad stays an error at the fab's danger band (Issue #8858); a pad joined to its own pour by thermal spokes is `own_pour_thermal` info per JLCDFM's board 01 result, solid connections stay errors (Issue #9284) |
 | [Via current capacity](via-current-capacity.md) | Screening model for via-barrel current capacity behind the `path_ampacity` layer-change check: annulus formula and its caveat, plating classes, 10 C rise (Issue #8745) |
 | [3D model coverage](3d-model-coverage.md) | Per-board 3D body coverage, model licensing and gate interactions, plus the plan for the JLCPCB catalog |
 

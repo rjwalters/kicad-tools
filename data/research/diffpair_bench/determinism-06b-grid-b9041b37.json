@@ -24,7 +24,7 @@
         "LVDS4_P"
       ],
       "deterministic_rescue": true,
-      "cmd": "-m kicad_tools.cli route /tmp/pairs6475/06b-grid-s42/r0/diffpair_test.kicad_pcb -o /tmp/pairs6475/06b-grid-s42/r0/diffpair_test_routed.kicad_pcb --timeout 600 --no-cache --preserve-existing --route-engine grid --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --deterministic-rescue --net-class-map /home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6475/boards/06-diffpair-test/output/net_class_map.json --seed 42",
+      "cmd": "-m kicad_tools.cli route /tmp/pairs6475/06b-grid-s42/r0/diffpair_test.kicad_pcb -o /tmp/pairs6475/06b-grid-s42/r0/diffpair_test_routed.kicad_pcb --timeout 600 --no-cache --preserve-existing --route-engine grid --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --deterministic-rescue --net-class-map .loom/worktrees/issue-6475/boards/06-diffpair-test/output/net_class_map.json --seed 42",
       "exit_code": 3,
       "wall_s": 242.6,
       "killed_by_harness": false,
@@ -257,7 +257,7 @@
         "LVDS4_P"
       ],
       "deterministic_rescue": true,
-      "cmd": "-m kicad_tools.cli route /tmp/pairs6475/06b-grid-s42/r1/diffpair_test.kicad_pcb -o /tmp/pairs6475/06b-grid-s42/r1/diffpair_test_routed.kicad_pcb --timeout 600 --no-cache --preserve-existing --route-engine grid --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --deterministic-rescue --net-class-map /home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6475/boards/06-diffpair-test/output/net_class_map.json --seed 42",
+      "cmd": "-m kicad_tools.cli route /tmp/pairs6475/06b-grid-s42/r1/diffpair_test.kicad_pcb -o /tmp/pairs6475/06b-grid-s42/r1/diffpair_test_routed.kicad_pcb --timeout 600 --no-cache --preserve-existing --route-engine grid --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --deterministic-rescue --net-class-map .loom/worktrees/issue-6475/boards/06-diffpair-test/output/net_class_map.json --seed 42",
       "exit_code": 3,
       "wall_s": 235.4,
       "killed_by_harness": false,
@@ -490,7 +490,7 @@
         "LVDS4_P"
       ],
       "deterministic_rescue": true,
-      "cmd": "-m kicad_tools.cli route /tmp/pairs6475/06b-grid-s43/r0/diffpair_test.kicad_pcb -o /tmp/pairs6475/06b-grid-s43/r0/diffpair_test_routed.kicad_pcb --timeout 600 --no-cache --preserve-existing --route-engine grid --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --deterministic-rescue --net-class-map /home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6475/boards/06-diffpair-test/output/net_class_map.json --seed 43",
+      "cmd": "-m kicad_tools.cli route /tmp/pairs6475/06b-grid-s43/r0/diffpair_test.kicad_pcb -o /tmp/pairs6475/06b-grid-s43/r0/diffpair_test_routed.kicad_pcb --timeout 600 --no-cache --preserve-existing --route-engine grid --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --deterministic-rescue --net-class-map .loom/worktrees/issue-6475/boards/06-diffpair-test/output/net_class_map.json --seed 43",
       "exit_code": 3,
       "wall_s": 234.7,
       "killed_by_harness": false,
@@ -723,7 +723,7 @@
         "LVDS4_P"
       ],
       "deterministic_rescue": true,
-      "cmd": "-m kicad_tools.cli route /tmp/pairs6475/06b-grid-s43/r1/diffpair_test.kicad_pcb -o /tmp/pairs6475/06b-grid-s43/r1/diffpair_test_routed.kicad_pcb --timeout 600 --no-cache --preserve-existing --route-engine grid --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --deterministic-rescue --net-class-map /home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6475/boards/06-diffpair-test/output/net_class_map.json --seed 43",
+      "cmd": "-m kicad_tools.cli route /tmp/pairs6475/06b-grid-s43/r1/diffpair_test.kicad_pcb -o /tmp/pairs6475/06b-grid-s43/r1/diffpair_test_routed.kicad_pcb --timeout 600 --no-cache --preserve-existing --route-engine grid --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --deterministic-rescue --net-class-map .loom/worktrees/issue-6475/boards/06-diffpair-test/output/net_class_map.json --seed 43",
       "exit_code": 3,
       "wall_s": 229.0,
       "killed_by_harness": false,

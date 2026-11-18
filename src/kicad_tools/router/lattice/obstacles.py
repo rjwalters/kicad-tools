@@ -43,6 +43,7 @@ from kicad_tools.geometry.copper import pad_waiver_polygon as _pad_waiver_polygo
 
 from ..clearance_shapes import pad_kernel_params
 from ..primitives import Pad, pad_half_extents
+from ..via_clearance import SAME_NET_BAND_WRITE_SLACK_MM
 from . import kernel_adapter as ka
 from .geometry import (
     Pt,
@@ -407,6 +408,67 @@ class LatticeObstacleModel:
             if extra > 0.0:
                 rect = (rect[0] - extra, rect[1] - extra, rect[2] + extra, rect[3] + extra)
             if seg_rect_intersect(a, b, rect) and self.pad_keepout_hit(idx, a, b, extra):
+                return True
+        return False
+
+    def same_net_pad_band_blocked(
+        self,
+        a: Pt,
+        b: Pt,
+        layer: int,
+        net: int,
+        half: float,
+        edge_mm: float,
+    ) -> bool:
+        """True when the copper swept by segment ``a-b`` parks in the fab
+        slit band beside an own-net SMD pad on ``layer`` (issue #9018).
+
+        The leg form of the #8974 via-seat guard.  A same-net pad is not an
+        obstacle -- ``segment_blocked`` skips it above -- so a leg-acceptance
+        predicate that never looks at it lets A* pick lines parallel to an
+        own-net pad edge inside the fab ``pad_spacing`` band: copper the fab
+        grades as a slit (board 07's 14 same-net findings, #9011).  The
+        acceptable regions are exactly two, as in
+        :func:`~kicad_tools.router.via_clearance.same_net_segment_pad_gap_acceptable`
+        (#9012): the swept copper UNIONS the pad (gap <= 0 -- the pad's own
+        stub or attach necessarily qualifies) or keeps the detection edge
+        ``edge_mm`` (the ``GapBand.detection_edge_mm`` of the resolved
+        ``pad_spacing`` dfm entry, never ``error_edge_mm`` -- #8976).  The
+        open band ``(0, edge_mm)`` in between is rejected.
+
+        The gap is exact swept-copper geometry: the kernel's true pad outline
+        (rotated, oval, roundrect -- the #7503 discipline) minus the sweep
+        identity, ``gap = centreline-to-outline distance - half``, never a
+        grown rectangle.  Pads with a drill are skipped -- the #9012
+        predicate's SMD scope, mirroring ``_via_ok_at``'s band branch (a
+        through-hole neighbour is the hole-to-hole floor's business).  The
+        degenerate ``a == b`` form is the point probe.  ``edge_mm <= 0``
+        keeps the guard off (an unresolvable stackup changes nothing).
+        """
+        if edge_mm <= 0.0:
+            return False
+        reach = half + edge_mm + 0.5
+        x0, x1 = min(a[0], b[0]) - reach, max(a[0], b[0]) + reach
+        y0, y1 = min(a[1], b[1]) - reach, max(a[1], b[1]) + reach
+        ax0, ax1 = min(a[0], b[0]), max(a[0], b[0])
+        ay0, ay1 = min(a[1], b[1]), max(a[1], b[1])
+        eps = ka.LATTICE_CLEARANCE_EPSILON_MM
+        for idx in self.pads_near(x0, y0, x1, y1):
+            pad = self.pads[idx]
+            if pad.net != net or pad.through_hole or pad.drill > 0:
+                continue
+            if layer not in self.pad_layer_indices[idx]:
+                continue
+            hw, hh = pad_half_extents(pad)
+            # Perf (#6182 pattern): the exact centreline-to-outline distance
+            # is >= the axis-aligned bbox separation, so a separation that
+            # already clears the band skips the kernel call without moving a
+            # verdict.
+            sep = max(pad.x - hw - ax1, ax0 - (pad.x + hw), pad.y - hh - ay1, ay0 - (pad.y + hh))
+            if sep - half > edge_mm + eps:
+                continue
+            gap = self.pad_centerline_gap(idx, a, b) - half
+            if eps < gap < edge_mm - eps:
                 return True
         return False
 
@@ -1055,6 +1117,32 @@ class CommittedCopper:
                     ):
                         return False
         return True
+
+    def same_net_segments_near(
+        self, point: Pt, net: int, reach: float
+    ) -> list[tuple[float, float, float, float, float]]:
+        """Own-net committed segments, on ANY layer, within ``reach`` of ``point``.
+
+        ``(x1, y1, x2, y2, width)`` centrelines for the via-vs-own-trace slit
+        band (Issue #9272).  ``reach`` is the annulus radius plus the band
+        edge; the query pad adds the write slack plus the global default
+        half-width, and each stored segment's OWN half-width and clearance
+        widen its index registration (``_cells_for_seg(pad=hw + clr + 0.5)``),
+        so a segment of any width that can sit in the band is returned --
+        the pad never has to guess a maximum width.  (Issue #9279 tightened
+        this from the ``via_clear``-style ``+ 2.0`` window: the band is a
+        ``~0.13 mm`` question and the wide window was pulling ~60 segments
+        into a scan per A* candidate.)  A segment stored on several layers is
+        returned once per layer (harmless: the band test is a pure ``any``).
+        """
+        out: list[tuple[float, float, float, float, float]] = []
+        for layer in range(self.num_layers):
+            for c, d, cnet, hw, _iclr in self.copper[layer].query_seg(
+                point, point, pad=reach + self.trace_half + SAME_NET_BAND_WRITE_SLACK_MM
+            ):
+                if cnet == net:
+                    out.append((c[0], c[1], d[0], d[1], 2.0 * hw))
+        return out
 
     def via_clear(self, point: Pt, net: int, clearance: float | None = None) -> bool:
         """True if a through-via at ``point`` clears committed copper (ALL

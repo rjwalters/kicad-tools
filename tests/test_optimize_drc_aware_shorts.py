@@ -214,6 +214,49 @@ def test_referee_uses_board_clearance_not_preset(monkeypatch):
     assert seen["clearance"] == 0.0508 != preset
 
 
+def test_referee_inner_floor_follows_authored_clearance(monkeypatch):
+    """Issue #9113 regression: the jlcpcb 4-layer/2oz preset's inner floor
+    (0.1016 mm) must not invert under an authored 0.1 mm outer clearance --
+    ``DesignRules`` raises ValueError on inner > outer, so the referee
+    clamps the inner floor down alongside the outer one."""
+    from kicad_tools.manufacturers import get_profile
+
+    seen = {}
+
+    class _Res:
+        errors: list = []
+
+        def merge(self, other):
+            return None
+
+    class _Checker:
+        def __init__(self, *a, **k):
+            self.design_rules = get_profile("jlcpcb").get_design_rules(4, 2.0)
+
+        def check_clearances(self):
+            seen["clearance"] = self.design_rules.min_clearance_mm
+            seen["inner_clearance"] = self.design_rules.min_inner_clearance_mm
+            return _Res()
+
+        check_dimensions = check_segment_zone_clearances = check_via_zone_clearances = lambda self: (
+            _Res()
+        )
+
+    import kicad_tools.schema.pcb as schema_pcb
+    import kicad_tools.validate as validate
+
+    assert _Checker().design_rules.min_inner_clearance_mm == 0.1016 > 0.1
+
+    monkeypatch.setattr(schema_pcb.PCB, "load", staticmethod(lambda p: SimpleNamespace()))
+    monkeypatch.setattr(validate, "DRCChecker", _Checker)
+    counts = pcb_mod._run_drc_error_count_by_category(
+        _PCB, manufacturer="jlcpcb", layers=4, copper_oz=2.0, min_clearance_mm=0.1
+    )
+    assert counts["__total__"] == 0
+    assert seen["clearance"] == 0.1
+    assert seen["inner_clearance"] == 0.1
+
+
 # --- Issue #8367: external arbitration when the referee is rule-blind ------
 
 _PCB3 = _PCB.replace('(net 2 "B")', '(net 2 "B")\n  (net 3 "C")').replace(

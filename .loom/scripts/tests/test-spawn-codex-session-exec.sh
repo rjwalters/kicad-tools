@@ -109,6 +109,48 @@ assert_contains "--env CARGO_PROFILE_DEV_DEBUG=line-tables-only" "$line" "the #1
 assert_not_contains "never-forward-me" "$line" \
     "an ambient provider credential in the host env is never forwarded"
 
+# The dispatcher's lease context crosses with its claim marker, so the session
+# reads the lease its dispatcher published as its own; and the commit identity
+# git resolves on the host crosses as GIT_AUTHOR_*/GIT_COMMITTER_* (the session
+# image has no global git config).
+IDENT_HOME="$TMPROOT/ident-home"
+mkdir -p "$IDENT_HOME"
+printf '[user]\n\tname = fleet-bot[bot]\n\temail = 1+fleet-bot[bot]@users.noreply.example.invalid\n' > "$IDENT_HOME/.gitconfig"
+out="$(cd "$WS" && env -u CODEX_HOME -u LOOM_CODEX_PROFILE \
+    -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL \
+    LOOM_SWEEP_NICE=0 LOOM_CODEX_NO_EXEC=1 LOOM_WORKSPACE="$WS" \
+    LOOM_CODEX_HOME="$PROFILE" HOME="$IDENT_HOME" GIT_CONFIG_NOSYSTEM=1 \
+    LOOM_SWEEP_CLAIM_OWNED=20 LOOM_SWEEP_LEASE_RENEW_DISPATCHED=20 LOOM_LEASE_HOST_ID=fleet-host-7 \
+    bash "$SPAWN_CODEX" -p "hi" 2>&1 || true)"
+line="$(printf '%s\n' "$out" | grep '^spawn-codex would-exec:' || true)"
+assert_contains "--env LOOM_SWEEP_CLAIM_OWNED=20" "$line" "the claim marker is forwarded into the container"
+assert_contains "--env LOOM_SWEEP_LEASE_RENEW_DISPATCHED=20" "$line" "the dispatch's lease-renewal marker is forwarded with it"
+assert_contains "--env LOOM_LEASE_HOST_ID=fleet-host-7" "$line" "the dispatcher's lease host id is forwarded with it"
+assert_contains "--env GIT_AUTHOR_NAME=fleet-bot[bot]" "$line" "the host's git user.name is forwarded as the author name"
+assert_contains "--env GIT_COMMITTER_NAME=fleet-bot[bot]" "$line" "…and as the committer name"
+assert_contains "--env GIT_AUTHOR_EMAIL=1+fleet-bot[bot]@users.noreply.example.invalid" "$line" "the host's git user.email is forwarded as the author email"
+assert_contains "--env GIT_COMMITTER_EMAIL=1+fleet-bot[bot]@users.noreply.example.invalid" "$line" "…and as the committer email"
+
+# An identity already exported wins over the host config; with neither, none is invented.
+out="$(cd "$WS" && env -u CODEX_HOME -u LOOM_CODEX_PROFILE \
+    -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL \
+    LOOM_SWEEP_NICE=0 LOOM_CODEX_NO_EXEC=1 LOOM_WORKSPACE="$WS" \
+    LOOM_CODEX_HOME="$PROFILE" HOME="$IDENT_HOME" GIT_CONFIG_NOSYSTEM=1 \
+    GIT_AUTHOR_NAME=explicit-author \
+    bash "$SPAWN_CODEX" -p "hi" 2>&1 || true)"
+line="$(printf '%s\n' "$out" | grep '^spawn-codex would-exec:' || true)"
+assert_contains "--env GIT_AUTHOR_NAME=explicit-author" "$line" "an exported GIT_AUTHOR_NAME wins over the host config"
+assert_contains "--env GIT_COMMITTER_NAME=fleet-bot[bot]" "$line" "…while the unset committer name still comes from it"
+out="$(cd "$WS" && env -u CODEX_HOME -u LOOM_CODEX_PROFILE \
+    -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL \
+    LOOM_SWEEP_NICE=0 LOOM_CODEX_NO_EXEC=1 LOOM_WORKSPACE="$WS" \
+    LOOM_CODEX_HOME="$PROFILE" HOME="$TMPROOT/no-ident-home" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+    bash "$SPAWN_CODEX" -p "hi" 2>&1 || true)"
+line="$(printf '%s\n' "$out" | grep '^spawn-codex would-exec:' || true)"
+assert_contains " -- codex exec " "$line" "a host with no git identity still dispatches"
+assert_not_contains "GIT_AUTHOR" "$line" "…and no identity is invented for the container"
+assert_not_contains "GIT_COMMITTER" "$line" "…for author or committer"
+
 # A non-adopted profile is untouched: bare-metal, no docker, no --workdir.
 GOOD="$TMPROOT/profiles/bare"
 mkdir -p "$GOOD"

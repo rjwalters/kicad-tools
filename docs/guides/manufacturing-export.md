@@ -530,20 +530,59 @@ Find LCSC part numbers at: https://www.lcsc.com
 
 ### "CPL rotation is wrong"
 
-JLCPCB may expect different rotation for some packages. You can add rotation corrections:
+JLCPCB's library models do not always share KiCad's 0° orientation, so a part
+can land a quarter turn off in the fab's placement preview. Two sources of
+correction feed the CPL, and corrections are always **added** to the KiCad
+rotation (`(kicad + correction) % 360`):
 
-```python
-from kicad_tools.export import export_pnp, PnPExportConfig
+1. The shipped per-manufacturer table
+   (`manufacturers/data/jlcpcb_rotations.yaml`), keyed on footprint-name globs
+   such as `SOT-23*`.
+2. A **per-project sidecar**, `cpl_rotations.yaml`, committed next to your
+   `.kicad_pcb`. `kct export` and `kct readiness --generate` discover it
+   automatically:
 
-config = PnPExportConfig(
-    rotation_offsets={
-        "SOT-23": 180,  # Rotate SOT-23 by 180°
-        "TQFP-32": 90,  # Rotate TQFP-32 by 90°
-    }
-)
-
-export_pnp(pcb, "cpl.csv", manufacturer="jlcpcb", config=config)
+```yaml
+# cpl_rotations.yaml -- degrees added to the KiCad rotation in the CPL
+by_reference:        # one specific placement
+  J2: 90
+by_lcsc:             # every placement of that LCSC part
+  C5156614: 90       # 1x05 pin header
+  C5116483: 90       # 1x04 pin header
+  C4991872: 270      # SJ-3523-SMT audio jack
 ```
+
+Precedence per placement is `by_reference` > `by_lcsc` > the shipped footprint
+table. A sidecar entry replaces the table's correction for that part; parts the
+sidecar does not name keep the table's. Prefer `by_lcsc` for connectors: the
+correction belongs to the fab's model of the LCSC part, and a footprint glob
+such as `PinHeader_*` would rotate every other header wrongly. The LCSC number
+is the one in the generated BOM (falling back to the footprint's `LCSC`
+property). Measure the offset by rotating the part in the fab's placement
+preview until the body sits on its pads.
+
+An invalid sidecar (unknown key, non-numeric degrees, a `by_lcsc` key that is not
+`Cnnnn`) fails the CPL step instead of silently shipping an uncorrected file.
+
+`kct readiness` records the result in `output/readiness.json`:
+
+- the sidecar is hashed as a readiness input, so editing, adding or deleting it
+  makes the evidence stale and `--verify` fails;
+- `cpl_rotations.applied` lists each shifted placement (reference, which key
+  matched, degrees), and `cpl_rotations.sidecar_sha256` pins the sidecar;
+- `cpl_rotations.unreviewed` lists connectors, ICs, diodes, transistors, LEDs,
+  switches, crystals/oscillators and jumpers (reference prefix
+  `J`/`U`/`D`/`Q`/`LED`/`SW`/`Y`/`JP`/`X`) that **no** correction matched.
+  This is a review list, not a blocker: check each one in the fab's placement
+  preview before ordering. `kct export` prints the same list when it writes
+  the CPL, and an empty-but-present sidecar is still recorded (path + hash);
+- `--verify` re-derives every sidecar-corrected rotation from the board and the
+  current sidecar and fails if the retained CPL disagrees. If the re-derivation
+  itself cannot run (an unreadable or malformed bundle file, an unexpected
+  error), `--verify` reports the skip instead of passing silently, and
+  `readiness.json` records the reason under `cpl_rotations.rederivation_skipped`.
+
+The hand-edited-CSV route is not an option: it breaks the manifest checksums.
 
 ## Next Steps
 

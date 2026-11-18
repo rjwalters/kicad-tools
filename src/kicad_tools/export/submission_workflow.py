@@ -32,8 +32,12 @@ It lives in the manifest, never in the hash-pinned ``readiness.json``; it binds 
 board and gerber sha256 like the sign-offs, is recommended before ``fab-review``
 but not required by it, and never gates anything.
 
-Nothing here calls checkout, payment or parts purchase, and "ordered" is never
-set by code: the states it reports stop at ``stock-checked`` / ``uploaded``.
+Nothing here calls checkout, payment or parts purchase, and nothing here sets
+"ordered": the states it reports stop at ``stock-checked`` / ``uploaded``. The
+one payment path in kicad-tools is the opt-in, attended, exact-total-approved
+checkout leg in :mod:`kicad_tools.manufacturers.jlc_payment` (issue #8935),
+reached only from ``kct submit-jlcpcb --website --checkout``; this module never
+imports it.
 """
 
 from __future__ import annotations
@@ -354,8 +358,8 @@ DFM_CATEGORY_RULES: dict[str, tuple[str, ...]] = {
     "negative_soldermask_expansion": (),
     "soldermask_opening_multiple_segments": (),
     "unconnected_trace_end": ("track_dangling",),
-    "sharp_trace_corner": (),
-    "missing_plated_through_hole": (),
+    "sharp_trace_corner": ("sharp_trace_corner",),
+    "missing_plated_through_hole": ("missing_plated_hole",),
     "silkscreen_line_width": ("min_text_thickness",),
     "fiducial": ("fiducials",),
 }

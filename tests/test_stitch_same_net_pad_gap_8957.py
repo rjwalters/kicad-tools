@@ -9,10 +9,11 @@ annulus vs its own pad, a stub bridging the middle), which the fab-view
 a fab sees copper, not nets.
 
 The stitcher now rejects candidate seats whose annulus-to-same-net-SMD-pad
-gap falls in the forbidden band (``0 < gap <`` the stackup's pad error edge,
-``GapBand.error_edge_mm`` of the ``pad_spacing`` dfm entry) and lets the
-placement ladder keep walking: annulus overlapping the pad is a copper union
-(no slit), and a gap at or beyond the edge is not a fab finding.
+gap falls in the forbidden band (``0 < gap <`` the stackup's pad *detection*
+edge, ``GapBand.detection_edge_mm`` of the ``pad_spacing`` dfm entry -- never
+``error_edge_mm``; #9016) and lets the placement ladder keep walking: annulus
+overlapping the pad is a copper union (no slit), and a gap at or beyond the
+edge is not a fab finding.
 """
 
 from __future__ import annotations
@@ -64,9 +65,10 @@ def test_band_rejects_the_measured_gap():
     assert not same_net_pad_gap_acceptable(0.0, y, VIA, [PAD_BBOX], EDGE_1OZ)
 
 
-def test_touching_annulus_is_acceptable():
-    # gap == 0: annulus and pad form one copper union, no slit.
-    assert same_net_pad_gap_acceptable(0.0, PAD_TOP + R, VIA, [PAD_BBOX], EDGE_1OZ)
+def test_tangent_annulus_is_rejected():
+    # Issue #9124: gap == 0 is a one-point touch -- the receding arc leaves a
+    # sub-edge wedge the fab-view checker grades, so it is NOT a union.
+    assert not same_net_pad_gap_acceptable(0.0, PAD_TOP + R, VIA, [PAD_BBOX], EDGE_1OZ)
 
 
 def test_overlapping_annulus_is_acceptable():

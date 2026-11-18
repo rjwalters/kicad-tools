@@ -21,12 +21,23 @@ Examples:
 
     # Apply, then run an independent native DRC check on the silk rules
     kct place-silk-refs board.kicad_pcb --verify-drc
+
+    # Move only the references sitting on a drilled hole (Issue #9054)
+    kct place-silk-refs board.kicad_pcb --over-holes
+
+Coordinate frames: ``old/new_position_mm`` (JSON) and the text report's
+moved positions are board-relative; ``reason`` obstacle labels quote
+sheet-absolute coordinates -- the frame the KiCad editor shows -- when they
+carry any (Issue #9364).  The JSON output names the frame and carries
+``origin_mm``, so ``origin_mm + position_mm`` recovers the sheet point a
+reason quotes.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -39,6 +50,7 @@ from kicad_tools.silkscreen.place_refs import (
     SILK_EDGE_CLEARANCE_MM,
     PlaceSilkRefsResult,
     SilkRefPlacer,
+    references_over_holes,
 )
 
 
@@ -104,13 +116,28 @@ def _print_fixed_text_conflicts(result: PlaceSilkRefsResult) -> None:
         "(not moved; relocate by hand):"
     )
     for c in result.fixed_text_conflicts:
-        x, y = c.position
-        print(f"  {c.text!r} at ({x:.3f}, {y:.3f}) over {c.opening}")
+        # Print in sheet coordinates, the frame the opening label (and the
+        # KiCad editor / kicad-cli) uses (Issue #9327).
+        x, y = c.to_sheet(c.position)
+        print(f"  {c.text!r} at ({x:.3f}, {y:.3f}) [sheet coords] over {c.opening}")
         if c.candidates:
-            spots = ", ".join(f"({cx:.3f}, {cy:.3f})" for cx, cy in c.candidates)
-            print(f"    candidate clear positions: {spots}")
+            spots = ", ".join("({:.3f}, {:.3f})".format(*c.to_sheet(p)) for p in c.candidates)
+            print(f"    candidate clear positions [sheet coords]: {spots}")
         else:
             print("    no clear position found within the search radius")
+
+
+_SHEET_COORDS_RE = re.compile(r"\(-?\d+\.\d+, -?\d+\.\d+\)")
+
+
+def _reason_frame_suffix(reason: str) -> str:
+    """Label naming the frame of coordinates quoted in a placement *reason*.
+
+    Aperture/obstacle labels embed ``({x:.3f}, {y:.3f})`` sheet-absolute
+    points (Issue #9364); a reason quoting one names its frame so it can sit
+    beside a board-relative position unnamed no longer.
+    """
+    return " [sheet coords]" if _SHEET_COORDS_RE.search(reason) else ""
 
 
 def _print_text(result: PlaceSilkRefsResult, dry_run: bool) -> None:
@@ -130,7 +157,10 @@ def _print_text(result: PlaceSilkRefsResult, dry_run: bool) -> None:
                 if p.new_rotation != p.old_rotation
                 else ""
             )
-            print(f"  {p.footprint_ref}: ({ox:.3f}, {oy:.3f}) -> ({nx:.3f}, {ny:.3f}){rot}")
+            print(
+                f"  {p.footprint_ref}: ({ox:.3f}, {oy:.3f}) -> ({nx:.3f}, {ny:.3f})"
+                f" [board-relative]{rot}"
+            )
     elif not result.unplaceable and not result.under_component_fallback:
         print("No collisions found -- every visible reference is already clear.")
     else:
@@ -141,12 +171,12 @@ def _print_text(result: PlaceSilkRefsResult, dry_run: bool) -> None:
             f"\n{len(result.under_component_fallback)} reference(s) fell back under their own component body:"
         )
         for p in sorted(result.under_component_fallback, key=lambda p: p.footprint_ref):
-            print(f"  {p.footprint_ref}: {p.reason}")
+            print(f"  {p.footprint_ref}: {p.reason}{_reason_frame_suffix(p.reason)}")
 
     if result.unplaceable:
         print(f"\n{len(result.unplaceable)} reference(s) could not be placed cleanly:")
         for p in sorted(result.unplaceable, key=lambda p: p.footprint_ref):
-            print(f"  {p.footprint_ref}: {p.reason}")
+            print(f"  {p.footprint_ref}: {p.reason}{_reason_frame_suffix(p.reason)}")
 
     _print_fixed_text_conflicts(result)
 
@@ -269,6 +299,14 @@ def main(argv: list[str] | None = None) -> int:
             "stay put (but still act as obstacles). Default: all references"
         ),
     )
+    parser.add_argument(
+        "--over-holes",
+        action="store_true",
+        help=(
+            "Move only references whose text overlaps a drilled hole (the "
+            "silk_hole_overlap findings); combined with --refs, the intersection"
+        ),
+    )
     parser.add_argument("-o", "--output", help="Output file path (default: overwrite input)")
     parser.add_argument(
         "--dry-run", action="store_true", help="Preview the move plan without modifying files"
@@ -326,6 +364,10 @@ def main(argv: list[str] | None = None) -> int:
         if unknown:
             print(f"Error: unknown reference(s) in --refs: {', '.join(unknown)}", file=sys.stderr)
             return 1
+    if args.over_holes:
+        # Issue #9054: only the references silk_hole_overlap flags.
+        over = references_over_holes(placer.pcb)
+        only = over if only is None else only & over
 
     try:
         result = placer.plan(

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import subprocess
+import sys
 from itertools import combinations_with_replacement
 from pathlib import Path
 
@@ -222,17 +225,64 @@ def test_partial_does_not_trigger_incomplete():
 
 
 # ---------------------------------------------------------------------------
+# Issue #9234: a kct rule that did not complete this run names its rows.
+# ---------------------------------------------------------------------------
+
+
+def test_run_incomplete_rule_names_only_its_danger_rows():
+    plain = fdp.evaluate_parity("jlcpcb")
+    assert "solder_mask_opening_exposing_trace" not in plain.incomplete_categories
+    assert plain.run_incomplete_categories == ()
+    report = fdp.evaluate_parity("jlcpcb", incomplete_rules=("mask_to_copper",))
+    assert "solder_mask_opening_exposing_trace" in report.incomplete_categories
+    assert report.run_incomplete_categories == ("solder_mask_opening_exposing_trace",)
+    # The static table subset -- what meta_checks and the verdict key on
+    # (#9062) -- is unchanged by run state.
+    assert report.table_incomplete_categories == plain.table_incomplete_categories
+    assert not report.table_incomplete
+    assert report.to_dict()["incomplete_categories"] == list(report.incomplete_categories)
+
+
+def test_run_incomplete_rule_splits_band_qualified_attribution_keys():
+    """``physical_copper_gap`` feeds two banded rows; both are named (#9234).
+
+    The ``#trace``/``#pad`` qualifiers are attribution-only, so a rule that
+    did not complete names every danger-capable row counting its findings.
+    """
+    report = fdp.evaluate_parity("jlcpcb", incomplete_rules=("physical_copper_gap",))
+    assert report.run_incomplete_categories == ("trace_spacing", "pad_spacing")
+
+
+def test_stanza_separates_run_state_from_table_gaps():
+    plain = fdp.format_parity_stanza(fdp.evaluate_parity("jlcpcb"))
+    run_state = fdp.format_parity_stanza(
+        fdp.evaluate_parity("jlcpcb", incomplete_rules=("mask_to_copper",))
+    )
+    # A run with no rule gaps gains exactly one line naming the category.
+    assert "INCOMPLETE (this run)" not in plain
+    line = next(ln for ln in run_state.splitlines() if "INCOMPLETE (this run)" in ln)
+    assert "solder_mask_opening_exposing_trace" in line
+    # Every danger row in the shipped table is covered/partial, so neither
+    # stanza claims a static gap: "kct has no rule" stays a table-only claim.
+    assert "kct has no rule for the categories above" not in plain
+    assert "kct has no rule for the categories above" not in run_state
+
+
+# ---------------------------------------------------------------------------
 # Issue #8940: kct-vs-fab count comparison in the parity stanza.
 # ---------------------------------------------------------------------------
 
 #: The pre-#8940 stanza shape, captured from ``origin/main`` @ 993d2d2ab
 #: before any edit to ``format_parity_stanza`` (the issue's Test Plan requires
 #: the baseline be captured first; AC 2 makes it the byte-identity contract).
-#: #8972 bumps the table version 6 -> 7 (row attribution change), so only the
-#: header's ``table v7`` digit moved -- rows, order and wording are unchanged.
+#: The header's version token is interpolated from ``fdp.TABLE_VERSION`` (a
+#: content hash of the rows, issue #9242) rather than pinned, so a PR that
+#: edits a row no longer edits this constant.  Rows, order and wording are the
+#: byte-identity contract.
 EXPECTED_DEFAULT_STANZA = (
     "\n"
-    "Fab DFM parity (JLCDFM, table v7, 2026-11-12): 0 danger-capable categories not covered\n"
+    f"Fab DFM parity (JLCDFM, table v{fdp.TABLE_VERSION}, 2026-11-12): "
+    "0 danger-capable categories not covered\n"
     "  partial     trace_spacing [danger-capable]: clearance, physical_copper_gap\n"
     "  partial     pad_spacing [danger-capable]: clearance, physical_copper_gap\n"
     "  partial     solder_mask_opening_exposing_trace [danger-capable]: mask_to_copper\n"
@@ -243,8 +293,8 @@ EXPECTED_DEFAULT_STANZA = (
     "  covered     negative_soldermask_expansion: mask_negative_expansion\n"
     "  covered     soldermask_opening_multiple_segments: mask_multi_segment\n"
     "  covered     unconnected_trace_end: dangling_copper\n"
-    "  not covered sharp_trace_corner: -\n"
-    "  not covered missing_plated_through_hole: -\n"
+    "  covered     sharp_trace_corner: sharp_trace_corner\n"
+    "  partial     missing_plated_through_hole: missing_plated_hole\n"
     "  partial     silkscreen_line_width: silkscreen\n"
     "  covered     fiducial: fiducials"
 )
@@ -399,6 +449,30 @@ def test_bandless_physical_gap_findings_stay_on_pad_spacing():
     assert (by_cat["trace_spacing"].kct_errors, by_cat["trace_spacing"].kct_warnings) == (0, 0)
 
 
+def test_pad_spacing_cases_fixture_attributes_errors_to_pad_spacing():
+    """Issue #9034: the committed five-case fixture's three graded findings
+    all sit on the pad band, so they count toward ``pad_spacing`` and
+    ``trace_spacing`` stays clean; the zone-fill advisory counts to neither
+    tally.  The issue-reported ratio (19 kct errors vs the fab's 6 danger +
+    1 warning on one 4-layer board, board not committed) stays
+    *reported-not-reproduced*: this fixture pins the band semantics and the
+    per-pair counting granularity, not that board."""
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.physical_gap import check_physical_copper_gap_fab_view
+
+    findings = list(
+        check_physical_copper_gap_fab_view(
+            PCB.load(str(FIX / "pad_spacing_cases.kicad_pcb")), _policy_2layer_1oz()
+        ).violations
+    )
+    graded = [v for v in findings if v.severity != "info"]
+    assert len(graded) == 3 and all(v.fab_band == "pad" for v in graded)
+    rep = fdp.evaluate_parity("jlcpcb", findings=findings, recorded_counts=RECORDED_8838)
+    by_cat = {c.category: c for c in rep.comparisons}
+    assert (by_cat["pad_spacing"].kct_errors, by_cat["pad_spacing"].kct_warnings) == (3, 0)
+    assert (by_cat["trace_spacing"].kct_errors, by_cat["trace_spacing"].kct_warnings) == (0, 0)
+
+
 def test_physical_copper_gap_rule_id_is_band_stable():
     """AC: the qualified key is attribution-only.  ``rule_id`` -- and so
     ``DRCViolation.key`` and every existing ``.kct_waivers.json`` entry
@@ -412,10 +486,10 @@ def test_physical_copper_gap_rule_id_is_band_stable():
     assert len({v.key for v in (trace, pad, legacy)}) == 1
 
 
-def _finding(rule_id: str, severity: str = "error", *, waived: bool = False):
+def _finding(rule_id: str, severity: str = "error", *, waived: bool = False, **extra):
     from kicad_tools.validate.violations import DRCViolation
 
-    return DRCViolation(rule_id, severity, f"synthetic {rule_id}", waived=waived)
+    return DRCViolation(rule_id, severity, f"synthetic {rule_id}", waived=waived, **extra)
 
 
 RECORDED_8838 = RECORDED
@@ -452,6 +526,22 @@ def test_comparison_counts_attributed_by_count_rule_ids():
         by_cat["silkscreen_line_width"].kct_warnings,
     ) == (0, 2)
     assert (by_cat["fiducial"].kct_errors, by_cat["fiducial"].kct_warnings) == (0, 1)
+
+
+def test_sharp_trace_corner_bend_population_attributes_to_its_row():
+    """Issue #9037: the ``#bend`` qualified key counts only two-segment
+    bends toward the ``sharp_trace_corner`` row; junction findings are
+    kct-only over-reporting and count to neither row's tallies."""
+    bend = _finding("sharp_trace_corner", "warning", corner_class="bend")
+    junction = _finding("sharp_trace_corner", "warning", corner_class="junction")
+    assert fdp.attribution_key(bend) == "sharp_trace_corner#bend"
+    assert fdp.attribution_key(junction) == "sharp_trace_corner#junction"
+    rep = fdp.evaluate_parity("jlcpcb", findings=[bend, junction], recorded_counts=RECORDED_8838)
+    by_cat = {c.category: c for c in rep.comparisons}
+    assert by_cat["sharp_trace_corner"].kct_warnings == 1
+    # The qualified key is attribution-only: rule_id (and so DRCViolation.key)
+    # is identical across both populations.
+    assert bend.key == junction.key
 
 
 def test_silk_finding_lands_in_exactly_one_silk_row():
@@ -766,3 +856,56 @@ def test_fab_danger_severity_fails_verdict_and_exit():
     v = evaluate_check_verdict(pcb, res, drc_only=True, manufacturer="jlcpcb")
     assert v.verdict == "fail"
     assert v.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# Issue #9242: TABLE_VERSION is content-derived, not hand-picked.
+# ---------------------------------------------------------------------------
+
+
+def test_table_version_is_short_hex_digest():
+    assert isinstance(fdp.TABLE_VERSION, str)
+    assert len(fdp.TABLE_VERSION) == 8
+    int(fdp.TABLE_VERSION, 16)  # raises if not hex
+
+
+def test_table_version_matches_helper_and_is_exposed_everywhere():
+    assert fdp.compute_table_version(fdp.PARITY_TABLE) == fdp.TABLE_VERSION
+    report = fdp.evaluate_parity("jlcpcb")
+    assert report.to_dict()["table_version"] == fdp.TABLE_VERSION
+    assert f"table v{fdp.TABLE_VERSION}," in fdp.format_parity_stanza(report)
+
+
+def test_table_version_is_stable_across_processes():
+    code = "from kicad_tools.validate import fab_dfm_parity as f; print(f.TABLE_VERSION)"
+    outs = {
+        subprocess.run(
+            [sys.executable, "-I", "-c", code], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        for _ in range(2)
+    }
+    assert outs == {fdp.TABLE_VERSION}
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("category", "renamed_category"),
+        ("kct_rules", ("extra_rule",)),
+        ("status", "not_covered"),
+        ("danger_capable", False),
+        ("count_rule_ids", ("extra_count_rule",)),
+        ("note", "a different note"),
+    ],
+)
+def test_table_version_changes_when_any_row_field_changes(field, value):
+    rows = list(fdp.PARITY_TABLE)
+    # Use the first row; make sure the replacement really differs.
+    assert getattr(rows[0], field) != value
+    rows[0] = dataclasses.replace(rows[0], **{field: value})
+    assert fdp.compute_table_version(rows) != fdp.TABLE_VERSION
+
+
+def test_table_version_unchanged_for_identical_rows():
+    assert fdp.compute_table_version(list(fdp.PARITY_TABLE)) == fdp.TABLE_VERSION
+    assert fdp.compute_table_version(tuple(fdp.PARITY_TABLE)) == fdp.TABLE_VERSION

@@ -79,6 +79,7 @@ from kicad_tools.validate.rules.schematic_fields import DEFAULT_SCH_FIELD_THRESH
 if TYPE_CHECKING:
     from kicad_tools.erc import ERCReport
     from kicad_tools.erc.violation import ERCViolation
+    from kicad_tools.validate.rules.waivers import Waivers
 
 # Issue #3750: meta-check status set.  ``NOT RUN`` is rendered with a space
 # in human output and ``"NOT RUN"`` in JSON; we treat it as a single token
@@ -278,10 +279,21 @@ class MetaCheckResult:
     # honours; never widened (an explicitly requested check that cannot run
     # stays FAILED).
     coverage_incomplete: bool = False
-    # The blocking categories whose incompleteness set ``coverage_incomplete``
-    # (e.g. ``("mask_to_copper",)``); names them on the ``Overall:`` line.
-    # Not serialized in ``to_dict``: machine consumers already receive
-    # ``verdict`` and ``exit_code``, and the report's schema is pinned.
+    # Categories whose check did not complete on this run (issue #9062):
+    # every tracked category (mask_to_copper, dfm_table, fab_dfm_parity)
+    # that could not finish, named on the ``Overall:`` line and serialized
+    # as ``meta_checks.incomplete_categories`` -- the run-time counterpart
+    # of ``coverage.*.state``.  ``mask_to_copper`` is keyed on the same
+    # predicate the coverage row keys on (``assessment.coverage``, never
+    # ``assessment.passed`` -- see ``cov.mask_copper_unknown``): a mask
+    # check that completed and found a real violation did NOT fail to
+    # complete, so it is not named.  Wider than the flag: a default-applied
+    # mask assessment that did not complete with provisional ``violation``
+    # / ``uncertain`` measurements keeps the verdict FAILED (it drives
+    # ``mask_failed``), yet its category still did not complete, so it is
+    # named here while ``coverage_incomplete`` stays False.  The list is a
+    # name list, never the reason for ``overall`` -- ``compute_overall``
+    # reads only ``coverage_incomplete``.
     incomplete_categories: tuple[str, ...] = ()
 
     def _subs(self) -> tuple[SubCheckResult, ...]:
@@ -323,6 +335,11 @@ class MetaCheckResult:
             "manifest": self.manifest.to_dict(),
             "overall": self.overall,
             "schematic_missing": self.schematic_missing,
+            # Issue #9062: additive key -- categories whose check did not
+            # complete on this run (may be non-empty while ``overall`` is
+            # FAILED).  The ``coverage_incomplete`` flag itself stays
+            # unserialized: machine consumers read ``overall``.
+            "incomplete_categories": list(self.incomplete_categories),
         }
 
 
@@ -1100,8 +1117,11 @@ def run_meta_checks(
             (issue #8949).  Threaded in -- not set on the returned object
             -- because this helper calls ``compute_overall`` itself, so a
             flag assigned afterwards would be a no-op.
-        incomplete_categories: Names of the categories behind
-            ``coverage_incomplete``; rendered on the ``Overall:`` line.
+        incomplete_categories: Categories whose check did not complete on
+            this run (issue #9062); named on the ``Overall:`` line and
+            serialized as ``meta_checks.incomplete_categories``.  May be
+            wider than ``coverage_incomplete`` (see
+            :attr:`MetaCheckResult.incomplete_categories`).
     """
     resolved_sch = _resolve_check_schematic(schematic, pcb_path)
 
@@ -3188,7 +3208,10 @@ def evaluate_check_verdict(
             would-be ``pass`` becomes ``incomplete``.
         manufacturer: Manufacturer id; for the JLCPCB family a danger-capable
             ``not_covered`` fab DFM parity row (Issue #8845) makes an otherwise
-            passing verdict ``incomplete``.
+            passing verdict ``incomplete``, and a default-applied mask check
+            that did not complete names its JLCDFM category in
+            ``fab_dfm_parity.incomplete_categories`` without widening the
+            verdict (Issue #9234).
         recorded_fab_counts: Recorded fab DFM result ``counts`` (Issue #8940;
             ``--fab-dfm-result``).  When given, the parity report carries the
             per-category kct-vs-fab count comparison (findings are attributed
@@ -3225,7 +3248,20 @@ def evaluate_check_verdict(
     )
     from kicad_tools.validate.fab_dfm_parity import evaluate_parity
 
-    parity = evaluate_parity(manufacturer, findings=counted, recorded_counts=recorded_fab_counts)
+    # Issue #9234: a default-applied mask_to_copper assessment that did not
+    # complete also withholds this run's kct-vs-fab comparison for the JLCDFM
+    # category it covers, so fab_dfm_parity.incomplete_categories names that
+    # category. Keyed on coverage -- the same predicate
+    # meta_checks.incomplete_categories keys on -- never on passed.
+    mask_copper_did_not_complete = mask_copper_default and any(
+        a.coverage != "complete" for a in results.mask_copper_assessments
+    )
+    parity = evaluate_parity(
+        manufacturer,
+        findings=counted,
+        recorded_counts=recorded_fab_counts,
+        incomplete_rules=("mask_to_copper",) if mask_copper_did_not_complete else (),
+    )
     meta: MetaCheckResult | None = None
     if not drc_only:
         # Issue #8949: ONE notion of "incomplete".  Every incompleteness the
@@ -3237,19 +3273,46 @@ def evaluate_check_verdict(
         # explicitly requested mask check that cannot run is ``mask_failed``
         # above and keeps reporting FAILED.  ``compute_overall`` ranks
         # FAILED first, so a failed board still reads FAILED.
+        #
+        # Issue #9062: ``incomplete_categories`` -- serialized as
+        # ``meta_checks.incomplete_categories`` -- is deliberately WIDER
+        # than that flag.  It names every category whose check did not
+        # complete on this run, keyed on the SAME predicate the coverage
+        # row keys on (``assessment.coverage``, never ``assessment.passed``
+        # -- see ``cov.mask_copper_unknown``), so a default-applied mask
+        # assessment that did not complete is named even when its
+        # provisional ``violation``/``uncertain`` measurements send it to
+        # ``mask_failed`` (verdict FAILED) instead of ``mask_incomplete``
+        # and ``coverage.mask_to_copper`` reads ``unknown``.  A mask check
+        # that completed and found a real violation is ``passed=False`` but
+        # ``coverage == "complete"``: the check DID complete, so it is not
+        # named (the coverage row reads ``checked`` too).
+        # ``coverage_incomplete`` keeps the narrower #8949 set so the
+        # rollup, the ``Overall:`` line and the exit code do not move
+        # (``compute_overall`` ranks FAILED first anyway, so the wider list
+        # never changes the printed line either).  For the same reason the
+        # parity legs below key on the static ``not_covered`` subset only:
+        # #9234's run-state parity categories are named inside the
+        # ``fab_dfm_parity`` section itself and do not widen the meta rollup
+        # -- the run's incompleteness is already named there via
+        # ``mask_to_copper``.
         incomplete_categories: list[str] = []
-        if mask_incomplete:
+        if mask_copper_did_not_complete:
             incomplete_categories.append("mask_to_copper")
         if dfm_incomplete:
             incomplete_categories.append("dfm_table")
-        if parity is not None and parity.incomplete:
+        if parity is not None and parity.table_incomplete:
             incomplete_categories.append("fab_dfm_parity")
         meta = run_meta_checks(
             Path(pcb_path),
             drc_status=drc_sub,
             schematic=schematic,
             strict=strict,
-            coverage_incomplete=bool(incomplete_categories),
+            coverage_incomplete=bool(
+                mask_incomplete
+                or dfm_incomplete
+                or (parity is not None and parity.table_incomplete)
+            ),
             incomplete_categories=tuple(incomplete_categories),
         )
     verdict, exit_code = _check_verdict(
@@ -3262,7 +3325,7 @@ def evaluate_check_verdict(
         allow_incomplete=allow_incomplete,
         meta=meta,
     )
-    if (dfm_incomplete or (parity is not None and parity.incomplete)) and verdict == "pass":
+    if (dfm_incomplete or (parity is not None and parity.table_incomplete)) and verdict == "pass":
         # Reachable only under ``drc_only`` since #8949: without the meta
         # rollup there is no ``Overall:`` line to keep honest (the branch is
         # dead on the meta path -- a "pass" verdict there implies no
@@ -3510,7 +3573,7 @@ class CheckRuleSet:
     manufacturer: str
     layers: int
     net_class_map_path: Path | None = None
-    general_waivers: object | None = None
+    general_waivers: "Waivers | None" = None
     notes: list[str] = field(default_factory=list)
 
 
@@ -3634,11 +3697,18 @@ def build_check_rule_set(
     )
 
 
-def run_check_rule_set(rule_set: CheckRuleSet) -> DRCResults:
+def run_check_rule_set(rule_set: CheckRuleSet, *, apply_sidecar_waivers: bool = True) -> DRCResults:
     """Run every default ``kct check`` category under ``rule_set``.
 
     Same dispatch as the CLI (:func:`run_selected_checks`, so the
-    path-dependent rules run), with the board's waivers applied afterwards.
+    path-dependent rules run), with the board's general-waiver sidecar
+    applied afterwards.
+
+    ``apply_sidecar_waivers=False`` returns the raw findings *before* the
+    general waivers step: callers that diff waiver matching across two board
+    states (the ``pcb prune`` / ``fix-drc`` invalidation report, Issue
+    #9331) need the pre-waiver findings so entry usage is derived from the
+    match loop itself, not from findings their own sidecar already waived.
     """
     sch_path = _resolve_check_schematic(None, rule_set.project_pcb_path)
     results = run_selected_checks(
@@ -3650,11 +3720,62 @@ def run_check_rule_set(rule_set: CheckRuleSet) -> DRCResults:
         pcb_path=rule_set.project_pcb_path,
         layers=rule_set.layers,
     )
-    if rule_set.general_waivers is not None:
-        from kicad_tools.validate.rules.waivers import apply_waivers
+    if apply_sidecar_waivers and rule_set.general_waivers is not None:
+        from kicad_tools.validate.rules.waivers import apply_waivers as _apply_waivers
 
-        apply_waivers(results, rule_set.general_waivers.for_check())  # type: ignore[attr-defined]
+        _apply_waivers(results, rule_set.general_waivers.for_check())
     return results
+
+
+def waiver_invalidation_report_lines(
+    project_pcb_path: Path,
+    before_board: PCB,
+    after_board: PCB,
+) -> list[str]:
+    """Formatted invalidated-waiver report lines for a copper edit (Issue #9331).
+
+    Runs ``kct check``'s findings pipeline (:func:`build_check_rule_set` +
+    :func:`run_check_rule_set`, waivers NOT applied) on the board before and
+    after a ``pcb prune`` / ``fix-drc`` edit and diffs which general-waiver
+    sidecar entries still waive something.  Returns ``[]`` when no waivers
+    sidecar is discoverable for the board or no entry was invalidated, so
+    callers stay silent for free; sidecar notes (e.g. a malformed
+    auto-discovered sidecar) are warned on stderr here.  Report-only: the
+    caller's exit code and board output are untouched.
+
+    Args:
+        project_pcb_path: The board whose sidecars define the rules and the
+            waivers (the *input* board).
+        before_board: The pre-edit geometry.  Captured *before* the edit:
+            both commands overwrite the input when no ``--output`` is given,
+            so reloading the file afterwards yields the edited board.
+        after_board: The post-edit geometry (in memory or reloaded).
+    """
+    try:
+        from kicad_tools.validate.rules.waivers import (
+            format_invalidated_waivers,
+            invalidated_waiver_keys,
+        )
+
+        rule_set = build_check_rule_set(project_pcb_path, pcb=before_board)
+        waivers = rule_set.general_waivers
+        if waivers is None:
+            for note in rule_set.notes:
+                if "waivers sidecar" in note:
+                    print(f"WARNING: {note}", file=sys.stderr)
+            return []
+        if not waivers.entries:
+            return []
+        before = run_check_rule_set(rule_set, apply_sidecar_waivers=False).violations
+        after = run_check_rule_set(
+            build_check_rule_set(project_pcb_path, pcb=after_board),
+            apply_sidecar_waivers=False,
+        ).violations
+        invalidated = invalidated_waiver_keys(before, after, waivers.for_check())
+        return format_invalidated_waivers(invalidated)
+    except Exception as e:  # noqa: BLE001 - the report must never fail the command
+        print(f"WARNING: waiver invalidation report skipped: {e}", file=sys.stderr)
+        return []
 
 
 def run_selected_checks(
@@ -3926,6 +4047,8 @@ def run_selected_checks(
         "board_id": checker.check_board_id,
         "edge": checker.check_edge_clearances,
         "fiducials": checker.check_fiducials,
+        "sharp_trace_corner": checker.check_sharp_trace_corner,
+        "missing_plated_hole": checker.check_missing_plated_hole,
         "impedance": checker.check_impedance,
         "isolated_copper": checker.check_isolated_copper,
         "match_group_length_skew": checker.check_match_group_length_skew,

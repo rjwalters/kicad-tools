@@ -11,6 +11,10 @@ Two halves:
   leak are listed in ``KNOWN_OFFENDERS`` and each board's next gated re-pin
   drops its entries.  The list may only shrink: a new offender fails, and so
   does an allowlisted file that is now clean.
+* A scan (Issue #9238) of committed text under ``data/research/``,
+  ``docs/diagnostics/``, ``benchmarks/`` and ``boards/*/engineering/``.
+  Those files are not hash-bound, so there is no allowlist: any absolute
+  host path fails outright.
 """
 
 from __future__ import annotations
@@ -89,6 +93,64 @@ def test_known_offender_allowlist_only_shrinks():
     assert not cleaned, (
         "These files no longer contain an absolute host path; remove them from "
         "KNOWN_OFFENDERS so they cannot regress:\n  " + "\n  ".join(cleaned)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Research / benchmark / diagnostic evidence scan (Issue #9238)
+# ---------------------------------------------------------------------------
+
+# An absolute home-directory path embedded in any tracked text file.
+HOST_PATH_IN_TEXT = re.compile(r"/(?:Users|home)/[A-Za-z0-9._-]+/")
+
+#: Not hash-bound: unlike board evidence there is no allowlist, any hit fails.
+NON_BOARD_EVIDENCE_SCOPES = (
+    "data/research/**",
+    "docs/**",  # includes docs/diagnostics/** (Issue #9276)
+    "benchmarks/**",
+    "boards/*/engineering/**",
+)
+
+#: Doc directories whose absolute-looking paths are ``YOUR_USERNAME`` /
+#: ``name`` placeholders in setup instructions, not leaked host paths
+#: (Issue #9276). One entry per directory; keep this list short and audited.
+ALLOWED_PLACEHOLDER_DOC_DIRS = ("docs/mcp/",)
+
+
+def _committed_non_board_evidence() -> list[str]:
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "-z", "--", *NON_BOARD_EVIDENCE_SCOPES],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("not a git checkout")
+    return sorted(
+        {
+            p
+            for p in out.decode().split("\0")
+            if p and not p.startswith(ALLOWED_PLACEHOLDER_DOC_DIRS)
+        }
+    )
+
+
+def test_committed_research_and_diagnostics_records_no_host_path():
+    offenders = []
+    for rel in _committed_non_board_evidence():
+        path = REPO_ROOT / rel
+        if not path.is_file():  # deleted in the working tree
+            continue
+        data = path.read_bytes()
+        if b"\0" in data:  # binary (e.g. images) is not text to scan
+            continue
+        if HOST_PATH_IN_TEXT.search(data.decode("utf-8", errors="replace")):
+            offenders.append(rel)
+    assert not offenders, (
+        "Committed research/benchmark/diagnostic/docs evidence records an absolute "
+        "host path (Issue #9238). Record the path repo-relative or as a "
+        "placeholder (<repo>, <chorus>) instead:\n  " + "\n  ".join(offenders)
     )
 
 
@@ -212,3 +274,151 @@ def test_readiness_rewrites_portable_kct_check_path_board_relative(
     assert rc == 0
     evidence = json.loads((board / "output/readiness/kct-check.json").read_text())
     assert evidence["file"] == "output/demo_routed.kicad_pcb"
+
+
+# ---------------------------------------------------------------------------
+# mask_to_copper provenance (Issue #9055): the recorded native commands must
+# be normalised, so a report produced through docker-shaped argv (temp-stage
+# and home-directory mounts) records no host path and no per-run temp name.
+# ---------------------------------------------------------------------------
+
+
+def test_mask_copper_report_records_no_host_path(tmp_path, monkeypatch):
+    """Both recording sites stay portable under docker-shaped native argv."""
+    import subprocess as sp
+
+    import kicad_tools.validate.mask_export_geometry as meg
+    from kicad_tools.validate.mask_copper_geometry import (
+        inspect_attributed_mask_geometry,
+    )
+    from tests.test_mask_copper_native import _fake_native_launch, _forbid_discovery
+    from tests.test_mask_export_geometry import HEADER, NATIVE_CASES, _board
+
+    docker_kicad_cli = [
+        "docker",
+        "run",
+        "--rm",
+        "-i",
+        "--platform",
+        "linux/amd64",
+        "--user",
+        "1000:1000",
+        "-v",
+        "/tmp/kct-kicad-toolchain-a1b2c3:/tmp/kct-kicad-toolchain-a1b2c3",
+        "-v",
+        "/home/me/board:/home/me/board",
+        "-e",
+        "KICAD_CONFIG_HOME=/home/me/.config/kicad",
+        "-e",
+        "HOME=/home/me",
+        "--entrypoint",
+        "kicad-cli",
+        "kicad/kicad:10.0.6",
+    ]
+    docker_python = [
+        "docker",
+        "run",
+        "--rm",
+        "-i",
+        "--user",
+        "1000:1000",
+        "-v",
+        "/tmp/kct-mask-objects-d4e5f6:/tmp/kct-mask-objects-d4e5f6",
+        "-v",
+        "/private/var/folders/T/kct-mask-objects-d4e5f6:/private/var/folders/T/kct-mask-objects-d4e5f6",
+        "-e",
+        "HOME=/home/me",
+        "--entrypoint",
+        "python3",
+        "kicad/kicad:10.0.6",
+    ]
+
+    def fake_export_run(command, **kwargs):
+        if command[-1] == "--version":
+            return sp.CompletedProcess(command, 0, "10.0.6\n", "")
+        destination = Path(command[command.index("-o") + 1])
+        destination.mkdir()
+        for layer in meg.LAYERS:
+            (destination / f"input-{layer.replace('.', '_')}.gbr").write_text(
+                HEADER + "%ADD10C,1*%D10*X0Y0D03*M02*"
+            )
+        return sp.CompletedProcess(command, 0, "", "")
+
+    # Export side: the real exporter records only image + entrypoint (#9055).
+    monkeypatch.setattr(meg.subprocess, "run", fake_export_run)
+    exported = meg.inspect_exported_mask_geometry(
+        _board(tmp_path / "input.kicad_pcb", NATIVE_CASES["merged"]),
+        native_command=docker_kicad_cli,
+    )
+    assert exported.export_identity["command"] == [
+        "docker",
+        "run",
+        "kicad/kicad:10.0.6",
+        "kicad-cli",
+    ]
+
+    # Objects side: the executed argv keeps every mount, the recorded one none.
+    board, seen = _fake_native_launch(monkeypatch, tmp_path)
+    _forbid_discovery(monkeypatch)
+    result = inspect_attributed_mask_geometry(
+        board, native_python_command=docker_python, scratch_dir=tmp_path
+    )
+    assert seen["cmd"][: len(docker_python)] == docker_python
+    assert result.provenance["native_python_command"] == [
+        "docker",
+        "run",
+        "kicad/kicad:10.0.6",
+        "python3",
+    ]
+
+    payload = json.dumps(
+        {
+            "mask_to_copper": {
+                "geometry_provenance": {
+                    "export": exported.to_dict(),
+                    "objects": result.provenance,
+                }
+            }
+        }
+    )
+    assert not ABSOLUTE_HOST_PATH.search(payload)
+
+
+def test_mask_copper_export_records_no_shim_digest(tmp_path, monkeypatch):
+    """A docker shim command file pins no tool identity: no per-run digest.
+
+    The readiness docker path resolves kicad-cli to the shim
+    ``write_docker_shim`` writes; its bytes embed the per-run mounts and
+    config home, so recording their sha would break byte-identical
+    reproduction (#9055) while the recorded command drops to the basename.
+    """
+    import subprocess as sp
+
+    import kicad_tools.validate.mask_export_geometry as meg
+    from kicad_tools.cli.kicad_toolchain import is_docker_shim, write_docker_shim
+    from tests.test_mask_export_geometry import HEADER, NATIVE_CASES, _board
+
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    shim = write_docker_shim(tmp_path / "bin", [tmp_path], cfg)
+    assert is_docker_shim(shim)
+
+    def fake_export_run(command, **kwargs):
+        if command[-1] == "--version":
+            return sp.CompletedProcess(command, 0, "10.0.6\n", "")
+        destination = Path(command[command.index("-o") + 1])
+        destination.mkdir()
+        for layer in meg.LAYERS:
+            (destination / f"input-{layer.replace('.', '_')}.gbr").write_text(
+                HEADER + "%ADD10C,1*%D10*X0Y0D03*M02*"
+            )
+        return sp.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(meg.subprocess, "run", fake_export_run)
+    exported = meg.inspect_exported_mask_geometry(
+        _board(tmp_path / "input.kicad_pcb", NATIVE_CASES["merged"]),
+        native_command=[str(shim)],
+    )
+    assert exported.export_identity["command"] == ["kicad-cli"]
+    assert "command_file_sha256" not in exported.export_identity
+    assert not ABSOLUTE_HOST_PATH.search(json.dumps(exported.export_identity))
