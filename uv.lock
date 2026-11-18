@@ -2988,7 +2988,8 @@ research = [
 ]
 screenshot = [
     { name = "cairosvg" },
-    { name = "pillow" },
+    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "pillow", version = "13.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
 submit = [
     { name = "playwright" },
@@ -3005,7 +3006,8 @@ dev = [
     { name = "jinja2" },
     { name = "nanobind" },
     { name = "ninja" },
-    { name = "pillow" },
+    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "pillow", version = "13.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pytest-cov" },
     { name = "scikit-build-core" },
 ]
