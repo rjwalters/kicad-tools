@@ -131,11 +131,47 @@ BOARD07_GAP_NETS: tuple[str, ...] = ()
 # slit (via re-seated 0.1 mm further out, C++ own-net-trace band check).
 BOARD06_GAP_NETS = ("GND", "MIPI_CLK+")
 
+# Issue #8858 (measured 2026-11-18, pinned image, seed-42 regen at main
+# 304c70e2c): every ``mask_to_copper`` error net signature the regeneration
+# carries.  Two independent regenerations reproduced all 22 signatures and
+# their per-net counts exactly (200 findings: 122 same-net pass-throughs,
+# 78 same-net own-pad entries).  The committed allowance must list exactly
+# these; a net that starts failing or stops failing trips the gate.
+BOARD06_MASK_NETS = (
+    "+1V2",
+    "+3V3",
+    "GND",
+    "MIPI_CLK+",
+    "MIPI_CLK-",
+    "MIPI_D0+",
+    "MIPI_D0-",
+    "MIPI_RST",
+    "PCIE_RX+",
+    "PCIE_RX-",
+    "PCIE_TX+",
+    "PCIE_TX-",
+    "USB2_D+",
+    "USB2_D-",
+    "USB3_RX1+",
+    "USB3_RX1-",
+    "USB3_RX2+",
+    "USB3_RX2-",
+    "USB3_TX1-",
+    "USB3_TX2+",
+    "USB_CC1",
+    "USB_CC2",
+)
+
 
 def fab_gap_allowance(nets: tuple[str, ...]) -> dict:
     # #8974: DQS_P/DQS_N/GND/+1V2 drained (route-side slit-band fix) and every
     # survivor re-pointed from #8957 to the #8962 parent tracker.
     return {("physical_copper_gap", net): 8962 for net in nets}
+
+
+def mask_allowance(nets: tuple[str, ...]) -> dict:
+    """Issue #8858: the board 06 mask_to_copper entries, all citing #8858."""
+    return {("mask_to_copper", net): 8858 for net in nets}
 
 
 def test_board07_committed_allowance():
@@ -282,15 +318,20 @@ def with_board06_synthetic(gate):
 
 
 def test_board06_committed_allowance():
-    """Issue #7548 emptied the skew entry: board 06's allowance holds only
-    the #8957 fab-view ``physical_copper_gap`` nets (net-signature keyed --
-    the board is regenerated each CI run, so geometry-keyed identities are
-    ephemeral).  #9124's tangent-seat rejection drained the PCIE_RX+
-    face-aligned corner wedge and #9208's C++ own-net-trace slit refusal
-    drained the USB2_D- trace-population finding (both entries deleted; see
-    the allowance comment in check_diffpair_coverage.py)."""
+    """Issue #7548 emptied the skew entry: board 06's allowance holds the
+    #8957 fab-view ``physical_copper_gap`` nets plus, since issue #8858, the
+    seed-42 regen's ``mask_to_copper`` net signatures (both net-signature
+    keyed -- the board is regenerated each CI run, so geometry-keyed
+    identities are ephemeral: the gap rule's items are via/track refs and
+    the mask rule's items are opening/conductor UUIDs).  #9124's
+    tangent-seat rejection drained the PCIE_RX+ face-aligned corner wedge
+    and #9208's C++ own-net-trace slit refusal drained the USB2_D-
+    trace-population finding (both entries deleted; see the allowance
+    comment in check_diffpair_coverage.py)."""
     gate = load("check_diffpair_coverage")
-    assert fab_gap_allowance(BOARD06_GAP_NETS) == gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
+    expected = fab_gap_allowance(BOARD06_GAP_NETS)
+    expected.update(mask_allowance(BOARD06_MASK_NETS))
+    assert expected == gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
     assert not hasattr(gate, "DIFFPAIR_SKEW_TRACKER")
     assert gate.DIFFPAIR_ALLOWANCES.get(BOARD06_KEY) == gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
 
@@ -412,6 +453,56 @@ def test_physical_gap_identity_is_the_net_signature():
     # population; the identity (and so the allowance slot) is unchanged.
     assert identity.violation_identity(one) == identity.violation_identity(other)
     assert identity.violation_identity(gap_violation(("A", "B"))) == "A/B"
+
+
+def mask_violation(
+    net: str, uuids=("4ea1b8f0-b43c-4e0a-ba9f-c10e52daf681", "729d5602-2572-4c4a-a80c-e4a36f48410c")
+):
+    """One ``kct check`` mask_to_copper error record (#8858)."""
+    return {
+        "rule_id": "mask_to_copper",
+        "severity": "error",
+        "nets": [net],
+        "items": list(uuids),
+    }
+
+
+def test_mask_identity_is_the_net_signature():
+    """Issue #8858: mask_to_copper joins NET_IDENTITY_RULES.  Its items are
+    the opening and conductor UUIDs the native geometry pass re-mints on
+    every synthetic-board regeneration; the owner + conductor net names in
+    ``nets`` are what reproduces, so the identity (and the allowance slot)
+    must key on them."""
+    identity = load("identity_allowance")
+    assert "mask_to_copper" in identity.NET_IDENTITY_RULES
+    one = mask_violation("USB2_D-")
+    regen = mask_violation("USB2_D-", uuids=("00000000-1111-2222-3333-444444444444",))
+    assert identity.violation_identity(one) == "USB2_D-"
+    assert identity.violation_identity(one) == identity.violation_identity(regen)
+    assert identity.violation_identity(mask_violation("USB2_D-", uuids=())) == "USB2_D-"
+
+
+def test_board06_measured_mask_population_passes_and_drains():
+    """Issue #8858: the measured seed-42 population (one record per listed
+    net; per-net counts are irrelevant to an identity allowance) passes the
+    committed gate; a NEW net carrying mask errors fails; a net the router
+    stops exposing goes stale and forces its entry out."""
+    gate = load("check_diffpair_coverage")
+    found = [mask_violation(net) for net in BOARD06_MASK_NETS]
+    # The #8957 slit population fires alongside the mask findings.
+    found += [gap_violation((net,)) for net in BOARD06_GAP_NETS]
+    ids = identities_of(found)
+    assert gate.unexpected_baseline_errors(BOARD06_KEY, rule_counts(found), ids) == {}
+    assert gate.unallowed_blocking(BOARD06_KEY, found) == []
+    assert gate.stale_allowances(BOARD06_KEY, ids) == []
+    regressed = found + [mask_violation("ADDR_BUS")]
+    assert gate.unallowed_blocking(BOARD06_KEY, regressed) == [("mask_to_copper", "ADDR_BUS")]
+    last_mask_net = BOARD06_MASK_NETS[-1]
+    drained = [
+        v for v in found if not (v["rule_id"] == "mask_to_copper" and v["nets"] == [last_mask_net])
+    ]
+    stale = gate.stale_allowances(BOARD06_KEY, identities_of(drained))
+    assert stale == [("mask_to_copper", last_mask_net, 8858)]
 
 
 def test_regenerated_population_passes_and_a_new_net_fails():

@@ -317,3 +317,42 @@ KCT_KICAD_DOCKER=1 uv run kct check \
 # pinned plot for the oracle: kicad-cli pcb export gerbers \
 #   --layers F.Cu,B.Cu,F.Mask,B.Mask --no-protel-ext -o out/ <pcb>
 ```
+
+## Board 06's residual baselined by net signature; its diffpair-gate skip removed (2026-11-18, main `304c70e2c`)
+
+The operator ruling sanctions per-board baselining alongside repair, so the
+diff-pair gate's `--skip mask_to_copper` (#8842) is replaced by identity
+entries rather than waiting for the #9326/#9332 repair path. Measured on the
+pinned toolchain (`KCT_KICAD_DOCKER=1`; `kicad-cli` **10.0.6** in
+`kicad/kicad@sha256:18693567` — the digest CI's `KICAD_IMAGE` pins), fresh
+seed-42 regeneration of board 06:
+
+- **200 `mask_to_copper` errors** (122 same-net pass-throughs, 78 same-net
+  own-pad entries; relation split 182 violation / 18 uncertain), alongside
+  the 13 identity-allowed `physical_copper_gap` findings (MIPI_CLK+ 11,
+  GND 2). Class split matches the table above.
+- **Net-signature stability**: two independent regenerations reproduced all
+  **22** signatures and their per-net counts exactly (USB2_D- 18,
+  USB2_D+ 17, MIPI_RST 16, MIPI_CLK- 15, MIPI_CLK+ 14, PCIE_TX+ 14,
+  PCIE_RX+ 13, PCIE_TX- 13, PCIE_RX- 12, USB3_TX1- 11, USB3_RX2+ 10,
+  USB_CC1 9, USB_CC2 9, USB3_RX2- 8, GND 5, MIPI_D0- 4, +1V2 3, +3V3 3,
+  MIPI_D0+ 2, USB3_RX1- 2, USB3_RX1+ 1, USB3_TX2+ 1). The #8957 model
+  applies: the rule's `items` are opening/conductor UUIDs re-minted by
+  every regeneration, so `mask_to_copper` joins `NET_IDENTITY_RULES` and
+  the rule now names `nets` (owner pad + exposed conductor) on each
+  finding — additive metadata, severities unchanged.
+- **Gate**: `check_diffpair_coverage.py` drops the skip; the 22 net
+  signatures are listed in `DIFFPAIR_FIXTURE_ALLOWED_FINDINGS`, each
+  citing #8858. Full gate rerun end-to-end (route + check) exits 0: 213
+  errors, 213 identity-allowed, 0 unallowed, 0 stale. A net that starts
+  carrying mask errors fails the gate; a net the router stops exposing
+  goes stale and forces its entry out (the same ratchet the #8957 slits
+  are on; entries drain via the #9326/#9332 repair path).
+- **Wall, `kct check` on the fresh board 06 PCB** (loaded shared worker,
+  one run each): **49.6 s / 47.8 s** with the pass, **16.8 s** with
+  `--skip mask_to_copper`; the gate's own re-route step 250-276 s. The
+  board 05 numbers below are unchanged.
+
+The other four skips stay: board 07's matchgroup gate, `check_routed_drc.py`
+(the release surface) and `board_05_unattended.py` await their own
+per-board increments.

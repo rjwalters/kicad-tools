@@ -918,6 +918,15 @@ def assessment_results(assessment: MaskCopperAssessment) -> DRCResults:
                 actual_value=measurement.clearance_mm,
                 required_value=assessment.policy.clearance_mm if assessment.policy else None,
                 items=(*measurement.opening_uuids, measurement.conductor_uuid),
+                # Issue #8858: name the nets so the synthetic-fixture CI gates
+                # can baseline findings by the net signature (#8957 model).
+                # ``items`` are opening/conductor UUIDs, which every
+                # board regeneration re-mints, so they cannot key an
+                # identity allowance; owner + conductor net names are
+                # stable across regenerations of the same recipe.
+                nets=tuple(
+                    sorted({n for n in (measurement.owner_net, measurement.conductor_net) if n})
+                ),
             )
         )
     if assessment.measurements:
