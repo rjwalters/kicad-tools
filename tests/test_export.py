@@ -119,9 +119,10 @@ class TestJLCPCBBOMFormatter:
         reader = csv.reader(io.StringIO(output))
         rows = list(reader)
 
-        # Header + 4 rows (R1+R2 still share key, C1, U1)
-        # Note: Items with identical (value, footprint, lcsc) still get one row
-        assert len(rows) == 4
+        # Header + 4 rows: one per item, identical fields no longer collapse
+        # (issue #9382 -- colliding designators were silently dropped).
+        assert len(rows) == 5
+        assert {row[1] for row in rows[1:]} == {"R1", "R2", "C1", "U1"}
 
     def test_filter_dnp(self, items):
         items.append(MockBOMItem("R3", "1k", "0402", dnp=True))
