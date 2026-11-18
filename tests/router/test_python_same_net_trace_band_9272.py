@@ -280,9 +280,7 @@ def test_python_gates_agree_with_the_cpp_guard(dy):
     rules.allow_smd_vias = True
     rules.same_net_trace_gap_band_edge_mm = EDGE
     pf = router_cpp.Pathfinder(grid, rules, False)
-    cpp_ok = not pf.is_via_blocked(
-        round(10.0 / cpp_res), round((10.0 + dy) / cpp_res), NET, True
-    )
+    cpp_ok = not pf.is_via_blocked(round(10.0 / cpp_res), round((10.0 + dy) / cpp_res), NET, True)
 
     esc_ok = _router(EDGE)._can_place_via(10.0, 10.0 + dy, net=NET, foreign_tracks=[_segment()])
     lpf, committed = _lattice(EDGE)
