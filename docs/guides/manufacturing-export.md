@@ -570,12 +570,17 @@ An invalid sidecar (unknown key, non-numeric degrees, a `by_lcsc` key that is no
   makes the evidence stale and `--verify` fails;
 - `cpl_rotations.applied` lists each shifted placement (reference, which key
   matched, degrees), and `cpl_rotations.sidecar_sha256` pins the sidecar;
-- `cpl_rotations.unreviewed` lists connectors, ICs, diodes, transistors and
-  LEDs (reference prefix `J`/`U`/`D`/`Q`/`LED`) that **no** correction matched.
+- `cpl_rotations.unreviewed` lists connectors, ICs, diodes, transistors, LEDs,
+  switches, crystals/oscillators and jumpers (reference prefix
+  `J`/`U`/`D`/`Q`/`LED`/`SW`/`Y`/`JP`/`X`) that **no** correction matched.
   This is a review list, not a blocker: check each one in the fab's placement
-  preview before ordering;
+  preview before ordering. `kct export` prints the same list when it writes
+  the CPL, and an empty-but-present sidecar is still recorded (path + hash);
 - `--verify` re-derives every sidecar-corrected rotation from the board and the
-  current sidecar and fails if the retained CPL disagrees.
+  current sidecar and fails if the retained CPL disagrees. If the re-derivation
+  itself cannot run (an unreadable or malformed bundle file, an unexpected
+  error), `--verify` reports the skip instead of passing silently, and
+  `readiness.json` records the reason under `cpl_rotations.rederivation_skipped`.
 
 The hand-edited-CSV route is not an option: it breaks the manifest checksums.
 

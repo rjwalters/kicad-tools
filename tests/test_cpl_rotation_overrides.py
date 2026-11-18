@@ -242,7 +242,10 @@ def test_review_rejects_invalid_sidecar(board):
         ("LED2", True),
         ("R1", False),
         ("C5", False),
-        ("JP1", False),
+        ("JP1", True),
+        ("SW1", True),
+        ("Y1", True),
+        ("X1", True),
         ("", False),
     ],
 )
@@ -314,7 +317,9 @@ def test_invalid_sidecar_fails_the_cpl_instead_of_shipping_uncorrected(board, tm
 def _readiness_options(board: Path, out: Path):
     from types import SimpleNamespace
 
-    return SimpleNamespace(assembly=True, pcb=board, output_dir=out, manufacturer="jlcpcb")
+    return SimpleNamespace(
+        assembly=True, pcb=board, output_dir=out, manufacturer="jlcpcb", include_tht=False
+    )
 
 
 def _ship_bundle(board: Path, out: Path) -> None:
@@ -391,6 +396,173 @@ def test_verify_without_sidecar_does_not_inspect_the_cpl(board, tmp_path):
     out = tmp_path / "out"
     _ship_bundle(board, out)
     assert _verify_cpl_rotations(_readiness_options(board, out)) == []
+
+
+def test_review_records_empty_but_present_sidecar(board):
+    # Issue #9362: an empty-but-present sidecar still has a path and a hash;
+    # the old truthiness guard (via ``__bool__``) nulled both.
+    (board.parent / SIDECAR_NAME).write_text("# comment only\n")
+    review = review_cpl_rotations(board, "jlcpcb")
+    assert review.sidecar == str(board.parent / SIDECAR_NAME)
+    assert review.sidecar_sha256 and len(review.sidecar_sha256) == 64
+    block = review.to_report("board/" + SIDECAR_NAME)
+    assert block["sidecar"] == "board/" + SIDECAR_NAME
+    assert block["sidecar_sha256"] == review.sidecar_sha256
+
+
+# --------------------------------------------------------------------------
+# The re-derivation must fail visibly, never silently skip (#9346)
+# --------------------------------------------------------------------------
+
+
+def test_unexpected_rederivation_error_is_reported_not_swallowed(board, tmp_path, monkeypatch):
+    import kicad_tools.cli.readiness_cmd as readiness_cmd
+    import kicad_tools.export.assembly as assembly_mod
+
+    out = tmp_path / "out"
+    _ship_bundle(board, out)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("rederive blew up")
+
+    # Patch at the source module: _cpl_rotation_state imports the symbol at
+    # call time, so the local import must see the replacement.
+    monkeypatch.setattr(assembly_mod, "review_cpl_rotations", boom)
+    options = _readiness_options(board, out)
+    review, problem = readiness_cmd._cpl_rotation_state(options)
+    assert review is None
+    assert problem and "RuntimeError" in problem and "rederive blew up" in problem
+    assert readiness_cmd._verify_cpl_rotations(options) == [problem]
+
+
+def test_unreadable_board_reports_a_visible_skip_not_silence(board, tmp_path):
+    from kicad_tools.cli.readiness_cmd import _cpl_rotation_state, _verify_cpl_rotations
+
+    out = tmp_path / "out"
+    _ship_bundle(board, out)
+    # A CPL exists, so the export parsed this board once; if it no longer
+    # parses the re-derivation must say so instead of passing by omission.
+    board.write_text("(kicad_pcb (version 20240108)")
+    review, problem = _cpl_rotation_state(_readiness_options(board, out))
+    assert review is None
+    assert problem and "skipped" in problem and "ParseError" in problem
+    assert _verify_cpl_rotations(_readiness_options(board, out)) == [problem]
+
+
+def test_report_block_records_the_skip(board, tmp_path):
+    from kicad_tools.cli.readiness_cmd import _cpl_rotation_report_entry
+
+    out = tmp_path / "out"
+    _ship_bundle(board, out)
+    board.write_text("(kicad_pcb (version 20240108)")
+    entry = _cpl_rotation_report_entry(_readiness_options(board, out))
+    assert entry is not None and "rederivation_skipped" in entry
+
+    board.write_text(_PCB)
+    entry = _cpl_rotation_report_entry(_readiness_options(board, out))
+    assert entry is not None
+    assert "rederivation_skipped" not in entry and "applied" in entry
+
+
+def test_verify_still_reports_an_invalid_sidecar_message(board, tmp_path):
+    from kicad_tools.cli.readiness_cmd import _verify_cpl_rotations
+
+    out = tmp_path / "out"
+    _ship_bundle(board, out)
+    (board.parent / SIDECAR_NAME).write_text("by_lcsc: nope\n")
+    problems = _verify_cpl_rotations(_readiness_options(board, out))
+    assert problems and "invalid" in problems[0]
+
+
+def test_readiness_rederivation_mirrors_include_tht(board, tmp_path, monkeypatch):
+    import kicad_tools.export.assembly as assembly_mod
+    from kicad_tools.cli.readiness_cmd import _cpl_rotation_state
+    from kicad_tools.export.pnp import PnPExportConfig
+
+    out = tmp_path / "out"
+    _ship_bundle(board, out)
+    captured: dict[str, object] = {}
+    real = assembly_mod.review_cpl_rotations
+
+    def spy(*args, **kwargs):
+        captured["pnp_config"] = kwargs.get("pnp_config")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(assembly_mod, "review_cpl_rotations", spy)
+    _cpl_rotation_state(_readiness_options(board, out))
+    assert captured["pnp_config"] is None  # no --include-tht: the fab's resolution
+
+    options = _readiness_options(board, out)
+    options.include_tht = True
+    _cpl_rotation_state(options)
+    assert captured["pnp_config"] == PnPExportConfig(exclude_tht=False)
+
+
+def test_review_cpl_rotations_honours_exclude_tht(board):
+    from kicad_tools.export.pnp import PnPExportConfig
+
+    tht_refs = {"J1", "J2", "J4", "J5"}
+    with_tht = review_cpl_rotations(board, "jlcpcb")
+    assert tht_refs <= set(with_tht.rotations)
+    without_tht = review_cpl_rotations(
+        board, "jlcpcb", pnp_config=PnPExportConfig(exclude_tht=True)
+    )
+    assert not tht_refs & set(without_tht.rotations)
+    assert "Q1" in without_tht.rotations
+
+
+def test_resolve_pnp_config_mirrors_the_export_resolution():
+    from kicad_tools.export.assembly import resolve_pnp_config
+    from kicad_tools.export.pnp import PnPExportConfig
+
+    explicit = PnPExportConfig(exclude_tht=False)
+    assert resolve_pnp_config("jlcpcb", explicit) is explicit
+    assert resolve_pnp_config("jlcpcb", None) is None  # aux-origin preset: left to the formatter
+    assert resolve_pnp_config("oshpark", None) == PnPExportConfig(use_aux_origin=False)
+
+
+def test_export_prints_the_unreviewed_rotation_list(board, tmp_path, capsys):
+    # Issue #9362: `kct export` shows the same review list as the result's
+    # __str__ (rendered from rotation_review_lines(), not a re-implementation).
+    from kicad_tools.cli import export_cmd
+
+    rc = export_cmd.main(
+        [
+            str(board),
+            "--output",
+            str(tmp_path / "mfg"),
+            "--mfr",
+            "jlcpcb",
+            "--skip-preflight",
+            "--no-bom",
+            "--no-gerbers",
+            "--no-report",
+            "--no-project-zip",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Unreviewed rotation (no correction matched): J1, J2, J3, J4, J5" in out
+    # A present sidecar also surfaces its provenance line.
+    (board.parent / SIDECAR_NAME).write_text(_SIDECAR)
+    rc = export_cmd.main(
+        [
+            str(board),
+            "--output",
+            str(tmp_path / "mfg2"),
+            "--mfr",
+            "jlcpcb",
+            "--skip-preflight",
+            "--no-bom",
+            "--no-gerbers",
+            "--no-report",
+            "--no-project-zip",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Rotation overrides: cpl_rotations.yaml (4 row(s) corrected)" in out
+    assert "Unreviewed rotation (no correction matched): J4" in out
 
 
 def _bound_report(root: Path):

@@ -5,6 +5,11 @@ individually identified copper objects. It supplements the existing solder-mask
 expansion, pad-size and annular-ring checks. See [mask geometry](mask-geometry.md)
 for the underlying geometry inspection APIs.
 
+To repair a track that enters its own pad off-centre (the `same-net own-pad
+entry` relation) instead of only flagging it, run the `fix-drc` repair pass:
+`kct fix-drc board.kicad_pcb --only mask-copper` — see the
+[CLI reference](../reference/cli.md#fix-drc).
+
 Supply a process-specific clearance requirement with its source, process and
 revision. A manufacturer profile, mask expansion or minimum mask-web width does
 not supply this requirement. The example below uses a **fictional test policy**;

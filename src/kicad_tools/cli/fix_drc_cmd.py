@@ -1405,6 +1405,28 @@ def _attempt_granular_rollback(
         return (True, 0, [])
 
 
+def _waived_report_indices(report_path: Path, violation_count: int) -> set[int]:
+    """Indices of ``kct check`` JSON findings marked waived (Issue #9326).
+
+    The report file is the source of truth: ``_parse_kct_check_json``
+    deliberately leaves ``DRCViolation.waived`` false so a re-parsed finding
+    stays severity-keyed for the ``kct audit`` manufacturing gate (Issue
+    #4417).  Positional matching is safe because that parser emits exactly
+    one violation per JSON entry; when the counts disagree (another schema,
+    or unparseable content) nothing is matched and the report is used as-is.
+    """
+    try:
+        data = json.loads(report_path.read_text())
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    items = data.get("violations")
+    if not isinstance(items, list) or len(items) != violation_count:
+        return set()
+    return {i for i, item in enumerate(items) if isinstance(item, dict) and item.get("waived")}
+
+
 def _get_drc_report(
     drc_report_path: str | None,
     pcb_path: Path,
@@ -1430,10 +1452,27 @@ def _get_drc_report(
             print(f"Error: DRC report not found: {report_path}", file=sys.stderr)
             return None
         try:
-            return DRCReport.load(report_path)
+            report = DRCReport.load(report_path)
         except Exception as e:
             print(f"Error loading DRC report: {e}", file=sys.stderr)
             return None
+        # Issue #9326: a ``kct check`` JSON report marks waived findings with
+        # a per-finding ``waived`` flag; those findings must not become
+        # repair targets (the no-report path already drops waived results --
+        # see ``_run_python_drc``).  The flag is read from the report file
+        # itself, not from ``DRCViolation.waived``: the shared parser keeps
+        # ``waived`` false on re-parse so severity-keyed consumers (the
+        # ``kct audit`` manufacturing gate, Issue #4417) still block on it.
+        # Reports without the flag are unchanged.
+        waived_idx = _waived_report_indices(report_path, len(report.violations))
+        if waived_idx:
+            report.violations = [v for i, v in enumerate(report.violations) if i not in waived_idx]
+            print(
+                f"Skipping {len(waived_idx)} waived finding(s) from the DRC report "
+                f"(waivers are not repair targets).",
+                file=sys.stderr,
+            )
+        return report
 
     # Try to run DRC using kicad-cli
     try:
