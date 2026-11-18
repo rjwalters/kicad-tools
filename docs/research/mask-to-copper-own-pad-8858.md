@@ -361,8 +361,11 @@ mask exposure of the ring beside the opening, so family C stays an error.
   family table is on #8858 (2026-11-17).
 - Pour clearance is not fab-judged (#8938), but that result is about pour gaps.
   It is not about pour beside a mask opening, which is why B fails closed.
-- Fab parity table row `solder_mask_opening_exposing_trace`, v11; v12 adds the
-  `own_pour_thermal` class and the different-net parity check (#9284).
+- Fab parity table row `solder_mask_opening_exposing_trace`; #9284 added the
+  `own_pour_thermal` class and the different-net parity check. The table has no
+  integer version: `fab_dfm_parity.TABLE_VERSION` is a content hash of the rows
+  (`3559f167` as of 2026-11-18 on main `f2347f38d`; re-read
+  `fab_dfm_parity.TABLE_VERSION` for the current value).
 - JLCDFM result for board 01's Gerbers, own pour and via ring: #8858, 2026-11-17.
 
 ## Residual after the router repairs, and the disjoint class verified against the plot (2026-11-18, main `f77b80fb5`)
