@@ -274,6 +274,47 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("physical_copper_gap", "GND"): 8962,
     ("physical_copper_gap", "MIPI_CLK+"): 8962,
+    # Issue #8858 (measured 2026-11-18 at main 304c70e2c, pinned image
+    # kicad/kicad@sha256:18693567 -- the digest CI's KICAD_IMAGE pins): the
+    # seed-42 regeneration of this board carries 200 ``mask_to_copper``
+    # errors (122 same-net pass-throughs, 78 same-net own-pad entries; the
+    # #9326/#9332 repair path's population) across the 22 net signatures
+    # listed below.  Two independent regenerations reproduced every
+    # signature and per-net count exactly, so the entries are keyed by NET
+    # SIGNATURE like the #8957 slits (mask_to_copper's items are
+    # opening/conductor UUIDs, re-minted by every regeneration; the rule
+    # now names ``nets`` on each finding).  A net that starts carrying
+    # mask errors still fails the gate; a net the router stops exposing
+    # goes stale and forces its entry out.  Each entry's value is the
+    # tracking issue number (#8858), the same convention as the
+    # physical_copper_gap entries' 8962 -- the gate judges identity,
+    # never count; the measured per-net populations are recorded in the
+    # research note.  Verify with:
+    #   KCT_KICAD_DOCKER=1 uv run kct check \
+    #     boards/06-diffpair-test/regression-output/diffpair_test_routed.kicad_pcb \
+    #     --mfr jlcpcb --errors-only --format json
+    ("mask_to_copper", "+1V2"): 8858,
+    ("mask_to_copper", "+3V3"): 8858,
+    ("mask_to_copper", "GND"): 8858,
+    ("mask_to_copper", "MIPI_CLK+"): 8858,
+    ("mask_to_copper", "MIPI_CLK-"): 8858,
+    ("mask_to_copper", "MIPI_D0+"): 8858,
+    ("mask_to_copper", "MIPI_D0-"): 8858,
+    ("mask_to_copper", "MIPI_RST"): 8858,
+    ("mask_to_copper", "PCIE_RX+"): 8858,
+    ("mask_to_copper", "PCIE_RX-"): 8858,
+    ("mask_to_copper", "PCIE_TX+"): 8858,
+    ("mask_to_copper", "PCIE_TX-"): 8858,
+    ("mask_to_copper", "USB2_D+"): 8858,
+    ("mask_to_copper", "USB2_D-"): 8858,
+    ("mask_to_copper", "USB3_RX1+"): 8858,
+    ("mask_to_copper", "USB3_RX1-"): 8858,
+    ("mask_to_copper", "USB3_RX2+"): 8858,
+    ("mask_to_copper", "USB3_RX2-"): 8858,
+    ("mask_to_copper", "USB3_TX1-"): 8858,
+    ("mask_to_copper", "USB3_TX2+"): 8858,
+    ("mask_to_copper", "USB_CC1"): 8858,
+    ("mask_to_copper", "USB_CC2"): 8858,
 }
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key
@@ -776,10 +817,9 @@ def count_errors_via_kct_check(
         str(pcb_path),
         "--mfr",
         "jlcpcb",
-        # Issue #8842: mask_to_copper is default-on under --mfr but has no baseline
-        # in this gate; skipped until the #8839 threshold table lands.
-        "--skip",
-        "mask_to_copper",
+        # Issue #8858: mask_to_copper findings are judged by net-signature
+        # identity like every other blocking rule (see
+        # DIFFPAIR_FIXTURE_ALLOWED_FINDINGS) -- the #8842 skip is gone.
         "--errors-only",
         "--format",
         "json",
