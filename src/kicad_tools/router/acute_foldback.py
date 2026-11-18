@@ -88,6 +88,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 
 from ..explain.checks.acid_trap import (
@@ -797,6 +798,7 @@ def plan_foldback_repairs(
     tolerance: float = JUNCTION_TOL,
     min_segment_length: float = MIN_REPAIR_SEGMENT_LENGTH,
     clearance: float | None = None,
+    path_is_clear_ignoring: Callable[[AbstractSet[int]], PathIsClear] | None = None,
 ) -> FoldBackResult:
     """Plan fold-back repairs over *segments* without mutating anything.
 
@@ -832,6 +834,17 @@ def plan_foldback_repairs(
             different net of the same layer.  ``None`` skips that check (the
             pre-#8930 behaviour, kept so a caller without a clearance rule is
             unchanged).
+        path_is_clear_ignoring: Builds a *path_is_clear* that treats the
+            segments whose ``id()`` is in the given set as absent (see
+            ``VectorCollisionChecker.ignoring``).  *path_is_clear* is a
+            pre-repair snapshot, so once a repair has removed ``short`` and
+            ``long`` a later group would still be vetoed against them
+            (Issue #9355).  With this, every group is checked against the
+            snapshot minus the copper earlier groups removed, plus -- via
+            *clearance* -- the copper they added.  Honoured only together
+            with *clearance*: the added-copper veto is what guarantees the
+            applied result is a subset of what was checked.  ``None`` keeps
+            the snapshot as is.
 
     Returns:
         A :class:`FoldBackResult` whose ``repairs`` must be applied in order.
@@ -840,6 +853,7 @@ def plan_foldback_repairs(
     if path_is_clear is None:
         return result
     accepted_added: list[Segment] = []
+    removed_ids: set[int] = set()
     for (net, layer), group in sorted(
         _group_by_net_layer(segments).items(),
         key=lambda kv: (kv[0][0], kv[0][1].kicad_name),
@@ -849,13 +863,21 @@ def plan_foldback_repairs(
             layer,
             group,
             discs,
-            _clear_of_accepted(path_is_clear, accepted_added, clearance),
+            _clear_of_accepted(
+                path_is_clear_ignoring(removed_ids)
+                if path_is_clear_ignoring is not None and clearance is not None
+                else path_is_clear,
+                accepted_added,
+                clearance,
+            ),
             is_mutable,
             tolerance,
             min_segment_length,
         )
         for repair in repairs:
             accepted_added.extend(repair.added)
+        for repair in repairs:
+            removed_ids.update(id(s) for s in repair.removed)
         result.repairs.extend(repairs)
         result.repaired += repaired
         result.skipped += skipped
@@ -871,6 +893,7 @@ def repair_foldbacks(
     tolerance: float = JUNCTION_TOL,
     min_segment_length: float = MIN_REPAIR_SEGMENT_LENGTH,
     clearance: float | None = None,
+    path_is_clear_ignoring: Callable[[AbstractSet[int]], PathIsClear] | None = None,
 ) -> tuple[list[Segment], FoldBackResult]:
     """Apply :func:`plan_foldback_repairs` to a flat segment list.
 
@@ -891,6 +914,7 @@ def repair_foldbacks(
         tolerance=tolerance,
         min_segment_length=min_segment_length,
         clearance=clearance,
+        path_is_clear_ignoring=path_is_clear_ignoring,
     )
     for repair in result.repairs:
         dropped = {id(s) for s in repair.removed}
