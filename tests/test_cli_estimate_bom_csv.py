@@ -197,3 +197,80 @@ def test_csv_bom_grouped_jlcpcb_rows_count_all_designators(minimal_pcb, tmp_path
     specs = doc["assembly"]["specs"]
     assert specs["smt_parts"] == 5
     assert specs["unique_parts"] == 2
+
+
+def test_lcsc_header_normaliser_matches_sidecar_reader():
+    """``_norm_csv_header`` mirrors ``pcb.lcsc_bom._norm`` exactly, but the
+    two readers keep separate accept-lists (Issue #9402): the CSV loader
+    matches only its own spellings while the KiCad sidecar reader matches
+    the wider property-name set."""
+    from kicad_tools.pcb.lcsc_bom import _LCSC_PROPERTY_NAMES, _norm
+    from kicad_tools.schema.bom import _LCSC_CSV_HEADERS, _norm_csv_header
+
+    for header in (
+        "",
+        "LCSC",
+        "lcsc",
+        "LCSC Part",
+        "LCSC Part #",
+        "lcsc_part_#",
+        "LCSC Part Number",
+        "JLC Part",
+        "JLCPCB",
+        "JLCPCB Part #",
+        "née colonne",
+    ):
+        assert _norm_csv_header(header) == _norm(header), repr(header)
+
+    assert _LCSC_CSV_HEADERS == ("lcsc", "lcscpart", "jlcpart")
+    assert sorted(_LCSC_PROPERTY_NAMES) == [
+        "jlcpcb",
+        "jlcpcbpart",
+        "lcsc",
+        "lcscpart",
+        "lcscpartnumber",
+    ]
+
+
+def test_load_bom_csv_rejects_sidecar_only_lcsc_spellings(tmp_path):
+    """Spellings only ``pcb.lcsc_bom`` accepts (``LCSC Part Number``,
+    ``JLCPCB Part #``, ``JLCPCB``) intentionally do NOT populate
+    ``BOMItem.lcsc`` in the CSV loader (Issue #9402)."""
+    from kicad_tools.schema.bom import load_bom_csv
+
+    for header in ("LCSC Part Number", "JLCPCB Part #", "JLCPCB"):
+        f = tmp_path / "b.csv"
+        f.write_text(f"Designator,Comment,Footprint,{header}\nR1,1k,R_0402,C25804\n")
+        bom = load_bom_csv(f)
+        assert len(bom.items) == 1, header
+        assert bom.items[0].lcsc == "", header
+
+
+def test_load_bom_csv_colliding_lcsc_columns_prefer_first_non_empty(tmp_path):
+    """Two headers that normalise to the same key: a blank later column must
+    not discard a populated earlier one (Issue #9402; pre-#9379 behaviour)."""
+    from kicad_tools.schema.bom import load_bom_csv
+
+    blank_last = tmp_path / "blank_last.csv"
+    blank_last.write_text(
+        "Designator,Comment,Footprint,LCSC Part,LCSC Part #\nR1,1k,R_0402,CAAA,\n"
+    )
+    bom = load_bom_csv(blank_last)
+    assert [i.lcsc for i in bom.items] == ["CAAA"]
+
+    blank_first = tmp_path / "blank_first.csv"
+    blank_first.write_text(
+        "Designator,Comment,Footprint,LCSC Part,LCSC Part #\nR1,1k,R_0402,,CAAA\n"
+    )
+    bom = load_bom_csv(blank_first)
+    assert [i.lcsc for i in bom.items] == ["CAAA"]
+
+    both = tmp_path / "both.csv"
+    both.write_text("Designator,Comment,Footprint,LCSC Part,LCSC Part #\nR1,1k,R_0402,C1,C2\n")
+    bom = load_bom_csv(both)
+    assert [i.lcsc for i in bom.items] == ["C1"]
+
+    distinct = tmp_path / "distinct.csv"
+    distinct.write_text("Designator,Comment,Footprint,LCSC,JLC Part\nR1,1k,R_0402,,CBBB\n")
+    bom = load_bom_csv(distinct)
+    assert [i.lcsc for i in bom.items] == ["CBBB"]
