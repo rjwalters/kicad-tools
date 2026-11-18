@@ -540,7 +540,11 @@ class Pin1MarkerRule(DRCRule):
             if _silk_side(text.layer) != side:
                 continue
             geom = _text_bbox_geometry(
-                text.text, text.font_size, text.font_thickness, transform(text.position)
+                text.text,
+                text.font_size,
+                text.font_thickness,
+                transform(text.position),
+                justify=text.justify,
             )
             if geom is not None:
                 yield geom

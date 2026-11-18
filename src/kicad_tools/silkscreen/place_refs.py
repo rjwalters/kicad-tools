@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import contextlib
 import math
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -246,6 +246,7 @@ def _oriented_text_geometry(
     thickness: float,
     center: tuple[float, float],
     angle: float,
+    justify: Sequence[str] = (),
 ) -> Any:
     """Rotate the complete text envelope, retaining glyph dimensions.
 
@@ -253,7 +254,7 @@ def _oriented_text_geometry(
     the footprint orientation before its position transform). Do not add the
     footprint angle again. KiCad positive angles turn toward negative board y.
     """
-    return _text_bbox_geometry(text, font_size, thickness, center, angle)
+    return _text_bbox_geometry(text, font_size, thickness, center, angle, justify)
 
 
 def _set_text_at(ref_node: SExp, x: float, y: float, angle: float) -> None:
@@ -297,6 +298,7 @@ def _visible_reference(footprint: Footprint):
         ref_text.font_thickness,
         center,
         _read_text_angle(ref_node),
+        ref_text.justify,
     )
     if geom is None:
         return None
@@ -351,7 +353,12 @@ def _iter_owned_static_silk(pcb: PCB):
                 continue
             center = transform(fp_text.position)
             geom = _oriented_text_geometry(
-                fp_text.text, fp_text.font_size, fp_text.font_thickness, center, fp_text.rotation
+                fp_text.text,
+                fp_text.font_size,
+                fp_text.font_thickness,
+                center,
+                fp_text.rotation,
+                fp_text.justify,
             )
             if geom is None:
                 continue
@@ -383,7 +390,12 @@ def _iter_owned_static_silk(pcb: PCB):
         if side is None or text.hidden:
             continue
         geom = _oriented_text_geometry(
-            text.text, text.font_size, text.font_thickness, to_board(text.position), text.rotation
+            text.text,
+            text.font_size,
+            text.font_thickness,
+            to_board(text.position),
+            text.rotation,
+            text.justify,
         )
         if geom is None:
             continue
@@ -721,7 +733,7 @@ def _report_fixed_text_over_openings(
 
         def geom_at(point: tuple[float, float], text: Any = text) -> Any:
             return _oriented_text_geometry(
-                text.text, text.font_size, text.font_thickness, point, text.rotation
+                text.text, text.font_size, text.font_thickness, point, text.rotation, text.justify
             )
 
         geom = geom_at(center)
@@ -915,10 +927,16 @@ def _render_svg(
         font_size = ref_text.font_size if ref_text is not None else (1.0, 1.0)
         font_thickness = ref_text.font_thickness if ref_text is not None else 0.15
         text = ref_text.text if ref_text is not None else placement.footprint_ref
+        justify = ref_text.justify if ref_text is not None else ()
 
         if placement.status == "moved":
             old_geom = _oriented_text_geometry(
-                text, font_size, font_thickness, placement.old_position, placement.old_rotation
+                text,
+                font_size,
+                font_thickness,
+                placement.old_position,
+                placement.old_rotation,
+                justify,
             )
             if old_geom is not None:
                 points = " ".join(
@@ -942,7 +960,12 @@ def _render_svg(
             color = "#cc3333"
 
         geom = _oriented_text_geometry(
-            text, font_size, font_thickness, placement.new_position, placement.new_rotation
+            text,
+            font_size,
+            font_thickness,
+            placement.new_position,
+            placement.new_rotation,
+            justify,
         )
         if geom is not None:
             points = " ".join(f"{x * scale:.2f},{y * scale:.2f}" for x, y in geom.exterior.coords)
@@ -1203,6 +1226,7 @@ class SilkRefPlacer:
                         ref_text.font_thickness,
                         point,
                         rotation,
+                        ref_text.justify,
                     )
                     ok, why = clears(geom)
                     if not ok:

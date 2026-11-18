@@ -30,7 +30,7 @@ convention difference to explain away.  See #4612 for the measured parity table.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -629,11 +629,20 @@ def _text_bbox_geometry(
     font_thickness: float,
     center: tuple[float, float],
     angle: float = 0.0,
+    justify: Sequence[str] = (),
 ) -> _Geometry | None:
     """Build a shapely box approximating a stroked-text bounding box.
 
-    The box is centered on ``center`` (board coordinates).  Justification is
-    modeled only to first order (centered).  ``angle`` is the absolute
+    ``center`` is the text *anchor* in board coordinates -- the box centre for
+    the default (centred) justification.  ``justify`` is the text's
+    ``(justify ...)`` tokens (Issue #9433): ``left`` starts the box at the
+    anchor and extends it along the text direction, ``right`` ends it at the
+    anchor, ``top`` hangs it below the anchor and ``bottom`` stands it above.
+    The offset is applied in the text's own (unrotated) frame and the box is
+    then rotated about the anchor, so rotated justified text lands correctly.
+    ``mirror`` is not modeled: mirrored text keeps the centred horizontal
+    placement (only the vertical tokens still apply, as mirroring flips x
+    only), which is the pre-#9433 behaviour.  ``angle`` is the absolute
     board-frame text angle in KiCad degrees (positive turns toward negative
     board y); the default ``0`` yields the axis-aligned box.  Returns ``None``
     for empty text.
@@ -647,6 +656,17 @@ def _text_bbox_geometry(
     width = font_size[0] * n * _TEXT_CHAR_WIDTH_FACTOR + font_thickness
     height = font_size[1] + font_thickness
     cx, cy = center
+    mirrored = "mirror" in justify
+    if not mirrored:
+        if "left" in justify:
+            cx += width / 2.0
+        elif "right" in justify:
+            cx -= width / 2.0
+    # Board y grows downward: ``top`` anchors the top edge, box extends +y.
+    if "top" in justify:
+        cy += height / 2.0
+    elif "bottom" in justify:
+        cy -= height / 2.0
     geom = box(
         cx - width / 2.0,
         cy - height / 2.0,
@@ -1005,6 +1025,7 @@ def _iter_silk_elements(
                 fp_text.font_thickness,
                 center,
                 fp_text.rotation,
+                fp_text.justify,
             )
             if geom is None:
                 continue
@@ -1037,7 +1058,12 @@ def _iter_silk_elements(
             continue
         center = to_board(text.position)
         geom = _text_bbox_geometry(
-            text.text, text.font_size, text.font_thickness, center, text.rotation
+            text.text,
+            text.font_size,
+            text.font_thickness,
+            center,
+            text.rotation,
+            text.justify,
         )
         if geom is None:
             continue
@@ -1875,7 +1901,11 @@ def _iter_board_frame_texts(
                 continue
             center = transform(fp_text.position)
             geom = _text_bbox_geometry(
-                fp_text.text, fp_text.font_size, fp_text.font_thickness, center
+                fp_text.text,
+                fp_text.font_size,
+                fp_text.font_thickness,
+                center,
+                justify=fp_text.justify,
             )
             if geom is None:
                 continue
@@ -1886,7 +1916,12 @@ def _iter_board_frame_texts(
             continue
         center = (text.position[0] - ox, text.position[1] - oy)
         geom = _text_bbox_geometry(
-            text.text, text.font_size, text.font_thickness, center, text.rotation
+            text.text,
+            text.font_size,
+            text.font_thickness,
+            center,
+            text.rotation,
+            text.justify,
         )
         if geom is None:
             continue
@@ -2059,7 +2094,12 @@ def check_silk_ref_obscured(
         ref_node = _find_reference_node(footprint)
         angle = _read_text_angle(ref_node) if ref_node is not None else 0.0
         geom = _oriented_text_geometry(
-            ref_text.text, ref_text.font_size, ref_text.font_thickness, center, angle
+            ref_text.text,
+            ref_text.font_size,
+            ref_text.font_thickness,
+            center,
+            angle,
+            ref_text.justify,
         )
         if geom is None:
             continue
