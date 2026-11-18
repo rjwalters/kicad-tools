@@ -7,6 +7,7 @@ import pytest
 
 from kicad_tools.cli.fix_drc_cmd import PassResult, main
 from kicad_tools.drc.repair_clearance import RepairResult
+from kicad_tools.drc.repair_copper_gap import CopperGapResult
 from kicad_tools.drc.repair_drill_clearance import (
     DrillClearanceRepairer,
     DrillRepairResult,
@@ -3513,6 +3514,7 @@ class TestTransactionalFlag:
             return (
                 RepairResult(total_violations=1, repaired=0),
                 DrillRepairResult(),
+                CopperGapResult(),
             )
 
         monkeypatch.setattr(fix_drc_cmd, "_run_single_pass", corrupt_without_progress)
@@ -3805,7 +3807,11 @@ class TestFixDrcRecheck6431:
 
         def copy_and_claim(**kwargs):
             shutil.copyfile(kwargs["pcb_path"], kwargs["output_path"])
-            return RepairResult(total_violations=1, repaired=1), DrillRepairResult()
+            return (
+                RepairResult(total_violations=1, repaired=1),
+                DrillRepairResult(),
+                CopperGapResult(),
+            )
 
         monkeypatch.setattr(fix_drc_cmd, "_run_single_pass", copy_and_claim)
 
