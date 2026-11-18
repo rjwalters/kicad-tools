@@ -551,10 +551,14 @@ def count_errors_via_kct_check(
         str(pcb_path),
         "--mfr",
         "jlcpcb",
-        # Issue #8842: mask_to_copper is default-on under --mfr but has no baseline
-        # in this gate; skipped until the #8839 threshold table lands.
-        "--skip",
-        "mask_to_copper",
+        # Issue #8858 (board 07 increment): the #8842 ``--skip mask_to_copper``
+        # is gone.  The seed-42 regeneration carries a stable population of
+        # ``mask_to_copper`` errors, baselined by NET SIGNATURE in
+        # MATCHGROUP_FIXTURE_ALLOWED_FINDINGS below (each entry cites #8858),
+        # the same identity model the #8957 slit entries and board 06's
+        # #9358 increment use.  A net that starts carrying mask errors still
+        # fails the gate; a net whose mask findings the router stops leaving
+        # goes stale and forces its entry out.
         "--errors-only",
         "--format",
         "json",
@@ -717,8 +721,60 @@ def count_errors_via_kct_check(
 # The #8962 coordination note (the via-population child re-baselines again
 # when it lands) is retired with them: these wedges were exactly the
 # tangent seats #9124 rejects, so no via-population re-baseline is pending
-# for this population.  Board 07's allowance is now empty.
-MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {}
+# for this population.  At that point board 07's allowance was empty again.
+#
+# Issue #8858 (board 07 increment, measured 2026-11-18 at main 163f4a175,
+# pinned image kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a
+# 6033f5b9c80aa3b19dd3ec -- the digest CI's KICAD_IMAGE pins, kicad-cli
+# 10.0.6, python 3.12): the seed-42 regeneration of this board carries 54
+# ``mask_to_copper`` errors -- 52 violation + 2 uncertain, all same-net
+# (same-net pass-throughs and entries whose copper sits beside the opening
+# beyond the one clean crossing; the fab-danger shapes from #8914) -- across
+# the 19 net signatures listed below.  Three independent regenerations (two
+# in this image, one on a worker through KCT_KICAD_DOCKER) reproduced every
+# signature and per-net count exactly; the findings' coordinates shift with
+# the recipe's board origin between environments, but the per-net
+# populations are stable, so the entries are keyed by NET SIGNATURE like the
+# #8957 slits and board 06's #9358 increment (mask_to_copper's items are
+# opening/conductor UUIDs, re-minted by every regeneration; the rule names
+# ``nets`` on each finding).  This is the #9326/#9332 repair-path
+# population: the boards are regenerated from scratch every run and the
+# findings are real residual geometry, so they are baselined here by
+# identity rather than repaired in this increment.  A net that starts
+# carrying mask errors fails the gate; a net the router stops exposing goes
+# stale and forces its entry out.  Each entry's value is the tracking issue
+# number (#8858), the same convention as the physical_copper_gap entries'
+# 8962 -- the gate judges identity, never count; the measured per-net
+# populations (+1V8 18, GND 8, DQ0-DQ7 and DM0 2 each, A0/A7 2 each,
+# A2/A3/A5/MIPI_CLK_P/TMDS_D2_P/TMDS_D2_N 1 each) are recorded in the
+# research note.  Verify with:
+#   KCT_KICAD_DOCKER=1 uv run kct check \
+#     boards/07-matchgroup-test/regression-output/matchgroup_test_routed.kicad_pcb \
+#     --mfr jlcpcb --errors-only --format json
+#   (native-in-container rerun for CI parity: the Docker-fallback and
+#   native kicad-cli disagree on the pour-stitch via population but agree
+#   on every mask_to_copper finding.)
+MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {
+    ("mask_to_copper", "+1V8"): 8858,
+    ("mask_to_copper", "A0"): 8858,
+    ("mask_to_copper", "A2"): 8858,
+    ("mask_to_copper", "A3"): 8858,
+    ("mask_to_copper", "A5"): 8858,
+    ("mask_to_copper", "A7"): 8858,
+    ("mask_to_copper", "DM0"): 8858,
+    ("mask_to_copper", "DQ0"): 8858,
+    ("mask_to_copper", "DQ1"): 8858,
+    ("mask_to_copper", "DQ2"): 8858,
+    ("mask_to_copper", "DQ3"): 8858,
+    ("mask_to_copper", "DQ4"): 8858,
+    ("mask_to_copper", "DQ5"): 8858,
+    ("mask_to_copper", "DQ6"): 8858,
+    ("mask_to_copper", "DQ7"): 8858,
+    ("mask_to_copper", "GND"): 8858,
+    ("mask_to_copper", "MIPI_CLK_P"): 8858,
+    ("mask_to_copper", "TMDS_D2_N"): 8858,
+    ("mask_to_copper", "TMDS_D2_P"): 8858,
+}
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key
 #: absent here has no allowance at all: every blocking finding counts.

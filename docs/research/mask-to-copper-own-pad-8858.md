@@ -494,3 +494,52 @@ seed-42 regeneration of board 06:
 The other four skips stay: board 07's matchgroup gate, `check_routed_drc.py`
 (the release surface) and `board_05_unattended.py` await their own
 per-board increments.
+
+## Board 07's matchgroup gate baselined by net signature; its skip removed (2026-11-18, main `163f4a175`)
+
+The same authorisation chain as board 06's increment above (#7270 Q3,
+#8858's curated acceptance criteria, the Curator's 2026-11-18 re-curation
+"Remove them only per board, once that board's residual is repaired or
+baselined"; the operator ruling's "no allowance entries" condition still
+governs only the release surface — `check_routed_drc.py` keeps its skip).
+The board 07 skip was the largest of the three left (the issue title's
+"543 findings" predates the #9108 rule rework).
+
+**Measurement environment.** The gate is host-sensitive through its pour
+pipeline: on a worker whose kicad-cli is reached through
+`KCT_KICAD_DOCKER=1`, the seed-42 regen carries 17 extra via-population
+errors (11 `hole_to_hole_clearance`, 6 `physical_copper_gap` GND) that
+CI's in-container regen does not produce; measured both ways. The
+`mask_to_copper` population is not affected by that divergence: the
+identical 19 net signatures and per-net counts (54 errors) reproduce
+under both kicad-cli modes. The authoritative numbers below are from the
+CI-exact environment — the pinned image `kicad/kicad@sha256:18693567392b…`
+(the digest CI's `KICAD_IMAGE` pins), kicad-cli **10.0.6**, python 3.12,
+`PYTHONHASHSEED=42`, the gate's own re-route then the raw check:
+
+- **54 `mask_to_copper` errors** (52 violation / 2 uncertain), all
+  same-net: same-net pass-throughs and entries whose copper sits beside
+  the opening beyond the one clean crossing — the #8914 fab-danger
+  shapes that #9108 keeps at error. 19 net signatures: +1V8 18, GND 8,
+  DQ0–DQ7 and DM0 2 each, A0/A7 2 each, A2/A3/A5/MIPI_CLK_P/TMDS_D2_P/
+  TMDS_D2_N 1 each.
+- **Stability**: three independent regenerations (two in the pinned
+  image, one worker regen) reproduced every signature and per-net count
+  exactly. The findings' coordinates shift by a constant board-origin
+  offset between environments; the net signatures do not.
+- **Gate**: `check_matchgroup_coverage.py` drops the skip; the 19
+  signatures join `MATCHGROUP_FIXTURE_ALLOWED_FINDINGS`, each citing
+  #8858. On the in-container regen the gate's non-mask error count is 0
+  (the worker's 17 via findings do not exist in the CI-exact
+  environment), so after the change: 54 errors, 54 identity-allowed,
+  0 unallowed, 0 stale; reach 31/31, match-group rule exercised, pour
+  audit OK. The stale ratchet is enforced on both CI paths (the
+  matchgroup job's regen and the E2E job's `--skip-route` bundle).
+- **Wall, `kct check` on the fresh board 07 PCB** (worker, one run
+  each): ~75 s with the pass (54 mask findings judged by the native
+  geometry pass); the gate's own re-route step is the dominant cost
+  (~4-5 min), unchanged by this increment.
+
+The remaining two skips stay: `check_routed_drc.py` (the release surface)
+and `board_05_unattended.py` await their own per-board increments.
+

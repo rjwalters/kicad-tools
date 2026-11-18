@@ -16,6 +16,20 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-18
 
+- **PR #9395**: fix: net-gate pad openings in mask_to_copper reinforce attribution
+- **PR #9391**: fix: keep every owner net in mask_to_copper signature for merged mask regions
+- **PR #9379**: fix: match LCSC BOM headers case/punctuation-insensitively in load_bom_csv
+- **PR #9369**: fix: revert mask-copper moves that create new DRC errors; restore snapshot on failed undo
+- **Issue #9374** (closed): mask_to_copper net signature drops owner nets on a merged mask region, so a different-net exposure can hide behind a same-net allowance entry
+- **Issue #9368** (closed): load_bom_csv drops the LCSC column from a real bom_jlcpcb.csv (header is `LCSC Part #`)
+- **Issue #9365** (closed): fix-drc mask-copper: clearance gate uses the manufacturer floor, not the effective net-class clearance
+- **Issue #9348** (closed): mask_to_copper reinforce attribution: owner-net override ordering, pad-kind net gate, and two per-opening recomputations
+- **PR #9393**: fix: drop empty values from merged JLCPCB BOM Comment and CPL value check
+- **PR #9370**: fix: widen CPL rotation review list and close readiness reporting edges
+- **PR #9388**: fix: give every Changelog workflow run its own concurrency group
+- **Issue #9380** (closed): JLCPCB merged BOM row: empty Value constituent is not filtered from the "; " join or split
+- **Issue #9362** (closed): CPL rotation review: widen the unreviewed-placement list (SW/Y missed) and close three reporting/verify edges
+- **Issue #9383** (closed): forge wait-checks reads a concurrency-cancelled duplicate Changelog check-run as RED, refusing approval on a green head
 - **PR #9389**: docs: document fix-drc --only mask-copper repair pass in reference docs
 - **PR #9386**: fix(parts): default check_bom quantity_needed to 1 for BOMItem
 - **PR #9385**: fix: emit one row per item in ungrouped JLCPCB/PCBWay BOM export
