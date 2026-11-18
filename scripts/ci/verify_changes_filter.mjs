@@ -190,7 +190,9 @@ function verifyFailureFallbacks() {
     for (const m of text.matchAll(/steps\.([A-Za-z0-9_-]+)\.outputs\b/g)) referenced.add(m[1]);
     for (const id of referenced) {
       if (!filterIds.has(id)) continue;
-      const fallback = new RegExp(`steps\\.${id.replace(/[-]/g, "\\-")}\\.outcome\\s*==\\s*'failure'`);
+      // `id` is constrained to [A-Za-z0-9_-]+ by the capture group above, so it
+      // holds no regex metacharacter ("-" is literal outside a character class).
+      const fallback = new RegExp(`steps\\.${id}\\.outcome\\s*==\\s*'failure'`);
       if (!fallback.test(text)) {
         violations.push(
           `output \`${name}\` reads \`steps.${id}.outputs\` but has no ` +
