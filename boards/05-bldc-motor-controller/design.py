@@ -3841,8 +3841,8 @@ def legacy_main() -> int:
         # fresh route whose vias land on generator-authored silk fails the
         # manufacturing gates.  The committed artifact's pre-existing 13
         # findings (6 reference designators, 7 footprint graphics) are
-        # allowlisted in .github/routed-drc-tolerance.yml pending the #9134
-        # evidence re-issue that retires the entry.  Runs after the last
+        # excepted by identity in .github/routed-drc-tolerance.yml until the
+        # #9134 repair + evidence re-issue retires those entries.  Runs after the last
         # via-producing step (7a can relocate vias; Step 7's fix-drc is
         # disabled) and before the zone fill + DRC, reading the rule's own
         # findings so the pass tracks whatever via population this run
