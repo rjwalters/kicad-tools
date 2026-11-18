@@ -613,8 +613,15 @@ class TestProbeLeavesNoTrace:
             if before.get(key, "<absent>") != after.get(key, "<absent>")
         }
         # The records are the probe's output; the #4794 occupancy
-        # generation must move FORWARD so occupancy-keyed caches miss.
-        assert moved == {"auto.detour_probe_records", "grid._occupancy_generation"}
+        # generation must move FORWARD so occupancy-keyed caches miss.  The
+        # probe's measured wall-clock cost (#9244) is likewise a deliberate
+        # persisted output -- the budgets that must not see it are re-based
+        # from it.
+        assert moved == {
+            "auto.detour_probe_records",
+            "auto.detour_probe_elapsed_s",
+            "grid._occupancy_generation",
+        }
 
     @pytest.mark.parametrize("driver", ["route_all", "route_all_negotiated"])
     def test_unroutable_net_failure_records_identical(self, tmp_path: Path, driver: str) -> None:

@@ -690,7 +690,7 @@ def count_errors_via_kct_check(
 # that producer: the same-net slit-band predicate rejects a TANGENT seat
 # (``gap == 0``, centre exactly one annulus radius from a pad face or
 # corner) in the Python point predicate, the ring form and the C++ mirror
-# (BUILD_VERSION 68), the findings stopped firing on the fresh seed-42
+# (BUILD_VERSION 70), the findings stopped firing on the fresh seed-42
 # regen (31/31 reach, 0 error violations), and their entries are deleted.
 # The #8962 coordination note (the via-population child re-baselines again
 # when it lands) is retired with them: these wedges were exactly the

@@ -38,6 +38,13 @@ from .pnp import (
     extract_tht_exclusions,
     get_pnp_formatter,
 )
+from .rotation_overrides import (
+    RotationOverrides,
+    RotationReview,
+    discover_rotation_overrides,
+    load_rotation_overrides,
+    review_rotations,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +93,13 @@ class AssemblyConfig:
     # ``merge_lcsc=False`` (--no-merge-lcsc) takes precedence.
     merge_lcsc_from: Path | None = None
 
+    # Per-project CPL rotation corrections (issue #9322).  ``None`` auto-discovers
+    # ``cpl_rotations.yaml`` next to the .kicad_pcb; an explicit path must exist.
+    # ``no_rotation_overrides=True`` ignores any sidecar (explicit path wins
+    # nothing there -- it takes precedence, like ``no_spec``).
+    rotation_overrides_path: Path | None = None
+    no_rotation_overrides: bool = False
+
     # Filtering
     exclude_references: list[str] = field(default_factory=list)
 
@@ -103,7 +117,12 @@ class AssemblyPackageResult:
     rotation_corrections_applied: int = 0
     """Number of CPL rows whose rotation was shifted by a manufacturer
     per-footprint correction (issue #7107).  0 when the manufacturer
-    profile has no corrections."""
+    profile has no corrections.  Since issue #9322 this also counts rows
+    shifted by the project's ``cpl_rotations.yaml`` sidecar."""
+    rotation_review: RotationReview | None = None
+    """Which correction (sidecar reference / LCSC, or footprint table) moved
+    each CPL row, plus polarised/asymmetric placements no correction matched
+    (issue #9322).  ``None`` when no CPL was generated."""
     tht_excluded: list[PlacementData] = field(default_factory=list)
     """Through-hole components excluded from the CPL by the THT filter
     (issue #3539).  These are on the board and in the BOM but absent
@@ -145,6 +164,20 @@ class AssemblyPackageResult:
             lines.append(f"  BOM: {self.bom_path.name}")
         if self.pnp_path:
             lines.append(f"  CPL: {self.pnp_path.name}")
+            review = self.rotation_review
+            if review is not None:
+                if review.sidecar:
+                    lines.append(
+                        f"    Rotation overrides: {Path(review.sidecar).name} "
+                        f"({sum(1 for a in review.applied if a['source'] != 'footprint_glob')}"
+                        " row(s) corrected)"
+                    )
+                if review.unreviewed:
+                    refs = ", ".join(u["reference"] for u in review.unreviewed)
+                    lines.append(
+                        f"    Unreviewed rotation (no correction matched): {refs}"
+                        " -- check JLC's placement preview"
+                    )
         if self.gerber_path:
             lines.append(f"  Gerbers: {self.gerber_path.name}")
         if self.errors:
@@ -601,6 +634,14 @@ class AssemblyPackage:
         except Exception as e:
             logger.warning("BOM/CPL footprint-form reconciliation skipped: %s", e)
 
+        # The BOM's final LCSC numbers (after spec overlay / enrichment / merge)
+        # key the CPL's per-part rotation overrides (issue #9322).
+        self._cpl_lcsc_by_ref = {
+            i.reference: i.lcsc.strip()
+            for i in items
+            if getattr(i, "lcsc", "") and i.lcsc.strip() and not getattr(i, "is_virtual", False)
+        }
+
         # Generate BOM
         bom_config = self.config.bom_config or BOMExportConfig()
         bom_csv = export_bom(items, self.fab_family, bom_config)
@@ -661,6 +702,9 @@ class AssemblyPackage:
 
         # Resolve per-footprint rotation corrections from manufacturer profile
         rotation_corrections = self._get_rotation_corrections()
+        # Per-project sidecar (issue #9322): ref > LCSC > the table above.
+        rotation_overrides = self._load_rotation_overrides()
+        lcsc_by_ref = dict(getattr(self, "_cpl_lcsc_by_ref", None) or {})
 
         # Generate CPL – pass None when no explicit config so that the
         # formatter can apply its own defaults (a fab-specific exclude_tht default).
@@ -679,6 +723,8 @@ class AssemblyPackage:
             pnp_config,
             rotation_corrections=rotation_corrections,
             aux_origin=aux_origin,
+            rotation_overrides=rotation_overrides,
+            lcsc_by_reference=lcsc_by_ref,
         )
 
         # Record the THT hand-solder set excluded from the CPL.  Use the
@@ -691,6 +737,8 @@ class AssemblyPackage:
                 self.fab_family,
                 pnp_config,
                 rotation_corrections=rotation_corrections,
+                rotation_overrides=rotation_overrides,
+                lcsc_by_reference=lcsc_by_ref,
             )
             effective_config = get_pnp_formatter(self.fab_family, pnp_config).config
             result.tht_excluded = extract_tht_exclusions(
@@ -704,9 +752,17 @@ class AssemblyPackage:
                 )
             # Issue #7260: the CPL rows' facts, from the same placement
             # filters export_pnp applies (callers never re-parse the CSV).
-            formatter = get_pnp_formatter(self.fab_family, pnp_config, rotation_corrections)
+            formatter = get_pnp_formatter(
+                self.fab_family, pnp_config, rotation_corrections, rotation_overrides
+            )
             placements = formatter.filter_placements(
-                extract_placements(footprints, formatter.config, aux_origin)
+                extract_placements(footprints, formatter.config, aux_origin, lcsc_by_ref)
+            )
+            result.rotation_review = review_rotations(
+                placements,
+                formatter.apply_transforms,
+                rotation_corrections,
+                rotation_overrides,
             )
             result.pnp_placement_count = len(placements)
             sides = {p.layer for p in placements}
@@ -723,6 +779,28 @@ class AssemblyPackage:
         logger.info(f"Generated CPL: {pnp_path}")
         return pnp_path
 
+    def _load_rotation_overrides(self) -> RotationOverrides | None:
+        """Load the project's ``cpl_rotations.yaml`` sidecar (issue #9322).
+
+        An explicit ``rotation_overrides_path`` must exist; otherwise the
+        sidecar next to the PCB is used when present.  An invalid sidecar
+        raises :class:`RotationOverridesError` rather than silently shipping a
+        CPL without the corrections the owner declared.
+        """
+        if self.config.no_rotation_overrides:
+            return None
+        path = self.config.rotation_overrides_path or discover_rotation_overrides(self.pcb_path)
+        if path is None:
+            return None
+        overrides = load_rotation_overrides(path)
+        logger.info(
+            "CPL rotation overrides: %s (%d by reference, %d by LCSC)",
+            path,
+            len(overrides.by_reference),
+            len(overrides.by_lcsc),
+        )
+        return overrides
+
     def _get_rotation_corrections(self) -> dict[str, float] | None:
         """Resolve rotation corrections from the manufacturer profile.
 
@@ -730,15 +808,7 @@ class AssemblyPackage:
         manufacturer's profile, or ``None`` if no corrections are
         available.
         """
-        try:
-            from ..manufacturers import get_profile
-
-            profile = get_profile(self.manufacturer)
-            if profile.rotation_corrections:
-                return profile.rotation_corrections
-        except (ValueError, ImportError):
-            pass
-        return None
+        return profile_rotation_corrections(self.manufacturer)
 
     def _generate_gerbers(self, output_dir: Path) -> Path:
         """Generate Gerber files."""
@@ -816,6 +886,77 @@ class AssemblyPackage:
             if fnmatch.fnmatch(reference, pattern):
                 return True
         return False
+
+
+def profile_rotation_corrections(manufacturer: str) -> dict[str, float] | None:
+    """The manufacturer profile's footprint-glob rotation table, or ``None``."""
+    try:
+        from ..manufacturers import get_profile
+
+        profile = get_profile(manufacturer)
+        if profile.rotation_corrections:
+            return profile.rotation_corrections
+    except (ValueError, ImportError):
+        pass
+    return None
+
+
+def review_cpl_rotations(
+    pcb: str | Path,
+    manufacturer: str = "jlcpcb",
+    *,
+    lcsc_by_reference: dict[str, str] | None = None,
+    footprint_names: dict[str, str] | None = None,
+    pnp_config: PnPExportConfig | None = None,
+    overrides_path: str | Path | None = None,
+) -> RotationReview:
+    """Re-derive how the CPL's rotations were resolved, without writing anything.
+
+    Mirrors the CPL step of :class:`AssemblyPackage` (same placement filters,
+    footprint table and sidecar) so ``kct readiness`` can record the applied
+    corrections and the unreviewed-placement list, and re-check a retained CPL
+    against the sidecar (issue #9322).
+
+    Args:
+        pcb: Path to the ``.kicad_pcb``.
+        manufacturer: Manufacturer ID or capability tier.
+        lcsc_by_reference: LCSC numbers (typically read from the shipped BOM);
+            the footprint's own LCSC property is the fallback.
+        footprint_names: Reference -> footprint name as written in the CPL, so
+            glob matching sees the same form the export used.
+        pnp_config: Explicit PnP config; ``None`` takes the fab's defaults.
+        overrides_path: Explicit sidecar; ``None`` auto-discovers next to *pcb*.
+
+    Raises:
+        RotationOverridesError: the sidecar is unreadable or invalid.
+    """
+    import copy
+
+    from ..manufacturers import get_fab_family
+    from ..schema.pcb import PCB
+
+    pcb_path = Path(pcb)
+    manufacturer = manufacturer.lower()
+    fab_family = get_fab_family(manufacturer)
+    footprints = list(PCB.load(str(pcb_path)).footprints)
+    if footprint_names:
+        patched = []
+        for fp in footprints:
+            name = footprint_names.get(fp.reference)
+            if name and name != fp.name:
+                fp = copy.copy(fp)
+                fp.name = name
+            patched.append(fp)
+        footprints = patched
+
+    sidecar = Path(overrides_path) if overrides_path else discover_rotation_overrides(pcb_path)
+    overrides = load_rotation_overrides(sidecar) if sidecar is not None else None
+    corrections = profile_rotation_corrections(manufacturer)
+    formatter = get_pnp_formatter(fab_family, pnp_config, corrections, overrides)
+    placements = formatter.filter_placements(
+        extract_placements(footprints, formatter.config, lcsc_by_reference=lcsc_by_reference)
+    )
+    return review_rotations(placements, formatter.apply_transforms, corrections, overrides)
 
 
 def create_assembly_package(
