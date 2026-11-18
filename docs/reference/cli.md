@@ -420,6 +420,15 @@ timestamps. `spaced` mode has no legs and writes no sidecar. `--format json`
 embeds the list as `wires`; `kct pcb reinforce BOARD --list-wires [--net NET]
 [--format json]` prints it read-only from the sidecar.
 
+`kct pcb reinforce BOARD --adopt [--net NET] [--dry-run]` records wires that are
+already on the board (e.g. hand-adjusted after a Gerber review) without moving
+copper or writing the board: each solder-mask strip chain running between two
+same-net anchor holes of a wire gauge's drill becomes a sidecar record, which
+`mask_to_copper` then uses to excuse the run's strip, anchors and end holes on
+both mask sides. Wires the sidecar already records are kept, so a re-run changes
+nothing; strips that cannot be resolved (branched, or an end with no anchor hole)
+are reported, never guessed.
+
 Declared current paths that do not resolve (moved/removed pad, ambiguous
 loop) are listed under `unresolved_paths` and warned about on stderr; they
 get no anchors and the exit code stays 0. `--format json` adds `anchor_mode`,
