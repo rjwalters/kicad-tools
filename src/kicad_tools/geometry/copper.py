@@ -101,6 +101,45 @@ def pad_outline_is_exact(pad: Any) -> bool:
     return not (shape == "roundrect" and _pad_has_chamfer(pad))
 
 
+def custom_pad_board_outline(pad: Any, center: tuple[float, float]) -> Any | None:
+    """Board-frame copper of a ``custom`` pad: its anchor plus filled polygons.
+
+    Issue #9468.  The schema pad only carries the anchor's nominal ``(size)``;
+    the primitives (SOT-89's tab, for one) live in the retained source node, so
+    this reuses :func:`kicad_tools.router.fixed_copper.custom_pad_copper` -- the
+    outline the DSN export and router already honour (#5376, #7525) -- rather
+    than a second reading of the same S-expression.
+
+    ``center`` is the pad *anchor* in board coordinates; the pad's ABSOLUTE
+    angle is applied exactly once inside ``custom_pad_copper``.  Returns
+    ``None`` when the pad is not ``custom``, has no source node, or its copper
+    is something that routine refuses (unsupported primitive, layer-specific
+    padstack): callers then keep their nominal-box fallback.
+    """
+    if (getattr(pad, "shape", "") or "").lower() != "custom":
+        return None
+    node = getattr(pad, "_sexp_node", None)
+    if node is None or not _has_shapely():
+        return None
+    from kicad_tools.router.fixed_copper import custom_pad_copper
+
+    try:
+        copper = custom_pad_copper(
+            node.to_string(),
+            reference="",
+            pad_number=str(getattr(pad, "number", "")),
+            x=center[0],
+            y=center[1],
+            rotation=float(getattr(pad, "rotation", 0.0) or 0.0),
+            source_net="",
+            source_net_id=0,
+        )
+    except ValueError:
+        return None
+    geometry = copper.geometry
+    return None if geometry.is_empty else geometry
+
+
 def pad_board_center(
     pad: Any,
     fp_position: tuple[float, float],
@@ -177,8 +216,10 @@ def pad_copper_outline(
     (#6453) and was load-bearing only because the box's corners grazed
     foreign pours.
 
-    Shapes not modelled exactly (``trapezoid``, chamfered ``roundrect``,
-    ``custom``) fall back to the size box eroded by
+    A ``custom`` pad uses its real anchor-plus-filled-polygon copper (Issue
+    #9468, :func:`custom_pad_board_outline`).  Shapes not modelled exactly
+    (``trapezoid``, chamfered ``roundrect``, and a ``custom`` pad whose copper
+    that helper refuses) fall back to the size box eroded by
     :data:`PAD_FALLBACK_ERODE` (un-eroded if the erosion empties it), which
     can only under-report contact.  A pad with a non-positive size is its
     bare anchor point.  Returns ``None`` when shapely is unavailable.
@@ -186,6 +227,9 @@ def pad_copper_outline(
     if not _has_shapely():
         return None
     cx, cy = pad_board_center(pad, fp_position, fp_rotation)
+    custom = custom_pad_board_outline(pad, (cx, cy))
+    if custom is not None:
+        return custom
     w, h = pad.size
     if w <= 0 or h <= 0:
         return _ShapelyPoint((cx, cy))

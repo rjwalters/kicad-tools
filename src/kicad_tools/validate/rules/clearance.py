@@ -416,6 +416,13 @@ def _pad_polygon(pad: Pad, footprint: Footprint):
     from shapely.geometry import Point
 
     cx, cy = _transform_pad_position(pad, footprint)
+    # A ``custom`` pad's copper is its anchor plus filled primitives (issue
+    # #9468), not the nominal ``size`` box the generic branch below would build.
+    from kicad_tools.geometry.copper import custom_pad_board_outline
+
+    custom = custom_pad_board_outline(pad, (cx, cy))
+    if custom is not None:
+        return custom
     w, h = pad.size  # LOCAL size -- the rotation below orients the polygon
     if w <= 0 or h <= 0:
         return None
