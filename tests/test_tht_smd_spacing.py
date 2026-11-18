@@ -92,6 +92,16 @@ def test_bands(gap, severity):
         assert set(found[0].items) == {"tht", "smd"}
 
 
+@pytest.mark.parametrize(
+    ("gap", "limit_text"),
+    [(2.025, "< 2.032mm"), (1.5, "< 2.032mm"), (2.9, "< 3.050mm"), (3.0, "< 3.050mm")],
+)
+def test_message_states_the_exact_limit(gap, limit_text):
+    """Issue #9421: the printed limit must be the threshold the code applies."""
+    (v,) = check_tht_smd_spacing(board(tht(), smd(gap))).violations
+    assert limit_text in v.message
+
+
 def test_back_side_smd_pad_is_measured():
     found = check_tht_smd_spacing(board(tht(), smd(1.5, "B.Cu"))).violations
     assert [v.severity for v in found] == ["error"]

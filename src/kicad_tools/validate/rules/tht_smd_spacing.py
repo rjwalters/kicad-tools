@@ -2,8 +2,8 @@
 
 JLCDFM flags through-hole pads and vias that sit close to an SMD pad (wave /
 selective-solder and rework clearance). Observed thresholds (epic #8838,
-2026-11-12 -- observed from JLCDFM output, not documented by the fab; thresholds moved to 2.032 / 3.05 mm
-by Issue #9421 after the fab rated two pairs at 2.00 / 2.025 mm as danger that
+2026-11-12 -- observed from JLCDFM output, not documented by the fab; thresholds
+moved to 2.032 / 3.05 mm by Issue #9421 after the fab rated two pairs at 2.00 / 2.025 mm as danger that
 the old 2.0 mm floor passed -- 2.032 mm is 80 mil, the likely real limit, from
 one board's Alert value panel, not confirmed):
 
@@ -251,7 +251,7 @@ def check_tht_smd_spacing(
                 "tht_smd_spacing",
                 "error" if is_error else "warning",
                 f"THT/via to {what} spacing {distance:.3f}mm < "
-                f"{(danger_mm if is_error else warning_mm):.1f}mm "
+                f"{(danger_mm if is_error else warning_mm):.3f}mm "
                 f"(copper edge to copper edge) on {where or layer}; closest points "
                 f"({a.x + ox:.6f}, {a.y + oy:.6f}) and ({b.x + ox:.6f}, {b.y + oy:.6f})",
                 location=((a.x + b.x) / 2, (a.y + b.y) / 2),
