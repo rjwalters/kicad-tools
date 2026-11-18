@@ -406,7 +406,7 @@ class ParityReport:
         return bool(self.incomplete_categories)
 
     def to_dict(self) -> dict:
-        data = {
+        data: dict[str, object] = {
             "table_version": TABLE_VERSION,
             "source": SOURCE,
             "retrieved": RETRIEVED,
