@@ -3211,6 +3211,11 @@ class Autorouter:
         reads the grid's committed routes and writes nothing the router
         consults, and every failure is swallowed: routing is byte-identical
         with the hook on or off.
+
+        The tracker is seeded from the routes already on the grid at
+        construction, so copper that lands outside this hook (input board,
+        escape-phase results, same-net pre-search ties) welds from the first
+        report instead of appearing only after a rip-up rebuild.
         """
         from .barrier_closure import ENV_FLAG
 
@@ -3258,6 +3263,12 @@ class Autorouter:
                     stage=lambda: f"{journal.pass_name}[{journal.iteration}]",
                 )
                 tracker.owner = grid
+                # Issue #9000 review: the hook runs after mark_route, so
+                # ``route`` is already on the grid -- exclude it here and let
+                # on_commit weld and report it; everything already committed
+                # (input board, escapes, pre-search ties) welds unreported,
+                # matching what a first rebuild would produce.
+                tracker.rebuild([r for r in grid.routes if r is not route])
                 self._barrier_closure_tracker = tracker
             tracker.on_commit(route, list(grid.routes))
         except Exception:  # diagnostic only: never alter routing
@@ -18911,7 +18922,11 @@ class Autorouter:
             # Issue #6799: neighbouring duplicate pins are one Kelvin terminal.
             tie_routes, tied = self._create_kelvin_terminal_ties(net, pads)
             for route in tie_routes:
-                self._mark_route(route)
+                if self._mark_route(route):
+                    # Issue #9000 review: pre-search copper is grid-committed
+                    # copper -- feed the diagnostic before it can close a loop
+                    # unseen (construction seeding only covers older copper).
+                    self._barrier_closure_commit(route)
                 routes.append(route)
             pads_for_routing = reduce_pads_after_intra_ic(pads, tied, pad_lookup=self.pads)
             if tied:
@@ -18921,13 +18936,15 @@ class Autorouter:
         else:
             intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
             for route in intra_routes:
-                self._mark_route(route)
+                if self._mark_route(route):
+                    self._barrier_closure_commit(route)
                 routes.append(route)
 
             # Handle block-internal connections (Issue #1587)
             block_routes, block_connected = self._create_block_internal_routes(net, pads)
             for route in block_routes:
-                self._mark_route(route)
+                if self._mark_route(route):
+                    self._barrier_closure_commit(route)
                 routes.append(route)
             connected_indices |= block_connected
 

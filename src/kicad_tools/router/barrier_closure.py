@@ -63,6 +63,8 @@ logger = logging.getLogger(__name__)
 ENV_FLAG = "KCT_BARRIER_CLOSURE"
 
 #: Edge length (mm) of a coarse region tile when the driver builds the tiling.
+#: The driver clamps the tiling to 60x60 tiles (core.py), so a board longer than
+#: 60 * DEFAULT_TILE_MM (120 mm) on an axis silently gets coarser tiles.
 DEFAULT_TILE_MM = 2.0
 
 #: Coordinate rounding (mm) used to chain segments end-to-end.
@@ -306,14 +308,14 @@ class BarrierClosureTracker:
         signal = self._signal or [layer]
         blocked: dict[int, int] = {}
         severed: dict[int, int] = {}
-        for net, comps in comps_by_net.items():
-            here = self._groups(comps, self._layers[layer].rings, net)
+        for cand_net, comps in comps_by_net.items():
+            here = self._groups(comps, self._layers[layer].rings, cand_net)
             if here <= 1:
                 continue
-            blocked[net] = here - 1
-            everywhere = self._groups_all_layers(comps, signal, net)
+            blocked[cand_net] = here - 1
+            everywhere = self._groups_all_layers(comps, signal, cand_net)
             if everywhere > 1:
-                severed[net] = everywhere - 1
+                severed[cand_net] = everywhere - 1
         if not blocked:
             return None
         ev = ClosureEvent(
@@ -403,9 +405,10 @@ class BarrierClosureTracker:
 def _chains(segs: list[tuple[Point, Point]]) -> list[list[Point]]:
     """Order segments into end-to-end point chains (one per connected piece).
 
-    Leaves (degree 1) start a chain.  Branched or closed pieces fall back to
-    the straight line between their first two terminals -- per-connection
-    routes are paths, so this is the rare case.
+    Leaves (degree 1) start a chain; the walk stops at the first branch node,
+    so a branched piece yields one chain per leaf.  A closed piece has no leaf
+    and yields no chain at all -- per-connection routes are paths, so this is
+    the rare case.
     """
     adj: dict[Point, list[Point]] = {}
     for p, q in segs:

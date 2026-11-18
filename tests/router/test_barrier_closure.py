@@ -69,6 +69,7 @@ def test_loop_around_pad_reports_severed_net_single_layer():
     assert events[:3] == [None, None, None]
     ev = events[3]
     assert ev is not None
+    assert ev.net == 4  # net of the committed route that closed the loop
     assert ev.severed_nets == (9,)
     assert ev.severed_connections == 1
     assert ev.layer == 0
@@ -220,6 +221,77 @@ def test_hook_failure_never_breaks_routing(monkeypatch):
     monkeypatch.setattr(BarrierClosureTracker, "on_commit", boom)
     router = _small_router()
     assert router.route_all_negotiated(max_iterations=1)
+
+
+def test_construction_seeds_copper_already_on_grid(monkeypatch):
+    # Issue #9221 review: the tracker is built lazily on the first hook call,
+    # by which time copper committed outside the hook (input board, escapes,
+    # pre-search ties) is already on the grid.  The initial weld set must
+    # include it, or a loop that was really closed reports nothing until the
+    # first rip-up rebuild silently welds the same copper.
+    monkeypatch.setenv(ENV_FLAG, "1")
+    router = Autorouter(width=40.0, height=40.0)
+    router.add_component(
+        "U9",
+        [
+            {
+                "number": "1",
+                "x": 20.0,
+                "y": 20.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 9,
+                "net_name": "N9",
+            },
+            {
+                "number": "2",
+                "x": 35.0,
+                "y": 35.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 9,
+                "net_name": "N9",
+            },
+        ],
+    )
+    for i, pts in enumerate(SQUARE):  # closed loop committed unhooked on B.Cu
+        router.grid.mark_route(_route(5 + i, Layer.B_CU, *pts))
+    for i, pts in enumerate(SQUARE[:3]):  # three sides on F.Cu, same
+        router.grid.mark_route(_route(i + 1, Layer.F_CU, *pts))
+    closing = _route(4, Layer.F_CU, *SQUARE[3])
+    router.grid.mark_route(closing)  # the hook always runs post-mark
+
+    router._barrier_closure_commit(closing)
+
+    tracker = getattr(router, "_barrier_closure_tracker", None)
+    assert tracker is not None, "hook never built the tracker"
+    assert tracker.events, "seeded sides must close the loop on the first report"
+    ev = tracker.events[-1]
+    assert ev.net == 4
+    assert ev.severed_nets == (9,)  # rings on both signal layers
+
+
+def test_pre_search_commit_reaches_the_tracker(monkeypatch):
+    # Issue #9221 review: intra-IC / Kelvin / block-internal routes inside
+    # _route_net_negotiated are grid copper too -- every route on the grid
+    # must be welded (hooked or construction-seeded) once routing settles.
+    monkeypatch.setenv(ENV_FLAG, "1")
+    router = _small_router()
+    canned: dict[str, Route] = {}
+
+    def fake_intra_ic(net, pads):
+        if not canned:
+            canned["r"] = _route(net, Layer.F_CU, (14.0, 10.0), (16.0, 10.0))
+            return [canned["r"]], set()
+        return [], set()
+
+    monkeypatch.setattr(router, "_create_intra_ic_routes", fake_intra_ic)
+    router.route_all_negotiated(max_iterations=2)
+    assert canned, "fixture must have produced at least one intra-IC route"
+    tracker = getattr(router, "_barrier_closure_tracker", None)
+    assert tracker is not None
+    missing = [r for r in router.grid.routes if not any(r is k for k in tracker._known.values())]
+    assert not missing, f"{len(missing)} grid route(s) the tracker never welded"
 
 
 @pytest.mark.parametrize("value", ["0", "", "off"])
