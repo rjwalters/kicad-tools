@@ -6,7 +6,10 @@ at 45 degrees or steeper, with nothing exposed beyond the pad and nothing
 under mask beside the opening beyond that one crossing. Everything the fab
 reported as danger, and every shape the evidence does not decide, keeps its
 measured verdict and is pinned here. Evidence and the classification table:
-issue #8858 and ``docs/research/mask-to-copper-own-pad-8858.md``.
+issue #8858 and ``docs/research/mask-to-copper-own-pad-8858.md``. Issue #9107
+additionally pins the per-object measurement itself: a conductor chained to a
+pad-entry conductor (a jogged exit) is measured on its own, shared cap
+included, because JLCDFM flags jogged exits as danger (#8914 items 1 and 5).
 """
 
 import math
@@ -133,6 +136,18 @@ def test_perpendicular_entry_at_zero_expansion_is_within_own_pad_info():
     assert _severity(result) == "info"
     message = next(v.message for v in assessment_results(result).violations if OTHER in v.items)
     assert "within_own_pad" in message
+    # Issue #9269: the deciding beside-pad excess is printed, so a reader can
+    # see why a non-zero "beyond owner pad copper" is excused.
+    assert "beside owner excess" in message
+
+
+def test_message_omits_beside_owner_excess_when_not_evaluated():
+    """Issue #9269: no deciding value was measured, so none is printed."""
+    result, m = _only(_segment((0.5, 0.5), (2.0, 0.5), net="M"))
+    assert m.disposition == "violation"
+    assert m.beside_owner_excess_mm2 is None
+    message = next(v.message for v in assessment_results(result).violations if OTHER in v.items)
+    assert "beside owner excess" not in message
 
 
 def test_45_degree_entry_is_within_own_pad():
@@ -144,6 +159,89 @@ def test_45_degree_entry_is_within_own_pad():
 def test_track_lying_wholly_on_its_pad_is_within_own_pad():
     result, m = _only(_segment((0.3, 0.5), (0.7, 0.5)))
     assert m.disposition == "within_own_pad"
+
+
+# --- end-cap poke past the edge (issue #9261) --------------------------------------------
+
+OVAL = LineString([(0.25, 0.25), (0.75, 0.25)]).buffer(0.25, quad_segs=64)  # 1 x 0.5 mm
+
+
+def _poke_segment(pad, poke, width=0.2, y=None, owner_kind="pad:rect"):
+    """Both authored ends inside *pad*; the far end cap pokes *poke* past x = 1."""
+    y = 0.5 if y is None else y
+    end_x = 1.0 + poke - width / 2  # authored end stays inside the pad for poke < width/2
+    return _segment((0.3, y), (end_x, y), width, pad=pad, owner_kind=owner_kind)
+
+
+@pytest.mark.parametrize("poke", [0.01, 0.02, 0.05])
+@pytest.mark.parametrize(
+    "pad,y,owner_kind",
+    [(PAD, 0.5, "pad:rect"), (OVAL, 0.25, "pad:oval")],
+)
+def test_end_cap_poking_past_the_pad_edge_is_info(pad, y, owner_kind, poke):
+    """Both authored ends on the pad; only the round cap pokes out (issue #9261)."""
+    result, m = _only(_poke_segment(pad, poke, y=y, owner_kind=owner_kind))
+    assert m.disposition == "within_own_pad"
+    assert _severity(result) == "info"
+    assert result.passed
+
+
+def _roundrect(radius):
+    """A true roundrect pad: a box with *radius* corner arcs (issue #9261)."""
+    return box(0, 0, 1, 1).buffer(-radius, join_style="round").buffer(radius, join_style="round")
+
+
+@pytest.mark.parametrize("poke", [0.01, 0.02, 0.05])
+@pytest.mark.parametrize("radius", [0.25, 0.15])
+def test_end_cap_poking_past_the_roundrect_corner_arc_is_info(radius, poke):
+    """The roundrect row's shape class: a cap poking past a real corner arc.
+
+    The track leaves along the 45-degree diagonal toward corner (1, 1); both
+    authored ends sit strictly inside the pad and only the round cap crosses
+    the corner arc (issue #9261's measured roundrect-corner case).
+    """
+    reach = radius + poke - 0.1  # cap tip lands *poke* past the arc
+    end = (1 - radius + reach * math.sqrt(0.5),) * 2
+    result, m = _only(
+        _segment((0.5, 0.5), end, 0.2, pad=_roundrect(radius), owner_kind="pad:roundrect")
+    )
+    assert m.disposition == "within_own_pad"
+    assert _severity(result) == "info"
+    assert result.passed
+
+
+@pytest.mark.parametrize(
+    "pad,y,owner_kind",
+    [(PAD, 0.5, "pad:rect"), (OVAL, 0.25, "pad:oval")],
+)
+def test_poke_sweep_never_scores_below_a_full_exit(pad, y, owner_kind):
+    """Severity is non-decreasing in under-mask copper across the A0/A1 boundary.
+
+    The track's far end moves from wholly on the pad, through a cap poking out,
+    to an end on the edge and a full exit. A smaller poke must never be worse
+    than a longer exit that the rule excuses.
+    """
+    ranks = []
+    for step in range(0, 21):
+        end_x = 0.8 + step * 0.03  # 0.8 .. 1.4 mm; crosses the edge at x = 1.0
+        result, m = _only(_segment((0.3, y), (end_x, y), 0.2, pad=pad, owner_kind=owner_kind))
+        assert m.disposition == "within_own_pad", (end_x, m.disposition)
+        ranks.append(SEVERITY_RANK[_severity(result)])
+    assert max(ranks) == 1
+    assert ranks == sorted(ranks)
+
+
+def test_one_end_inside_other_on_the_edge_is_within_own_pad():
+    """The old 'neither entry nor wholly on the pad' arm is gone (issue #9261)."""
+    result, m = _only(_segment((0.5, 0.5), (1.0, 0.5)))
+    assert m.disposition == "within_own_pad"
+    assert _severity(result) == "info"
+
+
+def test_pass_through_with_no_end_inside_stays_an_error_after_the_poke_change():
+    result, m = _only(_segment((-0.5, 0.5), (1.5, 0.5)))
+    assert m.disposition in ("violation", "uncertain")
+    assert _severity(result) == "error"
 
 
 def test_back_side_entry_is_classified_like_the_front():
@@ -199,15 +297,23 @@ def test_translation_sweep_severity_never_drops_as_beside_copper_rises():
         sev = _severity(result)
         excess = m.beside_owner_excess_mm2 if m and m.beside_owner_excess_mm2 is not None else None
         points.append((y, sev, excess, m.disposition if m else None))
-    # Info exactly when the track lies on the pad with nothing beside it.
+    # Info exactly when the copper under mask beside the opening fits one
+    # entry crossing (issue #9261: both ends are inside the pad here, so the
+    # track gets that budget even though its flank pokes past the edge).
+    # 0.05 mm of flank past the edge is far above that budget for this 0.4 mm
+    # track, so only a poke of about 0.04 mm or less may read as info.
     for y, sev, excess, disp in points:
         if disp == "within_own_pad":
             assert excess == pytest.approx(0.0, abs=1e-9)
-            assert y + 0.1 <= 1.0 + 1e-9
-    # Straddling and beside positions are errors (or out of reach).
+            assert y + 0.1 <= 1.0 + 0.05
+    # Straddling and beside positions with real copper past the edge are errors.
     for y, sev, _, _ in points:
-        if 1.0 - 0.1 < y < 1.0 + 0.1 + 0.09:
+        if 1.0 - 0.05 < y < 1.0 + 0.1 + 0.09:
             assert sev == "error", (y, sev)
+    # Walking onto the pad (y falling from 1.18), severity never rises again.
+    # (y = 1.2 is a warning-tier finding, below the error tier, so it is skipped.)
+    ranks = [SEVERITY_RANK[s] for y, s, _, _ in points if s and y < 1.19]
+    assert ranks == sorted(ranks, reverse=True)
     # Ordering: among positions that produce a finding, any position with
     # positive excess is at least as severe as any with zero excess.
     zero = [SEVERITY_RANK[s] for _, s, e, _ in points if s and e == 0]
@@ -367,6 +473,203 @@ def test_grazing_contact_within_the_construction_budget_is_not_reclassified():
     result, m = _only(_segment((1.098, 0.5), (2.0, 0.5), max_error=0.005))
     assert m.relation == "overlap"
     assert m.disposition == "violation"
+
+
+# --- #9107: per-object measurement of conductors chained to a pad entry -------------
+#
+# The decision (research note, "#9107"): keep per-object. JLCDFM flags jogged
+# pad exits as danger (#8914 items 1 and 5, at 0 and 0.08 mm), so the chained
+# segment keeps its own measured distance, shared cap included. A union view
+# (copper beyond the entry conductor) would report farther: on the board 03
+# U1/13 RESET fixture, 45 deg 0.025 -> 0.084 mm, 30 deg -> 0.098 mm, out of the
+# 0.09 mm danger band for a shape the fab flags. One test per #8914 danger item.
+
+
+def _multi(*specs, pad=PAD, side="F", margin=0.0):
+    """Several same-net conductors, each measured on its own (issue #9107).
+
+    Each spec is ``(copper, extra)`` or ``(copper, extra, kind)``. Returns
+    ``(result, found)`` where *found* maps the conductor's position in *specs*
+    to its measurement; conductors beyond the reach of the opening have none.
+    """
+    from shapely.ops import unary_union
+
+    from kicad_tools.validate.mask_copper_geometry import AttributedMaskGeometry
+    from kicad_tools.validate.mask_export_geometry import ExportedMaskGeometry
+
+    mask, cu = f"{side}.Mask", f"{side}.Cu"
+    opening = pad.buffer(margin, join_style="mitre") if margin else pad
+    objects = {
+        OWNER: {
+            "kind": "pad:roundrect",
+            "net": "N",
+            "pad_ref": "R1/1",
+            "layers_geometry": {mask: opening, cu: pad},
+            "margin_mm": {mask: margin},
+        }
+    }
+    coppers = []
+    for position, spec in enumerate(specs):
+        copper, extra = spec[0], spec[1]
+        kind = spec[2] if len(spec) > 2 else "segment"
+        coppers.append(copper)
+        objects[f"{OTHER}-{position:02d}"] = {
+            "kind": kind,
+            "net": "N",
+            "layers_geometry": {cu: copper},
+            "margin_mm": {},
+            **extra,
+        }
+    exported = ExportedMaskGeometry(
+        "a" * 64,
+        None,
+        None,
+        "10.0.6",
+        {},
+        layers={mask: opening, cu: unary_union([pad, *coppers])},
+    )
+    result = assess_attributed_geometry(AttributedMaskGeometry(exported, objects), POLICY)
+    assert result.coverage == "complete"
+    by_uuid = {m.conductor_uuid: m for m in result.measurements}
+    found = {
+        position: by_uuid[f"{OTHER}-{position:02d}"]
+        for position in range(len(specs))
+        if f"{OTHER}-{position:02d}" in by_uuid
+    }
+    return result, found
+
+
+def _severity_of(result, identity):
+    found = [
+        v.severity
+        for v in assessment_results(result).violations
+        if v.rule_id == "mask_to_copper" and identity in v.items
+    ]
+    return found[0] if found else None
+
+
+def test_8914_item1_jogged_exit_with_body_along_the_opening_edge_stays_an_error():
+    """Fab item 1 (0 mm): leaves the pad, body along the opening edge, 45 deg jog to a via."""
+    entry_copper, entry_extra = track((0.5, 0.4), (0.5, 1.05))
+    along_copper, along_extra = track((0.5, 1.05), (1.25, 1.05))
+    jog_copper, jog_extra = track((1.25, 1.05), (1.7, 1.5))
+    via = Point(1.8, 1.6).buffer(0.3, quad_segs=64)
+    result, found = _multi(
+        (entry_copper, entry_extra),
+        (along_copper, along_extra),
+        (jog_copper, jog_extra),
+        (via, {"drill_mm": 0.3}, "via"),
+    )
+    assert found[0].disposition == "within_own_pad"
+    # The along-edge body is not its own pad entry even though it is chained
+    # to one: it keeps its measured verdict.
+    assert found[1].disposition == "violation"
+    assert found[1].relation == "overlap"
+    assert _severity_of(result, found[1].conductor_uuid) == "error"
+    assert not result.passed
+
+
+def test_8914_item2_t_junction_branch_along_the_opening_edge_stays_an_error():
+    """Fab item 2 (0.01 mm): junction 0.7 mm out; one branch to a via, one along the edge."""
+    stem_copper, stem_extra = track((1.7, 0.5), (3.7, 0.5))
+    branch_edge_copper, branch_edge_extra = track((1.7, 0.5), (1.05, 0.5))
+    branch_via_copper, branch_via_extra = track((1.7, 0.5), (2.3, -0.1))
+    via = Point(2.4, -0.2).buffer(0.3, quad_segs=64)
+    result, found = _multi(
+        (stem_copper, stem_extra),
+        (branch_edge_copper, branch_edge_extra),
+        (branch_via_copper, branch_via_extra),
+        (via, {"drill_mm": 0.3}, "via"),
+    )
+    # The edge-hugging branch runs along the opening edge; its authored end
+    # never enters the pad, so the entry allowance does not reach it.
+    assert found[1].disposition == "violation"
+    assert _severity_of(result, found[1].conductor_uuid) == "error"
+    assert not result.passed
+
+
+@pytest.mark.parametrize("gap", [0.05, 0.07])
+def test_8914_items_3_and_4_parallel_same_net_track_at_the_fab_distance_stays_an_error(gap):
+    """Fab items 3 and 4: straight same-net tracks 0.05 / 0.07 mm copper-to-copper.
+
+    Item 3's authored track is 0.30 mm wide; the fixture keeps the default
+    0.2 mm because the measured gap is set by the centerline arithmetic and
+    the entry allowance never applies to a track with no end inside the pad.
+    """
+    centerline = 1 + gap + 0.1
+    result, m = _only(_segment((centerline, -0.5), (centerline, 1.5)))
+    assert m.disposition == "violation"
+    assert m.relation == "disjoint"
+    assert _severity(result) == "error"
+    assert not result.passed
+
+
+def test_8914_item5_jogged_exit_to_a_via_stays_an_error():
+    """Fab item 5 (0.08 mm): leaves the pad, jogs 45 deg to a via 0.9 mm away."""
+    entry_copper, entry_extra = track((0.5, 0.5), (1.125, 0.5))
+    jog_copper, jog_extra = track((1.125, 0.5), (1.575, 0.95))
+    via = Point(1.9, 0.5).buffer(0.3, quad_segs=64)
+    result, found = _multi(
+        (entry_copper, entry_extra),
+        (jog_copper, jog_extra),
+        (via, {"drill_mm": 0.3}, "via"),
+    )
+    assert found[0].disposition == "within_own_pad"
+    # The chained jog keeps its own distance, shared cap included.
+    assert found[1].disposition == "violation"
+    assert _severity_of(result, found[1].conductor_uuid) == "error"
+    # The pin reads the implementation's own measurement, not just the fixture.
+    assert found[1].clearance_mm == pytest.approx(0.025, abs=1e-4)
+    assert PAD.distance(jog_copper) == pytest.approx(0.025, abs=1e-4)
+    assert not result.passed
+
+
+@pytest.mark.parametrize("degrees,union_mm", [(45, 0.0836), (30, 0.0982)])
+def test_jog_chained_to_a_pad_entry_is_measured_per_object(degrees, union_mm):
+    """Board 03 U1/13 RESET (#9107): entry 0.125 mm past the edge, then a jog.
+
+    Per object the jog measures 0.025 mm at its shared cap and stays an error.
+    The union view (copper beyond the entry conductor) reports farther -- at a
+    30 deg jog out of the 0.09 mm danger band -- while the fab still flags
+    jogged exits (#8914 items 1 and 5). Pinning per-object is the decision.
+    """
+    entry_copper, entry_extra = track((0.5, 0.5), (1.125, 0.5))
+    jog_end = (
+        1.125 + 0.6 * math.cos(math.radians(degrees)),
+        0.5 + 0.6 * math.sin(math.radians(degrees)),
+    )
+    jog_copper, jog_extra = track((1.125, 0.5), jog_end)
+    result, found = _multi((entry_copper, entry_extra), (jog_copper, jog_extra))
+    assert found[0].disposition == "within_own_pad"
+    assert found[1].disposition == "violation"
+    assert _severity_of(result, found[1].conductor_uuid) == "error"
+    # The pin is the implementation's own measurement: per-object, and never
+    # the union view this decision rejected (the 45 deg case measures the same
+    # as the fixture; a union switch would read union_mm instead).
+    assert found[1].clearance_mm == pytest.approx(0.025, abs=1e-4)
+    assert found[1].clearance_mm != pytest.approx(union_mm, abs=5e-4)
+    assert PAD.distance(jog_copper) == pytest.approx(0.025, abs=1e-4)
+    union = PAD.distance(jog_copper.difference(entry_copper))
+    assert union == pytest.approx(union_mm, abs=5e-4)
+
+
+def test_fully_enclosed_collinear_redundant_segment_stays_an_error():
+    """Board 02 R3/2 and R4/2 (#9107): a collinear duplicate inside the entry track.
+
+    The duplicate's copper beyond the entry conductor is empty, so a union view
+    would report no distance at all. Per object it still sits 0.05 mm from the
+    opening and stays an error.
+    """
+    entry_copper, entry_extra = track((0.5, 0.5), (1.4, 0.5))
+    red_copper, red_extra = track((1.15, 0.5), (1.3, 0.5))
+    assert red_copper.difference(entry_copper).area == pytest.approx(0.0, abs=1e-12)
+    result, found = _multi((entry_copper, entry_extra), (red_copper, red_extra))
+    assert found[0].disposition == "within_own_pad"
+    assert found[1].disposition == "violation"
+    assert _severity_of(result, found[1].conductor_uuid) == "error"
+    assert found[1].clearance_mm == pytest.approx(0.05, abs=1e-9)
+    assert PAD.distance(red_copper) == pytest.approx(0.05, abs=1e-9)
+    assert not result.passed
 
 
 # --- bookkeeping ----------------------------------------------------------------------
