@@ -14,7 +14,7 @@ limits, and live in one table at the top of `validate/rules/physical_gap.py`:
 | Copper gap (tracks, pads, vias, fills; same-net included) | < 0.10 mm | `error` |
 | Copper gap | 0.10 to < 0.15 mm | `warning` |
 | Pad-to-pad mask bridge on **2 oz** copper | < 0.20 mm | `error` |
-| THT pad (any drill) or via drilled >= 1.0 mm, to SMD pad; via drilled >= 1.0 mm, to exposed via annulus except a same-net anchor↔anchor pair (`tht_smd_spacing`) | < 2.0 mm / < 2.7 mm | `error` / `warning` |
+| THT pad (any drill) or via drilled >= 1.0 mm, to SMD pad; via drilled >= 1.0 mm, to exposed via annulus except a same-net anchor↔anchor pair (`tht_smd_spacing`) | < 2.032 mm / < 3.05 mm | `error` / `warning` |
 
 Same-net near-parallel copper (e.g. 0.08 mm) is always listed; it uses the same
 tiers. The mask-bridge check needs a known copper weight (stackup or `--copper`);

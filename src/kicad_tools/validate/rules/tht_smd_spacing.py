@@ -2,10 +2,13 @@
 
 JLCDFM flags through-hole pads and vias that sit close to an SMD pad (wave /
 selective-solder and rework clearance). Observed thresholds (epic #8838,
-2026-11-12 -- observed from JLCDFM output, not documented by the fab):
+2026-11-12 -- observed from JLCDFM output, not documented by the fab; thresholds moved to 2.032 / 3.05 mm
+by Issue #9421 after the fab rated two pairs at 2.00 / 2.025 mm as danger that
+the old 2.0 mm floor passed -- 2.032 mm is 80 mil, the likely real limit, from
+one board's Alert value panel, not confirmed):
 
-* gap < :data:`DANGER_MM` (2.0 mm)  -> ``error``   (JLCDFM "danger")
-* gap < :data:`WARNING_MM` (2.7 mm) -> ``warning``
+* gap < :data:`DANGER_MM` (2.032 mm)  -> ``error``   (JLCDFM "danger")
+* gap < :data:`WARNING_MM` (3.05 mm)  -> ``warning``
 
 Measurement reference (a documented choice -- the epic does not say whether
 JLCDFM measures hole centre, hole edge or copper edge): **copper edge to copper
@@ -107,8 +110,8 @@ from .clearance import _pad_on_layer, _pad_polygon
 from .silkscreen import _via_is_tented
 
 TOLERANCE = 0.001
-DANGER_MM = 2.0
-WARNING_MM = 2.7
+DANGER_MM = 2.032
+WARNING_MM = 3.05
 
 #: Drill diameter (mm) at or above which a via is judged like a THT component
 #: pad.  1.0 mm is just under 18 AWG solid wire (1.02 mm): a hole that takes a

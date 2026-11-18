@@ -70,7 +70,18 @@ def via(*, drill, size=1.9, layers='"F.Cu" "B.Cu"', kind=""):
     )
 
 
-@pytest.mark.parametrize(("gap", "severity"), [(1.5, "error"), (2.3, "warning"), (3.0, None)])
+@pytest.mark.parametrize(
+    ("gap", "severity"),
+    [
+        (1.5, "error"),
+        # Issue #9421: the fab rated a 2.025 mm pair danger; the old 2.0 mm floor passed it.
+        (2.025, "error"),
+        (2.3, "warning"),
+        (2.5, "warning"),
+        (3.0, "warning"),
+        (3.06, None),
+    ],
+)
 def test_bands(gap, severity):
     found = check_tht_smd_spacing(board(tht(), smd(gap))).violations
     if severity is None:
