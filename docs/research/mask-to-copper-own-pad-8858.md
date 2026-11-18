@@ -193,6 +193,30 @@ is measured, so the closest copper is always reported. It can overstate. A jog
 segment's end cap shares copper with the entry segment, and is reported at that
 cap's distance.
 
+**Decision (2026-11-17, #9107): keep per-object; a jogged exit stays an
+error.** The fab evidence decides against the union view. JLCDFM's five danger
+items on the #8914 board include two jogged pad exits: item 1 (fab 0 mm,
+"track leaves an 0603-size pad, jogs 45° to a via 1.1 mm away; the track body
+lies along the pad's opening edge") and item 5 (fab 0.08 mm, "track leaves a
+pad and jogs to a via 0.9 mm away"). The fab counts the jog, so kct must keep
+a measured distance for the chained segment itself. A union view — copper
+beyond the entry conductor — reports farther: in the pinned fixture (entry
+0.125 mm past the pad edge, 0.2 mm track, board 03 U1/13 RESET's shape) the
+45° jog moves from 0.025 mm to 0.084 mm (the issue's numbers), and a 30° jog
+to 0.098 mm, out of the 0.09 mm danger band for a shape the fab flags as
+danger. Chaining a conductor to a pad-entry conductor is therefore not a
+disposition: `within_own_pad` keeps refusing any segment with no authored end
+inside the pad, and the jog keeps its per-object verdict. The fully enclosed
+collinear duplicates (board 02 R3/2, R4/2) keep their per-object distance too;
+their copper beyond the entry conductor is empty, so a union view would report
+nothing at all. Per shape, `tests/test_mask_copper_own_pad_8858.py` pins every
+#8914 danger item (1-5) and the U1/13 jog at its per-object distance. No
+threshold, disposition or count changes; the parity row note already records
+that jogged exits stay errors. Whether the entry-allowance tolerance itself
+belongs in this rule — the open question the owner raises against the
+post-#9108 consumer measurement in the #9107 thread — is tracked separately
+in #9305, so the pointer survives this issue's close.
+
 ## Reproduce
 
 ```bash
@@ -218,3 +242,78 @@ KCT_KICAD_DOCKER=1 uv run kct check <board>/output/<name>_routed.kicad_pcb --mfr
 - Pour clearance is not fab-judged (#8938), but that result is about pour gaps.
   It is not about pour beside a mask opening, which is why B fails closed.
 - Fab parity table row `solder_mask_opening_exposing_trace`, v11.
+
+## Residual after the router repairs, and the disjoint class verified against the plot (2026-11-18, main `f77b80fb5`)
+
+Re-measured on the pinned toolchain (`kicad-cli` 10.0.6) after the board-side
+and rule-side fixes that landed since the table above (#9264 entry allowance,
+#9275 route-path slit band, #9295 escape via placement). Two surfaces, because
+the CI gates judge two different artifacts:
+
+- **Fresh CI-recipe regenerations** (`--seed 42`, the `regression-output/`
+  trees the regression gates route from scratch): board 06 **200 / 45 / 444**
+  errors / warnings / info, board 07 **54 / 53 / 412**. Class split, board 06:
+  122 pass-through, 78 own-pad entry; 80 disjoint, 120 overlap. Board 07: 29
+  pass-through, 7 own-pad entry, 18 pour-beside-own-pad overlap (the shape
+  #9284's thermal-spoke class addresses; the zones connect `connect_pads`
+  thermal with a 0.3 mm gap), 7 disjoint, 47 overlap. Reruns of the same
+  output are identical (deterministic).
+- **Committed `output/` PCBs** under the current rule: board 05 121 / 122 /
+  236, board 06 48 / 0 / 133, board 07 67 / 31 / 275. (The two numbers are
+  different artifacts, not before/after of one route: boards 06/07 are
+  re-routed from scratch on each regeneration, and only the fresh tree is
+  what the gates judge. Why fresh 06 is the larger number is not
+  investigated here.)
+
+Wall time, board 05 committed PCB, one run each on a loaded shared worker:
+**122.4 s** with the pass, **42.1 s** with `--skip mask_to_copper`
+(+80 s wall, +46 s user).
+
+The committed evidence above plot-checked the excused (`within_own_pad`)
+findings; the disjoint/error class had only been classified from the rule's
+own messages. All 7 fresh-07 disjoint findings are now checked the same
+black-box way — mask and copper read with the independent Gerbonara oracle
+(the `tests/_mask_gerbonara_oracle.py` object loop, plus the X2 `TO.P` /
+`TO.N` attributes the pinned plot carries), conductor geometry from the
+authored board:
+
+| Opening | Side | Conductor | plot distance | rule verdict |
+|---|---|---|---|---|
+| J3/4 | F | A2 track cap leaving at 45° | 0.09 mm | uncertain (on the boundary) |
+| U4/B5 | F | GND track | 0.0485 mm | violation |
+| U4/B5 | F | GND track | 0.0872 mm | uncertain |
+| J3/7 | B | A5 track cap leaving at 45° | 0.07 mm | violation |
+| U5/13 | F | GND track tangent to the pad edge | ~0 (authored 0.0) | violation |
+| U3/7 | F | same tangent shape | ~0 (authored 0.0) | violation |
+| U2/13 | F | same tangent shape | ~0 (authored 0.0) | violation |
+
+Every opening is exactly its pad (`area(O − P)` = 0; the J3 pads plot as the
+authored 1.5 mm circles). Verdict: **real**. The disjoint measurements are
+same-net track caps and tangents 0–0.09 mm from a real mask opening — all
+inside or on the rule's own danger clearance `c` = 0.09 mm (§ "The
+criterion"). Against the consumer board's observed fab limit the split is
+narrower: five findings inside the fab's 0.08 mm danger band, and two — the
+0.0872 mm and 0.09 mm rows, marked `uncertain` — in its warning band
+(0.08–0.15 mm). The three tangent cases
+are authored-touching (distance 0.0, zero-area contact); the rule's plot
+reconstruction reads a µm-positive distance, so the relation label flips
+touching/disjoint on plot polygonalization. The finding is real in both
+readings: the fab sees copper at ~0 mm from the opening.
+
+Conclusion, in the operator ruling's terms: the residuals are real, so the
+five `--skip mask_to_copper` CI gate skips stay until the boards are repaired
+(the #9326 path). The pour-beside-own-pad overlaps await #9284; the
+overlap-with-excess severity question is the one raised for the rule owner on
+#8858.
+
+Reproduce:
+
+```bash
+KCT_KICAD_DOCKER=1 uv run python scripts/ci/check_matchgroup_coverage.py \
+  boards/07-matchgroup-test --seed 42
+KCT_KICAD_DOCKER=1 uv run kct check \
+  boards/07-matchgroup-test/regression-output/matchgroup_test_routed.kicad_pcb \
+  --mfr jlcpcb --only mask_to_copper --format json
+# pinned plot for the oracle: kicad-cli pcb export gerbers \
+#   --layers F.Cu,B.Cu,F.Mask,B.Mask --no-protel-ext -o out/ <pcb>
+```

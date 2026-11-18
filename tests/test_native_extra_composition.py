@@ -94,3 +94,16 @@ def test_install_nanobind_failure_names_native_extra() -> None:
     assert "kicad-tools[native]" in err
     # And it should warn that a bare install is not lockfile-tracked.
     assert "pip install nanobind" in err
+
+
+def test_pillow_bound_in_all_extra() -> None:
+    """The aggregate ``all`` extra must express the ``pillow>=12`` bound (#9281).
+
+    ``screenshot`` and the ``dev`` group carry it (#9274); ``all`` must too so
+    ``kicad-tools[all]`` does not rely on transitive pillow pins.
+    """
+    data = _load_pyproject()
+    all_extra = data["project"]["optional-dependencies"]["all"]
+    assert "pillow>=12" in [req.replace(" ", "") for req in all_extra], (
+        "the `all` extra must list `pillow>=12` (issues #9274, #9281)"
+    )
