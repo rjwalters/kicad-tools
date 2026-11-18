@@ -237,3 +237,32 @@ def test_kicad_cli_without_declaration_flags_both(tmp_path: Path):
         "PCB text 'LABEL' on F.Silkscreen",
         "Reference field of R1",
     ]
+
+
+# --- kct init (review of PR #9451) -------------------------------------------
+
+
+def _init_dru(directory: Path) -> str:
+    from kicad_tools.cli.init_cmd import init_project
+
+    # ``init_project(target=<dir>/proj)`` writes ``proj.kicad_dru`` into ``<dir>``.
+    assert init_project(target=str(directory / "proj"), manufacturer="jlcpcb", layers=2) == 0
+    return (directory / "proj.kicad_dru").read_text(encoding="utf-8")
+
+
+def test_init_emits_split_rule_beside_declaring_spec(tmp_path: Path):
+    project = tmp_path
+    _write_spec(project, 0.8)
+    assert 'rule "Silkscreen Reference Height - JLCPCB"' in _init_dru(project)
+
+
+def test_init_rerun_keeps_split_rule(tmp_path: Path):
+    project = tmp_path
+    _write_spec(project, 0.8)
+    _init_dru(project)
+    assert 'rule "Silkscreen Reference Height - JLCPCB"' in _init_dru(project)
+
+
+def test_init_without_declaration_has_no_split_rule(tmp_path: Path):
+    project = tmp_path
+    assert "Silkscreen Reference Height" not in _init_dru(project)
