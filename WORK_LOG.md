@@ -16,6 +16,35 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-18
 
+- **PR #9389**: docs: document fix-drc --only mask-copper repair pass in reference docs
+- **PR #9386**: fix(parts): default check_bom quantity_needed to 1 for BOMItem
+- **PR #9385**: fix: emit one row per item in ungrouped JLCPCB/PCBWay BOM export
+- **PR #9339**: fix: skip waived findings in fix-drc --drc-report repair targets
+- **Issue #9384** (closed): docs: cli.md still describes fix-drc as clearance + drill; --only mask-copper is undocumented
+- **Issue #9382** (closed): BOM formatters silently drop designators when group_by_value=False (pre-existing)
+- **Issue #9377** (closed): LCSCClient.check_bom accesses BOMItem.quantity, which schema/bom.BOMItem does not define (kct suggest alternatives crashes on any BOM)
+- **Issue #9326** (closed): No repair path for the fab-parity rules, and fix-drc/prune side effects on waivers (consumer board: 538 check errors, fix-drc finds nothing repairable)
+- **PR #9375**: fix: evaluate the Changelog fragment check against the PR's live labels
+- **PR #9372**: fix: make readiness CPL rotation re-derivation fail visibly, not open
+- **PR #9367**: fix: name the coordinate frame of place-silk-refs placement output
+- **PR #9366**: fix: expand grouped BOM designator cells into one component each
+- **PR #9360**: docs: split red-since date per board in diffpair coverage baseline comment
+- **PR #9359**: fix(router): stop vetoing fold-back repairs against legs earlier repairs removed
+- **PR #9358**: Baseline board 06 mask_to_copper by net signature; drop the diffpair-gate skip
+- **PR #9344**: fix: exempt same-net anchor-anchor via pairs from tht_smd_spacing annulus pairing
+- **PR #9341**: fix: merge JLCPCB BOM lines sharing one LCSC part into a single row
+- **PR #9330**: fix: excuse a reinforce run's own copper in mask_to_copper via the sidecar
+- **PR #9279**: fix: enforce same-net trace slit band in Python escape and lattice via gates
+- **Issue #9371** (closed): Changelog check: two rapid changelog:skip flips can leave a stale verdict under the required name
+- **Issue #9364** (closed): place-silk-refs: RefPlacement reasons quote sheet coordinates next to board-relative positions
+- **Issue #9363** (closed): load_bom_csv treats a grouped BOM row as one component (kct estimate/suggest undercount)
+- **Issue #9356** (closed): Baseline comment: board 04's red-since date in the #9140 AC4 paragraph is off by a day
+- **Issue #9355** (closed): acute_foldback: the plan's base collision model still contains legs its own earlier repairs removed
+- **Issue #9346** (closed): kct readiness --verify: the CPL rotation re-derivation fails open on any unexpected error
+- **Issue #9325** (closed): tht_smd_spacing pairs two same-net pcb reinforce anchors (7 of 11 errors on a consumer board; fab DFM counts none)
+- **Issue #9323** (closed): JLCPCB BOM: lines sharing one LCSC part come up unticked at the fab and are silently not fitted
+- **Issue #9315** (closed): mask_to_copper fails boards on the wire-strip and anchor openings that pcb reinforce creates on purpose (281 of 438 errors on a consumer board)
+- **Issue #9272** (closed): Pure-Python router engines never apply the same-net trace slit-band guard (pad twin is implemented; the C++/Python backends disagree)
 - **PR #9353**: feat: report waiver keys invalidated by pcb prune and fix-drc edits
 - **Issue #9331** (closed): Waiver keys silently orphaned when prune/fix-drc move or merge copper
 - **PR #9328**: test: pin the removed mask-copper u-band arm with discriminating geometry
