@@ -20,7 +20,7 @@
         "USB_MCU_D-"
       ],
       "deterministic_rescue": false,
-      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/b6535/work-final/03-lattice-s42/r0/usb_joystick.kicad_pcb -o /private/tmp/claude-501/b6535/work-final/03-lattice-s42/r0/usb_joystick_routed.kicad_pcb --timeout 2400 --no-cache --route-engine lattice --strategy basic --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --net-class-map /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-6535/boards/03-usb-joystick/output/net_class_map.json --seed 42",
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/b6535/work-final/03-lattice-s42/r0/usb_joystick.kicad_pcb -o /private/tmp/claude-501/b6535/work-final/03-lattice-s42/r0/usb_joystick_routed.kicad_pcb --timeout 2400 --no-cache --route-engine lattice --strategy basic --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --net-class-map .loom/worktrees/issue-6535/boards/03-usb-joystick/output/net_class_map.json --seed 42",
       "exit_code": 3,
       "wall_s": 92.0,
       "killed_by_harness": false,
@@ -201,7 +201,7 @@
         "LVDS4_P"
       ],
       "deterministic_rescue": false,
-      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/b6535/work-final/06b-lattice-s42/r0/diffpair_test.kicad_pcb -o /private/tmp/claude-501/b6535/work-final/06b-lattice-s42/r0/diffpair_test_routed.kicad_pcb --timeout 2400 --no-cache --preserve-existing --route-engine lattice --strategy basic --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --net-class-map /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-6535/boards/06-diffpair-test/output/net_class_map.json --seed 42",
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/b6535/work-final/06b-lattice-s42/r0/diffpair_test.kicad_pcb -o /private/tmp/claude-501/b6535/work-final/06b-lattice-s42/r0/diffpair_test_routed.kicad_pcb --timeout 2400 --no-cache --preserve-existing --route-engine lattice --strategy basic --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --net-class-map .loom/worktrees/issue-6535/boards/06-diffpair-test/output/net_class_map.json --seed 42",
       "exit_code": 3,
       "wall_s": 57.0,
       "killed_by_harness": false,

@@ -537,6 +537,27 @@ void Grid3D::clear_avoidance_costs() {
     }
 }
 
+// Issue #8999: airwire-separation plane verbs.  See the declarations in
+// grid.hpp for the refresh contract (full clear + sparse rewrite, all
+// layers per column).
+void Grid3D::clear_airwire_costs() {
+    for (auto& cell : cells_) {
+        cell.airwire_cost = 0.0f;
+    }
+}
+
+void Grid3D::set_airwire_cells(const std::vector<int>& xs, const std::vector<int>& ys,
+                               const std::vector<float>& costs) {
+    const size_t n = std::min({xs.size(), ys.size(), costs.size()});
+    for (size_t i = 0; i < n; ++i) {
+        const int x = xs[i], y = ys[i];
+        if (!is_valid(x, y, 0)) continue;
+        for (int layer = 0; layer < layers_; ++layer) {
+            at(x, y, layer).airwire_cost = costs[i];
+        }
+    }
+}
+
 void Grid3D::reset_usage() {
     for (auto& cell : cells_) {
         cell.usage_count = 0;
@@ -577,7 +598,11 @@ float Grid3D::get_negotiated_cost(int x, int y, int layer, float present_factor,
     }
 
     float present_cost = present_factor * cell.usage_count;
-    return present_cost + cell.history_cost;
+    // Issue #8999: prospective airwire-separation term (weighted crossing
+    // count of still-unrouted nets' desire lines; 0.0 when the flag is
+    // off, so the sum is unchanged).  Kept beside history so the Python
+    // and C++ negotiated costs stay in parity.
+    return present_cost + cell.history_cost + cell.airwire_cost;
 }
 
 void Grid3D::update_history_costs(float increment) {

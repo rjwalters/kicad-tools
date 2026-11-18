@@ -97,6 +97,7 @@ check_builder() {
     for tok in TARGET_IS_PR CLOSED FROZEN OPERATOR OPEN_PR MERGED_PR TRIAGE; do
         expect "$where builder: $tok refuses"          "$B" "\`$tok\`"
     done
+    expect "$where builder: the guard passes an owned claim itself" "$B" "the guard itself passes your invoker's own claim when \`LOOM_SWEEP_CLAIM_OWNED\` names the number"
     expect "$where builder: invoker's own claim allowed" "$B" "refuse unless your invoker holds this claim (\`LOOM_SWEEP_CLAIM_OWNED\`"
     expect "$where builder: the sweep brief is an ownership signal" "$B" "your brief says \`This /loom:sweep pre-flighted #<number>\`"
     expect "$where builder: operator override is claim-only" "$B" "that overrides these three, never the seven above"

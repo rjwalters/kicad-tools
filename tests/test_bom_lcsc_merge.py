@@ -15,7 +15,11 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.cli.route_lint_gate import _is_kicad_lock
-from kicad_tools.export.bom_formats import read_existing_lcsc_assignments
+from kicad_tools.export.bom_formats import (
+    JLCPCBBOMFormatter,
+    apply_existing_lcsc_assignments,
+    read_existing_lcsc_assignments,
+)
 from kicad_tools.schema.bom import BOMItem
 
 # ---------------------------------------------------------------------------
@@ -153,6 +157,24 @@ class TestReadExistingLcscAssignments:
         result = read_existing_lcsc_assignments(csv_path)
         assert len(result) == 2
 
+    def test_merged_row_registers_constituent_values(self, tmp_path: Path) -> None:
+        """A merged row (issue #9323) joins distinct values with "; " --
+        each constituent must map to the LCSC number so per-value items
+        still match on regeneration."""
+        csv_path = tmp_path / "bom.csv"
+        _write_jlcpcb_csv(
+            csv_path,
+            [
+                ["Green; LED green", "D1,D2,D3", "LED_0603", "C229417"],
+                ["Red", "D4", "LED_0603", "C229418"],
+            ],
+        )
+        result = read_existing_lcsc_assignments(csv_path)
+        assert result[("Green", "LED_0603")] == "C229417"
+        assert result[("LED green", "LED_0603")] == "C229417"
+        assert result[("Green; LED green", "LED_0603")] == "C229417"
+        assert result[("Red", "LED_0603")] == "C229418"
+
 
 # ---------------------------------------------------------------------------
 # Integration: merge step in _generate_bom
@@ -195,6 +217,40 @@ class TestBomLcscMergeIntegration:
         assert items[0].lcsc == "C123456"
         assert items[1].lcsc == "C123456"
         assert items[2].lcsc == "C789012"
+
+    def test_merged_row_round_trip_preserves_lcsc(self, tmp_path: Path) -> None:
+        """format -> read_existing_lcsc_assignments -> apply_existing_lcsc_assignments
+        must survive the merged-row format (issue #9323): regenerating a
+        board whose LCSC numbers live only in the committed CSV keeps them
+        instead of writing empty LCSC cells."""
+        csv_path = tmp_path / "bom_jlcpcb.csv"
+        csv_path.write_text(
+            JLCPCBBOMFormatter().format(
+                [
+                    _make_item("D1", "Green", "LED_0603", lcsc="C229417"),
+                    _make_item("D2", "Green", "LED_0603", lcsc="C229417"),
+                    _make_item("D3", "LED green", "LED_0603", lcsc="C229417"),
+                ]
+            )
+        )
+
+        # Fresh regeneration: same components, LCSC now empty.
+        fresh = [
+            _make_item("D1", "Green", "LED_0603"),
+            _make_item("D2", "Green", "LED_0603"),
+            _make_item("D3", "LED green", "LED_0603"),
+        ]
+        existing = read_existing_lcsc_assignments(csv_path)
+        merged_count, merged_refs = apply_existing_lcsc_assignments(fresh, existing)
+
+        assert merged_count == 3
+        assert merged_refs == {"D1", "D2", "D3"}
+        assert all(item.lcsc == "C229417" for item in fresh)
+
+        # And the regenerated CSV still carries the numbers.
+        rerun = JLCPCBBOMFormatter().format(fresh)
+        assert "C229417" in rerun
+        assert "D1,D2,D3" in rerun
 
     def test_merge_does_not_overwrite_schematic_lcsc(self, tmp_path: Path) -> None:
         """Items that already have an LCSC from the schematic must keep it."""
@@ -594,3 +650,41 @@ class TestPreflightMergeSource:
         src = self._csv(tmp_path / "prev.csv")
         items = self._items(tmp_path, merge_lcsc=False, merge_lcsc_from=src)
         assert items[0].lcsc == ""
+
+
+class TestJLCPCBMergedCommentEmptyValues:
+    """Empty Values must not leak into the merged Comment (issue #9380)."""
+
+    def _rows(self, items):
+        text = JLCPCBBOMFormatter().format(items)
+        return list(csv.DictReader(text.splitlines()))
+
+    def test_empty_value_omitted_from_merged_comment(self) -> None:
+        rows = self._rows(
+            [
+                _make_item("D1", "", "LED_0603", lcsc="C229417"),
+                _make_item("D2", "Green", "LED_0603", lcsc="C229417"),
+            ]
+        )
+        assert len(rows) == 1
+        assert rows[0]["Comment"] == "Green"
+        assert rows[0]["Designator"] == "D1,D2"
+
+    def test_all_empty_group_keeps_empty_comment(self) -> None:
+        rows = self._rows(
+            [
+                _make_item("D1", "", "LED_0603", lcsc="C229417"),
+                _make_item("D2", "", "LED_0603", lcsc="C229417"),
+            ]
+        )
+        assert len(rows) == 1
+        assert rows[0]["Comment"] == ""
+
+    def test_whitespace_only_value_omitted(self) -> None:
+        rows = self._rows(
+            [
+                _make_item("D1", "  ", "LED_0603", lcsc="C229417"),
+                _make_item("D2", "Green", "LED_0603", lcsc="C229417"),
+            ]
+        )
+        assert rows[0]["Comment"] == "Green"

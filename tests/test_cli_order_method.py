@@ -97,7 +97,7 @@ def test_kct_route_parser_order_method_default_none():
     assert args.order_method is None
 
 
-@pytest.mark.parametrize("method", ["greedy", "critical_first", "congestion", "hybrid"])
+@pytest.mark.parametrize("method", ["greedy", "critical_first", "congestion", "hybrid", "regret"])
 def test_kct_route_parser_accepts_each_order_method(method):
     route_parser = _kct_route_subparser()
     args = route_parser.parse_args(["dummy.kicad_pcb", "--order-method", method])
@@ -148,7 +148,7 @@ def test_kct_route_forwards_order_method_when_set():
     assert argv[idx + 1] == "greedy"
 
 
-@pytest.mark.parametrize("method", ["greedy", "critical_first", "congestion", "hybrid"])
+@pytest.mark.parametrize("method", ["greedy", "critical_first", "congestion", "hybrid", "regret"])
 def test_kct_route_forwards_each_order_method(method):
     argv = _run_kct_route_capture_argv(["--order-method", method])
     idx = argv.index("--order-method")
@@ -543,7 +543,7 @@ def test_unsupported_order_method_rejected_before_routing_on_escalation_paths(
     assert "--order-method crossing" in err
 
 
-@pytest.mark.parametrize("method", [None, "crossing"])
+@pytest.mark.parametrize("method", [None, "crossing", "regret"])
 @pytest.mark.parametrize(
     ("path_id", "extra", "dispatch"),
     _ESCALATION_PATHS,
@@ -552,9 +552,10 @@ def test_unsupported_order_method_rejected_before_routing_on_escalation_paths(
 def test_absent_and_crossing_still_dispatch_on_escalation_paths(
     tmp_path, monkeypatch, capsys, path_id, extra, dispatch, method
 ):
-    """Flag-absent and ``crossing`` are untouched by the #5908 gate.
+    """Flag-absent, ``crossing`` and ``regret`` are untouched by the #5908 gate.
 
-    The invocation reaches exactly the expected dispatch target, with no
+    ``regret`` (Issue #9001) joins ``crossing`` in the per-attempt accepted
+    set: the invocation reaches exactly the expected dispatch target, with no
     evaluation route, no ``_apply_order_method`` at dispatch time and no new
     diagnostic.
     """

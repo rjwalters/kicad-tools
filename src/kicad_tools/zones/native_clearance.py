@@ -81,10 +81,23 @@ def write_native_zone_clearance_rules(pcb_path: Path) -> None:
     if "clearance_min" in settings.get("defaults", {}):
         preserve(settings["defaults"]["clearance_min"])
     for footprint in doc.find_all("footprint"):
-        for item in [footprint, *footprint.find_all("pad")]:
-            local = item.find("clearance")
-            if local is not None:
-                preserve(local.get_float(0))
+        local = footprint.find_child("clearance")
+        if local is not None:
+            preserve(local.get_float(0))
+        for pad in footprint.find_all("pad"):
+            local = pad.find_child("clearance")
+            if local is None:
+                continue
+            # Issue #9143: a netless pad (fiducial, mechanical anchor) carries
+            # no electrical clearance contract. Native DRC does not report a
+            # clearance pair for netless copper, and the persisted rules are
+            # net-scoped, so a fiducial's generous manufacturing keepout (the
+            # stock Fiducial_1mm_Mask2mm pad declares 0.6mm against a 0.3mm
+            # zone target) cannot be overridden by them. Netted pads keep the
+            # refusal.
+            if _net_key(pad.find_child("net"), names) is None:
+                continue
+            preserve(local.get_float(0))
 
     # Both zone rules match a pair of unlike-net zones. KiCad selects the
     # last matching custom rule, so emit stronger targets last regardless

@@ -421,7 +421,14 @@ def _population(
             raise SubmissionError("Duplicate or extra CPL reference")
         seen.add(ref)
         assignment = assignments[ref]
-        if row["Val"] != assignment["value"]:
+        # A merged JLCPCB row joins distinct values in Comment (issue
+        # #9323) while the CPL keeps each placement's own value, so
+        # agreement accepts any constituent value of the row.
+        # Empty elements (e.g. from a leading "; ") never count as a
+        # constituent value, so an empty CPL Val is refused (issue #9380).
+        values = [v for v in assignment["value"].split("; ") if v.strip()]
+        values.append(assignment["value"])
+        if row["Val"] not in values:
             raise SubmissionError(
                 f"BOM/CPL value disagrees for {ref}: "
                 f"BOM {assignment['value']!r} vs CPL {row['Val']!r}"
@@ -442,6 +449,9 @@ def _population(
                 "rotation_degrees": _number(row["Rotation"]),
                 "side": str(side),
             }
+            # Each placement's own value, not the merged row's composite
+            # Comment (issue #9323).
+            | {"value": row["Val"]}
         )
     if seen != assignments.keys():
         raise SubmissionError("Missing CPL references")

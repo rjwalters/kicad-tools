@@ -2,6 +2,20 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-17
+
+- **PR #5543**: fix(judge): exclude draft PRs from fallback-mode evaluation
+- **Issue #5535** (closed): judge-fallback-guard.sh does not exclude draft PRs from fallback-mode evaluation
+- **PR #5532**: test(conformance): kicad-cli clearance oracle harness + named fixtures (Epic #5509 Phase 1a)
+- **PR #5531**: perf(analysis): spatially prune net-status segment-adjacency scan
+- **PR #5528**: feat(router): emit RoutingPlan sidecar from two-phase global pass (#5519)
+- **PR #5527**: perf(router): vectorize diff-pair corridor mask dilation
+- **PR #5526**: feat(router): declared swap groups + crossing-minimising pin assignment
+- **PR #5525**: feat(router): pad access sets + Kelvin/competing-net fixture (Epic #5508 Phase 1a)
+- **Issue #5522** (closed): [Epic #5511] Declared swap groups + crossing-minimising pin assignment (report-only)
+- **Issue #5519** (closed): [Epic #5510] router: emit RoutingPlan sidecar from the existing two-phase global pass (report-only, byte-identical copper)
+- **Issue #5516** (closed): [Epic #5508] Phase 1a: `router/pad_access.py` access-set computation + 4-pad Kelvin/competing-net fixture
+
 ### 2026-09-16
 
 - **PR #5512**: ci: pin routed job containers to the kicad slots' sibling-pair cores (6-31,38-63)

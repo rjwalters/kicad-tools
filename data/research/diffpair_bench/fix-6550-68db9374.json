@@ -20,7 +20,7 @@
         "USB_MCU_D-"
       ],
       "deterministic_rescue": false,
-      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/work-after/03-lattice-s42/r0/usb_joystick.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/work-after/03-lattice-s42/r0/usb_joystick_routed.kicad_pcb --timeout 3600 --no-cache --route-engine lattice --strategy basic --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --net-class-map /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-6550/boards/03-usb-joystick/output/net_class_map.json --seed 42",
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/work-after/03-lattice-s42/r0/usb_joystick.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/work-after/03-lattice-s42/r0/usb_joystick_routed.kicad_pcb --timeout 3600 --no-cache --route-engine lattice --strategy basic --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --net-class-map .loom/worktrees/issue-6550/boards/03-usb-joystick/output/net_class_map.json --seed 42",
       "exit_code": 3,
       "wall_s": 228.6,
       "killed_by_harness": false,
@@ -201,7 +201,7 @@
         "LVDS4_P"
       ],
       "deterministic_rescue": false,
-      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/work-after/06b-lattice-s42/r0/diffpair_test.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/work-after/06b-lattice-s42/r0/diffpair_test_routed.kicad_pcb --timeout 3600 --no-cache --preserve-existing --route-engine lattice --strategy basic --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --net-class-map /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-6550/boards/06-diffpair-test/output/net_class_map.json --seed 42",
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/work-after/06b-lattice-s42/r0/diffpair_test.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/work-after/06b-lattice-s42/r0/diffpair_test_routed.kicad_pcb --timeout 3600 --no-cache --preserve-existing --route-engine lattice --strategy basic --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --net-class-map .loom/worktrees/issue-6550/boards/06-diffpair-test/output/net_class_map.json --seed 42",
       "exit_code": 3,
       "wall_s": 85.7,
       "killed_by_harness": false,
@@ -484,7 +484,7 @@
         "USB3_TX2-"
       ],
       "deterministic_rescue": false,
-      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/work-after/06rf-lattice-s42/r0/diffpair_test.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/work-after/06rf-lattice-s42/r0/diffpair_test_routed.kicad_pcb --timeout 3600 --no-cache --route-engine lattice --strategy basic --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --net-class-map /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-6550/boards/06-diffpair-test/regression-fixture/net_class_map.json --seed 42",
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/work-after/06rf-lattice-s42/r0/diffpair_test.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/work-after/06rf-lattice-s42/r0/diffpair_test_routed.kicad_pcb --timeout 3600 --no-cache --route-engine lattice --strategy basic --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --net-class-map .loom/worktrees/issue-6550/boards/06-diffpair-test/regression-fixture/net_class_map.json --seed 42",
       "exit_code": 4,
       "wall_s": 544.3,
       "killed_by_harness": false,
@@ -922,7 +922,7 @@
         "TMDS_D2_P"
       ],
       "deterministic_rescue": false,
-      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/work-after/07rf-lattice-s42/r0/matchgroup_test.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/work-after/07rf-lattice-s42/r0/matchgroup_test_routed.kicad_pcb --timeout 3600 --no-cache --route-engine lattice --strategy basic --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --net-class-map /Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-6550/boards/07-matchgroup-test/regression-fixture/net_class_map.json --seed 42",
+      "cmd": "-m kicad_tools.cli route /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/work-after/07rf-lattice-s42/r0/matchgroup_test.kicad_pcb -o /private/tmp/claude-501/-Users-rwalters-GitHub-kicad-tools/51db8c7f-f861-40df-a6d1-1c379db3582e/scratchpad/work-after/07rf-lattice-s42/r0/matchgroup_test_routed.kicad_pcb --timeout 3600 --no-cache --route-engine lattice --strategy basic --differential-pairs --layers 4 --no-auto-layers --deterministic-budget --per-net-iterations 1000000 --no-placement-delta-feedback --net-class-map .loom/worktrees/issue-6550/boards/07-matchgroup-test/regression-fixture/net_class_map.json --seed 42",
       "exit_code": 3,
       "wall_s": 166.4,
       "killed_by_harness": false,

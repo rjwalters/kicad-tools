@@ -312,6 +312,143 @@ def _rewaive_candidates(entry: Waiver, findings: Iterable[DRCViolation]) -> list
     return sorted(keys)
 
 
+# Cap on the invalidated keys listed by the copper-edit waiver report
+# (``kct pcb prune`` / ``kct fix-drc``, Issue #9331); the tail is summarised
+# as ``+M more``.
+MAX_INVALIDATED_LISTED = 5
+
+
+@dataclass(frozen=True)
+class InvalidatedWaiver:
+    """One waiver entry a copper edit orphaned (Issue #9331).
+
+    Attributes:
+        key: The entry's finding key (keyed entries); ``None`` for legacy
+            ``rule``/``items``/``nets`` entries, which carry no key.
+        rule: The rule id the entry was written against.
+        scope: Human-readable description of what the entry names
+            (:attr:`Waiver.scope`).
+        rewaive_candidate: The after-state finding key to re-waive, when
+            exactly one active finding carries the same rule, nets, layer
+            and item kinds as the invalidated entry; ``None`` when the
+            finding is gone or several findings qualify.
+    """
+
+    key: str | None
+    rule: str
+    scope: str
+    rewaive_candidate: str | None = None
+
+
+def _used_entry_indices(findings: Iterable[DRCViolation], waivers: Waivers) -> set[int]:
+    """Indices of ``waivers`` entries that actually waive a finding.
+
+    Mirrors :func:`apply_waivers`' match loop exactly: already-waived
+    findings are skipped, the first entry that names a finding *and* whose
+    evidence matches wins, and an evidence-bound entry whose hash differs
+    (stale) does not count as used.
+    """
+    used: set[int] = set()
+    for v in findings:
+        if v.waived:
+            continue
+        for idx, entry in enumerate(waivers.entries):
+            if not entry.matches(v):
+                continue
+            if entry.evidence_matches(v):
+                used.add(idx)
+                break
+    return used
+
+
+def _invalidated_candidates(entry: Waiver, after_findings: list[DRCViolation]) -> list[str]:
+    """After-state keys an invalidated ``entry`` could be re-waived against.
+
+    Reuses :func:`_rewaive_candidates` (which covers old-coarse-name ->
+    geometry-key transitions) and, for geometry-keyed entries it does not
+    handle, names the active findings whose key coarsens to the same
+    rule/items-kinds/nets/layer tuple (:func:`_coarsen_key`) -- the same
+    finding after an edit moved or merged its copper.
+    """
+    candidates = _rewaive_candidates(entry, after_findings)
+    if candidates or entry.key is None:
+        return candidates
+    coarse = _coarsen_key(entry.key)
+    keys: set[str] = set()
+    for v in after_findings:
+        if v.waived or not isinstance(v, DRCViolation):
+            continue
+        key = getattr(v, "key", "")
+        if key and _coarsen_key(key) == coarse:
+            keys.add(key)
+    return sorted(keys)
+
+
+def invalidated_waiver_keys(
+    before_findings: Iterable[DRCViolation],
+    after_findings: Iterable[DRCViolation],
+    waivers: Waivers,
+) -> list[InvalidatedWaiver]:
+    """Waiver entries a copper edit invalidated, in sidecar order (Issue #9331).
+
+    An entry is *invalidated* when it waived a finding in the before-state
+    (:func:`_used_entry_indices`, the same matching
+    :func:`apply_waivers` performs on ``kct check``'s findings) and waives
+    nothing in the after-state.  Entries that were already unused before
+    the edit are not reported; an entry that still waives its finding
+    (possibly through a different finding that re-filled its slot) is not
+    either.
+
+    ``before_findings`` / ``after_findings`` must come from the same
+    findings pipeline for both states (e.g. ``kct check``'s rule set run on
+    the board before and after the edit).
+    """
+    before_used = _used_entry_indices(before_findings, waivers)
+    after_used = _used_entry_indices(after_findings, waivers)
+    if not before_used - after_used:
+        return []
+    after_list = list(after_findings)
+    out: list[InvalidatedWaiver] = []
+    for idx, entry in enumerate(waivers.entries):
+        if idx not in before_used or idx in after_used:
+            continue
+        candidates = _invalidated_candidates(entry, after_list)
+        out.append(
+            InvalidatedWaiver(
+                key=entry.key,
+                rule=entry.rule,
+                scope=entry.scope,
+                rewaive_candidate=candidates[0] if len(candidates) == 1 else None,
+            )
+        )
+    return out
+
+
+def format_invalidated_waivers(invalidated: Iterable[InvalidatedWaiver]) -> list[str]:
+    """Render :func:`invalidated_waiver_keys`' result as report lines.
+
+    Empty when nothing was invalidated, so callers stay silent for free.
+    """
+    items = list(invalidated)
+    if not items:
+        return []
+    lines = [
+        f"Waiver report: {len(items)} waiver key(s) invalidated by this edit "
+        "(they waived a finding before; they match nothing now):"
+    ]
+    shown = items[:MAX_INVALIDATED_LISTED]
+    for it in shown:
+        named = it.key if it.key is not None else it.scope
+        line = f"  - {named} (rule {it.rule})"
+        if it.rewaive_candidate:
+            line += f" -> re-waive candidate: {it.rewaive_candidate}"
+        lines.append(line)
+    more = len(items) - len(shown)
+    if more > 0:
+        lines.append(f"  (+{more} more)")
+    return lines
+
+
 @dataclass(frozen=True)
 class Waiver:
     """A single general waiver entry.

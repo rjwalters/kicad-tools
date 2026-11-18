@@ -108,7 +108,42 @@ def test_native_clearance_preserves_stronger_pad_clearance(tmp_path):
     from kicad_tools.zones.native_clearance import write_native_zone_clearance_rules
 
     pcb = tmp_path / "board.kicad_pcb"
-    pcb.write_text(BOARD[:-1] + '\n(footprint "Probe" (pad "1" smd rect (clearance 0.6))))')
+    # Issue #9143: the over-target pad is netted, so the refusal stands.
+    pcb.write_text(
+        BOARD[:-1] + '\n(footprint "Probe" (pad "1" smd rect (clearance 0.6) (net 1 "GND"))))'
+    )
+    with pytest.raises(ValueError, match="stronger"):
+        write_native_zone_clearance_rules(pcb)
+    assert not pcb.with_suffix(".kicad_dru").exists()
+
+
+def test_native_clearance_exempts_netless_pad_clearance(tmp_path):
+    """Issue #9143: a stock fiducial pad (netless, 0.6mm keepout) does not refuse."""
+    from kicad_tools.zones.native_clearance import write_native_zone_clearance_rules
+
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text(
+        BOARD[:-1]
+        + '\n(footprint "Fiducial:Fiducial_1mm_Mask2mm"'
+        + ' (pad "" smd circle (clearance 0.6) (layers "F.Cu" "F.Mask"))))'
+    )
+    write_native_zone_clearance_rules(pcb)
+    rules = pcb.with_suffix(".kicad_dru").read_text()
+    assert "A.NetName == 'GND'" in rules
+    assert "(min 0.3mm)" in rules
+
+
+def test_native_clearance_netless_pad_does_not_mask_a_netted_one(tmp_path):
+    """Issue #9143: a netless sibling must not excuse a netted over-target pad."""
+    from kicad_tools.zones.native_clearance import write_native_zone_clearance_rules
+
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text(
+        BOARD[:-1]
+        + '\n(footprint "Fiducial:Fiducial_1mm_Mask2mm"'
+        + ' (pad "" smd circle (clearance 0.6) (layers "F.Cu" "F.Mask")))'
+        + '\n(footprint "Probe" (pad "1" smd rect (clearance 0.5) (net 1 "GND"))))'
+    )
     with pytest.raises(ValueError, match="stronger"):
         write_native_zone_clearance_rules(pcb)
     assert not pcb.with_suffix(".kicad_dru").exists()

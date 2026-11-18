@@ -384,14 +384,14 @@ class TestSelectRoutedPcbs:
         assert result.base != "main"
         assert result.base != c1
 
-    @pytest.mark.parametrize("event_name", ["schedule", "workflow_dispatch"])
+    @pytest.mark.parametrize("event_name", ["schedule", "workflow_dispatch", "merge_group"])
     def test_main_run_events_scan_every_routed_pcb(
         self, srp, repo: GitRepo, event_name: str
     ) -> None:
-        """Issue #5986: main is verified by scheduled / dispatched runs that
-        cover a batch of merges and carry no before/after pair. Every routed
-        PCB in the tree is selected -- including one added several commits
-        before the verified head, and the native Board04 one."""
+        """Full-scan events verify every routed PCB in the checked-out tree,
+        including one added several commits before the verified head and the
+        native Board04 one. Merge groups must meet the same invariant as
+        scheduled / dispatched main runs (issue #5986)."""
         repo.write("boards/03-x/output/x_routed.kicad_pcb")
         repo.commit("c1: board 03")
         repo.write(srp.NATIVE_BOARD_RELATIVE_PATH)
@@ -405,7 +405,7 @@ class TestSelectRoutedPcbs:
         assert result.ordinary_files == ["boards/03-x/output/x_routed.kicad_pcb"]
         assert result.native_files == [srp.NATIVE_BOARD_RELATIVE_PATH]
 
-    @pytest.mark.parametrize("event_name", ["schedule", "workflow_dispatch"])
+    @pytest.mark.parametrize("event_name", ["schedule", "workflow_dispatch", "merge_group"])
     def test_main_run_events_ignore_push_and_pr_args(
         self, srp, repo: GitRepo, event_name: str
     ) -> None:
@@ -415,13 +415,37 @@ class TestSelectRoutedPcbs:
         result = srp.select_routed_pcbs(repo.root, event_name, c2, push_before=c2, pr_head_sha=c1)
         assert result.ordinary_files == ["boards/05-y/output/y_routed.kicad_pcb"]
 
-    @pytest.mark.parametrize("event_name", ["schedule", "workflow_dispatch"])
+    @pytest.mark.parametrize("event_name", ["schedule", "workflow_dispatch", "merge_group"])
     def test_main_run_events_unresolvable_head_raises(
         self, srp, repo: GitRepo, event_name: str
     ) -> None:
         repo.commit("c1")
         with pytest.raises(srp.GitCommandError):
             srp.select_routed_pcbs(repo.root, event_name, "f" * 40)
+
+    def test_merge_group_scans_preexisting_boards_and_all_group_members(
+        self, srp, repo: GitRepo
+    ) -> None:
+        existing_board = "boards/03-x/output/x_routed.kicad_pcb"
+        first_member_board = "boards/05-y/output/y_routed.kicad_pcb"
+        second_member_board = "boards/06-z/output/z_routed.kicad_pcb"
+        repo.write(existing_board)
+        repo.write(srp.NATIVE_BOARD_RELATIVE_PATH)
+        base = repo.commit("existing boards on main")
+        repo.checkout(base, new_branch="first-member")
+        repo.write(first_member_board)
+        repo.commit("first member's board")
+        repo.checkout(base, new_branch="second-member")
+        repo.write(second_member_board)
+        repo.commit("second member's board")
+        repo.checkout("main")
+        repo.merge("first-member")
+        group_head = repo.merge("second-member")
+
+        result = srp.select_routed_pcbs(repo.root, "merge_group", group_head, fallback_ref="main")
+
+        assert result.ordinary_files == [existing_board, first_member_board, second_member_board]
+        assert result.native_files == [srp.NATIVE_BOARD_RELATIVE_PATH]
 
     def test_main_run_events_are_the_ci_yml_non_pr_triggers(self, srp) -> None:
         """Every non-PR trigger of ci.yml must be a full-scan event, so a new
@@ -508,11 +532,12 @@ class TestMainCli:
         assert "native_files<<SELECT_ROUTED_PCBS_EOF" in content
         assert "ordinary_files<<SELECT_ROUTED_PCBS_EOF" in content
 
-    def test_schedule_event_cli_needs_no_event_specific_args(
-        self, srp, repo: GitRepo, tmp_path: Path
+    @pytest.mark.parametrize("event_name", ["schedule", "workflow_dispatch", "merge_group"])
+    def test_full_scan_event_cli_needs_no_event_specific_args(
+        self, srp, repo: GitRepo, tmp_path: Path, event_name: str
     ) -> None:
-        """The workflow passes only --event-name/--sha on schedule and
-        workflow_dispatch (Issue #5986); that must succeed and select the
+        """Full-scan events need only --event-name/--sha, without PR or push
+        metadata (Issue #5986); that must succeed and select the
         routed boards in the tree."""
         repo.write("boards/05-y/output/y_routed.kicad_pcb")
         repo.commit("board 05")
@@ -521,7 +546,7 @@ class TestMainCli:
         rc = srp.main(
             [
                 "--event-name",
-                "schedule",
+                event_name,
                 "--sha",
                 head,
                 "--repo-root",

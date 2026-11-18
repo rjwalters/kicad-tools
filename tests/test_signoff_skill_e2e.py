@@ -35,6 +35,8 @@ from pathlib import Path
 
 import pytest
 
+from kicad_tools.native_concurrency import ENV_HELD, native_slot
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL = REPO_ROOT / "src" / "kicad_tools" / "agent_skills" / "kct" / "manufacturing-readiness.md"
 BOARD_DIR = REPO_ROOT / "boards" / "00-simple-led" / "output"
@@ -212,14 +214,22 @@ def _run_case(case: str, root: Path) -> dict:
         )
     results: dict[int, subprocess.CompletedProcess[str]] = {}
     for gate in GATES:
-        results[gate] = subprocess.run(
-            ["bash", "-c", _render(blocks[gate], pcb, out_dir)],
-            cwd=REPO_ROOT,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=240,
-        )
+        # Gate 2 runs ``"$KICAD_CLI" pcb drc`` straight from bash, which the
+        # in-process ``_GatedPopen`` never sees (#9128).  Charge each gate run
+        # against KCT_NATIVE_MAX_CONCURRENCY once, here.  ``native_slot`` does
+        # not mark the child, so set ENV_HELD ourselves when a permit is held:
+        # otherwise the ``kct`` children of Gates 1 and 3 would take a second
+        # permit and double-charge the subtree.  No-op when the limit is unset.
+        with native_slot() as permit:
+            gate_env = {**env, ENV_HELD: "1"} if permit.bounded else env
+            results[gate] = subprocess.run(
+                ["bash", "-c", _render(blocks[gate], pcb, out_dir)],
+                cwd=REPO_ROOT,
+                env=gate_env,
+                capture_output=True,
+                text=True,
+                timeout=240,
+            )
     return {"pcb": pcb, "out_dir": out_dir, "results": results}
 
 

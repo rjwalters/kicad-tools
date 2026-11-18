@@ -16,7 +16,6 @@
 # error or, if it is a false positive, add a targeted ``# type: ignore[code]``
 # with a comment, which removes it from the report entirely.
 
-src/kicad_tools/acceleration/backend.py	import-not-found	Cannot find implementation or library stub for module named "cupyx"
 src/kicad_tools/acceleration/backend.py	no-any-return	Returning Any from function declared to return "bool"
 src/kicad_tools/acceleration/backend.py	no-any-return	Returning Any from function declared to return "ndarray[tuple[Any, ...], dtype[Any]]"
 src/kicad_tools/acceleration/backend.py	no-any-return	Returning Any from function declared to return "ndarray[tuple[Any, ...], dtype[Any]]"
@@ -257,7 +256,6 @@ src/kicad_tools/cost/suggest.py	assignment	Incompatible types in assignment (exp
 src/kicad_tools/datasheet/cache.py	no-any-return	Returning Any from function declared to return "int"
 src/kicad_tools/datasheet/parser.py	assignment	Incompatible types in assignment (expression has type "Iterable[int]", variable has type "range")
 src/kicad_tools/datasheet/parser.py	assignment	Incompatible types in assignment (expression has type "Iterable[int]", variable has type "range")
-src/kicad_tools/datasheet/parser.py	import-not-found	Cannot find implementation or library stub for module named "fitz"
 src/kicad_tools/datasheet/parser.py	import-not-found	Cannot find implementation or library stub for module named "markitdown"
 src/kicad_tools/datasheet/parser.py	import-not-found	Cannot find implementation or library stub for module named "pdfplumber"
 src/kicad_tools/datasheet/parser.py	import-untyped	Library stubs not installed for "pandas"
@@ -358,7 +356,6 @@ src/kicad_tools/intent/interfaces/usb.py	no-any-return	Returning Any from functi
 src/kicad_tools/ipc/board.py	no-any-return	Returning Any from function declared to return "list[dict[str, Any]]"
 src/kicad_tools/ipc/board.py	no-any-return	Returning Any from function declared to return "list[dict[str, Any]]"
 src/kicad_tools/ipc/board.py	no-any-return	Returning Any from function declared to return "list[dict[str, Any]]"
-src/kicad_tools/ipc/client.py	import-not-found	Cannot find implementation or library stub for module named "pynng"
 src/kicad_tools/ipc/client.py	no-any-return	Returning Any from function declared to return "list[dict[str, Any]]"
 src/kicad_tools/ipc/client.py	no-any-return	Returning Any from function declared to return "str"
 src/kicad_tools/ipc/transactions.py	no-any-return	Returning Any from function declared to return "list[str]"
@@ -585,7 +582,6 @@ src/kicad_tools/performance.py	import-untyped	Library stubs not installed for "p
 src/kicad_tools/performance.py	no-any-return	Returning Any from function declared to return "float"
 src/kicad_tools/performance.py	unused-ignore	Unused "type: ignore" comment
 src/kicad_tools/physics/timing.py	arg-type	Argument "net_name" to "TimingBudget" has incompatible type "float"; expected "str"
-src/kicad_tools/placement/bo_strategy.py	union-attr	Item "None" of "Any | None" has no attribute "complete_trial"
 src/kicad_tools/placement/cmaes_strategy.py	import-untyped	Skipping analyzing "cmaes": module is installed, but missing library stubs or py.typed marker
 src/kicad_tools/placement/cpp_backend.py	attr-defined	Module "kicad_tools.placement" has no attribute "placement_cpp"
 src/kicad_tools/placement/cpp_backend.py	no-any-return	Returning Any from function declared to return "float"

@@ -1214,6 +1214,26 @@ def main() -> int:
         # spoke fails native DRC instead of being repaired into solid copper.
         apply_pad_thermal_overrides(routed_path)
 
+        # Step 5.48 (#8532 / #9143): global fiducials and a board-ID
+        # silkscreen, so the default-on ``fiducials_missing`` /
+        # ``board_id_missing`` rules stop blocking a fresh readiness receipt.
+        # This MUST run before the Step 5.5 fill: the fill has to honour the
+        # fiducial pads' keepout so the saved fill matches a native refill
+        # (#7356).  Board 03 is the only board filled under
+        # ``native_clearance=True`` (#5326); the stock Fiducial_1mm_Mask2mm
+        # pads are netless with a 0.6mm keepout, which ``preserve`` used to
+        # refuse as a stronger contract -- netless pads are exempt there since
+        # #9143, so the stock footprint lands without weakening the 0.3mm
+        # zone target.  The board-ID text reads ``rev`` from the PCB title
+        # block that generate_pcb.py writes.
+        from kicad_tools.cli.pcb_add_board_info import run_add_board_info
+        from kicad_tools.cli.pcb_add_fiducials import run_add_fiducials
+
+        if run_add_fiducials(routed_path, sides="populated") != 0:
+            raise RuntimeError("pcb add-fiducials failed")
+        if run_add_board_info(routed_path, auto=True) != 0:
+            raise RuntimeError("pcb add-board-info failed")
+
         # Step 5.5: Fill the zone polygons in the routed PCB so DRC's
         # ``connectivity`` rule sees the power-net pads as connected.  This
         # MUST run after Step 5.4 (new GND stitching vias) and Step 5.45

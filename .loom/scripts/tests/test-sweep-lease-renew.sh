@@ -319,7 +319,7 @@ reset_state() {
     # path must not inherit them -- otherwise "newest wins" tests silently
     # become exact-match tests against identity values the fixtures were
     # never written to match.
-    unset LOOM_TERMINAL_ID LOOM_HOST_ID LOOM_LEASE_PUBLISH_HOSTNAME HOSTNAME 2> /dev/null || true
+    unset LOOM_TERMINAL_ID LOOM_HOST_ID LOOM_LEASE_HOST_ID LOOM_LEASE_PUBLISH_HOSTNAME HOSTNAME 2> /dev/null || true
     # Same reason for the gh-call attribution vars (#10139): test (x) sets them
     # deliberately; everything else must start from an absent pair.
     unset LOOM_SWEEP_ID LOOM_ROLE 2> /dev/null || true
@@ -583,6 +583,31 @@ sleep 0.5
 kill "$LOOP_PID_J" 2> /dev/null || true
 assert_true "$([[ -f "$STUB_DIR/patch-10-1.body" ]] && echo true || echo false)" "(j) start renewed its OWN lease comment (id 10), not the newer peer comment"
 assert_true "$([[ ! -f "$STUB_DIR/patch-99-1.body" ]] && echo true || echo false)" "(j) start did NOT renew the peer's newer lease comment (id 99)"
+
+# --- (j2) LOOM_LEASE_HOST_ID outranks LOOM_HOST_ID in that auto-resolution -
+# A session in a container is handed its dispatcher's lease host id; the
+# lease to renew is the one published under THAT host, not under the
+# telemetry host id or the container's hostname.
+reset_state
+cat > "$STUB_DIR/comments.json" <<JSON
+[
+  {"id": 11, "body": "<!-- loom:lease host=${OWN_OPAQUE_HOST} sweep=sweep-mine-1001 -->\nprose"},
+  {"id": 98, "body": "<!-- loom:lease host=$(compute_opaque_host_id other-host) sweep=sweep-mine-1001 -->\nprose"}
+]
+JSON
+sleep 4 &
+WATCH_PID_J2=$!
+export LOOM_LEASE_HOST_ID="$OWN_RAW_HOST" LOOM_HOST_ID="other-host"
+export LOOM_TERMINAL_ID="daemon-sweep-mine-1001"
+LOOP_PID_J2="$("$SCRIPT" start 6485 --interval 1 --watch-pid "$WATCH_PID_J2" 2> "$STUB_DIR/start-j2-stderr.log")"
+unset LOOM_LEASE_HOST_ID LOOM_HOST_ID LOOM_TERMINAL_ID
+wait_until test -f "$STUB_DIR/patch-11-1.body"
+kill "$WATCH_PID_J2" 2> /dev/null || true
+wait "$WATCH_PID_J2" 2> /dev/null || true
+sleep 0.5
+kill "$LOOP_PID_J2" 2> /dev/null || true
+assert_true "$([[ -f "$STUB_DIR/patch-11-1.body" ]] && echo true || echo false)" "(j2) start renewed the lease under LOOM_LEASE_HOST_ID's host (id 11)"
+assert_true "$([[ ! -f "$STUB_DIR/patch-98-1.body" ]] && echo true || echo false)" "(j2) start did NOT renew the LOOM_HOST_ID host's lease (id 98)"
 
 # --- (k) start's loop stops as soon as its own-yield guard fires ----------
 echo ""

@@ -67,6 +67,61 @@ def via_travel_mm(via, segments, elevations: dict[str, float]) -> float:
     return max(depths) - min(depths)
 
 
+def matched_length_mm(measurement, segments, vias_by_index, elevations: dict[str, float]) -> float:
+    """Matched length of one net: pad-to-pad copper path plus its via travel.
+
+    The single definition shared by the gate and by
+    ``tests/test_board07_byte0_physical_spread.py`` so the two cannot disagree
+    (Issue #9198). ``measurement`` is a ``measure_net_path`` result whose
+    ``path_length_mm`` is not None; the caller reports that error itself.
+    """
+    return measurement.path_length_mm + sum(
+        via_travel_mm(vias_by_index[index], segments, elevations)
+        for index in measurement.path_via_indices
+    )
+
+
+# Off-path copper above this does not count toward matched length and is
+# an error (Issue #9117).  Source of the margin: with contact links charged
+# the distance they span (the #9117 review's weighting fix), defect-free
+# nets on the committed copper measure 0.13-2.08 mm of residual copper,
+# scaling with each net's length-matching staircase (SDNRAS 1.57 mm on
+# 206 micro-steps; SDCKE1, the highest, 2.08 mm on 322).  SDCKE1's 360
+# segments form one simple pad-to-pad chain with no dead end and no
+# branch, so its residual is not a defect: it is barrel-overlap and the
+# staircase steps the pad-to-pad path shortcuts diagonally (Issue #9175).
+# Measured decomposition of SDCKE1's residual (Issue #9182): the
+# pad-to-pad path covers 48.79 mm of track plus 18.94 mm of contact
+# chords, skipping 21.02 mm of copper -- 20.51 mm of it staircase
+# micro-steps the path cuts diagonally across capsule overlaps (leg
+# minus chord), 0.51 mm near-parallel duplicate escape dashes, 0.00 mm
+# in-pad copper; skipped minus chords equals the 2.0759 mm residual
+# exactly.  At this board's 0.05 mm dash / 0.18 mm width encoding the
+# staircase share grows ~0.0045 mm per step, so a denser or taller
+# staircase can push a defect-free net toward this limit: after
+# re-routing a matched net's staircase, re-run this script and re-check
+# the worst defect-free net's margin (each net's residual is reported as
+# off_path_mm in validation.json).  No per-link weighting removes the
+# staircase share -- the deficit is a property of the route picked
+# (skipped legs minus chords), not of any single link, and surcharging
+# links to zero it inflates matched length by the same copper (Issue
+# #9182).  Beyond this limit is copper the signal never travels on the
+# path: a dead-end loop, an overlapping duplicate or a stub.  The
+# DQ7/LDQM same-net loops of #9117 measured ~6.3 and ~7.2 mm before the
+# #9118 repair (PR #9139), so 2.5 mm keeps ~20% headroom over the worst
+# defect-free net while sitting over 2.5x below the smallest real defect.
+OFF_PATH_TOLERANCE_MM = 2.5
+
+
+def off_path_error(net_name: str, off_path_mm: float) -> str:
+    """Error for matched-net copper on no pad-to-pad path (Issue #9117)."""
+    return (
+        f"{net_name}: {off_path_mm:.3f} mm of copper lies off the pad-to-pad path "
+        f"(dead-end loop, duplicate or stub) and is excluded from match length; "
+        f"limit {OFF_PATH_TOLERANCE_MM:.1f} mm"
+    )
+
+
 def via_barrel_capacitance_pf(
     pad_diameter_mm: float,
     antipad_diameter_mm: float,
@@ -502,7 +557,9 @@ def check(candidate: Path, source: Path, evidence: Path) -> bool:
         if set(via.layers) != {"F.Cu", "B.Cu"} or via.via_type is not None:
             errors.append(f"Nonstandard via span/type at {via.position}: {via.layers}")
     analyzer = TraceLengthAnalyzer()
+    vias_by_index = dict(enumerate(board.vias))
     lengths = {}
+    off_paths = {}
     impedance = {}
     trace_capacitance = {}
     external_loads = {}
@@ -522,9 +579,20 @@ def check(candidate: Path, source: Path, evidence: Path) -> bool:
                 errors.append(
                     f"{name}: trunk on {segment.layer} violates data/control layer separation"
                 )
-        lengths[name] = report.total_length_mm + sum(
-            via_travel_mm(via, segments, elevations) for via in board.vias_in_net(net.number)
-        )
+        # Matched length is the physical pad-to-pad copper path plus the
+        # vertical travel of the vias that path runs through -- never the
+        # sum of all copper on the net, which would count dead-end loops,
+        # overlapping duplicates and stubs the signal never travels as
+        # matched length and hide real skew (Issue #9117).
+        measurement = analyzer.measure_net_path(board, name)
+        if measurement.path_length_mm is None:
+            errors.append(f"{name}: no connected pad-to-pad copper path for match length")
+            continue
+        lengths[name] = matched_length_mm(measurement, segments, vias_by_index, elevations)
+        off_path = measurement.off_path_length_mm or 0.0
+        off_paths[name] = round(off_path, 4)
+        if off_path > OFF_PATH_TOLERANCE_MM:
+            errors.append(off_path_error(name, off_path))
         dimensions = {(s.layer, s.width) for s in segments}
         measured = []
         capacitance_pf = 0.0
@@ -673,6 +741,7 @@ def check(candidate: Path, source: Path, evidence: Path) -> bool:
         "status": "pass" if not errors else "blocked",
         "errors": errors,
         "lengths_including_vias_mm": lengths,
+        "off_path_mm": off_paths,
         "impedance": impedance,
         "trace_capacitance_pf": trace_capacitance,
         "external_load_estimates": external_loads,

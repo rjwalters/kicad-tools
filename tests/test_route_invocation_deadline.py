@@ -58,7 +58,10 @@ raise SystemExit(route_cmd._in_process_main([]))
     )
     assert time.monotonic() - started < 32
     report = json.loads(output.with_suffix(".timeout.json").read_text())
-    assert time.monotonic() - report["optimization_started_at"] < 4
+    # No absolute elapsed bound here (#9287): the post-arm wall-clock window
+    # (timer + signal + unwind + save + report read) overran 4 s once on a
+    # loaded hosted runner. Unwind/save are proven below by
+    # interrupted_function/snapshot_saved; only the < 32 watchdog stays.
     assert report["status"] == "partial"
     assert report["stage"] == "optimization"
     assert report["interrupted_function"] == "expensive_cleanup"
