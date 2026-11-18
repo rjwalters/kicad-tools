@@ -71,9 +71,27 @@ DFM_THRESHOLD_NAMES: tuple[str, ...] = (
 DFM_OZ_SNAP_TOLERANCE = 0.1
 
 #: Smallest reference-designator height (mm) a project may declare for itself
-#: (Issue #9448).  Below this no supported fab prints a legible character, so
-#: the declaration is rejected rather than recorded.
+#: (Issue #9448).  0.8 mm is the size the issue asks for and equals the
+#: PCBWay/Seeed/FlashPCB silkscreen floor; it is not a legibility threshold for
+#: every fab (JLCPCB publishes 1.0 mm, OSHPark 0.762 mm).  A smaller declaration
+#: is rejected rather than recorded.
 MIN_DECLARED_REFERENCE_HEIGHT_MM = 0.8
+
+
+def is_valid_declared_reference_height(value: object) -> bool:
+    """True for a finite real number >= ``MIN_DECLARED_REFERENCE_HEIGHT_MM``.
+
+    The single definition of a valid ``silkscreen_min_reference_height_mm``
+    (Issue #9448), shared by the spec schema, the ``project.kct`` resolver and
+    :class:`DesignRules` so they cannot drift.  Booleans, strings, ``nan`` and
+    ``inf`` are all invalid (``nan < 0.8`` is False, so a bare bound check
+    would let NaN through).
+    """
+    import math
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value) and value >= MIN_DECLARED_REFERENCE_HEIGHT_MM
 
 
 @dataclass(frozen=True)
@@ -400,7 +418,7 @@ class DesignRules:
         tighten it.  Labels and board text always keep the fab floor.
         """
         declared = self.declared_reference_height_mm
-        if declared is None:
+        if declared is None or not is_valid_declared_reference_height(declared):
             return self.min_silkscreen_height_mm
         return min(declared, self.min_silkscreen_height_mm)
 

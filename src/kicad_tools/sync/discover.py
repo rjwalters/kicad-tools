@@ -286,10 +286,13 @@ def resolve_declared_reference_height_for_pcb(pcb_path: str | Path) -> float | N
 
     Reads ``requirements.manufacturing.silkscreen_min_reference_height_mm``.
     Returns ``None`` when there is no ``project.kct``, the key is absent, or
-    the value is not a number >= 0.8 mm (an invalid declaration is ignored, so
+    the value is not a finite number >= 0.8 mm (an invalid declaration is ignored, so
     designators stay held to the fab floor; ``load_spec`` rejects it loudly).
     """
-    from kicad_tools.manufacturers.base import MIN_DECLARED_REFERENCE_HEIGHT_MM
+    from kicad_tools.manufacturers.base import (
+        MIN_DECLARED_REFERENCE_HEIGHT_MM,
+        is_valid_declared_reference_height,
+    )
 
     kct_path = _project_kct_for_pcb(Path(pcb_path))
     if kct_path is None:
@@ -310,11 +313,12 @@ def resolve_declared_reference_height_for_pcb(pcb_path: str | Path) -> float | N
         if isinstance(manufacturing, dict)
         else None
     )
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if value is None:
         return None
-    if value < MIN_DECLARED_REFERENCE_HEIGHT_MM:
+    if not is_valid_declared_reference_height(value):
         logger.warning(
-            "Ignoring silkscreen_min_reference_height_mm=%s in %s (must be >= %s mm)",
+            "Ignoring silkscreen_min_reference_height_mm=%r in %s "
+            "(must be a finite number >= %s mm)",
             value,
             kct_path,
             MIN_DECLARED_REFERENCE_HEIGHT_MM,

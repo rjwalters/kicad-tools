@@ -3037,6 +3037,7 @@ def main(argv: list[str] | None = None) -> int:
     # boards 03/04's ad hoc ``fabrication_overrides`` block.  ``None`` when
     # no ``via_in_pad_process_id`` is declared (the common case).
     fabrication_process_dict = describe_selection(checker.design_rules)
+    declared_deviations = _declared_deviations(checker, pcb_path)
     machine_output = args.format in ("json", "sarif")
     if results.mask_copper_assessments and not machine_output:
         # Issue #8949: collapse the repeated reason lines (the live
@@ -3078,6 +3079,7 @@ def main(argv: list[str] | None = None) -> int:
             project_rules=project_rules,
             copper_weights=copper_weights,
             fab_dfm_parity=fab_dfm_parity,
+            declared_deviations=declared_deviations,
         )
     elif args.format == "summary":
         output_summary(violations, results, pcb_path)
@@ -3096,6 +3098,7 @@ def main(argv: list[str] | None = None) -> int:
             layers,
             args.verbose,
             copper_weights=copper_weights,
+            declared_deviations=declared_deviations,
         )
         if meta is not None:
             print_meta_check_stanza(meta, args.verbose)
@@ -3131,6 +3134,7 @@ def main(argv: list[str] | None = None) -> int:
             scope=scope_record,
             copper_weights=copper_weights,
             fab_dfm_parity=fab_dfm_parity,
+            declared_deviations=declared_deviations,
         )
 
     # Issue #4375: optionally emit DRC-constraint sidecars from the SAME
@@ -4335,6 +4339,37 @@ def _print_category_summary(violations: list[DRCViolation]) -> None:
         print(f"      {adv.detail()}  [{adv.rule_list()}]")
 
 
+def _declared_deviations(checker: Any, pcb_path: Path) -> list[dict]:
+    """Project-declared relaxations active in this run (Issue #9448).
+
+    One entry when ``project.kct`` declares a reference-designator height that
+    lowers the fab's silkscreen text-height floor, else ``[]`` -- so a relaxed
+    board is distinguishable from an unrelaxed one in the report of the engine
+    whose floor was lowered.
+    """
+    rules = checker.design_rules
+    if not rules.has_reference_height_deviation:
+        return []
+    return [
+        {
+            "rule": "silkscreen_text_height",
+            "scope": "reference designators",
+            "declared_min_height_mm": rules.min_silkscreen_reference_height_mm,
+            "fab_min_height_mm": rules.min_silkscreen_height_mm,
+            "source": "project.kct requirements.manufacturing.silkscreen_min_reference_height_mm",
+        }
+    ]
+
+
+def _format_declared_deviation(deviation: dict) -> str:
+    """One-line form of a :func:`_declared_deviations` entry."""
+    return (
+        f"{deviation['rule']} for {deviation['scope']} relaxed to "
+        f"{deviation['declared_min_height_mm']:g} mm (fab floor "
+        f"{deviation['fab_min_height_mm']:g} mm) per project.kct"
+    )
+
+
 def _copper_weights_provenance(
     outer: float | None,
     inner: float | None,
@@ -4522,6 +4557,7 @@ def output_table(
     layers: int,
     verbose: bool = False,
     copper_weights: dict | None = None,
+    declared_deviations: list[dict] | None = None,
 ) -> None:
     """Output violations as a formatted table."""
     error_count = sum(1 for v in violations if v.is_error)
@@ -4535,6 +4571,8 @@ def output_table(
     print(f"File: {pcb_path.name}")
     print(f"Manufacturer: {mfr.upper()}")
     print(f"Layers: {layers}")
+    for deviation in declared_deviations or ():
+        print(f"Declared deviation: {_format_declared_deviation(deviation)}")
     if copper_weights:
         print(f"Copper (ampacity): {_format_copper_weights(copper_weights)}")
         dfm = copper_weights.get("dfm_table")
@@ -4901,6 +4939,7 @@ def output_json(
     exit_code: int | None = None,
     scope: dict | None = None,
     project_rules: list[dict] | None = None,
+    declared_deviations: list[dict] | None = None,
     copper_weights: dict | None = None,
     fab_dfm_parity: dict | None = None,
 ) -> None:
@@ -4988,6 +5027,8 @@ def output_json(
     }
     if copper_weights is not None:
         data["copper_weights"] = copper_weights
+    if declared_deviations:
+        data["declared_deviations"] = declared_deviations
     if meta is not None:
         data["meta_checks"] = meta.to_dict()
     if routing_quality is not None:
@@ -5063,6 +5104,7 @@ def write_json_report(
     scope: dict | None = None,
     copper_weights: dict | None = None,
     fab_dfm_parity: dict | None = None,
+    declared_deviations: list[dict] | None = None,
 ) -> None:
     """Write DRC results as a JSON report file.
 
@@ -5129,6 +5171,8 @@ def write_json_report(
     }
     if copper_weights is not None:
         data["copper_weights"] = copper_weights
+    if declared_deviations:
+        data["declared_deviations"] = declared_deviations
     if meta is not None:
         data["meta_checks"] = meta.to_dict()
     if routing_quality is not None:

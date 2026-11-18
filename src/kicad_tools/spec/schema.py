@@ -661,16 +661,23 @@ class ManufacturingRequirements(SpecModel):
             return None
         return _parse_copper_weight_oz(v)
 
-    @field_validator("silkscreen_min_reference_height_mm")
+    @field_validator("silkscreen_min_reference_height_mm", mode="before")
     @classmethod
-    def validate_reference_height(cls, v: float | None) -> float | None:
-        """Reject a designator height below the smallest legible size (#9448)."""
-        from kicad_tools.manufacturers.base import MIN_DECLARED_REFERENCE_HEIGHT_MM
+    def validate_reference_height(cls, v: Any) -> Any:
+        """Reject a non-finite, non-numeric or too-small designator height (#9448).
 
-        if v is not None and v < MIN_DECLARED_REFERENCE_HEIGHT_MM:
+        Runs before coercion so a quoted ``'0.8'`` or ``true`` is rejected,
+        matching ``resolve_declared_reference_height_for_pcb``.
+        """
+        from kicad_tools.manufacturers.base import (
+            MIN_DECLARED_REFERENCE_HEIGHT_MM,
+            is_valid_declared_reference_height,
+        )
+
+        if v is not None and not is_valid_declared_reference_height(v):
             raise ValueError(
-                f"silkscreen_min_reference_height_mm must be >= "
-                f"{MIN_DECLARED_REFERENCE_HEIGHT_MM} mm, got {v}"
+                f"silkscreen_min_reference_height_mm must be a finite number >= "
+                f"{MIN_DECLARED_REFERENCE_HEIGHT_MM} mm, got {v!r}"
             )
         return v
 

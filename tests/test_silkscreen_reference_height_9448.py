@@ -266,3 +266,161 @@ def test_init_rerun_keeps_split_rule(tmp_path: Path):
 def test_init_without_declaration_has_no_split_rule(tmp_path: Path):
     project = tmp_path
     assert "Silkscreen Reference Height" not in _init_dru(project)
+
+
+# --- review round 2: invalid values, other texts, wiring, report ------------
+
+from kicad_tools.manufacturers.base import is_valid_declared_reference_height  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "value", [float("nan"), float("inf"), float("-inf"), "0.8", True, 0.79, None]
+)
+def test_shared_validator_rejects_invalid(value):
+    assert not is_valid_declared_reference_height(value)
+
+
+@pytest.mark.parametrize("value", [0.8, 1, 1.5])
+def test_shared_validator_accepts_valid(value):
+    assert is_valid_declared_reference_height(value)
+
+
+@pytest.mark.parametrize("value", [".nan", ".inf", "-.inf", "'0.8'", "true"])
+def test_discover_ignores_non_finite_and_non_numeric(tmp_path: Path, value: str):
+    assert resolve_declared_reference_height_for_pcb(_write_spec(tmp_path, value)) is None
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), "0.8", True])
+def test_schema_rejects_non_finite_and_non_numeric(value):
+    from pydantic import ValidationError
+
+    from kicad_tools.spec.schema import ManufacturingRequirements
+
+    with pytest.raises(ValidationError):
+        ManufacturingRequirements(silkscreen_min_reference_height_mm=value)
+
+
+def test_design_rules_nan_declaration_keeps_fab_floor():
+    rules = replace(JLC, declared_reference_height_mm=float("nan"))
+    assert rules.min_silkscreen_reference_height_mm == 1.0
+    assert not rules.has_reference_height_deviation
+
+
+def test_nan_declaration_does_not_disable_designator_check(tmp_path: Path):
+    items = _height_items(
+        _load(tmp_path, ref_height=0.1), declared_reference_height_mm=float("nan")
+    )
+    assert "R1 (reference)" in items
+
+
+def test_value_and_user_text_on_silk_keep_fab_floor_under_declaration(tmp_path: Path):
+    path = tmp_path / "board.kicad_pcb"
+    text = _board().replace(
+        '(property "Value" "10k" (at 0 2 0) (layer "F.Fab")\n'
+        "      (effects (font (size 1 1) (thickness 0.15))))",
+        '(property "Value" "10k" (at 0 2 0) (layer "F.SilkS")\n'
+        "      (effects (font (size 0.85 0.85) (thickness 0.15))))\n"
+        '    (fp_text user "NOTE" (at 0 4 0) (layer "F.SilkS")\n'
+        "      (effects (font (size 0.85 0.85) (thickness 0.15))))",
+    )
+    assert "0.85" in text
+    path.write_text(text)
+    items = _height_items(PCB.load(str(path)), declared_reference_height_mm=0.8)
+    assert "R1 (reference)" not in items
+    assert "LABEL" in items
+    assert any("value" in i.lower() or "10k" in i for i in items), items
+    assert len(items) >= 3, items
+
+
+def _declaring_project(tmp_path: Path) -> Path:
+    (tmp_path / "board.kicad_pcb").write_text(_board())
+    _write_spec(tmp_path, 0.8)
+    return tmp_path / "board.kicad_pcb"
+
+
+def test_build_check_rule_set_honours_project_kct(tmp_path: Path):
+    from kicad_tools.cli.check_cmd import build_check_rule_set
+
+    pcb = _declaring_project(tmp_path)
+    rules = build_check_rule_set(pcb, manufacturer="jlcpcb", layers=2)
+    items = [
+        i
+        for v in rules.checker.check_all().violations
+        if v.rule_id == "silkscreen_text_height"
+        for i in v.items
+    ]
+    assert "R1 (reference)" not in items and "LABEL" in items
+
+
+def test_kct_check_cli_reports_declaration(tmp_path: Path, capsys):
+    from kicad_tools.cli.check_cmd import main as check_main
+
+    pcb = _declaring_project(tmp_path)
+    check_main([str(pcb), "--mfr", "jlcpcb", "--only", "silkscreen", "--format", "json"])
+    data = json.loads(capsys.readouterr().out)
+    items = [i for v in data["violations"] for i in v.get("items", [])]
+    assert "R1 (reference)" not in items and "LABEL" in items
+    assert data["declared_deviations"] == [
+        {
+            "rule": "silkscreen_text_height",
+            "scope": "reference designators",
+            "declared_min_height_mm": 0.8,
+            "fab_min_height_mm": 1.0,
+            "source": "project.kct requirements.manufacturing.silkscreen_min_reference_height_mm",
+        }
+    ]
+    check_main([str(pcb), "--mfr", "jlcpcb", "--only", "silkscreen"])
+    assert "Declared deviation: silkscreen_text_height for reference designators" in (
+        capsys.readouterr().out
+    )
+
+
+def test_kct_check_cli_no_declaration_no_deviation(tmp_path: Path, capsys):
+    from kicad_tools.cli.check_cmd import main as check_main
+
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text(_board())
+    check_main([str(pcb), "--mfr", "jlcpcb", "--only", "silkscreen", "--format", "json"])
+    assert "declared_deviations" not in json.loads(capsys.readouterr().out)
+
+
+def test_kct_check_emit_dru_honours_project_kct(tmp_path: Path):
+    from kicad_tools.cli.check_cmd import main as check_main
+
+    pcb = _declaring_project(tmp_path)
+    check_main([str(pcb), "--mfr", "jlcpcb", "--only", "silkscreen", "--emit-dru"])
+    assert 'rule "Silkscreen Reference Height' in pcb.with_suffix(".kicad_dru").read_text()
+
+
+def test_write_drc_constraints_honours_project_kct(tmp_path: Path):
+    from kicad_tools.manufacturers.project_generator import write_drc_constraints
+
+    pcb = _declaring_project(tmp_path)
+    write_drc_constraints(pcb, JLC, manufacturer_id="jlcpcb", layers=2)
+    assert 'rule "Silkscreen Reference Height' in pcb.with_suffix(".kicad_dru").read_text()
+
+
+def test_readiness_records_declaration_in_manifest_and_readme(tmp_path: Path):
+    from kicad_tools.cli import readiness_cmd as cmd
+    from tests.test_kct_readiness_cmd import FakeEngines, make_board
+
+    board = make_board(tmp_path)
+    assert (
+        cmd.main([str(board), "--mfr", "jlcpcb", "--generate"], engines=FakeEngines(board).bundle())
+        == 0
+    )
+    args = cmd.build_parser().parse_args([str(board), "--mfr", "jlcpcb"])
+    opts, _ = cmd.resolve_options(args)
+    assert cmd._declared_reference_height_deviation(opts) is None
+    cmd._write_full_manifest(opts, {})
+    manifest = json.loads((opts.output_dir / "manifest.json").read_text())
+    assert "declared_deviations" not in manifest
+    assert "DECLARED DEVIATION" not in cmd._write_readme(opts, {}, []).read_text()
+
+    _write_spec(opts.pcb.parent, 0.8)
+    deviation = cmd._declared_reference_height_deviation(opts)
+    assert deviation is not None and deviation["declared_min_height_mm"] == 0.8
+    cmd._write_full_manifest(opts, {})
+    manifest = json.loads((opts.output_dir / "manifest.json").read_text())
+    assert manifest["declared_deviations"] == [deviation]
+    assert "DECLARED DEVIATION" in cmd._write_readme(opts, {}, []).read_text()
