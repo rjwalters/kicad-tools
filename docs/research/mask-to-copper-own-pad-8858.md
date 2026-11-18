@@ -235,9 +235,11 @@ the CI gates judge two different artifacts:
   thermal with a 0.3 mm gap), 7 disjoint, 47 overlap. Reruns of the same
   output are identical (deterministic).
 - **Committed `output/` PCBs** under the current rule: board 05 121 / 122 /
-  236, board 06 48 / 0 / 133, board 07 67 / 31 / 275. (The committed trees
-  pre-date the newest router fixes, which is why fresh 06 is the larger
-  number.)
+  236, board 06 48 / 0 / 133, board 07 67 / 31 / 275. (The two numbers are
+  different artifacts, not before/after of one route: boards 06/07 are
+  re-routed from scratch on each regeneration, and only the fresh tree is
+  what the gates judge. Why fresh 06 is the larger number is not
+  investigated here.)
 
 Wall time, board 05 committed PCB, one run each on a loaded shared worker:
 **122.4 s** with the pass, **42.1 s** with `--skip mask_to_copper`
@@ -263,8 +265,12 @@ authored board:
 
 Every opening is exactly its pad (`area(O − P)` = 0; the J3 pads plot as the
 authored 1.5 mm circles). Verdict: **real**. The disjoint measurements are
-same-net track caps and tangents 0–0.09 mm from a real mask opening — inside
-or on the consumer board's 0.08 mm fab danger limit. The three tangent cases
+same-net track caps and tangents 0–0.09 mm from a real mask opening — all
+inside or on the rule's own danger clearance `c` = 0.09 mm (§ "The
+criterion"). Against the consumer board's observed fab limit the split is
+narrower: five findings inside the fab's 0.08 mm danger band, and two — the
+0.0872 mm and 0.09 mm rows, marked `uncertain` — in its warning band
+(0.08–0.15 mm). The three tangent cases
 are authored-touching (distance 0.0, zero-area contact); the rule's plot
 reconstruction reads a µm-positive distance, so the relation label flips
 touching/disjoint on plot polygonalization. The finding is real in both
