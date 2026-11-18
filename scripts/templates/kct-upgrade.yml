@@ -2,7 +2,7 @@
 #
 # Vendored by kicad-tools' `scripts/install-kct.sh --upgrade-workflow`
 # (issue #8077). Installer-managed: edit the upstream template
-# (scripts/templates/kct-upgrade.yml in rjwalters/kicad-tools), not this copy;
+# (scripts/templates/kct-upgrade.yml in 2AMLogic/kicad-tools), not this copy;
 # re-running the installer with --upgrade-workflow overwrites it.
 #
 # Weekly (and on demand) two jobs run: `prepare` (read-only, no secrets) does
@@ -124,7 +124,7 @@ jobs:
           set -euo pipefail
           src="$RUNNER_TEMP/kicad-tools"
           git clone --quiet --depth 1 --branch "v${LATEST}" \
-            https://github.com/rjwalters/kicad-tools "$src"
+            https://github.com/2AMLogic/kicad-tools "$src"
           # Keep the agent client(s) this repo already installed.
           client="$(python3 - <<'PY'
           import json
@@ -165,7 +165,7 @@ jobs:
 
           src, out = Path(sys.argv[1]), Path(sys.argv[2])
           latest, current = os.environ["LATEST"], os.environ.get("CURRENT", "")
-          repo = "https://github.com/rjwalters/kicad-tools"
+          repo = "https://github.com/2AMLogic/kicad-tools"
           limit = 50000
 
           def vtuple(v):

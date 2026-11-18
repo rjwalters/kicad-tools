@@ -102,7 +102,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import changelog_assemble  # noqa: E402  (sibling script, not a package)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_REPO_SLUG = "rjwalters/kicad-tools"
+DEFAULT_REPO_SLUG = "2AMLogic/kicad-tools"
 PACKAGE_NAME = "kicad-tools"
 BASE_BRANCH = "main"
 RELEASE_BRANCH_PREFIX = "release/v"

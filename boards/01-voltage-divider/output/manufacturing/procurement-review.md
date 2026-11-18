@@ -2,9 +2,9 @@
 
 ## Current package — 2026-09-10
 
-The committed [project.kct](https://github.com/rjwalters/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/01-voltage-divider/project.kct),
-[BOM](https://github.com/rjwalters/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/01-voltage-divider/output/manufacturing/bom_jlcpcb.csv) and
-[SMT CPL](https://github.com/rjwalters/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/01-voltage-divider/output/manufacturing/cpl_jlcpcb.csv)
+The committed [project.kct](https://github.com/2AMLogic/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/01-voltage-divider/project.kct),
+[BOM](https://github.com/2AMLogic/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/01-voltage-divider/output/manufacturing/bom_jlcpcb.csv) and
+[SMT CPL](https://github.com/2AMLogic/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/01-voltage-divider/output/manufacturing/cpl_jlcpcb.csv)
 agree on the following corrected selections and assembly treatment.
 
 | Reference | Reviewed manufacturer part | LCSC | Current footprint / assembly |
@@ -53,14 +53,14 @@ to the shipped BOM/CPL. No new supplier lookup or stock check was performed.
 ## Fleet audit context
 
 The source corrections and redesigns were integrated in commit
-[d95b6eff](https://github.com/rjwalters/kicad-tools/commit/d95b6eff369c1479c4dce6d4a7bc2b4ef73f9350).
+[d95b6eff](https://github.com/2AMLogic/kicad-tools/commit/d95b6eff369c1479c4dce6d4a7bc2b4ef73f9350).
 The original fleet findings below describe the retired designs:
 
-- Board02 is now a real ATtiny85-20PU circuit. Its [hardware guide](https://github.com/rjwalters/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/02-charlieplex-led/HARDWARE.md) specifies the pinout, programming and manual through-hole assembly; the synthetic MCU warning below is historical.
-- Board03 revision B uses the real 44-pin ATmega32U4-AU. See its [design review](https://github.com/rjwalters/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/03-usb-joystick/DESIGN_REVIEW.md) and [assembly/firmware guide](https://github.com/rjwalters/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/03-usb-joystick/README.md). [Issue #5000](https://github.com/rjwalters/kicad-tools/issues/5000) still tracks USB firmware identity and suspend qualification as of this reconciliation.
-- Board05 revision B replaces the former shunt/buck topology with the DRV8313-based design. Its [hardware guide](https://github.com/rjwalters/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/05-bldc-motor-controller/redesign/HARDWARE.md) and [README](https://github.com/rjwalters/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/05-bldc-motor-controller/README.md) describe the current BOM, conservative operating targets and pending motor/thermal bench validation. The old DRV8301 source is an archived regression witness; [#4993](https://github.com/rjwalters/kicad-tools/issues/4993) and the part-reconciliation issues [#5046](https://github.com/rjwalters/kicad-tools/issues/5046)/[#5047](https://github.com/rjwalters/kicad-tools/issues/5047) are closed.
+- Board02 is now a real ATtiny85-20PU circuit. Its [hardware guide](https://github.com/2AMLogic/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/02-charlieplex-led/HARDWARE.md) specifies the pinout, programming and manual through-hole assembly; the synthetic MCU warning below is historical.
+- Board03 revision B uses the real 44-pin ATmega32U4-AU. See its [design review](https://github.com/2AMLogic/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/03-usb-joystick/DESIGN_REVIEW.md) and [assembly/firmware guide](https://github.com/2AMLogic/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/03-usb-joystick/README.md). [Issue #5000](https://github.com/2AMLogic/kicad-tools/issues/5000) still tracks USB firmware identity and suspend qualification as of this reconciliation.
+- Board05 revision B replaces the former shunt/buck topology with the DRV8313-based design. Its [hardware guide](https://github.com/2AMLogic/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/05-bldc-motor-controller/redesign/HARDWARE.md) and [README](https://github.com/2AMLogic/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/05-bldc-motor-controller/README.md) describe the current BOM, conservative operating targets and pending motor/thermal bench validation. The old DRV8301 source is an archived regression witness; [#4993](https://github.com/2AMLogic/kicad-tools/issues/4993) and the part-reconciliation issues [#5046](https://github.com/2AMLogic/kicad-tools/issues/5046)/[#5047](https://github.com/2AMLogic/kicad-tools/issues/5047) are closed.
 
-The broader [procurement audit #4971](https://github.com/rjwalters/kicad-tools/issues/4971) remains the cross-board tracker. These references do not establish live supplier stock, assembly-service eligibility, or completed hardware qualification.
+The broader [procurement audit #4971](https://github.com/2AMLogic/kicad-tools/issues/4971) remains the cross-board tracker. These references do not establish live supplier stock, assembly-service eligibility, or completed hardware qualification.
 
 ## Evidence and limits
 

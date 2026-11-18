@@ -1043,7 +1043,7 @@ def test_huge_section_body_fits_with_marker_and_pointer() -> None:
     assert len(body) <= rp.BODY_BUDGET < rp.GITHUB_BODY_LIMIT
     assert body.startswith(rp.AUTO_MARKER)
     assert "**Level: minor**" in body and "main CI green" in body
-    url = "https://github.com/rjwalters/kicad-tools/blob/release/v0.24.0/CHANGELOG.md"
+    url = "https://github.com/2AMLogic/kicad-tools/blob/release/v0.24.0/CHANGELOG.md"
     assert url in body
     assert "485 PRs" in body and "#7000," not in body
     # Cut at a bullet boundary: the last kept bullet is complete.

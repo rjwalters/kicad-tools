@@ -424,7 +424,7 @@ def test_git_mode_writes_git_source(target_repo: Path, fake_uv_env: dict[str, st
     assert '"kicad-tools"' in pyproject
     src = pyproject.split("[tool.uv.sources]", 1)[1]
     assert "git" in src
-    assert "rjwalters/kicad-tools" in src
+    assert "2AMLogic/kicad-tools" in src
     assert "v0.14.0" in src
     meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
     assert meta["source_mode"] == "git"
@@ -918,7 +918,7 @@ GIT_PINNED_BODY = (
     "]\n"
     "\n"
     "[tool.uv.sources]\n"
-    'kicad-tools = { git = "https://github.com/rjwalters/kicad-tools", rev = "v0.24.0" }\n'
+    'kicad-tools = { git = "https://github.com/2AMLogic/kicad-tools", rev = "v0.24.0" }\n'
 )
 
 
@@ -1137,10 +1137,10 @@ def test_pypi_mode_removes_table_form_sources_entry(
 ) -> None:
     _write_pyproject(
         target_repo,
-        'dependencies = ["kicad-tools[report] @ git+https://github.com/rjwalters/kicad-tools@45744d0a"]\n'
+        'dependencies = ["kicad-tools[report] @ git+https://github.com/2AMLogic/kicad-tools@45744d0a"]\n'
         "\n"
         "[tool.uv.sources.kicad-tools]\n"
-        'git = "https://github.com/rjwalters/kicad-tools"\n'
+        'git = "https://github.com/2AMLogic/kicad-tools"\n'
         'rev = "45744d0a"\n'
         "\n"
         "[tool.ruff]\n"
@@ -1218,7 +1218,7 @@ def test_pin_helper_ignores_comments_and_still_adds_the_dependency(tmp_path: Pat
         "\n"
         "[tool.uv.sources]\n"
         "kicad-tools = [\n"
-        '  { git = "https://github.com/rjwalters/kicad-tools", tag = "v0.24.0" },\n'
+        '  { git = "https://github.com/2AMLogic/kicad-tools", tag = "v0.24.0" },\n'
         "]\n"
     )
     result, data = _pin_apply(tmp_path, text)
@@ -1246,7 +1246,7 @@ def test_pin_helper_adds_main_dependency_when_only_in_a_group(tmp_path: Path) ->
 def test_pin_helper_refuses_a_sources_entry_it_cannot_remove(tmp_path: Path) -> None:
     text = (
         '[project]\nname = "board"\nversion = "0.1.0"\ndependencies = ["numpy"]\n'
-        '\n[tool.uv]\nsources.kicad-tools = { git = "https://github.com/rjwalters/kicad-tools" }\n'
+        '\n[tool.uv]\nsources.kicad-tools = { git = "https://github.com/2AMLogic/kicad-tools" }\n'
     )
     path = tmp_path / "pyproject.toml"
     path.write_text(text)
@@ -1281,7 +1281,7 @@ def test_pin_helper_keeps_crlf_line_endings(tmp_path: Path) -> None:
         "]",
         "",
         "[tool.uv.sources]",
-        'kicad-tools = { git = "https://github.com/rjwalters/kicad-tools", tag = "v0.24.0" }',
+        'kicad-tools = { git = "https://github.com/2AMLogic/kicad-tools", tag = "v0.24.0" }',
         "",
         "[tool.ruff]",
         "line-length = 100",

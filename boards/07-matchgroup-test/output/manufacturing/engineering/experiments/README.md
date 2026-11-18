@@ -32,13 +32,13 @@ repeated serpentine, with a measured 72.953 mm electrical length and 13.521 pF
 external-load estimate. The final byte/address/command spreads and model limits
 are in the design README and the archived validation evidence.
 
-Related tool investigations: full-span routing vias [#5013](https://github.com/rjwalters/kicad-tools/issues/5013),
-explicit reference-plane reservations [#5014](https://github.com/rjwalters/kicad-tools/issues/5014),
-asymmetric stripline [#5016](https://github.com/rjwalters/kicad-tools/issues/5016),
-native dielectric sublayers/reference selection [#5017](https://github.com/rjwalters/kicad-tools/issues/5017)
-and [#5018](https://github.com/rjwalters/kicad-tools/issues/5018),
-per-driver load budgets [#5020](https://github.com/rjwalters/kicad-tools/issues/5020),
-and symmetric clock spacing [#5021](https://github.com/rjwalters/kicad-tools/issues/5021).
+Related tool investigations: full-span routing vias [#5013](https://github.com/2AMLogic/kicad-tools/issues/5013),
+explicit reference-plane reservations [#5014](https://github.com/2AMLogic/kicad-tools/issues/5014),
+asymmetric stripline [#5016](https://github.com/2AMLogic/kicad-tools/issues/5016),
+native dielectric sublayers/reference selection [#5017](https://github.com/2AMLogic/kicad-tools/issues/5017)
+and [#5018](https://github.com/2AMLogic/kicad-tools/issues/5018),
+per-driver load budgets [#5020](https://github.com/2AMLogic/kicad-tools/issues/5020),
+and symmetric clock spacing [#5021](https://github.com/2AMLogic/kicad-tools/issues/5021).
 The need to reserve tuning room was already tracked by
-[#4085](https://github.com/rjwalters/kicad-tools/issues/4085); this record does not
+[#4085](https://github.com/2AMLogic/kicad-tools/issues/4085); this record does not
 present that existing architectural idea as a new feature.

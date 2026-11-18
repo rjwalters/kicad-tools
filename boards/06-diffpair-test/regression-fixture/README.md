@@ -8,7 +8,7 @@
 # Differential Pair Test Board (Board 06)
 
 Regression testbench for the differential-pair routing subsystem introduced
-by Epic [#2556](https://github.com/rjwalters/kicad-tools/issues/2556)
+by Epic [#2556](https://github.com/2AMLogic/kicad-tools/issues/2556)
 (Phases 1-3).  Demonstrates each protocol family the epic was scoped against
 (USB 2.0, USB 3.0, PCIe Gen1, MIPI D-PHY) by routing one or more diff pairs
 per protocol on a 4-layer JLCPCB tier-1 stackup.
@@ -130,11 +130,11 @@ kct check output/diffpair_test_routed.kicad_pcb --mfr jlcpcb --errors-only
 
 **Phase-3 dependencies**:
 
-- [#2649](https://github.com/rjwalters/kicad-tools/issues/2649)
+- [#2649](https://github.com/2AMLogic/kicad-tools/issues/2649)
   (Phase 3J `diffpair_length_skew` DRC rule) --- **landed** in PR #2662.
   Once the router populates `skew_data`, the rule fires on PCIe / MIPI
   skew violations.
-- [#2648](https://github.com/rjwalters/kicad-tools/issues/2648)
+- [#2648](https://github.com/2AMLogic/kicad-tools/issues/2648)
   (Phase 3I serpentine insertion) --- **landed** (closed).  At
   scaffold-time it was still in progress, so PCIe / MIPI pairs could
   exceed their declared `skew_tolerance_mm` because the router couldn't
@@ -392,7 +392,7 @@ key can move the result and the constraint lives upstream in placement / escape
 planning.
 
 Add `KCT_CROSSTAIL_CENSUS_REPORT=<path>`
-([#4799](https://github.com/rjwalters/kicad-tools/issues/4799)) to get the same measurement
+([#4799](https://github.com/2AMLogic/kicad-tools/issues/4799)) to get the same measurement
 as **data** instead of scraped stdout: a JSON document with one record per
 crossover plus the aggregate the per-crossover headers cannot give you
 (`saturated_pct`, `no_ordering_lever_pct`, `inert_pct`, an advisory `verdict`).
@@ -443,20 +443,20 @@ lattice the picture reverses — a synthetic fixture whose first legal candidate
 is at rank 0 pays ~3.9 ms of a ~4.0 ms census, ~39x the un-instrumented
 0.10 ms.)
 
-[#4463]: https://github.com/rjwalters/kicad-tools/issues/4463
-[#4536]: https://github.com/rjwalters/kicad-tools/issues/4536
-[#4570]: https://github.com/rjwalters/kicad-tools/issues/4570
-[#4574]: https://github.com/rjwalters/kicad-tools/issues/4574
-[#4575]: https://github.com/rjwalters/kicad-tools/issues/4575
-[#4577]: https://github.com/rjwalters/kicad-tools/issues/4577
-[#4579]: https://github.com/rjwalters/kicad-tools/issues/4579
-[#4580]: https://github.com/rjwalters/kicad-tools/issues/4580
-[#4581]: https://github.com/rjwalters/kicad-tools/issues/4581
-[#4582]: https://github.com/rjwalters/kicad-tools/issues/4582
-[#4604]: https://github.com/rjwalters/kicad-tools/issues/4604
-[#4611]: https://github.com/rjwalters/kicad-tools/pull/4611
-[#4635]: https://github.com/rjwalters/kicad-tools/issues/4635
-[#4800]: https://github.com/rjwalters/kicad-tools/issues/4800
+[#4463]: https://github.com/2AMLogic/kicad-tools/issues/4463
+[#4536]: https://github.com/2AMLogic/kicad-tools/issues/4536
+[#4570]: https://github.com/2AMLogic/kicad-tools/issues/4570
+[#4574]: https://github.com/2AMLogic/kicad-tools/issues/4574
+[#4575]: https://github.com/2AMLogic/kicad-tools/issues/4575
+[#4577]: https://github.com/2AMLogic/kicad-tools/issues/4577
+[#4579]: https://github.com/2AMLogic/kicad-tools/issues/4579
+[#4580]: https://github.com/2AMLogic/kicad-tools/issues/4580
+[#4581]: https://github.com/2AMLogic/kicad-tools/issues/4581
+[#4582]: https://github.com/2AMLogic/kicad-tools/issues/4582
+[#4604]: https://github.com/2AMLogic/kicad-tools/issues/4604
+[#4611]: https://github.com/2AMLogic/kicad-tools/pull/4611
+[#4635]: https://github.com/2AMLogic/kicad-tools/issues/4635
+[#4800]: https://github.com/2AMLogic/kicad-tools/issues/4800
 
 ## CI Gate (Phase 4N, #2660)
 
@@ -482,9 +482,9 @@ The job:
    is deleted).  The board has no entry in
    `.github/routed-drc-tolerance.yml`, so the count of blocking findings
    *outside* the allowance must be 0
-   ([#7367](https://github.com/rjwalters/kicad-tools/issues/7367); the
+   ([#7367](https://github.com/2AMLogic/kicad-tools/issues/7367); the
    old count of 18, ratcheted by
-   [#4019](https://github.com/rjwalters/kicad-tools/issues/4019), let a
+   [#4019](https://github.com/2AMLogic/kicad-tools/issues/4019), let a
    new finding hide behind a fixed one).
    <!-- kct:doc-pin drc-tolerance boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb = 0 -->
    The claim above is machine-checked by `kct check --only doc_drift`
@@ -515,21 +515,21 @@ The job:
 ### Tightening the allowance
 
 The original prerequisites ---
-[#2672](https://github.com/rjwalters/kicad-tools/issues/2672)
+[#2672](https://github.com/2AMLogic/kicad-tools/issues/2672)
 (impedance-width selection) and
-[#2677](https://github.com/rjwalters/kicad-tools/issues/2677) (BGA
+[#2677](https://github.com/2AMLogic/kicad-tools/issues/2677) (BGA
 partner-via escape) --- are both **closed**, and their error classes are
 gone from the gate.  The floor was ratcheted 24 -> 18 by
-[#4019](https://github.com/rjwalters/kicad-tools/issues/4019) and then
+[#4019](https://github.com/2AMLogic/kicad-tools/issues/4019) and then
 replaced by the identity allowance
-([#7367](https://github.com/rjwalters/kicad-tools/issues/7367)).  Each
+([#7367](https://github.com/2AMLogic/kicad-tools/issues/7367)).  Each
 entry is deleted when its finding is fixed --- the stale check forces
 it --- until the list is empty and the board routes cleanly under
 JLCPCB tier-1 rules.
 
 ## Out of Scope
 
-Per issue [#2658](https://github.com/rjwalters/kicad-tools/issues/2658)
+Per issue [#2658](https://github.com/2AMLogic/kicad-tools/issues/2658)
 Scope (out):
 
 - **No new router / validate features**.  This board EXERCISES Phases 1-3;
@@ -542,7 +542,7 @@ Scope (out):
 
 ## Related Issues
 
-- Epic: [#2556](https://github.com/rjwalters/kicad-tools/issues/2556) (first-class diff-pair support)
-- This issue: [#2658](https://github.com/rjwalters/kicad-tools/issues/2658) (Phase 4L scaffolding)
+- Epic: [#2556](https://github.com/2AMLogic/kicad-tools/issues/2556) (first-class diff-pair support)
+- This issue: [#2658](https://github.com/2AMLogic/kicad-tools/issues/2658) (Phase 4L scaffolding)
 - CI integration: Phase 4N (consumes the routed PCB committed here)
 - Documentation: Phase 4M (cites this board's `project.kct` + net-class declarations as canonical examples)

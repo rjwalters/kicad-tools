@@ -45,7 +45,7 @@ applies the per-net-class clearance at the consumer side; P_FP4 composes
 the ladder with auto-layers and auto-pcb-size; P_FP5 adds the consumer
 test on softstart rev B.
 
-Issue: https://github.com/rjwalters/kicad-tools/issues/3371
+Issue: https://github.com/2AMLogic/kicad-tools/issues/3371
 """
 
 from __future__ import annotations

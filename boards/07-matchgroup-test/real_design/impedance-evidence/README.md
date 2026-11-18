@@ -27,5 +27,5 @@ uv run --with scipy --with numpy python \
 
 The existing analytic asymmetric-stripline routine produces about 71.7 ohms
 for this 0.16 mm geometry; that discrepancy is tracked in
-[#5016](https://github.com/rjwalters/kicad-tools/issues/5016). No acceptance
+[#5016](https://github.com/2AMLogic/kicad-tools/issues/5016). No acceptance
 threshold has been widened to accommodate it.
