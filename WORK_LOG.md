@@ -16,6 +16,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-18
 
+- **PR #9393**: fix: drop empty values from merged JLCPCB BOM Comment and CPL value check
+- **PR #9370**: fix: widen CPL rotation review list and close readiness reporting edges
+- **PR #9388**: fix: give every Changelog workflow run its own concurrency group
+- **Issue #9380** (closed): JLCPCB merged BOM row: empty Value constituent is not filtered from the "; " join or split
+- **Issue #9362** (closed): CPL rotation review: widen the unreviewed-placement list (SW/Y missed) and close three reporting/verify edges
+- **Issue #9383** (closed): forge wait-checks reads a concurrency-cancelled duplicate Changelog check-run as RED, refusing approval on a green head
 - **PR #9389**: docs: document fix-drc --only mask-copper repair pass in reference docs
 - **PR #9386**: fix(parts): default check_bom quantity_needed to 1 for BOMItem
 - **PR #9385**: fix: emit one row per item in ungrouped JLCPCB/PCBWay BOM export
