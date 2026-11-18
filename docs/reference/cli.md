@@ -39,7 +39,7 @@ kct [--help] [--version] [--verbose] [-q] [--units {mm,mils}] <command> [options
 | | `net-status` | Report net connectivity status for a PCB |
 | | `constraints` | Constraint conflict detection and management |
 | | `detect-mistakes` | Detect common PCB design mistakes |
-| **Repair** | `fix-drc` | Automated DRC violation repair (clearance + drill) |
+| **Repair** | `fix-drc` | Automated DRC violation repair (clearance + drill + mask-copper) |
 | | `fix-erc` | Automated ERC violation repair (PWR_FLAG + no-connect) |
 | | `fix-vias` | Fix vias to meet manufacturer specifications |
 | | `fix-silkscreen` | Fix silkscreen line widths to meet manufacturer specs; `--clip-to-pads` also trims silk lines too close to pads; `--clip-to-holes` clips footprint silk lines/polygons off every drilled hole (run after routing) |
@@ -732,6 +732,43 @@ not run (file not found, wrong file type, audit crash). `--format json` keeps
 the top-level `verdict` (`ready`|`warning`|`not_ready`) and adds `gate_verdict`
 (`pass`|`fail`) and `exit_code`, the process exit code (#7230). See
 [Sign-off exit codes](#sign-off-exit-codes).
+
+---
+
+## Repair Commands
+
+### `fix-drc`
+
+Automated DRC violation repair. By default it repairs clearance violations by
+nudging traces, drill-clearance violations by de-duplicating or sliding vias,
+and mask-to-copper findings when the report carries them. `--only` restricts
+the run to a single repair pass:
+
+| `--only` value | Repairs |
+|----------------|---------|
+| `clearance` | Segment-segment and segment-via clearance violations (nudge traces) |
+| `drill-clearance` | Hole-to-hole clearance violations (de-duplicate or slide vias) |
+| `mask-copper` | A track entering its own pad's opening off-centre (see below) |
+
+```bash
+kct fix-drc board.kicad_pcb --only mask-copper --dry-run
+```
+
+Without `--drc-report`, the mask-copper pass detects its findings itself by
+running the pure-Python `kct check` on the board; other `--only` values (and
+the default set) read a report or require kicad-cli.
+
+`mask-copper` addresses the `same-net own-pad entry` class of the
+`mask_to_copper` check (see the [mask-to-copper guide](../guides/mask-to-copper.md)):
+the offending track is re-centred. Detection uses `kct check`'s rules, not
+kicad-cli, and the pass also runs in the default set when the report carries
+such findings. Because the repairer cannot run the native mask assessment, a
+move is kept only when a post-save `kct check` re-check confirms it; otherwise
+it is reverted and reported as unrepaired with a reason:
+`finding_not_cleared` (the finding is still present), `new_mask_finding` (the
+move exposed a new finding on the moved segment or its pad) or
+`recheck_unavailable` (the re-check could not run — an unverified move is
+never kept).
 
 ---
 
