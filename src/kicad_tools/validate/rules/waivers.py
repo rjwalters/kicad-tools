@@ -1191,7 +1191,10 @@ def migrate_evidence_waivers(
                     key=key,
                     old_hash=old_hash,
                     reason="key names no current finding (the key changed or the defect is gone)",
-                    candidates=tuple(_rewaive_candidates(shim, current)),
+                    candidates=tuple(
+                        _path_ampacity_layer_candidates(shim, current)
+                        or _rewaive_candidates(shim, current)
+                    ),
                 )
             )
             continue

@@ -394,3 +394,19 @@ class TestNeverImplicit:
         code = check_cmd.main([str(board), "--migrate-waivers"])
         assert code == 1
         assert "no waivers file" in capsys.readouterr().err
+
+
+def test_outer_kct_check_parser_accepts_and_forwards_migrate_flags(monkeypatch):
+    """The flags must survive the outer ``kct check`` parser + shim, not just check_cmd."""
+    from kicad_tools.cli.commands import validation
+    from kicad_tools.cli.parser import create_parser
+
+    args = create_parser().parse_args(["check", "board.kicad_pcb", "--migrate-waivers", "--write"])
+    assert args.migrate_waivers is True
+    assert args.migrate_write is True
+
+    seen: list[str] = []
+    monkeypatch.setattr(check_cmd, "main", lambda argv: seen.extend(argv) or 0)
+    assert validation.run_check_command(args) == 0
+    assert "--migrate-waivers" in seen
+    assert "--write" in seen
