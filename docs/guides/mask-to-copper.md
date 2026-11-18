@@ -175,6 +175,17 @@ and can differ from the class for very wide or very short tracks. The class uses
 the track's authored ends. Evidence and per-board counts:
 [mask-to-copper-own-pad-8858](../research/mask-to-copper-own-pad-8858.md).
 
+### Pads of one footprint: `within_own_footprint`
+
+A library footprint can put a rectangular ground pad under circular ground pads
+(`RF_Module:ESP32-C3-WROOM-02`), so each circular opening exposes the rectangular
+pad. That is the footprint's land pattern, which a consumer cannot edit. When the
+conductor and every opening owner are pads of **one** footprint on the **same
+identified net**, the measurement reads `within_own_footprint` at **info**
+(issue #9420), so the evidence stays listed. Pads of different footprints, pads on
+different nets, and any track, via or pour keep their measured verdict.
+`physical_copper_gap` applies the same exemption (native and fab-view paths).
+
 ### A pad's own pour joined by thermal spokes: `own_pour_thermal`
 
 A pad inside its own same-net pour, joined to it by thermal spokes, has spoke

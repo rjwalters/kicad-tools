@@ -98,6 +98,18 @@ clips, or a trace wholly under an unrelated opening elsewhere on the
 board) stays at its current severity: that is the hazard a strip can
 actually create. With no sidecar, or no matching record, nothing changes.
 
+A pad of the same footprint (issue #9420)
+=========================================
+
+A stock library footprint can carry a rectangular ground pad with circular
+thermal pads on it (``RF_Module:ESP32-C3-WROOM-02``); each circular opening
+exposes the rectangular pad's copper. That is the footprint's own land pattern,
+which a consumer cannot edit. When every opening owner and the conductor are
+**pads of one footprint** on the **same identified net**, the measurement is
+``within_own_footprint`` at info (kept visible, never dropped). Pads of
+different footprints, pads on different nets, and any track, via or pour keep
+their measured verdict.
+
 A pad's own pour joined by thermal spokes (issue #9284)
 =======================================================
 
@@ -264,6 +276,7 @@ class MaskCopperMeasurement:
             "within_own_pad",
             "within_reinforce_run",
             "own_pour_thermal",
+            "within_own_footprint",
         ) or self.relation not in ("overlap", "touching", "disjoint"):
             raise ValueError("Invalid mask measurement disposition/relation")
         if self.mask_side not in (
@@ -533,6 +546,25 @@ def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearanc
         if opening.distance(copper.centroid) < drill / 2 + uncertainty:
             return False, excess
     return True, excess
+
+
+def _same_footprint_pads(owner_items, item) -> bool:
+    """True when the conductor and every opening owner are pads of one footprint.
+
+    Issue #9420.  The footprint is the object's ``parent_uuid``; an empty one
+    (no identifiable footprint) never qualifies.  Net agreement is the caller's
+    ``same_net`` test, which already requires an identified conductor net.
+    """
+    footprint = item.get("parent_uuid")
+    return bool(
+        footprint
+        and str(item.get("kind", "")).startswith("pad:")
+        and owner_items
+        and all(
+            str(o.get("kind", "")).startswith("pad:") and o.get("parent_uuid") == footprint
+            for o in owner_items
+        )
+    )
 
 
 @dataclass
@@ -1175,6 +1207,14 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                     )
                     if qualifies:
                         disposition = "within_own_pad"
+                if (
+                    disposition in ("violation", "uncertain")
+                    and same_net
+                    and _same_footprint_pads(owner_items, item)
+                ):
+                    # Issue #9420: same-net pads of one footprint are its
+                    # land pattern, not routed copper.
+                    disposition = "within_own_footprint"
                 pour_spokes = pour_gap = pour_spoke = None
                 if (
                     disposition in ("violation", "uncertain")
@@ -1432,11 +1472,14 @@ def assessment_results(assessment: MaskCopperAssessment) -> DRCResults:
         # copper beyond what its reinforce run puts there on purpose.
         # ``own_pour_thermal`` (issue #9284): the only copper under mask
         # beside the opening is the pad's own thermal spokes.
+        # ``within_own_footprint`` (issue #9420): the opening and the copper
+        # are same-net pads of one footprint -- its library land pattern.
         if measurement.disposition in (
             "intentional",
             "within_own_pad",
             "within_reinforce_run",
             "own_pour_thermal",
+            "within_own_footprint",
         ):
             severity = "info"
         # Warning-disposition measurements and provisional (incomplete-run)
