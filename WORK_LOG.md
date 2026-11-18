@@ -16,6 +16,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-18
 
+- **PR #9405**: fix: prefer first non-empty LCSC column when CSV headers collide
+- **PR #9398**: docs: changelog per-PR check runs --pr with a live gh pr view, not --pr-event
+- **Issue #9402** (closed): load_bom_csv and pcb/lcsc_bom accept different LCSC header spellings (shared normaliser, divergent accept-lists)
+- **Issue #9376** (closed): changelog.d/README.md still says the per-PR check runs `--pr-event`
 - **PR #9394**: ci: baseline board 07 mask_to_copper by net signature; drop the matchgroup-gate skip
 - **PR #9395**: fix: net-gate pad openings in mask_to_copper reinforce attribution
 - **PR #9391**: fix: keep every owner net in mask_to_copper signature for merged mask regions
