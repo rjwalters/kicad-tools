@@ -11,6 +11,16 @@ name: Changelog
 # seconds. Deliberately NOT gated by ci.yml's `changes` path filter -- a
 # docs-only or fragment-only PR must still be evaluated.
 #
+# Only the `changelog:skip` label can change the verdict, so a `labeled` /
+# `unlabeled` event for any other label (Loom flips `loom:reviewing` and
+# friends several times per PR) does not re-run the check (issue #8434): each
+# such event used to start a run and cancel the queued one, leaving the last
+# required check restarting under a backed-up queue. Two parts, both needed:
+# the job-level `if:` skips the run, and the concurrency group below moves the
+# ignored event into its own per-run group -- concurrency is evaluated before
+# the job `if:`, so without that split the skipped run would still cancel the
+# in-flight substantive run in `changelog-<PR>`.
+#
 # `timeout-minutes` is a ceiling for a slow checkout, not an expected runtime
 # (issue #9246): one slow full-history fetch once consumed a 5-minute budget,
 # skipped every real step and reported `cancelled` with no verdict.
@@ -24,12 +34,13 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: changelog-${{ github.event.pull_request.number }}
+  group: ${{ (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'changelog:skip' && format('changelog-ignored-{0}', github.run_id) || format('changelog-{0}', github.event.pull_request.number) }}
   cancel-in-progress: true
 
 jobs:
   fragment-check:
     name: Changelog Fragment Check
+    if: ${{ (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'changelog:skip' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
