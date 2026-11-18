@@ -386,6 +386,17 @@ def load_board_recipe_module(board_dir: Path):
     term consumes.  Mirrors ``net_class_map_resolver.load_board_recipe_module``
     (kept local to this gate to preserve the byte-for-byte sibling
     convention with ``check_diffpair_coverage.py``).
+
+    Issue #9351: the recipe bare-imports its siblings (``import
+    generate_pcb`` / ``import generate_schematic``), which cache in
+    ``sys.modules`` under those plain names -- keys the unique
+    top-module name does not namespace, so the first board loaded in a
+    process would win them and every later board would silently receive
+    its siblings.  Entries under the board's ``*.py`` stem names are
+    evicted before the import (a stale entry must not be reused) and
+    ``sys.modules`` is restored afterwards, symmetric with the
+    ``sys.path`` restore; the recipe keeps its own attribute references
+    and stays functional.
     """
     script = board_dir / "generate_design.py"
     if not script.is_file():
@@ -396,6 +407,14 @@ def load_board_recipe_module(board_dir: Path):
     # so the import resolves correctly.
     saved_path = list(sys.path)
     sys.path.insert(0, str(board_dir))
+
+    # Issue #9351: the recipe's bare sibling imports resolve through the
+    # plain ``sys.modules`` keys.  Pop any entry under a sibling stem
+    # first (restore-only would let a stale sibling from another board
+    # satisfy the bare import), then in ``finally`` drop the keys the
+    # load added and put the popped originals back.
+    sibling_names = {p.stem for p in board_dir.glob("*.py")}
+    saved_modules = {name: sys.modules.pop(name) for name in sibling_names if name in sys.modules}
     try:
         return _import_module_from_path(
             f"_matchgroup_coverage_generate_design_{board_dir.name.replace('-', '_')}",
@@ -403,6 +422,9 @@ def load_board_recipe_module(board_dir: Path):
         )
     finally:
         sys.path[:] = saved_path
+        for name in sibling_names:
+            sys.modules.pop(name, None)
+        sys.modules.update(saved_modules)
 
 
 def build_net_class_map_for_board(board_dir: Path) -> dict | None:
