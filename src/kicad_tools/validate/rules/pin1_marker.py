@@ -544,7 +544,8 @@ class Pin1MarkerRule(DRCRule):
                 text.font_size,
                 text.font_thickness,
                 transform(text.position),
-                justify=text.justify,
+                text.rotation,
+                text.justify,
             )
             if geom is not None:
                 yield geom

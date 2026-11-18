@@ -640,9 +640,9 @@ def _text_bbox_geometry(
     anchor, ``top`` hangs it below the anchor and ``bottom`` stands it above.
     The offset is applied in the text's own (unrotated) frame and the box is
     then rotated about the anchor, so rotated justified text lands correctly.
-    ``mirror`` is not modeled: mirrored text keeps the centred horizontal
-    placement (only the vertical tokens still apply, as mirroring flips x
-    only), which is the pre-#9433 behaviour.  ``angle`` is the absolute
+    ``mirror`` (back-side text) reverses the horizontal direction -- verified
+    against KiCad's plotted output: ``left`` behaves as unmirrored ``right``
+    and vice versa.  ``top``/``bottom`` are unaffected.  ``angle`` is the absolute
     board-frame text angle in KiCad degrees (positive turns toward negative
     board y); the default ``0`` yields the axis-aligned box.  Returns ``None``
     for empty text.
@@ -656,12 +656,14 @@ def _text_bbox_geometry(
     width = font_size[0] * n * _TEXT_CHAR_WIDTH_FACTOR + font_thickness
     height = font_size[1] + font_thickness
     cx, cy = center
-    mirrored = "mirror" in justify
-    if not mirrored:
-        if "left" in justify:
-            cx += width / 2.0
-        elif "right" in justify:
-            cx -= width / 2.0
+    # Mirrored text swaps left/right (verified against KiCad plots).
+    h_left, h_right = "left", "right"
+    if "mirror" in justify:
+        h_left, h_right = h_right, h_left
+    if h_left in justify:
+        cx += width / 2.0
+    elif h_right in justify:
+        cx -= width / 2.0
     # Board y grows downward: ``top`` anchors the top edge, box extends +y.
     if "top" in justify:
         cy += height / 2.0
@@ -1905,7 +1907,8 @@ def _iter_board_frame_texts(
                 fp_text.font_size,
                 fp_text.font_thickness,
                 center,
-                justify=fp_text.justify,
+                fp_text.rotation,
+                fp_text.justify,
             )
             if geom is None:
                 continue

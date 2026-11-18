@@ -84,11 +84,40 @@ def test_rotated_90_left_extends_toward_negative_y():
     assert (minx, maxx) == pytest.approx((20 - HEIGHT / 2, 20 + HEIGHT / 2))
 
 
-def test_mirror_keeps_centred_horizontal_placement():
-    """Mirrored text is not modelled (not verified vs KiCad): stays centred in x."""
-    assert _bbox((10, 20), justify=("mirror", "left")) == _bbox((10, 20))
-    # ...but the vertical token is unaffected by an x-mirror.
+def test_mirror_swaps_left_and_right():
+    """Verified vs KiCad 10.0.6: ``left mirror`` behaves as unmirrored ``right``."""
+    assert _bbox((10, 20), justify=("mirror", "left")) == pytest.approx(
+        _bbox((10, 20), justify=("right",))
+    )
+    assert _bbox((10, 20), justify=("mirror", "right")) == pytest.approx(
+        _bbox((10, 20), justify=("left",))
+    )
+    assert _bbox((10, 20), justify=("mirror", "left"))[2] == pytest.approx(10)
+
+
+def test_mirror_left_rotated_90_extends_toward_positive_y():
+    minx, miny, maxx, maxy = _bbox((20, 20), 90, ("left", "mirror"))
+    assert miny == pytest.approx(20)
+    assert maxy == pytest.approx(20 + WIDTH)
+
+
+def test_mirror_leaves_vertical_tokens_alone():
     assert _bbox((10, 20), justify=("mirror", "top"))[1] == pytest.approx(20)
+    assert _bbox((10, 20), justify=("mirror", "bottom"))[3] == pytest.approx(20)
+
+
+def test_rotated_footprint_text_box_uses_text_rotation(tmp_path):
+    """Rotated justified fp_text is rotated at every call site (not shifted along x)."""
+    board = _BOARD.replace(
+        '(fp_text user "{text}" (at {fx} 0)', '(fp_text user "{text}" (at {fx} 0 90)'
+    )
+    path = tmp_path / "rot.kicad_pcb"
+    path.write_text(board.format(text=TEXT, x=0, fx=0, justify=" (justify right)"))
+    pcb = PCB.load(str(path))
+    a = [e[0] for e in silk._iter_board_frame_texts(pcb) if e[1] == "Q1 (user)"]
+    b = [e[1] for e in silk._iter_silk_elements(pcb) if e[2] == "Q1 (user)"]
+    assert a and b
+    assert a[0].bounds == pytest.approx(b[0].bounds)
 
 
 _BOARD = """(kicad_pcb (version 20240108) (generator "test") (generator_version "9.0")
