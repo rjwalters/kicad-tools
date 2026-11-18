@@ -4566,6 +4566,30 @@ class Router:
                     return False
         return True
 
+    def _route_impl_band_relaxed(self, *args, **kwargs) -> Route | None:
+        """``_route_impl`` with a one-shot retry off the own-net slit-band gate (#9019).
+
+        The band gate is a hard step refusal; on a pad whose every escape
+        step lands in the band it would turn a routable net into an unrouted
+        one.  Like the #6761 escape fence, it must reshape a route, never
+        lose a connection: when the gated search finds nothing, retry once
+        with the gate suspended.
+        """
+        result = self._route_impl(*args, **kwargs)
+        if (
+            result is not None
+            or self.relief_mode
+            or getattr(self, "_own_net_band_suspended", False)
+            or float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0) <= 0.0
+            or getattr(self, "last_route_deadline_hit", False)
+        ):
+            return result
+        self._own_net_band_suspended = True
+        try:
+            return self._route_impl(*args, **kwargs)
+        finally:
+            self._own_net_band_suspended = False
+
     def route(
         self,
         start: Pad,
@@ -4592,7 +4616,7 @@ class Router:
         if weight == 1.0 and net_weights:
             weight = net_weights.get(start.net, weight)
         if not self._per_call_timing_enabled:
-            return self._route_impl(
+            return self._route_impl_band_relaxed(
                 start,
                 end,
                 net_class=net_class,
@@ -4606,7 +4630,7 @@ class Router:
         t0 = time.monotonic()
         succeeded = False
         try:
-            result = self._route_impl(
+            result = self._route_impl_band_relaxed(
                 start,
                 end,
                 net_class=net_class,
@@ -4812,7 +4836,7 @@ class Router:
         # caller resolved no stackup edge; the validator-style relief probes skip it.
         band_edge_mm = (
             0.0
-            if self.relief_mode
+            if self.relief_mode or getattr(self, "_own_net_band_suspended", False)
             else float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
         )
         band_width = self._get_trace_width_for_net(start.net_name)
@@ -7125,7 +7149,7 @@ class Router:
         # and when the caller resolved no stackup edge).
         band_edge_mm = (
             0.0
-            if self.relief_mode
+            if self.relief_mode or getattr(self, "_own_net_band_suspended", False)
             else float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
         )
         band_width = self._get_trace_width_for_net(source_pad.net_name)

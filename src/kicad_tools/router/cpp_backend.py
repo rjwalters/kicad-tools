@@ -2778,6 +2778,10 @@ class CppPathfinder:
             via_size=net_via_size,
         )
         fence_state = {"on": bool(escape_fences)}
+        # Issue #9019: the own-net slit-band gate is a hard step refusal; like
+        # the fence it must never lose a connection, so a failed gated search
+        # retries once with it off.
+        band_state = {"on": True}
 
         def _run_fresh_search(timeout_s: float, max_iters: int):
             self._sync_pairwise_domains_to_cpp()
@@ -2832,7 +2836,7 @@ class CppPathfinder:
                 # skip it, as the Python search does).
                 self._impl.set_search_own_net_band(
                     0.0
-                    if self._relief_mode
+                    if self._relief_mode or not band_state["on"]
                     else float(getattr(self._rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
                 )
 
@@ -2902,6 +2906,13 @@ class CppPathfinder:
                 saved_routable_layers = list(self._routable_layers)
                 self.set_routable_layers(pending_routable)
             result = _run_fresh_search(timeout_seconds, self._effective_search_iterations)
+            if (
+                not result.success
+                and not self._relief_mode
+                and float(getattr(self._rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0) > 0.0
+            ):
+                band_state["on"] = False
+                result = _run_fresh_search(timeout_seconds, self._effective_search_iterations)
             if not result.success and fence_state["on"]:
                 # Issue #6761: a fence reshapes an escape, it must never lose
                 # a connection -- when the fenced search finds nothing (e.g.
