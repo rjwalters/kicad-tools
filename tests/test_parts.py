@@ -1125,6 +1125,62 @@ class TestLCSCClientCheckBOM:
             u1 = next(i for i in result.items if i.reference == "U1")
             assert u1.error == "Part not found"
 
+    def test_check_bom_real_bom_items(self, tmp_path):
+        """Regression #9377: real BOMItem objects must not raise AttributeError.
+
+        schema.bom.BOMItem is a single placed designator and carries no
+        ``quantity`` attribute; check_bom must default quantity_needed to 1.
+        """
+        from kicad_tools.parts import LCSCClient, Part, PartsCache
+        from kicad_tools.schema.bom import BOMItem
+
+        items = [
+            BOMItem(reference="R1", value="10k", footprint="0402", lib_id="R", lcsc="C123456"),
+            BOMItem(reference="C1", value="100nF", footprint="0402", lib_id="C", lcsc=""),
+        ]
+
+        cache = PartsCache(db_path=tmp_path / "cache.db")
+        client = LCSCClient(cache=cache)
+
+        with patch.object(client, "lookup_many") as mock_lookup:
+            mock_lookup.return_value = {
+                "C123456": Part(lcsc_part="C123456", mfr_part="R1", stock=5000),
+            }
+
+            result = client.check_bom(items)
+
+        assert len(result.items) == 2
+        r1 = next(i for i in result.items if i.reference == "R1")
+        assert r1.quantity_needed == 1
+        assert r1.matched is True
+        c1 = next(i for i in result.items if i.reference == "C1")
+        assert c1.quantity_needed == 1
+        assert c1.error == "No LCSC part number"
+
+    def test_check_bom_propagates_quantity_attr(self, tmp_path):
+        """Items that do carry a ``quantity`` attribute keep it."""
+        from kicad_tools.parts import LCSCClient, Part, PartsCache
+
+        class GroupedItem:
+            def __init__(self):
+                self.reference = "R1"
+                self.value = "10k"
+                self.footprint = "0402"
+                self.lcsc = "C123456"
+                self.quantity = 5
+
+        cache = PartsCache(db_path=tmp_path / "cache.db")
+        client = LCSCClient(cache=cache)
+
+        with patch.object(client, "lookup_many") as mock_lookup:
+            mock_lookup.return_value = {
+                "C123456": Part(lcsc_part="C123456", mfr_part="R1", stock=5000),
+            }
+
+            result = client.check_bom([GroupedItem()])
+
+        assert result.items[0].quantity_needed == 5
+
 
 class TestRequiresRequestsDecorator:
     """Tests for _requires_requests decorator."""
