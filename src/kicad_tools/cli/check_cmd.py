@@ -79,6 +79,7 @@ from kicad_tools.validate.rules.schematic_fields import DEFAULT_SCH_FIELD_THRESH
 if TYPE_CHECKING:
     from kicad_tools.erc import ERCReport
     from kicad_tools.erc.violation import ERCViolation
+    from kicad_tools.validate.rules.waivers import Waivers
 
 # Issue #3750: meta-check status set.  ``NOT RUN`` is rendered with a space
 # in human output and ``"NOT RUN"`` in JSON; we treat it as a single token
@@ -3572,7 +3573,7 @@ class CheckRuleSet:
     manufacturer: str
     layers: int
     net_class_map_path: Path | None = None
-    general_waivers: object | None = None
+    general_waivers: "Waivers | None" = None
     notes: list[str] = field(default_factory=list)
 
 
@@ -3696,11 +3697,18 @@ def build_check_rule_set(
     )
 
 
-def run_check_rule_set(rule_set: CheckRuleSet) -> DRCResults:
+def run_check_rule_set(rule_set: CheckRuleSet, *, apply_sidecar_waivers: bool = True) -> DRCResults:
     """Run every default ``kct check`` category under ``rule_set``.
 
     Same dispatch as the CLI (:func:`run_selected_checks`, so the
-    path-dependent rules run), with the board's waivers applied afterwards.
+    path-dependent rules run), with the board's general-waiver sidecar
+    applied afterwards.
+
+    ``apply_sidecar_waivers=False`` returns the raw findings *before* the
+    general waivers step: callers that diff waiver matching across two board
+    states (the ``pcb prune`` / ``fix-drc`` invalidation report, Issue
+    #9331) need the pre-waiver findings so entry usage is derived from the
+    match loop itself, not from findings their own sidecar already waived.
     """
     sch_path = _resolve_check_schematic(None, rule_set.project_pcb_path)
     results = run_selected_checks(
@@ -3712,11 +3720,62 @@ def run_check_rule_set(rule_set: CheckRuleSet) -> DRCResults:
         pcb_path=rule_set.project_pcb_path,
         layers=rule_set.layers,
     )
-    if rule_set.general_waivers is not None:
-        from kicad_tools.validate.rules.waivers import apply_waivers
+    if apply_sidecar_waivers and rule_set.general_waivers is not None:
+        from kicad_tools.validate.rules.waivers import apply_waivers as _apply_waivers
 
-        apply_waivers(results, rule_set.general_waivers.for_check())  # type: ignore[attr-defined]
+        _apply_waivers(results, rule_set.general_waivers.for_check())
     return results
+
+
+def waiver_invalidation_report_lines(
+    project_pcb_path: Path,
+    before_board: PCB,
+    after_board: PCB,
+) -> list[str]:
+    """Formatted invalidated-waiver report lines for a copper edit (Issue #9331).
+
+    Runs ``kct check``'s findings pipeline (:func:`build_check_rule_set` +
+    :func:`run_check_rule_set`, waivers NOT applied) on the board before and
+    after a ``pcb prune`` / ``fix-drc`` edit and diffs which general-waiver
+    sidecar entries still waive something.  Returns ``[]`` when no waivers
+    sidecar is discoverable for the board or no entry was invalidated, so
+    callers stay silent for free; sidecar notes (e.g. a malformed
+    auto-discovered sidecar) are warned on stderr here.  Report-only: the
+    caller's exit code and board output are untouched.
+
+    Args:
+        project_pcb_path: The board whose sidecars define the rules and the
+            waivers (the *input* board).
+        before_board: The pre-edit geometry.  Captured *before* the edit:
+            both commands overwrite the input when no ``--output`` is given,
+            so reloading the file afterwards yields the edited board.
+        after_board: The post-edit geometry (in memory or reloaded).
+    """
+    try:
+        from kicad_tools.validate.rules.waivers import (
+            format_invalidated_waivers,
+            invalidated_waiver_keys,
+        )
+
+        rule_set = build_check_rule_set(project_pcb_path, pcb=before_board)
+        waivers = rule_set.general_waivers
+        if waivers is None:
+            for note in rule_set.notes:
+                if "waivers sidecar" in note:
+                    print(f"WARNING: {note}", file=sys.stderr)
+            return []
+        if not waivers.entries:
+            return []
+        before = run_check_rule_set(rule_set, apply_sidecar_waivers=False).violations
+        after = run_check_rule_set(
+            build_check_rule_set(project_pcb_path, pcb=after_board),
+            apply_sidecar_waivers=False,
+        ).violations
+        invalidated = invalidated_waiver_keys(before, after, waivers.for_check())
+        return format_invalidated_waivers(invalidated)
+    except Exception as e:  # noqa: BLE001 - the report must never fail the command
+        print(f"WARNING: waiver invalidation report skipped: {e}", file=sys.stderr)
+        return []
 
 
 def run_selected_checks(

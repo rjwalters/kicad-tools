@@ -232,10 +232,29 @@ def test_poke_sweep_never_scores_below_a_full_exit(pad, y, owner_kind):
 
 
 def test_one_end_inside_other_on_the_edge_is_within_own_pad():
-    """The old 'neither entry nor wholly on the pad' arm is gone (issue #9261)."""
+    """The other authored end sits exactly on the pad edge and still gets the
+    one-crossing allowance (issue #9261: the other end may exit, sit on the
+    edge or be inside too). This case alone does not distinguish pre-#9261
+    code — the old entry-allowance branch allowed it as well; the u-band test
+    below is what pins the removed arm (issue #9310, measured)."""
     result, m = _only(_segment((0.5, 0.5), (1.0, 0.5)))
     assert m.disposition == "within_own_pad"
     assert _severity(result) == "info"
+
+
+def test_one_end_inside_other_within_the_u_band_of_the_edge_is_within_own_pad():
+    """The removed 'neither entry nor wholly on the pad' arm is gone (issue #9261).
+
+    The far authored end lies inside the pad copper but within the
+    construction budget u of its edge: 5 um inside under a 10 um Gerber ring
+    (max_error=0.005). Measured against the pre-#9261 source, this geometry
+    is exactly what reached that arm — it returned a violation; the new code
+    grants the one-crossing allowance (issue #9310, measured).
+    """
+    result, m = _only(_segment((0.5, 0.5), (0.995, 0.5), max_error=0.005))
+    assert m.disposition == "within_own_pad"
+    assert _severity(result) == "info"
+    assert result.passed
 
 
 def test_pass_through_with_no_end_inside_stays_an_error_after_the_poke_change():

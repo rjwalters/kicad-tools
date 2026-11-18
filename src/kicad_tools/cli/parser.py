@@ -5461,8 +5461,11 @@ def _add_fix_drc_parser(subparsers) -> None:
     )
     fix_drc_parser.add_argument(
         "--only",
-        choices=["clearance", "drill-clearance"],
-        help="Only fix a specific violation type",
+        choices=["clearance", "drill-clearance", "mask-copper"],
+        help=(
+            "Only fix a specific violation type ('mask-copper' re-centres a "
+            "track entering its own pad off-centre; detected with kct check's rules)"
+        ),
     )
     fix_drc_parser.add_argument(
         "-o",

@@ -22017,6 +22017,10 @@ class Autorouter:
             # The checker above is a pre-repair snapshot; this makes later
             # repairs clear the chords earlier ones added (issue #8930).
             clearance=float(self.grid.rules.trace_clearance),
+            # ...and this stops them being vetoed by legs earlier repairs
+            # removed (issue #9355).  Only the vector checker can; the raster
+            # fallback has no such method and keeps its snapshot.
+            path_is_clear_ignoring=getattr(checker, "ignoring", None),
         )
         if not result.repairs:
             if result.skipped:

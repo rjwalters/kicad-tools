@@ -38,6 +38,7 @@ is a report the gallery's validator accepts.
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import logging
@@ -60,6 +61,8 @@ from kicad_tools.analysis.routing_quality import (
     RULE_OFF_AXIS_LENGTH_WARNING,
     off_axis_layer_warning_count,
 )
+from kicad_tools.exceptions import FileFormatError
+from kicad_tools.sexp import ParseError
 
 from .board_readiness import read_readiness, readiness_input_hash
 from .format_options import FORMAT_JSON, add_format_flag, emit_json, stdout_to_stderr_when
@@ -3606,23 +3609,52 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
     )
 
 
+# Inputs whose failure to read or parse means the CPL rotation re-derivation
+# cannot run (issue #9346): the retained CSVs and the board PCB.  ``ParseError``
+# is the s-expression parser's (a ``ValueError``), raised by ``PCB.load`` on a
+# malformed board; ``FileFormatError`` for a file that is not a PCB.  The
+# sidecar has its own error type and message; anything else reaching this
+# point used to hit a blanket ``except Exception`` that silently skipped the
+# check, and must be reported instead.
+_CPL_REDERIVATION_INPUT_ERRORS: tuple[type[Exception], ...] = (
+    OSError,
+    csv.Error,
+    UnicodeDecodeError,
+    ParseError,
+    FileFormatError,
+)
+
+
 def _cpl_rotation_state(options: ReadinessOptions) -> tuple[Any, str | None]:
     """Re-derive the shipped CPL's rotation provenance (issue #9322).
 
-    Returns ``(RotationReview | None, error)``.  Reads the shipped BOM/CPL for
+    Returns ``(RotationReview | None, problem)``.  Reads the shipped BOM/CPL for
     the LCSC numbers and footprint names the export actually used, so the
-    recorded corrections are the ones keyed against the shipped files.  ``None``
-    without an error means there is nothing to report (no CPL, or a board the
-    export step could not have parsed); an error means the sidecar is invalid.
+    recorded corrections are the ones keyed against the shipped files.  ``(None,
+    None)`` means there is nothing to report (no CPL, or a board the export step
+    could not have parsed); a non-``None`` problem string means the
+    re-derivation could not be trusted -- an invalid sidecar, or an input or
+    unexpected failure, which callers must report rather than skip silently
+    (issue #9346: a check that cannot run must never look like one that passed).
     """
     if not options.assembly or not options.pcb.is_file():
         return None, None
     cpl = next(iter(sorted(options.output_dir.glob("cpl*.csv"))), None)
     if cpl is None:
         return None, None
-    from kicad_tools.export.assembly import review_cpl_rotations
+    from kicad_tools.export.assembly import resolve_pnp_config, review_cpl_rotations
+    from kicad_tools.export.pnp import PnPExportConfig
     from kicad_tools.export.rotation_overrides import RotationOverridesError
+    from kicad_tools.manufacturers import get_fab_family
 
+    # Mirror the export's effective PnP config: --include-tht exported with an
+    # explicit exclude_tht=False (cli.export_cmd._build_configs), so the
+    # re-derived placement set must resolve the same way instead of assuming
+    # the fab default (#9346).
+    pnp_config = resolve_pnp_config(
+        get_fab_family(options.manufacturer),
+        PnPExportConfig(exclude_tht=False) if options.include_tht else None,
+    )
     try:
         names: dict[str, str] = {}
         header, rows = _read_csv_rows(cpl)
@@ -3653,11 +3685,20 @@ def _cpl_rotation_state(options: ReadinessOptions) -> tuple[Any, str | None]:
             options.manufacturer,
             lcsc_by_reference=lcsc,
             footprint_names=names,
+            pnp_config=pnp_config,
         )
     except RotationOverridesError as exc:
-        return None, str(exc)
-    except Exception as exc:  # unexpected: never vanish (issue #9362)
-        return None, f"unexpected failure while reviewing CPL rotations: {exc!r}"
+        return None, f"CPL rotation sidecar is invalid: {exc}"
+    except _CPL_REDERIVATION_INPUT_ERRORS as exc:
+        logger.warning("CPL rotation re-derivation skipped: %s: %s", type(exc).__name__, exc)
+        return None, f"CPL rotation re-derivation skipped ({type(exc).__name__}: {exc})"
+    except Exception as exc:
+        logger.warning(
+            "CPL rotation re-derivation failed unexpectedly: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        return None, f"CPL rotation re-derivation failed ({type(exc).__name__}: {exc})"
     return review, None
 
 
@@ -3674,9 +3715,11 @@ def _verify_cpl_rotations(options: ReadinessOptions) -> list[str]:
 
     if not options.assembly:
         return []
-    review, error = _cpl_rotation_state(options)
-    if error:
-        return [f"CPL rotation review failed: {error}"]
+    review, problem = _cpl_rotation_state(options)
+    if problem:
+        # An invalid sidecar, or a re-derivation that could not run (issue
+        # #9346): report it instead of letting the check pass by omission.
+        return [problem]
     if review is None or review.sidecar is None:
         return []
     cpl = next(iter(sorted(options.output_dir.glob("cpl*.csv"))), None)
@@ -3707,6 +3750,26 @@ def _verify_cpl_rotations(options: ReadinessOptions) -> list[str]:
                 f"{Path(review.sidecar).name} gives {expected}; regenerate the bundle"
             )
     return problems
+
+
+def _cpl_rotation_report_entry(options: ReadinessOptions) -> dict[str, Any] | None:
+    """The ``cpl_rotations`` evidence block for ``readiness.json``, if any.
+
+    ``None`` when there is genuinely nothing to report (no CPL, or a board the
+    export step could not have parsed).  A re-derivation that could not be
+    trusted (invalid sidecar, unreadable input, unexpected failure) is recorded
+    as a skip so the evidence never shows a silently-skipped check as a pass
+    (issue #9346).
+    """
+    review, problem = _cpl_rotation_state(options)
+    if review is not None:
+        block: dict[str, Any] = review.to_report(
+            _rel(options, Path(review.sidecar)) if review.sidecar else None
+        )
+        return block
+    if problem is not None:
+        return {"rederivation_skipped": problem}
+    return None
 
 
 def build_report(
@@ -3801,15 +3864,9 @@ def build_report(
         }
         if produced:
             report["report_sources"] = produced
-    cpl_rotations, rotation_error = _cpl_rotation_state(options)
-    if cpl_rotations is not None:
-        report["cpl_rotations"] = cpl_rotations.to_report(
-            _rel(options, Path(cpl_rotations.sidecar)) if cpl_rotations.sidecar else None
-        )
-    elif rotation_error:
-        # Issue #9362: an unexpected review failure must be visible in the
-        # report, not silently dropped (and --verify reports it as a problem).
-        report["cpl_rotations"] = {"error": rotation_error}
+    cpl_block = _cpl_rotation_report_entry(options)
+    if cpl_block is not None:
+        report["cpl_rotations"] = cpl_block
     external = _external_dependencies(options)
     if external:
         # Hash the exact collected out-of-directory dependencies (Issue #5813).

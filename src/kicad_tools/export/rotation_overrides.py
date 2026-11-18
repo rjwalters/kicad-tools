@@ -266,11 +266,14 @@ def review_rotations(
     """
     # Guard on ``path is not None``, not truthiness: an empty-but-present
     # sidecar (``__bool__`` False) still has a path and hash worth recording.
-    has_sidecar = overrides is not None and overrides.path is not None
-    review = RotationReview(
-        sidecar=str(overrides.path) if has_sidecar else None,
-        sidecar_sha256=overrides.sha256 if has_sidecar else None,
-    )
+    # Narrow in place (not through an intermediate bool) so mypy follows it.
+    if overrides is not None and overrides.path is not None:
+        review = RotationReview(
+            sidecar=str(overrides.path),
+            sidecar_sha256=overrides.sha256,
+        )
+    else:
+        review = RotationReview()
     used_refs: set[str] = set()
     used_lcsc: set[str] = set()
     for placement in sorted(placements, key=lambda p: p.reference):

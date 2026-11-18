@@ -10,10 +10,14 @@ from __future__ import annotations
 import pytest
 
 from kicad_tools.validate.rules.waivers import (
+    MAX_INVALIDATED_LISTED,
     WAIVER_UNUSED_RULE_ID,
+    InvalidatedWaiver,
     Waivers,
     apply_waivers,
     discover_waivers_sidecar,
+    format_invalidated_waivers,
+    invalidated_waiver_keys,
     load_waivers,
     waivers_from_dict,
 )
@@ -307,3 +311,215 @@ class TestApplyWaivers:
         apply_waivers(results, waivers)
         assert results.waived_count == 2
         assert all(v.rule_id != WAIVER_UNUSED_RULE_ID for v in results.violations)
+
+
+# ── Issue #9331: invalidated-waiver report for pcb prune / fix-drc ─────────
+
+
+def _kv(
+    rule_id="clearance_segment_segment",
+    items=("Trace@F.Cu:w0.25:100/100~110/100",),
+    nets=("GND",),
+    layer="F.Cu",
+    severity="error",
+    waived=False,
+    evidence_hash=None,
+):
+    from dataclasses import replace
+
+    v = _v(rule_id=rule_id, items=items, nets=nets, severity=severity)
+    v = replace(v, layer=layer, waived=waived)
+    if evidence_hash:
+        v = replace(v, evidence_hash=evidence_hash)
+    return v
+
+
+def _keyed_waivers(key: str, evidence_hash: str) -> Waivers:
+    return waivers_from_dict(
+        {
+            "version": 3,
+            "waivers": [
+                {
+                    "key": key,
+                    "evidence_hash": evidence_hash,
+                    "reason": "reviewed overlap",
+                    "reviewer": "rj",
+                    "date": "2026-11-18",
+                }
+            ],
+        }
+    )
+
+
+class TestInvalidatedWaiverKeys:
+    KEY_A = (
+        "clearance_segment_segment|Trace@F.Cu:w0.25:100/100.15~110/100.15,"
+        "Trace@F.Cu:w0.25:100/100~102/100|+3.3V,GND|F.Cu"
+    )
+    KEY_A_MOVED = (
+        "clearance_segment_segment|Trace@F.Cu:w0.25:100/100.15~110/100.15,"
+        "Trace@F.Cu:w0.25:100/100~102.5/100|+3.3V,GND|F.Cu"
+    )
+
+    def _entry_for(self, key: str, finding) -> Waivers:
+        from kicad_tools.validate.evidence import compute_evidence_hash
+
+        return _keyed_waivers(key, compute_evidence_hash(finding))
+
+    def _finding_for(self, key: str):
+        """A finding whose ``key`` equals ``key`` (rule|items|nets|layer)."""
+        rule, items, nets, layer = key.split("|")
+        return _kv(
+            rule_id=rule,
+            items=tuple(items.split(",")) if items else (),
+            nets=tuple(nets.split(",")) if nets else (),
+            layer=layer or None,
+        )
+
+    def test_key_gone_is_invalidated_without_candidate(self):
+        before = [self._finding_for(self.KEY_A)]
+        w = self._entry_for(self.KEY_A, before[0])
+        out = invalidated_waiver_keys(before, [], w)
+        assert len(out) == 1
+        assert out[0].key == self.KEY_A
+        assert out[0].rule == "clearance_segment_segment"
+        assert out[0].rewaive_candidate is None  # the finding was fixed
+
+    def test_key_persists_not_reported(self):
+        before = [self._finding_for(self.KEY_A)]
+        w = self._entry_for(self.KEY_A, before[0])
+        assert invalidated_waiver_keys(before, [self._finding_for(self.KEY_A)], w) == []
+
+    def test_previously_unused_not_reported(self):
+        w = self._entry_for(self.KEY_A, self._finding_for(self.KEY_A))
+        # The entry never matched anything before the edit either.
+        assert invalidated_waiver_keys([], [], w) == []
+
+    def test_unique_rewaive_candidate_named(self):
+        before = [self._finding_for(self.KEY_A)]
+        w = self._entry_for(self.KEY_A, before[0])
+        after = [self._finding_for(self.KEY_A_MOVED)]
+        out = invalidated_waiver_keys(before, after, w)
+        assert len(out) == 1
+        assert out[0].rewaive_candidate == self.KEY_A_MOVED
+
+    def test_ambiguous_candidates_not_named(self):
+        before = [self._finding_for(self.KEY_A)]
+        w = self._entry_for(self.KEY_A, before[0])
+        # Two after-state findings share rule/nets/layer/item kinds.
+        after = [
+            self._finding_for(self.KEY_A_MOVED),
+            self._finding_for(
+                "clearance_segment_segment|Trace@F.Cu:w0.25:105/100~110/100,"
+                "Trace@F.Cu:w0.25:100/100.15~110/100.15|+3.3V,GND|F.Cu"
+            ),
+        ]
+        out = invalidated_waiver_keys(before, after, w)
+        assert len(out) == 1
+        assert out[0].rewaive_candidate is None
+
+    def test_already_waived_before_finding_not_counted(self):
+        before = [self._finding_for(self.KEY_A)]
+        waived_before = [_kv_replace_waived(before[0])]
+        w = self._entry_for(self.KEY_A, before[0])
+        assert invalidated_waiver_keys(waived_before, [], w) == []
+
+    def test_stale_evidence_not_used_before(self):
+        from dataclasses import replace
+
+        finding = replace(self._finding_for(self.KEY_A), evidence_hash="ev3:other")
+        w = self._entry_for(self.KEY_A, self._finding_for(self.KEY_A))
+        # The entry names the key but its evidence no longer matches: it did
+        # not waive anything before, so the edit is not what orphaned it.
+        assert invalidated_waiver_keys([finding], [], w) == []
+
+    def test_finding_persists_same_key_stale_evidence_names_candidate(self):
+        from dataclasses import replace
+
+        before = [self._finding_for(self.KEY_A)]
+        w = self._entry_for(self.KEY_A, before[0])
+        # Same key after the edit, different evidence (e.g. a moved neighbour
+        # changed the measured value): the entry is stale -> invalidated, and
+        # the surviving finding is the re-waive candidate.
+        after = [replace(self._finding_for(self.KEY_A), evidence_hash="ev3:new")]
+        out = invalidated_waiver_keys(before, after, w)
+        assert len(out) == 1
+        assert out[0].rewaive_candidate == self.KEY_A
+
+    def test_legacy_entry_still_matching_not_reported(self):
+        w = waivers_from_dict(
+            {
+                "version": 2,
+                "waivers": [
+                    {
+                        "rule": "courtyards_overlap",
+                        "items": ["C52", "U10"],
+                        "reason": "ok",
+                        "issue": "x#1",
+                    }
+                ],
+            }
+        )
+        before = [_v(rule_id="courtyards_overlap", items=("C52", "U10"))]
+        after = [_v(rule_id="courtyards_overlap", items=("C52", "U10"))]
+        assert invalidated_waiver_keys(before, after, w) == []
+
+    def test_legacy_entry_items_changed_is_invalidated(self):
+        w = waivers_from_dict(
+            {
+                "version": 2,
+                "waivers": [
+                    {
+                        "rule": "courtyards_overlap",
+                        "items": ["C52", "U10"],
+                        "reason": "ok",
+                        "issue": "x#1",
+                    }
+                ],
+            }
+        )
+        before = [_v(rule_id="courtyards_overlap", items=("C52", "U10"))]
+        after = [_v(rule_id="courtyards_overlap", items=("C52", "U11"))]
+        out = invalidated_waiver_keys(before, after, w)
+        assert len(out) == 1
+        assert out[0].key is None
+        assert out[0].rule == "courtyards_overlap"
+        assert out[0].rewaive_candidate is None  # refs changed, kinds differ
+
+
+def _kv_replace_waived(v):
+    from dataclasses import replace
+
+    return replace(v, waived=True, waiver_reason="courtyard")
+
+
+class TestFormatInvalidatedWaivers:
+    def test_empty_is_silent(self):
+        assert format_invalidated_waivers([]) == []
+
+    def test_lists_key_rule_and_candidate(self):
+        items = [
+            InvalidatedWaiver(
+                key="r|a|n|F.Cu",
+                rule="r",
+                scope="key='r|a|n|F.Cu'",
+                rewaive_candidate="r|a'|n|F.Cu",
+            )
+        ]
+        lines = format_invalidated_waivers(items)
+        assert len(lines) == 2
+        assert "1 waiver key(s) invalidated" in lines[0]
+        assert "r|a|n|F.Cu" in lines[1] and "(rule r)" in lines[1]
+        assert "re-waive candidate: r|a'|n|F.Cu" in lines[1]
+
+    def test_legacy_entry_uses_scope(self):
+        items = [InvalidatedWaiver(key=None, rule="r", scope="items=['A', 'B']")]
+        lines = format_invalidated_waivers(items)
+        assert "items=['A', 'B']" in lines[1]
+
+    def test_caps_with_more_tail(self):
+        items = [InvalidatedWaiver(key=f"r|a{i}|n|F.Cu", rule="r", scope=f"s{i}") for i in range(7)]
+        lines = format_invalidated_waivers(items)
+        assert "7 waiver key(s) invalidated" in lines[0]
+        assert sum(1 for ln in lines if ln.startswith("  - ")) == MAX_INVALIDATED_LISTED
+        assert lines[-1] == f"  (+{7 - MAX_INVALIDATED_LISTED} more)"
