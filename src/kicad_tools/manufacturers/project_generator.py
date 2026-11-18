@@ -1574,6 +1574,7 @@ def write_drc_constraints(
     max_ampacity_width_mm: float | None = None,
     route_edge_clearance_mm: float | None = None,
     _board_path: str | Path | None = None,
+    _report_dru_path: str | Path | None = None,
 ) -> list[Path]:
     """Emit DRC-constraint sources next to a routed ``.kicad_pcb``.
 
@@ -1665,6 +1666,8 @@ def write_drc_constraints(
             applied to both sidecars without being written into the project;
             ``None`` (default) reads the project.  See
             :func:`merge_project_rules`.
+        _report_dru_path: Internal -- ``.kicad_dru`` path to name in
+            diagnostics when ``pcb_path`` is a scratch copy (#9430).
         _board_path: Internal -- board to read keepout rule areas from when
             ``pcb_path`` is a staged sibling with no ``.kicad_pcb`` beside it.
         source_pcb_path: Original board when routing to a renamed destination.
@@ -1807,6 +1810,9 @@ def write_drc_constraints(
         from .dru_generator import merge_dru_floors
 
         dru_path = pcb_path.with_suffix(".kicad_dru")
+        # Name in diagnostics (#9430): the real sidecar when ``pcb_path`` is a
+        # scratch copy (``export --dry-run``), so messages never cite a temp dir.
+        report_path = Path(_report_dru_path) if _report_dru_path is not None else dru_path
         try:
             existing_dru: str | None = (
                 dru_path.read_text(encoding="utf-8") if dru_path.exists() else None
@@ -1847,7 +1853,7 @@ def write_drc_constraints(
                 route_edge_clearance_mm=route_edge_clearance_mm,
                 zone_clearances=zone_targets,
             ),
-            path=dru_path,
+            path=report_path,
             authored=authored_state,
             allow=allow_dru,
         )
@@ -1855,7 +1861,7 @@ def write_drc_constraints(
         # kicad-cli < 10.0.6 does not enforce rule areas on its own (#7198).
         if board.exists():
             keepout_dru = apply_keepout_rules(
-                merged_dru, board, _installed_kicad_cli_version(), path=dru_path
+                merged_dru, board, _installed_kicad_cli_version(), path=report_path
             )
             if keepout_dru is not None:
                 merged_dru = keepout_dru
@@ -1880,6 +1886,6 @@ def write_drc_constraints(
         written.append(dru_path)
         # The sidecar is on disk now; tell the user if the engine they have
         # installed will silently ignore its SMD pad floor (#5724).
-        _warn_if_smd_pad_clearance_is_inert(rules, dru_path)
+        _warn_if_smd_pad_clearance_is_inert(rules, report_path)
 
     return written
