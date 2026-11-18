@@ -647,8 +647,8 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty):
     already in the chain, seeded by the pieces standing on the confirmed
     anchors. An opening that is merely over the same net's copper elsewhere
     on the board is not continuous with any anchor flash and attributes to
-    nothing (#9315). An anchor-flash ``via`` must also carry the run's net;
-    board graphics have none to check. Ties between records of one net go
+    nothing (#9315). An anchor-flash ``via`` or ``pad`` must also carry the
+    run's net (#9348); board graphics have none to check. Ties between records of one net go
     to the run with the nearest anchor, first recorded winning a tie, so
     attribution is deterministic. ``merged_region`` openings attribute
     through their contributors, which are attributed individually before
@@ -668,14 +668,20 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty):
         uuid = owners[0]
         if kind == "gr_line":
             strip_materials[uuid] = material
+        # Hoisted out of the per-run loop: one hull per opening, not per run.
+        hull = material.convex_hull
+        # Anchor flashes carry a net (a via, or a pad); board graphics have
+        # none to check. Both must match the run's net (#9348).
+        owner_net = None
+        if kind == "via" or kind.startswith("pad"):
+            owner = objects.get(uuid) if len(owners) == 1 else None
+            owner_net = (owner.get("net") if owner else "") or ""
         for run in runs:
             if not run.confirmed_anchors:
                 continue
-            if kind == "via":
-                owner = objects.get(uuid) if len(owners) == 1 else None
-                if (owner.get("net") if owner else "") != run.net:
-                    continue
-            distance = min(material.convex_hull.distance(Point(a)) for a in run.confirmed_anchors)
+            if (kind == "via" or kind.startswith("pad")) and owner_net != run.net:
+                continue
+            distance = min(hull.distance(Point(a)) for a in run.confirmed_anchors)
             if distance <= tolerance:
                 candidates.setdefault(uuid, []).append((run, distance))
 
