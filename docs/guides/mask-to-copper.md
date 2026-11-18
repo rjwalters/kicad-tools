@@ -244,8 +244,10 @@ spoke band, which does not apply (a solid pour body lies inside it):
   else the zone's; "thermal relief for through-hole pads only" counts as solid on
   an SMD pad;
 - the fill overlaps the pad by more than `u`, nothing is exposed beyond the pad,
-  and the fill covers at least 75% of a 0.01 mm rim around the pad (spokes cover
-  about 30%), so a declaration the fill does not bear out keeps its verdict.
+  and the fill's contact along the pad edge is longer than four thermal spokes
+  could make it (4 x 1.45 x the declared spoke width, the 1.45 allowing for a
+  spoke crossing a curved edge), so a declaration the fill does not bear out
+  keeps its verdict. A pour clipped by another net's clearance still counts.
 
 An unconnected same-net pour, a positive expansion with pour in the ring,
 different-net pour and unreadable connection data stay errors. The measurement

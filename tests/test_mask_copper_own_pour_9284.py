@@ -86,13 +86,14 @@ def _geometry(
     zone_conn="default",
     island=None,
     side="F",
+    pad=PAD,
 ):
     from kicad_tools.validate.mask_copper_geometry import AttributedMaskGeometry
     from kicad_tools.validate.mask_export_geometry import ExportedMaskGeometry
 
     mask, cu = f"{side}.Mask", f"{side}.Cu"
-    opening = PAD.buffer(margin, join_style="mitre") if margin else PAD
-    copper = [PAD, fill] + ([island] if island is not None else [])
+    opening = pad.buffer(margin, join_style="mitre") if margin else pad
+    copper = [pad, fill] + ([island] if island is not None else [])
     exported = ExportedMaskGeometry(
         "a" * 64, None, None, "10.0.6", {}, layers={mask: opening, cu: unary_union(copper)}
     )
@@ -101,7 +102,7 @@ def _geometry(
             "kind": owner_kind,
             "net": owner_net,
             "pad_ref": "R2/2",
-            "layers_geometry": {mask: opening, cu: PAD},
+            "layers_geometry": {mask: opening, cu: pad},
             "margin_mm": {mask: margin},
             "zone_connection": pad_connection() if owner_conn == "default" else owner_conn,
         },
@@ -261,6 +262,42 @@ def test_solid_fill_clipped_by_other_net_clearance_is_still_info(top):
     result, m = _measure(_geometry(fill, owner_conn=pad_connection(pad=SOLID)))
     assert m.disposition == "own_pour_solid"
     assert _severity(result) == "info"
+
+
+def test_solid_declared_but_round_pad_fill_shows_spokes_stays_an_error():
+    """Issue #9436 review: a spoke crossing a curved edge contacts more than its width.
+
+    On a circle r=0.5 mm, four 0.3 mm spokes contact 1.218 mm, above a bound
+    that omits _ENTRY_CROSSING_FACTOR (1.2 mm); the factor keeps it an error.
+    """
+    from shapely.geometry import Point
+
+    round_pad = Point(0.5, 0.5).buffer(0.5, quad_segs=64)
+    fill = thermal_fill(pad=round_pad)
+    result, m = _measure(
+        _geometry(
+            fill,
+            pad=round_pad,
+            owner_kind="pad:circle",
+            owner_conn=pad_connection(pad=SOLID),
+            zone_conn=zone_connection(),
+        )
+    )
+    assert m.disposition == "violation"
+    assert _severity(result) == "error"
+
+
+def test_solid_with_no_usable_spoke_width_fails_closed():
+    """A zero spoke width gives no bound; the declaration is not excused."""
+    result, m = _measure(
+        _geometry(
+            thermal_fill(),
+            owner_conn=pad_connection(pad=SOLID),
+            zone_conn=zone_connection(spoke=0.0),
+        )
+    )
+    assert m.disposition == "violation"
+    assert _severity(result) == "error"
 
 
 def test_solid_fill_notched_through_two_pad_edges_is_still_info():

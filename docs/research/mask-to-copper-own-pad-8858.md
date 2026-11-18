@@ -298,8 +298,11 @@ and that shape is `own_pour_solid` at info. It requires a plain pad shape with a
 margin of 0 or more, an *effective* solid zone connection (pad override, else
 footprint, else zone; "thermal for through-hole" on an SMD pad counts as solid),
 fill overlapping the pad beyond `u`, nothing exposed beyond the pad, and a fill
-that bears out the join (it covers at least 75% of a 0.01 mm rim around the pad;
-spokes cover about 30%). There is no band test: a solid pour body lies inside
+that bears out the join (its contact along the pad edge exceeds four spokes of
+the declared width x 1.45, the allowance for a curved edge; a clipped solid
+fill still clears it). The 13 consumer pads were not re-measured against this
+bound (the board is not in this repo); the issue's pin-3 row (0.15 mm ring 10%)
+is the one expected to fall below it. There is no band test: a solid pour body lies inside
 the band by definition. A declared-solid pad whose fill shows spokes keeps its
 verdict. The class was not re-measured on the fab here; the evidence is as
 stated on the issue.

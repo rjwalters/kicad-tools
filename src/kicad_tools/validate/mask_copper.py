@@ -123,9 +123,10 @@ holds. Every condition is required (``_own_pour_solid``): the pad is a plain
 shape with a non-negative mask margin; its *effective* zone connection (pad
 override, else footprint, else zone, as ``_declared_thermal`` resolves it) is
 solid, a "thermal for through-hole" setting on an SMD pad counting as solid;
-the fill overlaps the pad beyond ``u``, shows a solid join (it covers the
-pad's whole rim, not just spoke crossings), and nothing of it is exposed
-beyond the pad. A declared-solid pad whose fill shows spokes or no join, an
+the fill overlaps the pad beyond ``u``, shows a solid join (its contact
+along the pad edge is longer than ``_MAX_THERMAL_SPOKES`` spokes of the
+declared width times ``_ENTRY_CROSSING_FACTOR``, so spokes cannot reach it),
+and nothing of it is exposed beyond the pad. A declared-solid pad whose fill shows spokes or no join, an
 unconnected same-net pour, a positive expansion with pour in the ring and a
 different-net pour keep their measured verdict.
 """
@@ -1016,7 +1017,8 @@ def _own_pour_solid(opening, copper, owner_copper, owner, item, margin, uncertai
        empty, so a positive expansion with pour in its ring fails.
     5. The fill shows the solid join: its contact along the pad edge is longer
        than any thermal fill could make it, ``_MAX_THERMAL_SPOKES`` spokes of
-       the declared spoke width (pad override, else the zone's), so a
+       the declared spoke width times ``_ENTRY_CROSSING_FACTOR`` (pad override,
+       else the zone's), so a
        declaration the fill does not bear out (spokes, a relief gap) keeps its
        verdict. The bound comes from the declared spoke width, not a fraction
        of the perimeter, so another net's clearance clipping the pour (which
@@ -1043,7 +1045,14 @@ def _own_pour_solid(opening, copper, owner_copper, owner, item, margin, uncertai
         if pad["thermal_spoke_width_mm"] is not None
         else pour["thermal_spoke_width_mm"]
     )
-    thermal_contact = _MAX_THERMAL_SPOKES * (spoke or 0.0) + 4 * max(uncertainty, 1e-6)
+    if not spoke or spoke <= 0:
+        # Mirror _declared_thermal: no usable spoke width, no bound to test against.
+        return False
+    # A spoke crossing a curved pad edge contacts more than its nominal width,
+    # so the bound carries _ENTRY_CROSSING_FACTOR as _own_pour_thermal does.
+    thermal_contact = _MAX_THERMAL_SPOKES * _ENTRY_CROSSING_FACTOR * spoke + 4 * max(
+        uncertainty, 1e-6
+    )
     return rim.intersection(copper).area / _SOLID_RIM_MM > thermal_contact
 
 
