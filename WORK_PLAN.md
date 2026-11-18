@@ -7,6 +7,7 @@ Prioritized roadmap generated from current GitHub label state. Maintained by the
 ---
 
 <!-- guide:plan-body:start -->
+_Generated: 2026-11-18T14:44:17Z (snapshot; compare against live labels)_
 ## Operator Attention: Merge-Risk-Hold Pileup
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
@@ -33,7 +34,6 @@ Human-approved issues (`loom:issue`) ready for implementation — excluding held
 
 - **#9031**: tests: nested pytest.approx() at test_expand_route_experiment.py:166 blocks any pytest >= 9.2 bump
 - **#9305**: mask_to_copper: decide whether an area tolerance belongs on the 'beyond owner pad copper' test (112 of 144 consumer errors are sub-1e-6 mm² residue)
-- **#9368**: load_bom_csv drops the LCSC column from a real bom_jlcpcb.csv (header is `LCSC Part #`)
 
 ## In Progress
 
@@ -47,49 +47,23 @@ Issues currently being built (`loom:building`).
 - **#9065**: Wire the silk-vs-drill tools into board 03's recipe and gate silk_hole_overlap = 0 in CI
 - **#9097**: Board 04 fresh regen: raw route carries 13 advisory warnings (pour_slot x10, staircase, fragments, silk_hole_overlap) - reviewed gate leg 3 red
 - **#9138**: Match-group skew producer measures summed PCB copper: dead-end loops and duplicates mask real skew
-- **#9272**: Pure-Python router engines never apply the same-net trace slit-band guard (pad twin is implemented; the C++/Python backends disagree)
 - **#9298**: Repository moved to the 2AMLogic organization: update hard-coded owner slug and the PyPI trusted publisher
 - **#9299**: ci: qualify PR checks for GitHub merge queues
 - **#9306**: Merge-queue rollout: two required contexts are matrix-expanded names the audit cannot match
-- **#9310**: mask_copper tests: two own-pad cases pass on pre-#9261 code (one asserts a removed arm that was already dead)
-- **#9315**: mask_to_copper fails boards on the wire-strip and anchor openings that pcb reinforce creates on purpose (281 of 438 errors on a consumer board)
-- **#9323**: JLCPCB BOM: lines sharing one LCSC part come up unticked at the fab and are silently not fitted
-- **#9325**: tht_smd_spacing pairs two same-net pcb reinforce anchors (7 of 11 errors on a consumer board; fab DFM counts none)
-- **#9326**: No repair path for the fab-parity rules, and fix-drc/prune side effects on waivers (consumer board: 538 check errors, fix-drc finds nothing repairable)
-- **#9331**: Waiver keys silently orphaned when prune/fix-drc move or merge copper
 - **#9332**: Repair path for same-net fab-parity findings (physical_copper_gap, mask_to_copper own-pad)
 - **#9340**: Local CI gate: convert the jobs that can be a script call, record the rest, retire the job-manifest drift test
-- **#9346**: kct readiness --verify: the CPL rotation re-derivation fails open on any unexpected error
-- **#9351**: Board recipe loader: bare `import generate_pcb` lets one board's siblings shadow another's in-process
-- **#9355**: acute_foldback: the plan's base collision model still contains legs its own earlier repairs removed
-- **#9356**: Baseline comment: board 04's red-since date in the #9140 AC4 paragraph is off by a day
-- **#9362**: CPL rotation review: widen the unreviewed-placement list (SW/Y missed) and close three reporting/verify edges
-- **#9363**: load_bom_csv treats a grouped BOM row as one component (kct estimate/suggest undercount)
-- **#9364**: place-silk-refs: RefPlacement reasons quote sheet coordinates next to board-relative positions
-- **#9365**: fix-drc mask-copper: clearance gate uses the manufacturer floor, not the effective net-class clearance
+- **#9381**: Committed demo-board BOMs still carry the pre-#9323 duplicate-LCSC lines
+- **#9402**: load_bom_csv and pcb/lcsc_bom accept different LCSC header spellings (shared normaliser, divergent accept-lists)
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#9083**: fix(board03): clip silk off drilled holes in the recipe and gate silk_hole_overlap = 0
-- **#9179**: fix(validate): report off-path copper alongside derived match-group skew
-- **#9279**: fix: enforce same-net trace slit band in Python escape and lattice via gates
-- **#9328**: test: pin the removed mask-copper u-band arm with discriminating geometry
-- **#9330**: fix: excuse a reinforce run's own copper in mask_to_copper via the sidecar
-- **#9339**: fix: skip waived findings in fix-drc --drc-report repair targets
-- **#9341**: fix: merge JLCPCB BOM lines sharing one LCSC part into a single row
-- **#9344**: fix: exempt same-net anchor-anchor via pairs from tht_smd_spacing annulus pairing
-- **#9353**: feat: report waiver keys invalidated by pcb prune and fix-drc edits
-- **#9354**: fix: stop board recipe sibling imports shadowing across boards in one process
-- **#9358**: Baseline board 06 mask_to_copper by net signature; drop the diffpair-gate skip
-- **#9359**: fix(router): stop vetoing fold-back repairs against legs earlier repairs removed
-- **#9360**: docs: split red-since date per board in diffpair coverage baseline comment
-- **#9366**: fix: expand grouped BOM designator cells into one component each
-- **#9367**: fix: name the coordinate frame of place-silk-refs placement output
-- **#9369**: fix: revert mask-copper moves that create new DRC errors; restore snapshot on failed undo
-- **#9370**: fix: widen CPL rotation review list and close readiness reporting edges
-- **#9372**: fix: make readiness CPL rotation re-derivation fail visibly, not open
+- **#9083**: fix(board03): clip silk off drilled holes in the recipe and gate silk_hole_overlap = 0 *(held)*
+- **#9179**: fix(validate): report off-path copper alongside derived match-group skew *(held)*
+- **#9392**: ci: single-source the gate commands in scripts/ci/jobs/<id>.sh
+- **#9396**: feat: repair same-net physical_copper_gap slits in fix-drc (#9332) *(held)*
+- **#9405**: fix: prefer first non-empty LCSC column when CSV headers collide
 
 ## Approved (Awaiting Merge)
 
@@ -130,32 +104,19 @@ Issues carrying `loom:curated`.
 - **#9068**: Board 05: clear the strict-gate flood (29 physical_copper_gap errors, 13 silk_hole_overlap, 348 provisional mask_to_copper) and re-pin readiness *(curated)* *(held)*
 - **#9093**: submit-jlcpcb: attended, exact-total-approved JLC parts purchase leg *(curated)* *(held)*
 - **#9097**: Board 04 fresh regen: raw route carries 13 advisory warnings (pour_slot x10, staircase, fragments, silk_hole_overlap) - reviewed gate leg 3 red *(curated)*
+- **#9103**: Dead `material mismatch` assertion in the pinched-zone-fill regression (PR #9084) *(curated)*
 - **#9138**: Match-group skew producer measures summed PCB copper: dead-end loops and duplicates mask real skew *(curated)*
 - **#9235**: Slow-suite test test_armc_route_gives_usb_d_equal_vias_with_every_gate fails on main (USB_D+ 2 vias, USB_D- 3) *(curated)* *(held)*
-- **#9272**: Pure-Python router engines never apply the same-net trace slit-band guard (pad twin is implemented; the C++/Python backends disagree) *(curated)*
 - **#9273**: Same-net trace slit band sees only committed segments: measure whether any producer routes a via before the trace that skirts it *(curated)* *(held)*
 - **#9298**: Repository moved to the 2AMLogic organization: update hard-coded owner slug and the PyPI trusted publisher *(curated)*
 - **#9305**: mask_to_copper: decide whether an area tolerance belongs on the 'beyond owner pad copper' test (112 of 144 consumer errors are sub-1e-6 mm² residue) *(curated)*
 - **#9306**: Merge-queue rollout: two required contexts are matrix-expanded names the audit cannot match *(curated)*
 - **#9307**: Declare merge_group in select_routed_pcbs.py and pin the merge-group CI invariants with a test *(curated)* *(held)*
-- **#9310**: mask_copper tests: two own-pad cases pass on pre-#9261 code (one asserts a removed arm that was already dead) *(curated)*
-- **#9315**: mask_to_copper fails boards on the wire-strip and anchor openings that pcb reinforce creates on purpose (281 of 438 errors on a consumer board) *(curated)*
-- **#9323**: JLCPCB BOM: lines sharing one LCSC part come up unticked at the fab and are silently not fitted *(curated)*
-- **#9325**: tht_smd_spacing pairs two same-net pcb reinforce anchors (7 of 11 errors on a consumer board; fab DFM counts none) *(curated)*
-- **#9326**: No repair path for the fab-parity rules, and fix-drc/prune side effects on waivers (consumer board: 538 check errors, fix-drc finds nothing repairable) *(curated)*
-- **#9331**: Waiver keys silently orphaned when prune/fix-drc move or merge copper *(curated)*
 - **#9332**: Repair path for same-net fab-parity findings (physical_copper_gap, mask_to_copper own-pad) *(curated)*
 - **#9340**: Local CI gate: convert the jobs that can be a script call, record the rest, retire the job-manifest drift test *(curated)*
-- **#9346**: kct readiness --verify: the CPL rotation re-derivation fails open on any unexpected error *(curated)*
-- **#9351**: Board recipe loader: bare `import generate_pcb` lets one board's siblings shadow another's in-process *(curated)*
-- **#9355**: acute_foldback: the plan's base collision model still contains legs its own earlier repairs removed *(curated)*
-- **#9356**: Baseline comment: board 04's red-since date in the #9140 AC4 paragraph is off by a day *(curated)*
-- **#9362**: CPL rotation review: widen the unreviewed-placement list (SW/Y missed) and close three reporting/verify edges *(curated)*
-- **#9363**: load_bom_csv treats a grouped BOM row as one component (kct estimate/suggest undercount) *(curated)*
-- **#9364**: place-silk-refs: RefPlacement reasons quote sheet coordinates next to board-relative positions *(curated)*
-- **#9365**: fix-drc mask-copper: clearance gate uses the manufacturer floor, not the effective net-class clearance *(curated)*
-- **#9368**: load_bom_csv drops the LCSC column from a real bom_jlcpcb.csv (header is `LCSC Part #`) *(curated)*
-- **#9371**: Changelog check: two rapid changelog:skip flips can leave a stale verdict under the required name *(curated)*
+- **#9381**: Committed demo-board BOMs still carry the pre-#9323 duplicate-LCSC lines *(curated)*
+- **#9387**: Out-of-band: confirm no cancelled Changelog Fragment Check rows after #9383's per-run concurrency group *(curated)* *(held)*
+- **#9402**: load_bom_csv and pcb/lcsc_bom accept different LCSC header spellings (shared normaliser, divergent accept-lists) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -175,11 +136,11 @@ _None._
 | Operator merge-risk holds | 3 |
 | Very important | 1 |
 | Important | 1 |
-| Ready (`loom:issue`, net of holds/building/merge-pending) | 3 |
-| In Progress (`loom:building`) | 28 |
-| PRs awaiting review | 18 |
+| Ready (`loom:issue`, net of holds/building/merge-pending) | 2 |
+| In Progress (`loom:building`) | 15 |
+| PRs awaiting review | 5 |
 | Approved PRs awaiting merge | 3 |
-| Curated | 53 |
+| Curated | 40 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->
