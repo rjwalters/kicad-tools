@@ -746,7 +746,7 @@ the run to a single repair pass:
 
 | `--only` value | Repairs |
 |----------------|---------|
-| `clearance` | Segment-segment and segment-via clearance violations (nudge traces) |
+| `clearance` | Copper-clearance violations between tracks, vias and pads (nudge traces) |
 | `drill-clearance` | Hole-to-hole clearance violations (de-duplicate or slide vias) |
 | `mask-copper` | A track entering its own pad's opening off-centre (see below) |
 
@@ -755,8 +755,9 @@ kct fix-drc board.kicad_pcb --only mask-copper --dry-run
 ```
 
 Without `--drc-report`, the mask-copper pass detects its findings itself by
-running the pure-Python `kct check` on the board; other `--only` values (and
-the default set) read a report or require kicad-cli.
+running the pure-Python `kct check` on the board. For the other `--only`
+values (and the default set), detection resolves in order: `--drc-report` if
+given, else kicad-cli's DRC if it is installed, else the pure-Python checker.
 
 `mask-copper` addresses the `same-net own-pad entry` class of the
 `mask_to_copper` check (see the [mask-to-copper guide](../guides/mask-to-copper.md)):
