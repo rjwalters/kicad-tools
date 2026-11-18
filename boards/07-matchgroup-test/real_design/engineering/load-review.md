@@ -1,6 +1,6 @@
 # Board07 independent load review
 
-Read-only review; physical layout and checkers unchanged. Missing driver-load gate filed as [#5020](https://github.com/2AMLogic/kicad-tools/issues/5020), after searches for capacitance and SDRAM/load issues.
+Read-only review; physical layout and checkers unchanged. Missing driver-load gate filed as [#5020](https://github.com/rjwalters/kicad-tools/issues/5020), after searches for capacitance and SDRAM/load issues.
 
 | Item | Published value | Provenance / limitation |
 |---|---:|---|

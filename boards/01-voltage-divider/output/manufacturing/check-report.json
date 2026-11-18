@@ -1596,7 +1596,7 @@
   },
   "fab_dfm_parity": {
     "table_version": 2,
-    "source": "https://github.com/2AMLogic/kicad-tools/issues/8838",
+    "source": "https://github.com/rjwalters/kicad-tools/issues/8838",
     "retrieved": "2026-11-12",
     "manufacturer": "jlcpcb",
     "rows": [

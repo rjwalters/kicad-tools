@@ -49,5 +49,5 @@ thermal bench validation.
 
 The original DRV8301 circuit is retained in [legacy_drv8301](legacy_drv8301/ARCHIVE.md)
 as an electrically invalid historical regression fixture, documented in
-[issue #4993](https://github.com/2AMLogic/kicad-tools/issues/4993). Its generator
+[issue #4993](https://github.com/rjwalters/kicad-tools/issues/4993). Its generator
 writes `regression-output`; the default command above builds revision B.

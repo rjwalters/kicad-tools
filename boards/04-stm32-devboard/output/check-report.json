@@ -58,6 +58,6 @@
     "via_in_pad": false,
     "source": "https://jlcpcb.com/capabilities/pcb-capabilities/",
     "suppressed_findings": 0,
-    "tracking_issue": "https://github.com/2AMLogic/kicad-tools/issues/5009"
+    "tracking_issue": "https://github.com/rjwalters/kicad-tools/issues/5009"
   }
 }

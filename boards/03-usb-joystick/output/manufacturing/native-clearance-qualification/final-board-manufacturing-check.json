@@ -162,7 +162,7 @@
     "min_hole_to_hole_mm": 0.45,
     "source": "https://jlcpcb.com/capabilities/pcb-capabilities/",
     "reason": "Published pad-hole minimum; matches reviewed geometry (GCT USB4085-GF-A stock 0.40mm PTH contacts on 0.85mm pitch, actual hole-edge spacing 0.45mm). Native KiCad DRC at this floor reports zero hole_to_hole findings on the routed board.",
-    "tracking_issue": "https://github.com/2AMLogic/kicad-tools/issues/5006",
+    "tracking_issue": "https://github.com/rjwalters/kicad-tools/issues/5006",
     "suppressed_findings": 0
   },
   "usb_geometry": {

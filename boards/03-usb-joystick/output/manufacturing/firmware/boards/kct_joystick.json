@@ -26,6 +26,6 @@
     "protocol": "usbasp",
     "require_upload_port": false
   },
-  "url": "https://github.com/2AMLogic/kicad-tools/tree/main/boards/03-usb-joystick",
+  "url": "https://github.com/rjwalters/kicad-tools/tree/main/boards/03-usb-joystick",
   "vendor": "kicad-tools.org"
 }

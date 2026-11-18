@@ -31,6 +31,18 @@ OLD_SLUG_PATTERN = r"rjwalters([/\\]{1,2}|%2[Ff])kicad-tools"
 # - ``CHANGELOG.md`` and existing ``changelog.d/`` fragments: release
 #   history, never rewritten.
 # - this file: its constant must spell the old slug to detect it.
+# - board evidence archives (``boards/<board>/output/``, board 05's
+#   ``redesign/``, board 07's ``real_design/``, board 05's pinned
+#   ``README.md``): hash-bound provenance bundles. ``manifest.json`` records
+#   a sha256 *and* size for every file in the bundle and ``verify_manifest()``
+#   (``src/kicad_tools/export/manufacturing.py``) recomputes both, while
+#   ``readiness.json`` pins input digests. Rewriting files inside those
+#   bundles would falsify the record of what was actually shipped, so the
+#   archived copies keep the pre-transfer slug by design — the same reasoning
+#   as release history. Live sources outside the archives (e.g.
+#   ``boards/04-stm32-devboard/check_manufacturing.py``, the board root
+#   script, versus its archived copy under ``output/manufacturing/``) are
+#   still guarded.
 EXCLUDED = (
     ".loom/",
     ".claude/",
@@ -38,6 +50,18 @@ EXCLUDED = (
     "CHANGELOG.md",
     "changelog.d/",
     "tests/test_no_stale_owner_slug.py",
+    "boards/00-simple-led/output/",
+    "boards/01-voltage-divider/output/",
+    "boards/02-charlieplex-led/output/",
+    "boards/03-usb-joystick/output/",
+    "boards/04-stm32-devboard/output/",
+    "boards/05-bldc-motor-controller/output/",
+    "boards/05-bldc-motor-controller/redesign/",
+    "boards/05-bldc-motor-controller/README.md",
+    "boards/06-diffpair-test/output/",
+    "boards/07-matchgroup-test/output/",
+    "boards/07-matchgroup-test/real_design/",
+    "boards/09-usbc-pd-power/output/",
 )
 
 
@@ -85,6 +109,9 @@ def test_exclusions_still_exist() -> None:
         ("CHANGELOG.md", True),
         ("changelog.d/9298.changed.md", True),
         ("tests/test_no_stale_owner_slug.py", True),
+        ("boards/07-matchgroup-test/output/manufacturing/check-report.json", True),
+        ("boards/05-bldc-motor-controller/README.md", True),
+        ("boards/04-stm32-devboard/check_manufacturing.py", False),
     ],
 )
 def test_exclusion_classification(path: str, expected: bool) -> None:
