@@ -661,8 +661,16 @@ def _reinforce_runs(objects: dict[str, Any], wires: Any) -> list[_ReinforceRun]:
     return runs
 
 
-def _attribute_reinforce_openings(runs, openings, objects, uncertainty):
+def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs=()):
     """Attribute mask openings of one side to runs; ``(uuid -> run, id -> strip union)``.
+
+    ``runs`` are the runs whose own copper layer is this mask side. ``far_runs``
+    are runs on the *opposite* outer layer (#9419): ``pcb reinforce`` opens the
+    mask on both sides at each anchor and end hole (the wire tail and its
+    fillet exit on the far side), so the far side's anchor flashes and end
+    holes belong to the run too. A far run claims only non-strip openings --
+    ``gr_line`` strips on its far side belong to whatever run owns that side --
+    and still only through its confirmed anchors and net gates.
 
     An opening belongs to a run when its convex hull lies within the strip
     tolerance of one of the run's *confirmed* anchor points -- the hull, not
@@ -689,6 +697,7 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty):
     from .rules.reinforcement_incomplete import MASK_TOLERANCE_MM
 
     tolerance = MASK_TOLERANCE_MM + uncertainty
+    claimants = [(run, False) for run in runs] + [(run, True) for run in far_runs]
     candidates: dict[str, list[tuple[_ReinforceRun, float]]] = {}
     strip_materials: dict[str, Any] = {}
     for owners, material, kind, *_ in openings:
@@ -705,8 +714,10 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty):
         if kind == "via" or kind.startswith("pad"):
             owner = objects.get(uuid) if len(owners) == 1 else None
             owner_net = (owner.get("net") if owner else "") or ""
-        for run in runs:
+        for run, far in claimants:
             if not run.confirmed_anchors:
+                continue
+            if far and kind == "gr_line":
                 continue
             if (kind == "via" or kind.startswith("pad")) and owner_net != run.net:
                 continue
@@ -760,17 +771,22 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty):
     return run_by_uuid, strips
 
 
-def _conductor_on_reinforce_run(run, item, copper, opening, strip_union, uncertainty) -> bool:
+def _conductor_on_reinforce_run(
+    run, item, copper, opening, strip_union, uncertainty, opening_kind=""
+) -> bool:
     """``True`` when the conductor is copper the run exposes on purpose (#9315).
 
     The run's own track -- the strip lies along it (the opening is covered by
     this segment's copper), or the segment is wholly under the strip union,
     or the segment reaches one of the run's anchors --, its anchor vias, and
     a same-net pad standing on the run (the strip passes over its copper, or
-    the pad is itself an anchor) qualify. Everything else keeps its measured
-    verdict: different-net copper, a zone, an arc, and same-net copper off
-    the run (a neighbour the strip clips pokes past it, so neither
-    containment holds).
+    the pad is itself an anchor) qualify. Since #9419 so does any same-net
+    track, via or pad that an anchor flash / end hole of the run exposes
+    (``opening_kind`` is not a strip), on either mask side, and any that
+    intersects the attributed strip: a tee branch, the adjoining wire's anchor,
+    a layer-change via, a wider or doubled segment. Everything else keeps its
+    measured verdict: different-net copper, a zone, an arc, and same-net
+    copper that neither lies under the strip nor sits at an anchor opening.
     """
     from shapely.geometry import Point
 
@@ -779,6 +795,22 @@ def _conductor_on_reinforce_run(run, item, copper, opening, strip_union, uncerta
     if (item.get("net") or "") != run.net:
         return False
     kind = item["kind"]
+    if kind == "via" or kind == "segment" or kind.startswith("pad"):
+        # Same-net copper the run's own openings expose is the wire's
+        # attachment, not a defect (#9419). An anchor flash or end hole is
+        # tied to a confirmed anchor of this net, so whatever same-net track,
+        # via or pad it uncovers -- on either mask side -- is copper the wire
+        # is soldered to. Under the strip the same holds for a branch teeing
+        # off the run, the adjoining wire's anchor, a layer-change via and a
+        # wider or doubled segment. Different-net copper never reaches here.
+        if opening_kind not in ("gr_line", "merged_region"):
+            return True
+        if (
+            strip_union is not None
+            and copper.intersection(strip_union.buffer(MASK_TOLERANCE_MM + uncertainty)).area
+            > _AREA_EPSILON_MM2
+        ):
+            return True
     anchor_points = [Point(a) for a in run.anchors]
     if kind == "via":
         return any(
@@ -1157,9 +1189,14 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
         # Issue #9315: attribute this side's openings to the reinforce runs
         # before measuring, so the run's own copper can be classified below.
         side_runs = [run for run in runs if run.mask_side == side]
+        # Issue #9419: the opposite side's anchor flashes and end holes belong
+        # to the run too (``pcb reinforce`` opens both sides at each anchor).
+        far_runs = [run for run in runs if run.mask_side != side]
         run_by_uuid, run_strips = (
-            _attribute_reinforce_openings(side_runs, openings, geometry.objects, uncertainty)
-            if side_runs
+            _attribute_reinforce_openings(
+                side_runs, openings, geometry.objects, uncertainty, far_runs
+            )
+            if side_runs or far_runs
             else ({}, {})
         )
         # Every opening is measured against every object's copper on this layer.
@@ -1361,6 +1398,7 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                         opening,
                         run_strips.get(id(attributed_run)),
                         uncertainty,
+                        kind,
                     ):
                         disposition = "within_reinforce_run"
                 point = (
