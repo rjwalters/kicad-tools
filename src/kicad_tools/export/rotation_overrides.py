@@ -41,8 +41,9 @@ _LCSC_RE = re.compile(r"^C\d+$")
 _KNOWN_KEYS = ("by_reference", "by_lcsc")
 
 # Reference-designator prefixes of polarised / asymmetric parts whose CPL
-# rotation is worth a human look when no correction matched them.
-POLARISED_PREFIXES: tuple[str, ...] = ("J", "U", "D", "Q", "LED")
+# rotation is worth a human look when no correction matched them: connectors,
+# ICs, diodes, transistors, LEDs, switches, crystals/oscillators and jumpers.
+POLARISED_PREFIXES: tuple[str, ...] = ("J", "U", "D", "Q", "LED", "SW", "Y", "JP", "X")
 
 SOURCE_REFERENCE = "by_reference"
 SOURCE_LCSC = "by_lcsc"
@@ -263,9 +264,12 @@ def review_rotations(
     *transform* is the formatter's ``apply_transforms`` so the recorded final
     rotations are exactly the CPL's.
     """
+    # Guard on ``path is not None``, not truthiness: an empty-but-present
+    # sidecar (``__bool__`` False) still has a path and hash worth recording.
+    has_sidecar = overrides is not None and overrides.path is not None
     review = RotationReview(
-        sidecar=str(overrides.path) if overrides and overrides.path else None,
-        sidecar_sha256=overrides.sha256 if overrides and overrides.path else None,
+        sidecar=str(overrides.path) if has_sidecar else None,
+        sidecar_sha256=overrides.sha256 if has_sidecar else None,
     )
     used_refs: set[str] = set()
     used_lcsc: set[str] = set()

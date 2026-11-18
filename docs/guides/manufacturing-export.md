@@ -570,10 +570,15 @@ An invalid sidecar (unknown key, non-numeric degrees, a `by_lcsc` key that is no
   makes the evidence stale and `--verify` fails;
 - `cpl_rotations.applied` lists each shifted placement (reference, which key
   matched, degrees), and `cpl_rotations.sidecar_sha256` pins the sidecar;
-- `cpl_rotations.unreviewed` lists connectors, ICs, diodes, transistors and
-  LEDs (reference prefix `J`/`U`/`D`/`Q`/`LED`) that **no** correction matched.
+- `cpl_rotations.unreviewed` lists connectors, ICs, diodes, transistors, LEDs,
+  switches, crystals/oscillators and jumpers (reference prefix
+  `J`/`U`/`D`/`Q`/`LED`/`SW`/`Y`/`JP`/`X`) that **no** correction matched.
   This is a review list, not a blocker: check each one in the fab's placement
-  preview before ordering;
+  preview before ordering. `kct export` prints the same list when it writes
+  the CPL, and an empty-but-present sidecar is still recorded (path + hash);
+- if the rotation review itself fails unexpectedly, readiness records
+  `cpl_rotations.error` and `--verify` fails instead of waving the bundle
+  through;
 - `--verify` re-derives every sidecar-corrected rotation from the board and the
   current sidecar and fails if the retained CPL disagrees.
 

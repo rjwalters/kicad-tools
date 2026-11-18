@@ -3656,8 +3656,8 @@ def _cpl_rotation_state(options: ReadinessOptions) -> tuple[Any, str | None]:
         )
     except RotationOverridesError as exc:
         return None, str(exc)
-    except Exception:
-        return None, None
+    except Exception as exc:  # unexpected: never vanish (issue #9362)
+        return None, f"unexpected failure while reviewing CPL rotations: {exc!r}"
     return review, None
 
 
@@ -3676,7 +3676,7 @@ def _verify_cpl_rotations(options: ReadinessOptions) -> list[str]:
         return []
     review, error = _cpl_rotation_state(options)
     if error:
-        return [f"CPL rotation sidecar is invalid: {error}"]
+        return [f"CPL rotation review failed: {error}"]
     if review is None or review.sidecar is None:
         return []
     cpl = next(iter(sorted(options.output_dir.glob("cpl*.csv"))), None)
@@ -3801,11 +3801,15 @@ def build_report(
         }
         if produced:
             report["report_sources"] = produced
-    cpl_rotations, _rotation_error = _cpl_rotation_state(options)
+    cpl_rotations, rotation_error = _cpl_rotation_state(options)
     if cpl_rotations is not None:
         report["cpl_rotations"] = cpl_rotations.to_report(
             _rel(options, Path(cpl_rotations.sidecar)) if cpl_rotations.sidecar else None
         )
+    elif rotation_error:
+        # Issue #9362: an unexpected review failure must be visible in the
+        # report, not silently dropped (and --verify reports it as a problem).
+        report["cpl_rotations"] = {"error": rotation_error}
     external = _external_dependencies(options)
     if external:
         # Hash the exact collected out-of-directory dependencies (Issue #5813).

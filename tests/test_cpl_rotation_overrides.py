@@ -242,7 +242,10 @@ def test_review_rejects_invalid_sidecar(board):
         ("LED2", True),
         ("R1", False),
         ("C5", False),
-        ("JP1", False),
+        ("JP1", True),
+        ("SW1", True),
+        ("Y1", True),
+        ("X1", True),
         ("", False),
     ],
 )
@@ -382,7 +385,7 @@ def test_verify_reports_invalid_sidecar(board, tmp_path):
     _ship_bundle(board, out)
     (board.parent / SIDECAR_NAME).write_text("by_lcsc: nope\n")
     problems = _verify_cpl_rotations(_readiness_options(board, out))
-    assert problems and "invalid" in problems[0]
+    assert problems and "CPL rotation review failed" in problems[0] and "by_lcsc" in problems[0]
 
 
 def test_verify_without_sidecar_does_not_inspect_the_cpl(board, tmp_path):
@@ -391,6 +394,114 @@ def test_verify_without_sidecar_does_not_inspect_the_cpl(board, tmp_path):
     out = tmp_path / "out"
     _ship_bundle(board, out)
     assert _verify_cpl_rotations(_readiness_options(board, out)) == []
+
+
+def test_review_records_empty_but_present_sidecar(board):
+    # Issue #9362: an empty-but-present sidecar still has a path and a hash;
+    # the old truthiness guard (via ``__bool__``) nulled both.
+    (board.parent / SIDECAR_NAME).write_text("# comment only\n")
+    review = review_cpl_rotations(board, "jlcpcb")
+    assert review.sidecar == str(board.parent / SIDECAR_NAME)
+    assert review.sidecar_sha256 and len(review.sidecar_sha256) == 64
+    block = review.to_report("board/" + SIDECAR_NAME)
+    assert block["sidecar"] == "board/" + SIDECAR_NAME
+    assert block["sidecar_sha256"] == review.sidecar_sha256
+
+
+def test_unexpected_review_failure_is_surfaced(board, tmp_path, monkeypatch):
+    # Issue #9362: a non-RotationOverridesError inside the review used to
+    # vanish (review=None, error=None), so --verify waved a stale CPL through.
+    import kicad_tools.export.assembly as assembly_module
+    from kicad_tools.cli.readiness_cmd import _cpl_rotation_state, _verify_cpl_rotations
+
+    out = tmp_path / "out"
+    _ship_bundle(board, out)
+    options = _readiness_options(board, out)
+
+    def boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(assembly_module, "review_cpl_rotations", boom)
+    review, error = _cpl_rotation_state(options)
+    assert review is None
+    assert error is not None and "boom" in error
+    problems = _verify_cpl_rotations(options)
+    assert problems and "boom" in problems[0]
+
+
+def test_report_records_cpl_rotation_review_error(board, tmp_path, monkeypatch):
+    from kicad_tools.cli import readiness_cmd
+    from kicad_tools.cli.readiness_cmd import (
+        CheckOutcome,
+        EngineFingerprint,
+        ReadinessOptions,
+        build_report,
+    )
+
+    options = ReadinessOptions(
+        board_dir=board.parent,
+        pcb=board,
+        schematic=None,
+        project=None,
+        manufacturer="jlcpcb",
+        mode="pcb_only",
+        output_dir=tmp_path,
+        evidence_dir=tmp_path / "readiness",
+    )
+    monkeypatch.setattr(
+        readiness_cmd, "_cpl_rotation_state", lambda opts: (None, "review exploded")
+    )
+    report = build_report(
+        options,
+        [CheckOutcome(name="kct_check", status="passed", detail="ok")],
+        {},
+        EngineFingerprint(kicad_tools_version="test"),
+    )
+    assert report["cpl_rotations"] == {"error": "review exploded"}
+
+
+def test_export_prints_the_unreviewed_rotation_list(board, tmp_path, capsys):
+    # Issue #9362: `kct export` shows the same review list as the result's
+    # __str__ (rendered from rotation_review_lines(), not a re-implementation).
+    from kicad_tools.cli import export_cmd
+
+    rc = export_cmd.main(
+        [
+            str(board),
+            "--output",
+            str(tmp_path / "mfg"),
+            "--mfr",
+            "jlcpcb",
+            "--skip-preflight",
+            "--no-bom",
+            "--no-gerbers",
+            "--no-report",
+            "--no-project-zip",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Unreviewed rotation (no correction matched): J1, J2, J3, J4, J5" in out
+    # A present sidecar also surfaces its provenance line.
+    (board.parent / SIDECAR_NAME).write_text(_SIDECAR)
+    rc = export_cmd.main(
+        [
+            str(board),
+            "--output",
+            str(tmp_path / "mfg2"),
+            "--mfr",
+            "jlcpcb",
+            "--skip-preflight",
+            "--no-bom",
+            "--no-gerbers",
+            "--no-report",
+            "--no-project-zip",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Rotation overrides: cpl_rotations.yaml (4 row(s) corrected)" in out
+    assert "Unreviewed rotation (no correction matched): J4" in out
 
 
 def _bound_report(root: Path):
