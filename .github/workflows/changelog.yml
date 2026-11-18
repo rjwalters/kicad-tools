@@ -16,14 +16,18 @@ name: Changelog
 # friends several times per PR) does not re-run the check (issue #8434): each
 # such event used to start a run and cancel the queued one, leaving the last
 # required check restarting under a backed-up queue. Three parts, all needed:
-# the job-level `if:` skips the run; the conditional `name:` below reports
-# that skipped run under a non-required name (the branch check rollup takes
-# the *latest* run per name regardless of conclusion, so a `skipped` run
-# under the required name would supersede a prior failure -- issue #9309);
-# and the concurrency group moves the ignored event into its own per-run
-# group -- concurrency is evaluated before the job `if:`, so without that
-# split the skipped run would still cancel the in-flight substantive run in
-# `changelog-<PR>`.
+# the job-level `if:` skips the run; the conditional `name:` keeps that
+# skipped run off the required name -- GitHub records an `if:`-skipped job's
+# check run with its `name:` expression left *unevaluated*, so the entry
+# appears under the raw expression text and cannot supersede a prior failure
+# under `Changelog Fragment Check` in the branch check rollup (latest run per
+# name, regardless of conclusion; issue #8434). That raw text is what the
+# PR's checks list shows -- one entry per ignored label flip -- so keep the
+# expression short; `jobs.<id>.name` cannot read the `env` context, so the
+# condition must stay inline. And the concurrency group moves the ignored
+# event into its own per-run group -- concurrency is evaluated before the job
+# `if:`, so without that split the skipped run would still cancel the
+# in-flight substantive run in `changelog-<PR>`.
 #
 # `timeout-minutes` is a ceiling for a slow checkout, not an expected runtime
 # (issue #9246): one slow full-history fetch once consumed a 5-minute budget,
@@ -43,11 +47,13 @@ concurrency:
 
 jobs:
   fragment-check:
-    # Skipped run from an ignored label event must not report under the
-    # required name: the check rollup takes the latest run per name
-    # regardless of conclusion, so it would supersede a prior failure
-    # (issue #9309). See the file header.
-    name: ${{ ((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'changelog:skip') && 'Changelog Fragment Check (ignored label event)' || 'Changelog Fragment Check' }}
+    # An `if:`-skipped run is recorded with this expression *unevaluated*, so
+    # it cannot collide with the required `Changelog Fragment Check` name (a
+    # `skipped` run under the required name would supersede a prior failure
+    # in the check rollup, latest run per name). The raw expression text is
+    # the check-run name the PR's checks list shows for each ignored label
+    # event, so keep it short. Issue #8434; see the file header.
+    name: ${{ github.event.label.name == 'changelog:skip' && 'Changelog Fragment Check (changelog:skip)' || 'Changelog Fragment Check' }}
     if: ${{ (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'changelog:skip' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
