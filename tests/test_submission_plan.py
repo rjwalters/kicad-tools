@@ -184,6 +184,43 @@ def test_population_rejects_value_outside_merged_row():
         sp._population(bom, cpl, ("top",), {})
 
 
+def test_population_rejects_empty_cpl_value_against_merged_row():
+    # A merged BOM row whose empty-valued constituent was dropped (issue
+    # #9380) must not let a CPL row with an empty Val agree via an empty
+    # split element.
+    bom = csv_bytes(
+        ["Comment", "Designator", "Footprint", "LCSC Part #", "Quantity"],
+        [["Green", "D1,D2", "LED_0603", "C229417", 2]],
+    )
+    cpl = csv_bytes(
+        ["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"],
+        [
+            [ref, val, "LED_0603", "1.0000mm", "2.0000mm", "0.0", "Top"]
+            for ref, val in [("D1", ""), ("D2", "Green")]
+        ],
+    )
+    with pytest.raises(sp.SubmissionError, match="value disagrees"):
+        sp._population(bom, cpl, ("top",), {})
+
+
+def test_population_ignores_empty_element_in_merged_comment():
+    # A legacy BOM whose Comment has a leading "; " must not accept an
+    # empty CPL Val (issue #9380).
+    bom = csv_bytes(
+        ["Comment", "Designator", "Footprint", "LCSC Part #", "Quantity"],
+        [["; Green", "D1,D2", "LED_0603", "C229417", 2]],
+    )
+    cpl = csv_bytes(
+        ["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"],
+        [
+            [ref, val, "LED_0603", "1.0000mm", "2.0000mm", "0.0", "Top"]
+            for ref, val in [("D1", ""), ("D2", "Green")]
+        ],
+    )
+    with pytest.raises(sp.SubmissionError, match="value disagrees"):
+        sp._population(bom, cpl, ("top",), {})
+
+
 @pytest.mark.parametrize(
     "mutation", ["missing", "changed", "extra", "hash", "size", "source", "source-evidence"]
 )

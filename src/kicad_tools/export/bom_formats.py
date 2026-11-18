@@ -123,7 +123,11 @@ class JLCPCBBOMFormatter(BOMFormatter):
             designators = ",".join(sorted(item.reference for item in group_items))
             if lcsc:
                 # Merged across differing Value texts: list them all.
-                value = "; ".join(sorted({item.value for item in group_items}))
+                # Empty/blank values are omitted so the Comment never gets a
+                # leading "; " (issue #9380); an all-empty group stays "".
+                value = "; ".join(
+                    sorted({item.value for item in group_items if item.value.strip()})
+                )
             rows.append((value, footprint, lcsc, designators))
         # Sort like the old (value, footprint, lcsc) key order, extended
         # deterministically to merged rows.

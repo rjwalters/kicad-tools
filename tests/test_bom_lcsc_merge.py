@@ -650,3 +650,41 @@ class TestPreflightMergeSource:
         src = self._csv(tmp_path / "prev.csv")
         items = self._items(tmp_path, merge_lcsc=False, merge_lcsc_from=src)
         assert items[0].lcsc == ""
+
+
+class TestJLCPCBMergedCommentEmptyValues:
+    """Empty Values must not leak into the merged Comment (issue #9380)."""
+
+    def _rows(self, items):
+        text = JLCPCBBOMFormatter().format(items)
+        return list(csv.DictReader(text.splitlines()))
+
+    def test_empty_value_omitted_from_merged_comment(self) -> None:
+        rows = self._rows(
+            [
+                _make_item("D1", "", "LED_0603", lcsc="C229417"),
+                _make_item("D2", "Green", "LED_0603", lcsc="C229417"),
+            ]
+        )
+        assert len(rows) == 1
+        assert rows[0]["Comment"] == "Green"
+        assert rows[0]["Designator"] == "D1,D2"
+
+    def test_all_empty_group_keeps_empty_comment(self) -> None:
+        rows = self._rows(
+            [
+                _make_item("D1", "", "LED_0603", lcsc="C229417"),
+                _make_item("D2", "", "LED_0603", lcsc="C229417"),
+            ]
+        )
+        assert len(rows) == 1
+        assert rows[0]["Comment"] == ""
+
+    def test_whitespace_only_value_omitted(self) -> None:
+        rows = self._rows(
+            [
+                _make_item("D1", "  ", "LED_0603", lcsc="C229417"),
+                _make_item("D2", "Green", "LED_0603", lcsc="C229417"),
+            ]
+        )
+        assert rows[0]["Comment"] == "Green"

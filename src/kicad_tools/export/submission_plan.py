@@ -424,7 +424,9 @@ def _population(
         # A merged JLCPCB row joins distinct values in Comment (issue
         # #9323) while the CPL keeps each placement's own value, so
         # agreement accepts any constituent value of the row.
-        values = assignment["value"].split("; ")
+        # Empty elements (e.g. from a leading "; ") never count as a
+        # constituent value, so an empty CPL Val is refused (issue #9380).
+        values = [v for v in assignment["value"].split("; ") if v.strip()]
         values.append(assignment["value"])
         if row["Val"] not in values:
             raise SubmissionError(
