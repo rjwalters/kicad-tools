@@ -4095,3 +4095,95 @@ class TestWaivedDrcReportFindings:
         data = json.loads(captured.out)
         assert data["total_violations"] == 1
         assert "waived" not in captured.err
+
+
+# ── Issue #9331: invalidated-waiver report ──────────────────────────────────
+
+
+def _check_clearance_finding(pcb_path: Path):
+    """The ``clearance_segment_segment`` finding ``kct check`` emits pre-edit."""
+    from kicad_tools.cli.check_cmd import build_check_rule_set, run_check_rule_set
+
+    results = run_check_rule_set(build_check_rule_set(pcb_path), apply_sidecar_waivers=False)
+    (finding,) = [v for v in results.violations if v.rule_id == "clearance_segment_segment"]
+    return finding
+
+
+def _write_keyed_sidecar(pcb_path: Path, finding) -> Path:
+    import json
+
+    from kicad_tools.validate.evidence import compute_evidence_hash
+
+    sidecar = pcb_path.with_name(".kct_waivers.json")
+    sidecar.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "waivers": [
+                    {
+                        "key": finding.key,
+                        "evidence_hash": compute_evidence_hash(finding),
+                        "reason": "reviewed overlap",
+                        "reviewer": "rj",
+                        "date": "2026-11-18",
+                    }
+                ],
+            }
+        )
+    )
+    return sidecar
+
+
+class TestInvalidatedWaiverReport:
+    def test_repair_reports_invalidated_key(self, pcb_clearance, report_clearance, capsys):
+        """The nudge that repairs the violation orphans its waiver: the
+        command names the key; the finding is gone so no candidate."""
+        finding = _check_clearance_finding(pcb_clearance)
+        _write_keyed_sidecar(pcb_clearance, finding)
+        main([str(pcb_clearance), "--drc-report", str(report_clearance)])
+        captured = capsys.readouterr()
+        assert "Waiver report: 1 waiver key(s) invalidated by this edit" in captured.out
+        assert finding.key in captured.out
+        assert "re-waive candidate" not in captured.out  # the finding was fixed
+
+    def test_dry_run_reports_invalidated_key(self, pcb_clearance, report_clearance, capsys):
+        """The dry-run preview simulates the nudge on a throwaway copy."""
+        finding = _check_clearance_finding(pcb_clearance)
+        _write_keyed_sidecar(pcb_clearance, finding)
+        before = pcb_clearance.read_text()
+        main([str(pcb_clearance), "--drc-report", str(report_clearance), "--dry-run"])
+        captured = capsys.readouterr()
+        assert "Waiver report: 1 waiver key(s) invalidated by this edit" in captured.out
+        assert finding.key in captured.out
+        assert pcb_clearance.read_text() == before  # the preview wrote nothing
+
+    def test_json_format_report_goes_to_stderr(self, pcb_clearance, report_clearance, capsys):
+        """``--format json`` stdout stays a single JSON document (#5938)."""
+        import json
+
+        finding = _check_clearance_finding(pcb_clearance)
+        _write_keyed_sidecar(pcb_clearance, finding)
+        main([str(pcb_clearance), "--drc-report", str(report_clearance), "--format", "json"])
+        captured = capsys.readouterr()
+        assert json.loads(captured.out)  # exactly one JSON document
+        assert "Waiver report: 1 waiver key(s) invalidated by this edit" in captured.err
+        assert finding.key in captured.err
+
+    def test_no_sidecar_is_silent(self, pcb_clearance, report_clearance, capsys):
+        main([str(pcb_clearance), "--drc-report", str(report_clearance)])
+        captured = capsys.readouterr()
+        assert "Waiver report" not in captured.out
+        assert "Waiver report" not in captured.err
+
+    def test_no_repair_is_silent(self, pcb_clearance, report_empty, capsys):
+        """Nothing repaired -> nothing invalidated -> no report (and no
+        waiver sidecar load)."""
+        from kicad_tools.validate.rules.waivers import discover_waivers_sidecar
+
+        _write_keyed_sidecar(pcb_clearance, _check_clearance_finding(pcb_clearance))
+        assert discover_waivers_sidecar(pcb_clearance) is not None
+        # Empty report: no targeted violations -> nothing repaired.
+        main([str(pcb_clearance), "--drc-report", str(report_empty)])
+        captured = capsys.readouterr()
+        assert "Waiver report" not in captured.out
+        assert "Waiver report" not in captured.err

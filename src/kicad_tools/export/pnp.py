@@ -18,6 +18,7 @@ from kicad_tools.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
     from ..schema.pcb import Footprint
+    from .rotation_overrides import RotationOverrides
 
 
 @dataclass
@@ -31,6 +32,21 @@ class PlacementData:
     y: float  # mm from origin
     rotation: float  # degrees
     layer: str  # F.Cu or B.Cu
+    lcsc: str = ""  # LCSC part number, when known (issue #9322)
+
+
+# Footprint property names that carry the LCSC number; mirrors the PCB-side
+# BOM extraction in ``schema.bom`` so the CPL and BOM agree on the part.
+_LCSC_PROPERTY_NAMES = ("lcsc", "lcsc_pn", "lcsc part", "jlc", "jlcpcb")
+
+
+def footprint_lcsc(fp: object) -> str:
+    """LCSC part number from a footprint's properties, ``""`` when absent."""
+    props = getattr(fp, "properties", None) or {}
+    for name, value in props.items():
+        if str(name).lower() in _LCSC_PROPERTY_NAMES and str(value).strip():
+            return str(value).strip()
+    return ""
 
 
 @dataclass
@@ -66,9 +82,13 @@ class PnPFormatter(ABC):
         self,
         config: PnPExportConfig | None = None,
         rotation_corrections: dict[str, float] | None = None,
+        rotation_overrides: RotationOverrides | None = None,
     ):
         self.config = config or PnPExportConfig()
         self.rotation_corrections: dict[str, float] = rotation_corrections or {}
+        # Per-project sidecar corrections (issue #9322); take precedence over
+        # the footprint-glob table above.
+        self.rotation_overrides = rotation_overrides
 
     @abstractmethod
     def format(self, placements: list[PlacementData]) -> str:
@@ -87,8 +107,12 @@ class PnPFormatter(ABC):
         manufacturer preset), the footprint name is matched against the
         correction database and the corresponding offset is added to the
         component rotation **before** the global ``rotation_offset``.
+
+        A per-project sidecar (``rotation_overrides``) is consulted first:
+        reference designator, then LCSC number, then the footprint table
+        (issue #9322).
         """
-        from kicad_tools.manufacturers.base import match_rotation_correction
+        from .rotation_overrides import resolve_rotation_correction
 
         x = placement.x + self.config.x_offset
         y = placement.y + self.config.y_offset
@@ -99,7 +123,9 @@ class PnPFormatter(ABC):
             y = -y
 
         # Per-footprint rotation correction
-        fp_correction = match_rotation_correction(placement.footprint, self.rotation_corrections)
+        fp_correction, _source = resolve_rotation_correction(
+            placement, self.rotation_corrections, self.rotation_overrides
+        )
 
         rotation = (placement.rotation + fp_correction + self.config.rotation_offset) % 360
 
@@ -111,6 +137,7 @@ class PnPFormatter(ABC):
             y=y,
             rotation=rotation,
             layer=placement.layer,
+            lcsc=placement.lcsc,
         )
 
     def filter_placements(self, placements: list[PlacementData]) -> list[PlacementData]:
@@ -141,10 +168,11 @@ class JLCPCBPnPFormatter(PnPFormatter):
         self,
         config: PnPExportConfig | None = None,
         rotation_corrections: dict[str, float] | None = None,
+        rotation_overrides: RotationOverrides | None = None,
     ):
         if config is None:
             config = PnPExportConfig(exclude_tht=False)
-        super().__init__(config, rotation_corrections)
+        super().__init__(config, rotation_corrections, rotation_overrides)
 
     def get_headers(self) -> list[str]:
         """JLCPCB CPL column headers."""
@@ -333,6 +361,7 @@ def get_pnp_formatter(
     manufacturer: str,
     config: PnPExportConfig | None = None,
     rotation_corrections: dict[str, float] | None = None,
+    rotation_overrides: RotationOverrides | None = None,
 ) -> PnPFormatter:
     """
     Get pick-and-place formatter for a manufacturer.
@@ -342,6 +371,8 @@ def get_pnp_formatter(
         config: Export configuration
         rotation_corrections: Per-footprint rotation corrections (pattern -> degrees).
             When provided, these are applied during ``apply_transforms()``.
+        rotation_overrides: Per-project sidecar corrections (by reference /
+            LCSC); take precedence over ``rotation_corrections`` (issue #9322).
 
     Returns:
         PnPFormatter for the specified manufacturer
@@ -357,7 +388,7 @@ def get_pnp_formatter(
             context={"manufacturer": manufacturer, "available": available},
             suggestions=[f"Use one of: {', '.join(available)}"],
         )
-    return formatter_class(config, rotation_corrections)
+    return formatter_class(config, rotation_corrections, rotation_overrides)
 
 
 def is_through_hole_footprint(footprint: Footprint) -> bool:
@@ -444,6 +475,7 @@ def extract_placements(
     footprints: list[Footprint],
     config: PnPExportConfig | None = None,
     aux_origin: tuple[float, float] | None = None,
+    lcsc_by_reference: dict[str, str] | None = None,
 ) -> list[PlacementData]:
     """
     Extract placement data from PCB footprints.
@@ -456,11 +488,15 @@ def extract_placements(
         footprints: List of Footprint objects from PCB
         config: Optional export config for filtering (exclude_tht, include_dnp)
         aux_origin: Aux axis origin (sheet mm); ``None`` means (0, 0)
+        lcsc_by_reference: LCSC numbers from the BOM (reference -> part), which
+            win over the footprint's own property so the CPL keys on the same
+            part the BOM orders (issue #9322)
 
     Returns:
         List of PlacementData for assembly
     """
     config = config or PnPExportConfig()
+    lcsc_by_reference = lcsc_by_reference or {}
     placements = []
     for fp in footprints:
         # Skip footprints excluded from position files
@@ -485,6 +521,7 @@ def extract_placements(
                 y=y,
                 rotation=fp.rotation,
                 layer=fp.layer,
+                lcsc=lcsc_by_reference.get(fp.reference) or footprint_lcsc(fp),
             )
         )
 
@@ -550,6 +587,7 @@ def extract_tht_exclusions(
                 y=y,
                 rotation=fp.rotation,
                 layer=fp.layer,
+                lcsc=footprint_lcsc(fp),
             )
         )
 
@@ -621,6 +659,8 @@ def export_pnp(
     pcb_path: str | Path | None = None,
     rotation_corrections: dict[str, float] | None = None,
     aux_origin: tuple[float, float] | None = None,
+    rotation_overrides: RotationOverrides | None = None,
+    lcsc_by_reference: dict[str, str] | None = None,
 ) -> str:
     """
     Export pick-and-place file.
@@ -640,6 +680,10 @@ def export_pnp(
             during formatting via ``PnPFormatter.apply_transforms()``.
         aux_origin: Aux axis origin (sheet mm).  Overrides ``pcb_path``;
             with neither, (0, 0) is used (KiCad's default).
+        rotation_overrides: Per-project sidecar corrections by reference /
+            LCSC (issue #9322); take precedence over ``rotation_corrections``.
+        lcsc_by_reference: BOM LCSC numbers (reference -> part) for sidecar
+            ``by_lcsc`` lookups; the footprint's LCSC property is the fallback.
 
     Returns:
         Formatted CPL as CSV string
@@ -649,13 +693,13 @@ def export_pnp(
     # apply regardless of which branch below runs.  The formatter is the
     # single source of truth for the effective config; synthesizing a
     # config here would silently drop those defaults (issue #3618).
-    formatter = get_pnp_formatter(manufacturer, config, rotation_corrections)
+    formatter = get_pnp_formatter(manufacturer, config, rotation_corrections, rotation_overrides)
     config = formatter.config
 
     if aux_origin is None and pcb_path is not None and config.use_aux_origin:
         aux_origin = get_aux_origin(pcb_path)
 
-    placements = extract_placements(footprints, formatter.config, aux_origin)
+    placements = extract_placements(footprints, formatter.config, aux_origin, lcsc_by_reference)
     return formatter.format(placements)
 
 
@@ -664,19 +708,26 @@ def count_rotation_corrections(
     manufacturer: str = "generic",
     config: PnPExportConfig | None = None,
     rotation_corrections: dict[str, float] | None = None,
+    rotation_overrides: RotationOverrides | None = None,
+    lcsc_by_reference: dict[str, str] | None = None,
 ) -> int:
-    """Count CPL placements whose rotation is shifted by a per-footprint correction.
+    """Count CPL placements whose rotation is shifted by a correction.
 
     Uses the same effective config and placement filters as :func:`export_pnp`
     (THT/DNP/layer filtering), so the count covers exactly the rows written to
-    the CPL where ``match_rotation_correction`` is non-zero.
+    the CPL where the resolved correction (sidecar or footprint table) is
+    non-zero.
     """
-    from kicad_tools.manufacturers.base import match_rotation_correction
+    from .rotation_overrides import resolve_rotation_correction
 
-    if not rotation_corrections:
+    if not rotation_corrections and not rotation_overrides:
         return 0
-    formatter = get_pnp_formatter(manufacturer, config, rotation_corrections)
-    placements = formatter.filter_placements(extract_placements(footprints, formatter.config))
+    formatter = get_pnp_formatter(manufacturer, config, rotation_corrections, rotation_overrides)
+    placements = formatter.filter_placements(
+        extract_placements(footprints, formatter.config, lcsc_by_reference=lcsc_by_reference)
+    )
     return sum(
-        1 for p in placements if match_rotation_correction(p.footprint, rotation_corrections) != 0
+        1
+        for p in placements
+        if resolve_rotation_correction(p, rotation_corrections, rotation_overrides)[0] != 0
     )

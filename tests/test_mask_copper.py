@@ -170,6 +170,43 @@ def test_same_net_conductor_inside_the_opening_is_flagged_without_overlapping(
 
 
 @pytest.mark.parametrize(
+    "owner_net,conductor_net,expected_nets",
+    [
+        ("N", "N", ("N",)),
+        ("P", "C", ("C", "P")),
+        ("N", None, ("N",)),
+    ],
+)
+def test_violation_names_its_nets_for_identity_baselines(owner_net, conductor_net, expected_nets):
+    """Issue #8858: each mask_to_copper record names the owner pad's and the
+    exposed conductor's nets, so the synthetic-fixture CI gates can baseline
+    findings by the regeneration-stable net signature -- their ``items``
+    are opening/conductor UUIDs the native pass re-mints every run."""
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    geometry, _, _ = toy_geometry(
+        conductor_x=1.05,
+        overlap_owner=False,
+        owner_net=owner_net,
+        conductor_net=conductor_net,
+    )
+    result = assess_attributed_geometry(
+        geometry,
+        MaskCopperPolicy(
+            clearance_mm=0.09,
+            source="order",
+            process="process",
+            revision="rev",
+            warning_clearance_mm=0.15,
+        ),
+    )
+    violations = [v for v in assessment_results(result).violations if v.rule_id == "mask_to_copper"]
+    assert len(violations) == 1
+    assert violations[0].severity == "error"
+    assert violations[0].nets == expected_nets
+
+
+@pytest.mark.parametrize(
     "conductor_kind,mode",
     [
         (kind, mode)
