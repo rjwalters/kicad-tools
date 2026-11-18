@@ -4877,8 +4877,8 @@
 		(attr smd)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
-			(start -2.11 -1.635)
-			(end -2.11 -1.87)
+			(start -2.11 -2.11)
+			(end -1.635 -2.11)
 			(stroke
 				(width 0.12)
 				(type solid)
@@ -4887,8 +4887,8 @@
 			(uuid "8bcbfc2a-354f-59b6-be79-3ab20ffbeb89")
 		)
 		(fp_line
-			(start -2.11 2.11)
-			(end -2.11 1.635)
+			(start -2.11 -1.635)
+			(end -2.11 -2.11)
 			(stroke
 				(width 0.12)
 				(type solid)
@@ -4897,8 +4897,8 @@
 			(uuid "3e77a493-ed6a-515f-8bd8-0e5a31ac2852")
 		)
 		(fp_line
-			(start -1.813241 -2.11)
-			(end -1.635 -2.11)
+			(start -2.11 2.11)
+			(end -2.11 1.635)
 			(stroke
 				(width 0.12)
 				(type solid)
@@ -4956,7 +4956,7 @@
 			(layer "F.SilkS")
 			(uuid "ab38d540-3002-5a19-8a64-00b719dc7e62")
 		)
-		(fp_poly (pts (xy -2.11 -2.11) (xy -2.35 -2.44) (xy -1.87 -2.44))
+		(fp_poly (pts (xy -2.61 -1.25) (xy -2.94 -1.01) (xy -2.94 -1.49))
 			(stroke
 				(width 0.12)
 				(type solid)
@@ -6722,7 +6722,7 @@
 	(footprint "Capacitor_SMD:C_0603_1608Metric"
 		(layer "F.Cu")
 		(uuid "c89044d7-7dc1-5062-820a-54d8be51e2ce")
-		(at 153.65 101.5 90)
+		(at 153.7 101.5 90)
 		(descr "Capacitor SMD 0603 (1608 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 76, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "capacitor")
 		(property "Reference" "C6"
@@ -9860,14 +9860,6 @@
 		(uuid "2af9a63c-2a21-55b7-b171-d3eb4229a78e")
 	)
 	(segment
-		(start 155.363 102.45)
-		(end 153.65 102.275)
-		(width 0.45)
-		(layer "F.Cu")
-		(net "VIN")
-		(uuid "2b636d1f-d946-52c2-9bda-309e864b747b")
-	)
-	(segment
 		(start 111.8 90.5)
 		(end 110.95 85.9)
 		(width 0.4)
@@ -10202,6 +10194,14 @@
 		(layer "F.Cu")
 		(net "VBUS_RAW")
 		(uuid "460e1f34-b62d-550f-b810-1ffa49395b11")
+	)
+	(segment
+		(start 153.7 102.275)
+		(end 151.5 102.975)
+		(width 0.8)
+		(layer "F.Cu")
+		(net "VIN")
+		(uuid "461106b0-5ce8-5e3e-8e75-adaa72b391a6")
 	)
 	(segment
 		(start 171.5 93)
@@ -10930,6 +10930,14 @@
 		(layers "F.Cu" "B.Cu")
 		(net "GND")
 		(uuid "7f3964cc-3696-566b-b603-3e723425f893")
+	)
+	(segment
+		(start 155.363 102.45)
+		(end 153.7 102.275)
+		(width 0.45)
+		(layer "F.Cu")
+		(net "VIN")
+		(uuid "7f5d45a1-e498-5c80-83fa-cfa6b985d71b")
 	)
 	(segment
 		(start 151.5 104.25)
@@ -11851,14 +11859,6 @@
 		(net "VOUT_PRE")
 		(uuid "c0318c0c-eacd-5daf-9ab8-08455a5e9f85")
 	)
-	(segment
-		(start 153.65 102.275)
-		(end 151.5 102.975)
-		(width 0.8)
-		(layer "F.Cu")
-		(net "VIN")
-		(uuid "c05f0dcd-41cf-55ed-abc0-294bf13d9b06")
-	)
 	(via
 		(at 170.7 93)
 		(size 0.6)
@@ -11866,14 +11866,6 @@
 		(layers "F.Cu" "B.Cu")
 		(net "+5V_OUT")
 		(uuid "c1ac8ec8-abfc-5368-bd49-3a71c264b4fc")
-	)
-	(segment
-		(start 155.363 100.55)
-		(end 153.65 100.725)
-		(width 0.45)
-		(layer "F.Cu")
-		(net "GND")
-		(uuid "c1c92650-9bc3-5ce8-bea9-31e83272898b")
 	)
 	(segment
 		(start 131 127)
@@ -12108,6 +12100,14 @@
 		(uuid "d7a1449c-ed51-5c20-aabe-951e044dca21")
 	)
 	(segment
+		(start 153.7 100.725)
+		(end 151.5 100.025)
+		(width 0.8)
+		(layer "F.Cu")
+		(net "GND")
+		(uuid "d7ab81d4-a168-5a4b-8860-d1b68e9916c2")
+	)
+	(segment
 		(start 119.75 101.5)
 		(end 123 103.75)
 		(width 0.2)
@@ -12202,6 +12202,14 @@
 		(layer "F.Cu")
 		(net "DISCHARGE")
 		(uuid "e1ce3a53-5c90-54a1-9d27-f4270a370af4")
+	)
+	(segment
+		(start 155.363 100.55)
+		(end 153.7 100.725)
+		(width 0.45)
+		(layer "F.Cu")
+		(net "GND")
+		(uuid "e1e397f0-a89e-5470-b705-1eb8879a2e86")
 	)
 	(segment
 		(start 137 123.5)
@@ -12442,14 +12450,6 @@
 		(layer "F.Cu")
 		(net "PMOS_GATE")
 		(uuid "fa2a4a69-26fe-55f1-8878-5554fd28090f")
-	)
-	(segment
-		(start 153.65 100.725)
-		(end 151.5 100.025)
-		(width 0.8)
-		(layer "F.Cu")
-		(net "GND")
-		(uuid "fa38a962-e178-523f-96c2-e204ffc9c08c")
 	)
 	(segment
 		(start 162.5 101.5)
