@@ -854,9 +854,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"error: `gh pr view {args.pr}` failed", file=sys.stderr)
                 return 2
             pr = PullRequest.from_gh(json.loads(out))
-        # Only a commit whose subject ends in ``(#PR)`` triggers a gh lookup, so
-        # the usual CI run stays offline; a failed lookup falls back to its
-        # ``Part of`` lines, which is stricter, never laxer, than the release gate.
+        # Only a commit whose subject ends in ``(#PR)`` triggers a gh lookup of
+        # its own, on top of the ``gh pr view`` above; a failed lookup falls
+        # back to its ``Part of`` lines, which is stricter, never laxer, than
+        # the release gate.
         pr_resolver = _BranchResolver(args.repo or default_repo_slug(), args.offline)
         return run_pr_mode(
             pr,
