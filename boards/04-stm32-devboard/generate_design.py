@@ -2393,7 +2393,8 @@ def _rule_area_blocks_tracks(zone: Any, layer: str) -> bool:
 
     Honours the zone's layer spec: a single ``layer`` name or the
     multi-layer ``layers`` list with the wildcards KiCad writes for rule
-    areas (``*.Cu`` covers every copper layer, ``F&B.Cu`` the outer pair).
+    areas (``*.Cu`` covers every copper layer, ``F&B.Cu`` the outer pair,
+    ``*.In.Cu`` the inner layers).
     """
     keepout = getattr(zone, "keepout", None)
     if keepout is None or getattr(keepout, "tracks_allowed", True):
@@ -2406,8 +2407,10 @@ def _rule_area_blocks_tracks(zone: Any, layer: str) -> bool:
     for name in names:
         if name == layer:
             return True
-        if (name == "*.Cu" and layer.endswith(".Cu")) or (
-            name == "F&B.Cu" and layer in ("F.Cu", "B.Cu")
+        if (
+            (name == "*.Cu" and layer.endswith(".Cu"))
+            or (name == "F&B.Cu" and layer in ("F.Cu", "B.Cu"))
+            or (name == "*.In.Cu" and layer.startswith("In") and layer.endswith(".Cu"))
         ):
             return True
     return False
