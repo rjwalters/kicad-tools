@@ -51,8 +51,10 @@ anchor↔anchor pair is exempt (Issue #9325): consecutive `kct pcb reinforce`
 wire legs sit ~2.3-2.5 mm apart on one net, the fab's DFM counted none of
 those pairs, and reporting them produced 7 of the 11 errors on that board. The
 fab's same-net treatment is evidenced only by that one board, not a general
-fab-rule confirmation. An annulus counts only
-on an outer face where it is **not tented** (per-via `(tenting ...)` override,
+fab-rule confirmation, and the exemption needs a real shared net: two
+unconnected holes both read as net 0 (the no-net sentinel, issue #4127), so a
+net-0 anchor pair stays reported. An annulus counts only on an outer face
+where it is **not tented** (per-via `(tenting ...)` override,
 then the board setup default, then KiCad's absent-token default: tented); the
 fab's exact tenting test is unverified. A pair is reported once, naming every
 layer it meets on. Every via on boards 03 / 05 / 06 / 07 resolves as tented, so

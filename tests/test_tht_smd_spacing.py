@@ -291,6 +291,20 @@ def test_same_net_exposed_anchor_vias_produce_no_finding():
     assert not check_tht_smd_spacing(board(a, b)).violations
 
 
+def test_two_netless_anchor_vias_still_reported():
+    """Net 0 is the no-net sentinel, not a shared net (#4127): no exemption.
+
+    Two *unconnected* anchor-sized mask-open holes 1.5 mm apart are exactly the
+    bridging hazard the annulus pass models -- colliding on ``net 0`` is not
+    same-net, so the exemption must not swallow the pair.
+    """
+    a = ring(0, uuid="a", drill=1.3, size=1.9, net=0)
+    b = ring(0.95 + 1.5 + 0.95, uuid="b", drill=1.3, size=1.9, net=0)
+    found = check_tht_smd_spacing(board(a, b)).violations
+    assert [v.severity for v in found] == ["error"]
+    assert [v.nets for v in found] == [("0",)]
+
+
 def test_anchor_against_different_net_fanout_annulus_is_still_reported():
     """Issue #9325: the same-net anchor↔anchor exemption does not cross nets."""
     anchor = ring(0, uuid="anchor", drill=1.3, size=1.9, net=1)

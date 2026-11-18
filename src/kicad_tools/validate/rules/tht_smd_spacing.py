@@ -72,7 +72,12 @@ gates keep this from becoming the via flood above:
   mm apart on one net (1.9 mm annuli, 1.3 mm drill); this pairing reported one
   error per junction -- 7 of the 11 errors on the reporter's board -- and the
   fab's DFM counted none of them. A same-net ring that is a *fan-out-sized*
-  via is still reported (#8925 item 5, which the fab did count). **The fab's
+  via is still reported (#8925 item 5, which the fab did count). The
+  exemption needs a *real* shared net: net 0 is the single canonical no-net
+  sentinel every unconnected hole resolves to, not a per-via identity
+  (issue #4127), so a pair colliding on net 0 still reports -- two netless
+  mask-open anchor holes are exactly the bridging hazard this pairing models.
+  **The fab's
   treatment of same-net anchor↔anchor pairs is evidenced only by this one
   board** (it counted none); that is an observation, not a general fab-rule
   confirmation.
@@ -83,7 +88,8 @@ their counts (6 / 0 / 0 / 0); its live calibration is unverified. A pair is
 reported **once**, even when it meets on both faces or both vias are anchors
 (each then sits on both sides of the comparison); the message names every
 layer it meets on. A same-net anchor↔anchor pair is not reported at all
-(above); a different-net one is, once.
+(above); a different-net one is, once -- and so is a net-0 pair (net 0 is the
+no-net sentinel, not a shared net).
 
 A pad whose ``shape`` this rule cannot measure is **reported as unmeasured**
 (``tht_smd_spacing_incomplete``, info) rather than silently dropped: a shape the
@@ -139,6 +145,9 @@ def check_tht_smd_spacing(
     (Issue #8925); THT component pads are not.  A same-net anchor↔anchor pair
     is exempt (Issue #9325) -- consecutive ``kct pcb reinforce`` wire legs --
     while a same-net anchor against a fan-out-sized annulus is still reported.
+    The exemption needs a *real* shared net: two unconnected holes both read as
+    net 0 (the single no-net sentinel, issue #4127), and a net-0 anchor pair
+    still reports.
 
     ``via_drill_mm`` is the drill diameter at which a via starts being judged
     like a THT component pad (:data:`ANCHOR_DRILL_MM` by default; see the module
@@ -287,8 +296,13 @@ def check_tht_smd_spacing(
                 # consecutive ``kct pcb reinforce`` wire legs sit 2.3-2.5 mm
                 # apart on one net, and the fab's DFM counted none of those
                 # pairs.  A same-net ring that is a fan-out-sized via is still
-                # reported (the #8925 item-5 shape the fab did count).
-                if ring_id in anchor_ids and ring_net == net:
+                # reported (the #8925 item-5 shape the fab did count), and so
+                # is a "same-net" pair colliding on net 0: net 0 is the single
+                # canonical no-net sentinel every unconnected hole resolves to,
+                # not a per-via identity (issue #4127), so two netless
+                # mask-open anchor holes are a real bridging hazard, not a
+                # same-net no-op.
+                if ring_id in anchor_ids and ring_net == net != "0":
                     continue
                 key = (min(identity, ring_id), max(identity, ring_id))
                 entry = pairs.setdefault(
