@@ -575,7 +575,10 @@ An invalid sidecar (unknown key, non-numeric degrees, a `by_lcsc` key that is no
   This is a review list, not a blocker: check each one in the fab's placement
   preview before ordering;
 - `--verify` re-derives every sidecar-corrected rotation from the board and the
-  current sidecar and fails if the retained CPL disagrees.
+  current sidecar and fails if the retained CPL disagrees. If the re-derivation
+  itself cannot run (an unreadable or malformed bundle file, an unexpected
+  error), `--verify` reports the skip instead of passing silently, and
+  `readiness.json` records the reason under `cpl_rotations.rederivation_skipped`.
 
 The hand-edited-CSV route is not an option: it breaks the manifest checksums.
 

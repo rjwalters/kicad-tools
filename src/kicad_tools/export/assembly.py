@@ -711,11 +711,7 @@ class AssemblyPackage:
         # The CPL must share the Gerbers' frame, so take use_aux_origin from
         # the same preset the package plots with (OSH Park: False) unless
         # the caller supplied an explicit pnp_config.
-        pnp_config = self.config.pnp_config
-        if pnp_config is None and self.fab_family in MANUFACTURER_PRESETS:
-            use_aux = MANUFACTURER_PRESETS[self.fab_family].config.use_aux_origin
-            if not use_aux:
-                pnp_config = PnPExportConfig(use_aux_origin=False)
+        pnp_config = resolve_pnp_config(self.fab_family, self.config.pnp_config)
         aux_origin = _aux_origin_of(pcb.setup)
         pnp_csv = export_pnp(
             footprints,
@@ -898,6 +894,28 @@ def profile_rotation_corrections(manufacturer: str) -> dict[str, float] | None:
             return profile.rotation_corrections
     except (ValueError, ImportError):
         pass
+    return None
+
+
+def resolve_pnp_config(
+    fab_family: str,
+    pnp_config: PnPExportConfig | None,
+) -> PnPExportConfig | None:
+    """The PnP config a CPL export effectively resolves to (issue #9346).
+
+    ``None`` (the fab's defaults) resolves exactly as the CPL step of
+    :class:`AssemblyPackage` does: a preset whose Gerber frame is not the aux
+    origin (OSH Park) pins ``use_aux_origin=False``, anything else stays
+    ``None`` so the formatter applies its own defaults.  Callers re-deriving a
+    shipped CPL (``kct readiness --verify``) go through the same resolution, so
+    both sides always filter the same placement set.
+    """
+    if pnp_config is not None:
+        return pnp_config
+    if fab_family in MANUFACTURER_PRESETS:
+        use_aux = MANUFACTURER_PRESETS[fab_family].config.use_aux_origin
+        if not use_aux:
+            return PnPExportConfig(use_aux_origin=False)
     return None
 
 
