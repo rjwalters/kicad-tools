@@ -14,22 +14,47 @@ name: Changelog
 # `timeout-minutes` is a ceiling for a slow checkout, not an expected runtime
 # (issue #9246): one slow full-history fetch once consumed a 5-minute budget,
 # skipped every real step and reported `cancelled` with no verdict.
+#
+# Merge groups (Issue #9299): a `checks_requested` run repeats the tree-level
+# fragment validation (`changelog_assemble.py --check`) on the COMBINED queue
+# tree -- the part of the gate a merge run can genuinely verify -- and skips
+# the per-PR gap report, which is pure PR metadata (title, labels, closing
+# keyword) that a merge_group payload does not carry. That is the documented
+# PR-only gate arrangement: every queued PR has already passed
+# `Changelog Fragment Check` on its own head before the queue admitted it
+# (branch protection gates queue entry on the PR run), so the PR run is the
+# substantive gate. Consequence for the rollout step that selects required
+# queue checks (Issue #9299): this check must NOT be made a required
+# merge-queue context unless a member-PR derivation design lands first --
+# `loom-daemon merge-group-ci audit --required "Changelog Fragment Check"`
+# reports exactly that gap.
 on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, edited, labeled, unlabeled]
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
   pull-requests: read
 
+# On merge_group, `github.event.pull_request.number` does not exist -- a
+# naive `changelog-${{ ... number }}` group would collapse EVERY queue entry
+# into one `changelog-` group that cancels and supersedes itself. Key
+# merge-group runs by the queue commit (unique per entry) and never cancel
+# them; PR runs keep their per-PR group and cancel-on-new-push behavior.
 concurrency:
-  group: changelog-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: ${{ github.event_name == 'merge_group' && format('changelog-merge-group-{0}', github.sha) || format('changelog-{0}', github.event.pull_request.number) }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 jobs:
   fragment-check:
     name: Changelog Fragment Check
+    # merge-group-audit: pr-only -- the verdict is PR metadata (title type,
+    # labels, closing keyword) that a merge_group payload does not carry; see
+    # the header comment for the documented PR-only gate arrangement
+    # (Issue #9299).
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -51,8 +76,23 @@ jobs:
         run: python scripts/changelog_assemble.py --check
 
       - name: Check this PR has a changelog fragment (or is internal)
+        # Pull-request runs only: the gap report reads the PR from the event
+        # payload, and a merge_group payload carries no PR (Issue #9299).
+        if: github.event_name == 'pull_request'
         env:
           # Only for a commit whose subject ends in `(#PR)` (resolved to that
           # PR's branch issue, as the release gate does); usually unused.
           GH_TOKEN: ${{ github.token }}
         run: python scripts/changelog_gap_report.py --pr-event "$GITHUB_EVENT_PATH" --base HEAD^1
+
+      - name: Record the PR-only gate arrangement on merge groups
+        # Visible in the run summary so a green merge-group run is never
+        # mistaken for a per-PR verdict: it only certifies the combined
+        # tree's fragments assemble (Issue #9299).
+        if: github.event_name == 'merge_group'
+        run: |
+          {
+            echo "Merge-group run: tree-level fragment validation only."
+            echo "The per-PR gap report is a pull_request-only gate; every queued PR"
+            echo "already passed it on its own head before entering the queue."
+          } >> "$GITHUB_STEP_SUMMARY"
