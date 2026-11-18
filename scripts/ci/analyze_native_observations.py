@@ -306,7 +306,28 @@ def analyze_group(directory: Path, top: int, simulate: Sequence[int] = ()) -> di
     }
 
 
-def verdict(groups: list[dict[str, Any]], max_concurrency: int | None) -> list[str]:
+def excess_seconds(group: dict[str, Any], max_concurrency: int) -> float:
+    """Seconds this group spent with more native processes than the bound."""
+    histogram = group["native_concurrency"]["seconds_by_concurrency"]
+    return sum(seconds for level, seconds in histogram.items() if int(level) > max_concurrency)
+
+
+def verdict(
+    groups: list[dict[str, Any]],
+    max_concurrency: int | None,
+    tolerance_seconds: float = 0.0,
+) -> list[str]:
+    """Problems that fail the audit.
+
+    ``tolerance_seconds`` (Issue #9120) is an explicit, stated allowance for
+    time spent above ``max_concurrency``; the default ``0`` keeps the audit
+    strict. It exists because the gate wraps ``subprocess.Popen`` in Python
+    only, so a native process started straight from a shell (the sign-off
+    skill's ``kicad-cli`` gate blocks, run by ``bash -c`` in
+    ``tests/test_signoff_skill_e2e.py``) is invisible to it and can briefly
+    overlap two gated launches. It never excuses an OOM, an unbounded launch,
+    or an overshoot longer than the tolerance.
+    """
     problems = []
     for group in groups:
         name = group["group"]
@@ -322,10 +343,12 @@ def verdict(groups: list[dict[str, Any]], max_concurrency: int | None) -> list[s
             )
         if max_concurrency is not None:
             observed = group["native_concurrency"]["max_observed"]
-            if observed > max_concurrency:
+            over = excess_seconds(group, max_concurrency)
+            if observed > max_concurrency and over > tolerance_seconds:
                 problems.append(
                     f"{name}: observed native concurrency {observed} exceeds the "
-                    f"configured bound {max_concurrency}"
+                    f"configured bound {max_concurrency} for {over:.3f}s "
+                    f"(tolerance {tolerance_seconds:g}s)"
                 )
     return problems
 
@@ -334,6 +357,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path, help="native-observer output root")
     parser.add_argument("--max-concurrency", type=int, default=None)
+    parser.add_argument(
+        "--tolerance-seconds",
+        type=float,
+        default=0.0,
+        metavar="S",
+        help=(
+            "allow up to S seconds above --max-concurrency before failing "
+            "(default 0: strict). Tolerated overshoot is still printed."
+        ),
+    )
     parser.add_argument(
         "--simulate-bound",
         type=int,
@@ -347,6 +380,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.max_concurrency is not None and args.max_concurrency < 1:
         parser.error("--max-concurrency must be positive")
+    if args.tolerance_seconds < 0:
+        parser.error("--tolerance-seconds must not be negative")
     if any(bound < 1 for bound in args.simulate_bound):
         parser.error("--simulate-bound must be positive")
     directories = sorted(
@@ -389,7 +424,17 @@ def main(argv: list[str] | None = None) -> int:
                 f"{worst[0]['added_wait_seconds'] if worst else 0.0:.1f}s "
                 f"({worst[0]['nodeid'] if worst else 'n/a'})"
             )
-    problems = verdict(groups, args.max_concurrency)
+    problems = verdict(groups, args.max_concurrency, args.tolerance_seconds)
+    if args.max_concurrency is not None:
+        for group in groups:
+            over = excess_seconds(group, args.max_concurrency)
+            if over and not any(
+                item.startswith(f"{group['group']}: observed") for item in problems
+            ):
+                print(
+                    f"NOTE {group['group']}: {over:.3f}s above the bound {args.max_concurrency} "
+                    f"(within the stated {args.tolerance_seconds:g}s tolerance)"
+                )
     for problem in problems:
         print(f"FAIL {problem}", file=sys.stderr)
     return 1 if problems else 0
