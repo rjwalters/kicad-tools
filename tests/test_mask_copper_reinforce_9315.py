@@ -84,7 +84,9 @@ def _geometry(mask_pieces, copper_pieces):
     return AttributedMaskGeometry(exported, objects)
 
 
-def straight_geometry(neighbour=None, offrun=None, pad_on_run=False, stray_via=False):
+def straight_geometry(
+    neighbour=None, offrun=None, pad_on_run=False, stray_via=False, stray_strip=False
+):
     """One straight reinforced leg: strip from anchor to anchor, untented anchors."""
     track = box(10.0, 9.75, 30.0, 10.25)
     strip = box(A[0], 9.75, B[0], 10.25)
@@ -106,6 +108,9 @@ def straight_geometry(neighbour=None, offrun=None, pad_on_run=False, stray_via=F
         copper.append(
             ("via", "PWR", {"F.Cu": _disk(22.0, 10.6, 0.4), "F.Mask": _disk(22.0, 10.6, 0.4)})
         )
+    if stray_strip:
+        copper.append(("segment", "PWR", {"F.Cu": box(40.0, 39.75, 50.0, 40.25)}))
+        mask.append(("gr_line", "", {"F.Mask": box(41.0, 39.75, 47.0, 40.25)}))
     if neighbour is not None:
         copper.append(("segment", "OTHER", {"F.Cu": box(15.0, 10.32, 18.0, 10.42)}))
     if offrun is not None:
@@ -229,6 +234,32 @@ def test_stray_untented_via_off_the_run_is_not_excused():
     over_strip = [m for m in stray if m.conductor_uuid == stray_uuid]
     assert over_strip
     assert {m.owner_run for m in over_strip} == {"HS_POWER"}
+
+
+def test_same_net_trace_under_unrelated_opening_not_excused():
+    """A same-net trace wholly under its own cutout far from the run stays an error.
+
+    The run's strip was never net-scoped: an opening 30 mm away is not
+    continuous with either anchor flash, so it attributes to nothing and the
+    trace under it keeps its measured verdict (#9315 review blocker).
+    """
+    geometry = straight_geometry(stray_strip=True)
+    stray_uuid = next(
+        identity
+        for identity, item in geometry.objects.items()
+        if item["kind"] == "segment"
+        and abs(item["layers_geometry"]["F.Cu"].centroid.y - 40.0) < 1e-9
+    )
+    result = assess_attributed_geometry(geometry, POLICY, (), [reinforce_record()])
+    stray = [m for m in result.measurements if m.conductor_uuid == stray_uuid]
+    assert stray, "same-net trace under its own unrelated opening was not measured"
+    assert {m.disposition for m in stray} == {"violation"}
+    # The cutout it sits under is a bare board graphic: unattributed, so no
+    # owner net and no run name it.
+    assert {m.owner_run for m in stray} == {None}
+    assert {m.owner_net for m in stray} == {None}
+    assert {m.same_net for m in stray} == {None}
+    assert not result.passed
 
 
 def test_bent_leg_with_several_strip_pieces():

@@ -81,19 +81,22 @@ requires those openings to be continuous -- and ``mask_to_copper`` then
 failed the same board for having them (board-level ``gr_line``/``gr_circle``
 openings carry no native net, so the run's own copper measured as an
 ordinary violation). When ``<board>.reinforcement.json`` records the runs,
-each run's openings are attributed to their sidecar record -- strip
-``gr_line`` pieces lie wholly over same-net track on the record's layer,
-anchor flashes and end-hole rings sit within the strip tolerance of a
-recorded anchor point -- and the measurement's owner net becomes the run's
-net instead of ``null``. The run's own track (wholly under its strip, or
-entering one of its anchors), its anchor vias, and a same-net pad standing
-on the run (the strip passes over its copper, or the pad is itself an
-anchor) measure as disposition ``within_reinforce_run`` -- info, like
-``within_own_pad``. Copper of a different net within a strip's clearance
-band stays an error, and same-net copper that is not the run's (a
-neighbouring track the strip clips) stays at its current severity: that is
-the hazard a strip can actually create. With no sidecar, or no matching
-record, nothing changes.
+each run's openings are attributed to their sidecar record -- a strip
+``gr_line`` piece belongs to the run through mask continuity (#9315): it
+lies within the strip tolerance of a recorded anchor point or of a piece
+already in the run's chain, seeded at anchors a same-net hole really
+stands on -- anchor flashes and end-hole rings sit within the strip
+tolerance of a recorded anchor point -- and the measurement's owner net
+becomes the run's net instead of ``null``. The run's own track (wholly
+under its strip, or entering one of its anchors), its anchor vias, and a
+same-net pad standing on the run (the strip passes over its copper, or
+the pad is itself an anchor) measure as disposition
+``within_reinforce_run`` -- info, like ``within_own_pad``. Copper of a
+different net within a strip's clearance band stays an error, and
+same-net copper that is not the run's (a neighbouring track the strip
+clips, or a trace wholly under an unrelated opening elsewhere on the
+board) stays at its current severity: that is the hazard a strip can
+actually create. With no sidecar, or no matching record, nothing changes.
 """
 
 from __future__ import annotations
@@ -492,12 +495,14 @@ class _ReinforceRun:
 
     Sidecar coordinates are sheet-absolute and the native object inventory
     reads the same file frame, so the record's anchors and net attribute
-    openings directly. ``tracks`` are the same-net track capsules on the
-    record's copper layer -- the copper its strip (#8743) lies along.
-    ``confirmed_anchors`` are the recorded anchors a same-net hole really
-    stands on (copper within the strip tolerance of the point): a stale
-    record, or one naming another net's anchor, cannot claim the openings
-    there. ``anchors`` itself stays complete for the conductor tests.
+    openings directly. ``confirmed_anchors`` are the recorded anchors a
+    same-net hole really stands on (copper within the strip tolerance of
+    the point): a stale record, or one naming another net's anchor, cannot
+    claim the openings there. ``anchors`` itself stays complete for the
+    conductor tests. A run claims openings only through mask continuity
+    with those confirmed anchors -- never through the net alone, so an
+    unrelated ``gr_line`` opening over the same net elsewhere on the board
+    attributes to nothing (#9315).
     """
 
     label: str
@@ -505,7 +510,6 @@ class _ReinforceRun:
     layer: str
     mask_side: str
     anchors: tuple[tuple[float, float], ...]
-    tracks: tuple[Any, ...]
     confirmed_anchors: tuple[tuple[float, float], ...]
 
 
@@ -564,7 +568,6 @@ def _reinforce_runs(objects: dict[str, Any], wires: Any) -> list[_ReinforceRun]:
         mask_side = MASK_LAYER_FOR_COPPER.get(layer)
         if mask_side is None or not anchors:
             continue
-        tracks: list[Any] = []
         net_copper: list[Any] = []
         for item in objects.values():
             if item.get("net") != net:
@@ -573,8 +576,6 @@ def _reinforce_runs(objects: dict[str, Any], wires: Any) -> list[_ReinforceRun]:
             if copper is None or copper.is_empty:
                 continue
             net_copper.append(copper)
-            if item.get("kind") == "segment":
-                tracks.append(copper)
         confirmed: tuple[tuple[float, float], ...] = ()
         if net_copper:
             from shapely.ops import unary_union  # type: ignore[import-untyped]
@@ -590,7 +591,6 @@ def _reinforce_runs(objects: dict[str, Any], wires: Any) -> list[_ReinforceRun]:
                 layer=layer,
                 mask_side=mask_side,
                 anchors=tuple(anchors),
-                tracks=tuple(tracks),
                 confirmed_anchors=confirmed,
             )
         )
@@ -605,15 +605,19 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty):
     the material, so a ring-shaped end-hole opening that surrounds its
     anchor still matches; the anchor is corroborated by same-net copper
     standing on it, so a record naming another net's anchor (or a stale one)
-    claims nothing -- or, for ``gr_line`` pieces that run far between the
-    anchors, when the piece lies over the run's own track: the strip was
-    written along the leg's copper (#8743), so an attributed piece lies
-    within the strip tolerance of that track. An anchor-flash ``via`` must
-    also carry the run's net; board graphics have none to check. Ties
-    between records of one net go to the run with the nearest anchor, first
-    recorded winning a tie, so attribution is deterministic.
-    ``merged_region`` openings attribute through their contributors, which
-    are attributed individually before the merge.
+    claims nothing. A ``gr_line`` strip piece that runs far between the
+    anchors belongs to the run through *mask continuity*: the strip (#8743)
+    is one continuous cutout from anchor to anchor, so a piece joins the
+    run's chain when its hull lies within the strip tolerance of a piece
+    already in the chain, seeded by the pieces standing on the confirmed
+    anchors. An opening that is merely over the same net's copper elsewhere
+    on the board is not continuous with any anchor flash and attributes to
+    nothing (#9315). An anchor-flash ``via`` must also carry the run's net;
+    board graphics have none to check. Ties between records of one net go
+    to the run with the nearest anchor, first recorded winning a tie, so
+    attribution is deterministic. ``merged_region`` openings attribute
+    through their contributors, which are attributed individually before
+    the merge.
     """
     from shapely.geometry import Point
     from shapely.ops import unary_union
@@ -621,42 +625,66 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty):
     from .rules.reinforcement_incomplete import MASK_TOLERANCE_MM
 
     tolerance = MASK_TOLERANCE_MM + uncertainty
-    run_by_uuid: dict[str, _ReinforceRun] = {}
-    pieces: dict[int, list[Any]] = {}
+    candidates: dict[str, list[tuple[_ReinforceRun, float]]] = {}
+    strip_materials: dict[str, Any] = {}
     for owners, material, kind, *_ in openings:
         if kind == "merged_region" or material is None or material.is_empty:
             continue
-        owner = objects.get(owners[0]) if len(owners) == 1 else None
-        hull = material.convex_hull
+        uuid = owners[0]
+        if kind == "gr_line":
+            strip_materials[uuid] = material
+        for run in runs:
+            if not run.confirmed_anchors:
+                continue
+            if kind == "via":
+                owner = objects.get(uuid) if len(owners) == 1 else None
+                if (owner.get("net") if owner else "") != run.net:
+                    continue
+            distance = min(material.convex_hull.distance(Point(a)) for a in run.confirmed_anchors)
+            if distance <= tolerance:
+                candidates.setdefault(uuid, []).append((run, distance))
+
+    # Grow each run's strip chain to a fixpoint: a piece whose hull lies
+    # within the strip tolerance of a confirmed anchor -- or of an already
+    # admitted piece -- joins the chain and reaches further pieces.
+    for run in runs:
+        if not run.confirmed_anchors:
+            continue
+        anchor_points = [Point(a) for a in run.confirmed_anchors]
+        admitted_hulls: list[Any] = []
+        pending = list(strip_materials.items())
+        while pending:
+            remaining = []
+            progressed = False
+            for uuid, material in pending:
+                hull = material.convex_hull
+                near = any(hull.distance(point) <= tolerance for point in anchor_points) or any(
+                    hull.distance(other) <= tolerance for other in admitted_hulls
+                )
+                if not near:
+                    remaining.append((uuid, material))
+                    continue
+                if not any(r is run for r, _ in candidates.get(uuid, ())):
+                    candidates.setdefault(uuid, []).append((run, float("inf")))
+                admitted_hulls.append(hull)
+                progressed = True
+            pending = remaining
+            if not progressed:
+                break
+
+    run_by_uuid: dict[str, _ReinforceRun] = {}
+    pieces: dict[int, list[Any]] = {}
+    for uuid, pairs in candidates.items():
         best = None
         best_distance = None
-        for run in runs:
-            if kind == "via" and (owner.get("net") if owner else "") != run.net:
-                continue
-            near_anchor = (
-                min(hull.distance(Point(a)) for a in run.confirmed_anchors) <= tolerance
-                if run.confirmed_anchors
-                else False
-            )
-            over_track = False
-            if kind == "gr_line" and run.tracks:
-                track_union = unary_union(run.tracks)
-                over_track = material.difference(track_union.buffer(tolerance)).area <= (
-                    _AREA_EPSILON_MM2
-                )
-            if not (near_anchor or over_track):
-                continue
-            distance = (
-                min(hull.distance(Point(a)) for a in run.confirmed_anchors)
-                if run.confirmed_anchors
-                else float("inf")
-            )
+        for run, distance in pairs:
             if best_distance is None or distance < best_distance:
                 best, best_distance = run, distance
         if best is None:
             continue
-        run_by_uuid[owners[0]] = best
-        if kind == "gr_line":
+        run_by_uuid[uuid] = best
+        material = strip_materials.get(uuid)
+        if material is not None:
             pieces.setdefault(id(best), []).append(material)
     strips = {identity: unary_union(found) for identity, found in pieces.items()}
     return run_by_uuid, strips
