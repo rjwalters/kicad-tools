@@ -1740,7 +1740,7 @@ jobs:
     # board's failure is advisory (it gates merges only if the rollout makes
     # it a required queue check).
     needs: [changes, kicad_pin]
-    if: ${{ github.event_name == 'merge_group' || ((vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board07 == 'true' || needs.changes.result == 'failure')) }}
+    if: ${{ !cancelled() && (github.event_name == 'merge_group' || ((vars.BOARD_07_CI_ENABLED == 'true') && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board07 == 'true' || needs.changes.result == 'failure'))) }}
     # Issue #2726 / Epic #2661 Phase 3N: re-route board 07 (the
     # N-trace match-group testbench, #2724 Phase 3L) from scratch on
     # every PR and verify that
@@ -2753,7 +2753,7 @@ jobs:
     # deliberately -- same rationale as `matchgroup-routing-regression` above
     # (Issue #9299).
     needs: [changes, kicad_pin]
-    if: ${{ github.event_name == 'merge_group' || ((vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board07 == 'true' || needs.changes.result == 'failure')) }}
+    if: ${{ !cancelled() && (github.event_name == 'merge_group' || ((vars.BOARD_07_CI_ENABLED == 'true') && ((github.event_name != 'pull_request' && needs.kicad_pin.outputs.skip != 'true') || needs.changes.outputs.board07 == 'true' || needs.changes.result == 'failure'))) }}
     # Issue #3779: end-to-end gate for board 07 ("matchgroup-test").  The
     # fixture schematic is FULLY WIRED (#4012: 244/244 pads bound), so the
     # copper comparator carries real evidence.  Issue #7557 moved U4's TMDS
