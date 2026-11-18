@@ -45,10 +45,18 @@ die_skip() {
 
 # Idempotent restore of a staged-over committed path (file or directory).
 # Safe to call twice: the backup is removed on the first successful restore.
+# A directory restore is exact -- staged-over contents (including files the
+# staged run added that were never committed) are dropped before the backup
+# is copied back, so `git status` on the committed tree stays clean locally.
 _restore_committed_from_backup() {
   local bak=$1 committed=$2
   [ -e "$bak" ] || return 0
-  cp -a "$bak" "$committed"
+  if [ -d "$bak" ]; then
+    find "$committed" -mindepth 1 -delete
+    cp -a "$bak/." "$committed/"
+  else
+    cp -a "$bak" "$committed"
+  fi
   rm -rf "$bak"
 }
 
@@ -61,8 +69,16 @@ _with_staged_committed_path() {
   local committed=$1
   shift
   local bak
-  bak="$(mktemp "${TMPDIR:-/tmp}/ci-jobs-stage-bak.XXXXXX")"
-  cp -a "$committed" "$bak"
+  # Match the backup allocation to the kind of path being staged: cp -a
+  # refuses to overwrite a regular file (mktemp) with a directory, so the
+  # committed directory must be backed up into a mktemp -d directory.
+  if [ -d "$committed" ]; then
+    bak="$(mktemp -d "${TMPDIR:-/tmp}/ci-jobs-stage-bak.XXXXXX")"
+    cp -a "$committed/." "$bak/"
+  else
+    bak="$(mktemp "${TMPDIR:-/tmp}/ci-jobs-stage-bak.XXXXXX")"
+    cp -a "$committed" "$bak"
+  fi
   local rc=0
   (
     trap '_restore_committed_from_backup "$bak" "$committed"' EXIT

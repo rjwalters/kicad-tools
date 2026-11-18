@@ -11,7 +11,7 @@
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
 
-out="${1:-$(mktemp -t model-coverage-XXXXXX).json}"
+out="${1:-$(mktemp -t model-coverage-XXXXXX.json)}"
 
 step "Write model coverage report"
 uv run python scripts/ci/model_coverage_report.py -o "$out"
