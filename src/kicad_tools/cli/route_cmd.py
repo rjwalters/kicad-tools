@@ -8683,15 +8683,44 @@ def _apply_ripup_strategy(router: "Autorouter", args) -> None:
         router._ripup_strategy = strategy
 
 
+def _wire_detour_probe_deadline_shift(router: "Autorouter", args) -> None:
+    """Keep probe time out of the CLI wall-clock deadlines (issue #9244).
+
+    The detour probe pre-pass runs real A* searches before the real route;
+    without compensation its cost came off ``args._routing_deadline`` /
+    ``args._wall_clock_deadline``, so a binding ``--timeout`` could change
+    which real searches time out and therefore the routed copper -- with the
+    flag on vs off.  This installs the router's ``on_probe_elapsed`` hook
+    (fired once per probe, i.e. once per Autorouter): every probe shifts
+    both deadline stamps forward by its measured seconds and accumulates
+    the total on ``args._detour_probe_shift_s`` (the per-tier budget context
+    manager folds the shift that grew inside its block back into the
+    original it restores).  Unbounded runs (``None`` deadlines) are a no-op.
+    """
+
+    def _shift_probe_time(elapsed: float) -> None:
+        if elapsed <= 0.0:
+            return
+        args._detour_probe_shift_s = getattr(args, "_detour_probe_shift_s", 0.0) + float(elapsed)
+        for attr in ("_routing_deadline", "_wall_clock_deadline"):
+            deadline = getattr(args, attr, None)
+            if deadline is not None:
+                setattr(args, attr, float(deadline) + float(elapsed))
+
+    router.on_probe_elapsed = _shift_probe_time
+
+
 def _apply_detour_ratio_report(router: "Autorouter", args) -> None:
     """Enable the ``--report-detour-ratio`` probe pre-pass (issue #9003).
 
     Off by default (mirrors the ``_ripup_strategy`` attribute-on-router
     pattern above): without the flag no probe runs, no sidecar is written
-    and the run is byte-identical.  With it, routed output is still
-    identical unless a wall-clock limit cuts the run short (the probe's
-    searches count against ``--timeout``).  When passed, sets
-    ``router.report_detour_ratio`` so ``route_all`` /
+    and the run is byte-identical.  With it, routed output stays identical
+    even under a binding ``--timeout``: the probe measures its own cost and
+    the CLI's deadline stamps are shifted past it (issue #9244, see
+    :func:`_wire_detour_probe_deadline_shift`; the hard supervisor kill
+    ``KCT_ROUTE_INVOCATION_DEADLINE`` is still a whole-invocation cap).
+    When passed, sets ``router.report_detour_ratio`` so ``route_all`` /
     ``route_all_negotiated`` run the read-only alone-on-empty probe
     pre-pass; the report itself is printed/written post-settle by
     :func:`_report_detour_ratio`.  A no-op when the flag is absent, so
@@ -8699,6 +8728,7 @@ def _apply_detour_ratio_report(router: "Autorouter", args) -> None:
     """
     if getattr(args, "report_detour_ratio", False):
         router.report_detour_ratio = True
+        _wire_detour_probe_deadline_shift(router, args)
 
 
 def _apply_detour_repair(router: "Autorouter", args) -> None:
@@ -8730,6 +8760,10 @@ def _apply_detour_repair(router: "Autorouter", args) -> None:
             )
             return
         router.detour_repair = True
+        # Issue #9244: the repair pass's probe pre-pass must not consume the
+        # CLI wall-clock deadlines either -- a --detour-repair-only run
+        # probes without --report-detour-ratio, so wire the shift here too.
+        _wire_detour_probe_deadline_shift(router, args)
 
 
 def _apply_airwire_separation(router: "Autorouter", args) -> None:
@@ -21733,9 +21767,12 @@ def _route_parser() -> argparse.ArgumentParser:
             "sidecar. Roughly doubles search work (one extra A* per "
             "connection). Diagnostic only: the probe restores all router "
             "state it touches and never changes the exit code, so routed "
-            "copper is identical with and without the flag -- except when "
-            "a wall-clock limit (--timeout) cuts the run short, since the "
-            "probe's searches count against that limit (issue #9003). "
+            "copper is identical with and without the flag, including "
+            "under a binding --timeout (the probe's cost is excluded from "
+            "the routing budgets, issue #9244). The hard supervisor cap "
+            "(KCT_ROUTE_INVOCATION_DEADLINE) still bounds the whole "
+            "invocation: under a binding hard cap the flag can change the "
+            "output exactly as a slower machine would. "
             "Grid engine only; a no-op on the mesh/lattice engines."
         ),
     )
