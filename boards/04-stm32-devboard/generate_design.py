@@ -2422,6 +2422,9 @@ def clip_silk_to_holes(routed_path: Path) -> bool:
     if result.fixes:
         repairer.save()
     print(f"   {len(result.fixes)} silk graphic(s) clipped")
+    if result.marker_lost:
+        print(f"   FAILED: clipping removed the pin-1 marker of {result.marker_lost}")
+        return False
     if result.residual or result.text_residual:
         print(f"   FAILED: silk still over a hole: {result.residual + result.text_residual}")
         return False
