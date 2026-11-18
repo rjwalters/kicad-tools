@@ -849,3 +849,22 @@ def test_unscoped_hand_rule_that_lowers_a_concrete_layer_still_refuses():
         _dru_state(after_text, managed=_SPLIT_MANAGED, authored=_NETCLASS_015),
     )
     assert [(item.path, item.after) for item in found] == [("dru.resolved.track_track", 0.127)]
+
+
+@pytest.mark.parametrize("scope", ["outer", "inner"])
+def test_one_scope_class_dru_still_probes_the_other_classes_copper(scope):
+    """A single scoped rule must not hide an unscoped loosening elsewhere.
+
+    ``Hand low`` (0.05) is the last match on the layers the scoped rule does
+    not govern, so those layers really resolve to 0.05: still a loosening.
+    """
+    after_text = (
+        '(rule "Hand low"\n  (constraint clearance (min 0.05mm)))\n'
+        f'(rule "{scope} managed"\n  (layer {scope})\n'
+        "  (constraint clearance (min 0.3mm)))\n"
+    )
+    found = rule_loosenings(
+        _dru_state(None),
+        _dru_state(after_text, managed={f"{scope} managed"}, authored=_NETCLASS_015),
+    )
+    assert [(item.path, item.after) for item in found] == [("dru.resolved.track_track", 0.05)]

@@ -721,11 +721,12 @@ def _dru_loosenings(before: Mapping[str, Any], after: Mapping[str, Any]) -> list
         # (say 0.127 mm) and report it as the board's track-track resolution,
         # although every real track lives on a concrete layer where the
         # managed scoped rules come later and win.  Probe one representative
-        # concrete layer per scope class instead.
-        if has_outer:
-            scopes.update(("F.Cu", "B.Cu"))
-        if has_inner:
-            scopes.add("In1.Cu")
+        # concrete layer per scope class instead.  All three are probed
+        # whenever *any* scoped rule exists: a one-class DRU still leaves the
+        # other class's copper governed by the unscoped rules the ``None``
+        # probe used to model, so dropping it without a stand-in would hide a
+        # real loosening there.
+        scopes.update(("F.Cu", "B.Cu", "In1.Cu"))
         probe_layers = [*sorted(scopes)]
     else:
         probe_layers = [None, *sorted(scopes)]
