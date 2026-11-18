@@ -77,29 +77,19 @@ class TestBoard07Allowance:
         assert not hasattr(mod, "check_zero_violations")
 
     def test_fixture_finding_allowance_is_fab_gap_only(self):
-        """Issues #5333/#6448 emptied the pair/impedance/skew entries, so the
-        identity allowance holds only the #8957 fab-view ``physical_copper_gap``
-        nets: every other blocking finding counts.  #8974's route-side
-        slit-band fix, measured on the tree merged with #8975 and #8937,
-        drained DQS_P, DQS_N, GND and +1V2 entirely (entries deleted) and
-        re-pointed the six survivors to the #8962 parent tracker.  #9018's
-        leg-side band guard drained the pad-vs-trace population entirely
-        (MIPI_CLK_N / MIPI_DAT0_N / MIPI_DAT1_N deleted); the residual six
-        TMDS entries are the re-sited gateway fan vias' tangency wedges,
-        measured and re-pointed under #8962 (the via population's child)."""
+        """Issues #5333/#6448 emptied the pair/impedance/skew entries,
+        #8974's route-side slit-band fix drained DQS_P, DQS_N, GND and
+        +1V2 (entries deleted, survivors re-pointed to the #8962 parent
+        tracker), #9018's leg-side band guard drained the pad-vs-trace
+        population (MIPI_CLK_N / MIPI_DAT0_N / MIPI_DAT1_N deleted), and
+        issue #9124's tangent-seat rejection drained the last six fab-view
+        ``physical_copper_gap`` entries (the re-sited gateway fan vias'
+        tangency wedges): board 07's allowance is empty, so every blocking
+        finding counts.  #8962's via-population re-baseline note is retired
+        with them: the wedges were exactly the tangent seats #9124 rejects,
+        so none is pending re-baselining."""
         mod = _load_helper_module()
-        assert set(mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS) == {
-            ("physical_copper_gap", net)
-            for net in (
-                "TMDS_D0_N",
-                "TMDS_D0_P",
-                "TMDS_D1_N",
-                "TMDS_D1_P",
-                "TMDS_D2_N",
-                "TMDS_D2_P",
-            )
-        }
-        assert set(mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS.values()) == {8962}
+        assert mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS == {}
         assert mod.board_allowance(mod.MATCHGROUP_FIXTURE_KEY) == (
             mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
         )

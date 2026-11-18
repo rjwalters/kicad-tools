@@ -61,12 +61,12 @@ non-negative margin; the same identified net; a proven direct overlap; nothing
 exposed beyond the pad (the construction budget ``u`` tolerated once); and no
 copper under mask within the danger clearance beside the opening beyond what
 one straight entry at 45 degrees or steeper puts there. Only a straight
-segment with exactly one authored end strictly inside the pad gets that
-allowance; a segment wholly on the pad gets none. So a track that straddles,
-runs along or passes through the pad, a shallower entry, an arc, a via or pour
-touching the pad (ring copper beside the opening), a positive expansion ring
-wider than ``u``, solder-mask-defined, custom and padstack pads, pads with no
-net, and any different-net copper all keep their measured verdict.
+segment with at least one authored end strictly inside the pad gets that
+allowance (issue #9261). So a track that straddles, runs along or passes
+through the pad, a shallower entry, an arc, a via or pour touching the pad
+(ring copper beside the opening), a positive expansion ring wider than
+``u``, solder-mask-defined, custom and padstack pads, pads with no net, and
+any different-net copper all keep their measured verdict.
 ``exposed_beyond_owner_mm2`` and ``beside_owner_excess_mm2`` record the two
 measured quantities. "Same net" is the net pcbnew loads, which assigns a
 floating stub touching one pad to that pad's net. Evidence:
@@ -396,8 +396,9 @@ def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearanc
        ``B = (copper − opening.buffer(u)) ∩ opening.buffer(clearance + u)``,
        the conductor's copper under mask within the danger clearance of the
        opening. Its allowance ``A`` is zero, except for a straight segment
-       with exactly one authored endpoint strictly inside the pad and the
-       other outside it: one entry crossing, ``A = 1.45 × width × clearance``.
+       with at least one authored endpoint strictly inside the pad: one entry
+       crossing, ``A = 1.45 × width × clearance`` (the other end may exit, sit
+       on the edge or be inside too).
        The finding qualifies only if ``B − A`` (returned as the excess) is
        numerically zero. So a track that straddles, runs along or passes
        through the pad, an entry shallower than about 45 degrees, a via or
@@ -429,17 +430,15 @@ def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearanc
         if not width or not ends:
             return False, None
         core = owner_copper.buffer(-uncertainty)
-        inside = [core.contains(Point(p)) for p in ends]
-        outside = [not owner_copper.contains(Point(p)) for p in ends]
-        if not any(inside):
+        if not any(core.contains(Point(p)) for p in ends):
             # Pass-through, straddle or along-edge copper: not an entry.
             return False, max(0.0, band)
-        if inside.count(True) == 1 and outside.count(True) == 1:
-            allowance = _ENTRY_CROSSING_FACTOR * width * clearance
-        elif inside.count(True) != 2:
-            # One end inside, the other on the pad edge: neither a clean
-            # entry nor wholly on the pad.
-            return False, max(0.0, band)
+        # At least one authored end is strictly inside the pad. The budget is
+        # one entry crossing whether the other end exits, lies on the edge or
+        # is also inside, so an end cap poking a hair past the edge never
+        # scores worse than a full exit (issue #9261). B is still measured
+        # from the real copper, so the excess check keeps gating.
+        allowance = _ENTRY_CROSSING_FACTOR * width * clearance
     excess = max(0.0, band - allowance)
     if excess > _AREA_EPSILON_MM2:
         return False, excess
@@ -889,6 +888,10 @@ def assessment_results(assessment: MaskCopperAssessment) -> DRCResults:
         parts.append(f"exposed area {measurement.exposed_area_mm2:.9g} mm²")
         if measurement.exposed_beyond_owner_mm2 is not None:
             parts.append(f"beyond owner pad copper {measurement.exposed_beyond_owner_mm2:.9g} mm²")
+        # Issue #9269: print the deciding beside-pad excess, so a reader can
+        # see why a non-zero "beyond owner pad copper" is excused.
+        if measurement.beside_owner_excess_mm2 is not None:
+            parts.append(f"beside owner excess {measurement.beside_owner_excess_mm2:.9g} mm²")
         parts.append(f"assessment measurement {index}")
         parts.append(f"opening {_opening_owner_label(measurement)}")
         copper_desc = measurement.conductor_kind or "unknown copper"
