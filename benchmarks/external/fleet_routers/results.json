@@ -2,7 +2,7 @@
   "environment": {
     "kct_revision": "9a1fb50494be21d567b2bc50e7fc6aa2febbcd56",
     "kct_tree_dirty": false,
-    "kct_worktree": "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335",
+    "kct_worktree": ".loom/worktrees/issue-6335",
     "native_backend": {
       "backend": "cpp",
       "available": true,
@@ -182,7 +182,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -207,7 +207,7 @@
       "wall_s": 23.62,
       "commands": [
         [
-          "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+          ".loom/worktrees/issue-6335/.venv/bin/kct",
           "route",
           "/tmp/fleet6335/work/00/kct/run/simple_led.kicad_pcb",
           "-o",
@@ -233,7 +233,7 @@
           "build_version": 56,
           "unavailable_reason": null
         },
-        "kicad_tools_package": "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
+        "kicad_tools_package": ".loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
         "zones_added_by_tool": [
           "GND@B.Cu",
           "VCC@F.Cu"
@@ -310,7 +310,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -438,7 +438,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -617,7 +617,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -727,7 +727,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -752,7 +752,7 @@
       "wall_s": 10.07,
       "commands": [
         [
-          "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+          ".loom/worktrees/issue-6335/.venv/bin/kct",
           "route",
           "/tmp/fleet6335/work/01/kct/run/voltage_divider.kicad_pcb",
           "-o",
@@ -778,7 +778,7 @@
           "build_version": 56,
           "unavailable_reason": null
         },
-        "kicad_tools_package": "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
+        "kicad_tools_package": ".loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
         "zones_added_by_tool": [],
         "normalized_input_sha256": "8a64019d0c7e5a57ff164b63b527463f8322d35d2d824372ee28ab6fedb80c68"
       },
@@ -852,7 +852,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -980,7 +980,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -1159,7 +1159,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -1269,7 +1269,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -1294,7 +1294,7 @@
       "wall_s": 185.35,
       "commands": [
         [
-          "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+          ".loom/worktrees/issue-6335/.venv/bin/kct",
           "route",
           "/tmp/fleet6335/work/02/kct/run/charlieplex_3x3.kicad_pcb",
           "-o",
@@ -1320,7 +1320,7 @@
           "build_version": 56,
           "unavailable_reason": null
         },
-        "kicad_tools_package": "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
+        "kicad_tools_package": ".loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
         "zones_added_by_tool": [
           "GND@B.Cu",
           "VCC@F.Cu"
@@ -1397,7 +1397,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -1527,7 +1527,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -1714,7 +1714,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -1824,7 +1824,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -1849,7 +1849,7 @@
       "wall_s": 212.22,
       "commands": [
         [
-          "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+          ".loom/worktrees/issue-6335/.venv/bin/kct",
           "route",
           "/tmp/fleet6335/work/03/kct/run/usb_joystick.kicad_pcb",
           "-o",
@@ -1875,7 +1875,7 @@
           "build_version": 56,
           "unavailable_reason": null
         },
-        "kicad_tools_package": "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
+        "kicad_tools_package": ".loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
         "zones_added_by_tool": [
           "VBUS@In2.Cu"
         ],
@@ -1954,7 +1954,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -2086,7 +2086,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -2327,7 +2327,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -2437,7 +2437,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -2462,7 +2462,7 @@
       "wall_s": 55.82,
       "commands": [
         [
-          "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+          ".loom/worktrees/issue-6335/.venv/bin/kct",
           "route",
           "/tmp/fleet6335/work/04/kct/run/stm32_devboard.kicad_pcb",
           "-o",
@@ -2488,7 +2488,7 @@
           "build_version": 56,
           "unavailable_reason": null
         },
-        "kicad_tools_package": "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
+        "kicad_tools_package": ".loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
         "zones_added_by_tool": [
           "+3.3V@F.Cu",
           "+5V@F.Cu",
@@ -2566,7 +2566,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -2697,7 +2697,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -2882,7 +2882,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -2992,7 +2992,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -3017,7 +3017,7 @@
       "wall_s": 620.2,
       "commands": [
         [
-          "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+          ".loom/worktrees/issue-6335/.venv/bin/kct",
           "route",
           "/tmp/fleet6335/work/05/kct/run/bldc_controller.kicad_pcb",
           "-o",
@@ -3043,7 +3043,7 @@
           "build_version": 56,
           "unavailable_reason": null
         },
-        "kicad_tools_package": "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
+        "kicad_tools_package": ".loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
         "normalized_input_sha256": "ab26025538bae070c8090a9080706caab667b463dfadb463291813e2a594cbc1"
       },
       "interchange": null,
@@ -3165,7 +3165,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -3381,7 +3381,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -3491,7 +3491,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -3516,7 +3516,7 @@
       "wall_s": 62.38,
       "commands": [
         [
-          "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+          ".loom/worktrees/issue-6335/.venv/bin/kct",
           "route",
           "/tmp/fleet6335/work/06/kct/run/diffpair_test.kicad_pcb",
           "-o",
@@ -3542,7 +3542,7 @@
           "build_version": 56,
           "unavailable_reason": null
         },
-        "kicad_tools_package": "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
+        "kicad_tools_package": ".loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
         "zones_added_by_tool": [],
         "normalized_input_sha256": "c0c47e096704625e3580846484f7a640810f37d9a288480e11166cb26d58183b"
       },
@@ -3616,7 +3616,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -3746,7 +3746,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -3968,7 +3968,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -4078,7 +4078,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -4103,7 +4103,7 @@
       "wall_s": 620.16,
       "commands": [
         [
-          "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+          ".loom/worktrees/issue-6335/.venv/bin/kct",
           "route",
           "/tmp/fleet6335/work/07/kct/run/matchgroup_test.kicad_pcb",
           "-o",
@@ -4129,7 +4129,7 @@
           "build_version": 56,
           "unavailable_reason": null
         },
-        "kicad_tools_package": "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
+        "kicad_tools_package": ".loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
         "normalized_input_sha256": "3a82d04edb252dc9c1a26e6ec8493adb0aecca1f63a553d5cf3ee280803858b7"
       },
       "interchange": null,
@@ -4381,7 +4381,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -4551,7 +4551,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -4576,7 +4576,7 @@
       "wall_s": 620.15,
       "commands": [
         [
-          "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+          ".loom/worktrees/issue-6335/.venv/bin/kct",
           "route",
           "/tmp/fleet6335/work/09/kct/run/usbc_pd_power.kicad_pcb",
           "-o",
@@ -4602,7 +4602,7 @@
           "build_version": 56,
           "unavailable_reason": null
         },
-        "kicad_tools_package": "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
+        "kicad_tools_package": ".loom/worktrees/issue-6335/src/kicad_tools/__init__.py",
         "normalized_input_sha256": "a4a5fe0d622e302a29bb21e82dbebb257b9aada001ca9c06b3c5311ba2f83892"
       },
       "interchange": null,
@@ -4726,7 +4726,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",
@@ -4866,7 +4866,7 @@
             "pin_mismatches": 0
           },
           "command": [
-            "/home/ubuntu/GitHub/kicad-tools/.loom/worktrees/issue-6335/.venv/bin/kct",
+            ".loom/worktrees/issue-6335/.venv/bin/kct",
             "validate",
             "--sync",
             "-s",

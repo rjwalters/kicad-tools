@@ -1037,7 +1037,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     # Issue #8975 / #9150: the same-net band edges the fab-view grader
     # resolves for this board's stackup, from the one shared resolver (never
     # literals; a missing profile entry disables the band, 0.0).
-    SAME_NET_PAD_GAP_MM, SAME_NET_TRACE_GAP_MM = same_net_band_edges()
+    SAME_NET_PAD_GAP_MM, SAME_NET_TRACE_GAP_MM = same_net_band_edges("jlcpcb", 4, 1.0, 0.5)
 
     # Segments: (geom, net, layer)
     seg_index: list[tuple] = []

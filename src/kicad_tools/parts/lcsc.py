@@ -1127,7 +1127,7 @@ class LCSCClient:
                 value=item.value,
                 footprint=item.footprint,
                 lcsc_part=lcsc,
-                quantity_needed=item.quantity,
+                quantity_needed=getattr(item, "quantity", 1),
             )
 
             if not lcsc:

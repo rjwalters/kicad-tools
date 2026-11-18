@@ -8683,15 +8683,44 @@ def _apply_ripup_strategy(router: "Autorouter", args) -> None:
         router._ripup_strategy = strategy
 
 
+def _wire_detour_probe_deadline_shift(router: "Autorouter", args) -> None:
+    """Keep probe time out of the CLI wall-clock deadlines (issue #9244).
+
+    The detour probe pre-pass runs real A* searches before the real route;
+    without compensation its cost came off ``args._routing_deadline`` /
+    ``args._wall_clock_deadline``, so a binding ``--timeout`` could change
+    which real searches time out and therefore the routed copper -- with the
+    flag on vs off.  This installs the router's ``on_probe_elapsed`` hook
+    (fired once per probe, i.e. once per Autorouter): every probe shifts
+    both deadline stamps forward by its measured seconds and accumulates
+    the total on ``args._detour_probe_shift_s`` (the per-tier budget context
+    manager folds the shift that grew inside its block back into the
+    original it restores).  Unbounded runs (``None`` deadlines) are a no-op.
+    """
+
+    def _shift_probe_time(elapsed: float) -> None:
+        if elapsed <= 0.0:
+            return
+        args._detour_probe_shift_s = getattr(args, "_detour_probe_shift_s", 0.0) + float(elapsed)
+        for attr in ("_routing_deadline", "_wall_clock_deadline"):
+            deadline = getattr(args, attr, None)
+            if deadline is not None:
+                setattr(args, attr, float(deadline) + float(elapsed))
+
+    router.on_probe_elapsed = _shift_probe_time
+
+
 def _apply_detour_ratio_report(router: "Autorouter", args) -> None:
     """Enable the ``--report-detour-ratio`` probe pre-pass (issue #9003).
 
     Off by default (mirrors the ``_ripup_strategy`` attribute-on-router
     pattern above): without the flag no probe runs, no sidecar is written
-    and the run is byte-identical.  With it, routed output is still
-    identical unless a wall-clock limit cuts the run short (the probe's
-    searches count against ``--timeout``).  When passed, sets
-    ``router.report_detour_ratio`` so ``route_all`` /
+    and the run is byte-identical.  With it, routed output stays identical
+    even under a binding ``--timeout``: the probe measures its own cost and
+    the CLI's deadline stamps are shifted past it (issue #9244, see
+    :func:`_wire_detour_probe_deadline_shift`; the hard supervisor kill
+    ``KCT_ROUTE_INVOCATION_DEADLINE`` is still a whole-invocation cap).
+    When passed, sets ``router.report_detour_ratio`` so ``route_all`` /
     ``route_all_negotiated`` run the read-only alone-on-empty probe
     pre-pass; the report itself is printed/written post-settle by
     :func:`_report_detour_ratio`.  A no-op when the flag is absent, so
@@ -8699,6 +8728,7 @@ def _apply_detour_ratio_report(router: "Autorouter", args) -> None:
     """
     if getattr(args, "report_detour_ratio", False):
         router.report_detour_ratio = True
+        _wire_detour_probe_deadline_shift(router, args)
 
 
 def _apply_detour_repair(router: "Autorouter", args) -> None:
@@ -8730,6 +8760,10 @@ def _apply_detour_repair(router: "Autorouter", args) -> None:
             )
             return
         router.detour_repair = True
+        # Issue #9244: the repair pass's probe pre-pass must not consume the
+        # CLI wall-clock deadlines either -- a --detour-repair-only run
+        # probes without --report-detour-ratio, so wire the shift here too.
+        _wire_detour_probe_deadline_shift(router, args)
 
 
 def _apply_airwire_separation(router: "Autorouter", args) -> None:
@@ -11275,7 +11309,10 @@ def _apply_manufacturer_trace_width_floor(args, pcb_path, *, quiet: bool = False
     # ``__post_init__`` resolution is stackup-blind).  ``None`` (no dfm
     # table / no stackup entry) keeps the band guard OFF rather than
     # guessing an edge.
-    from kicad_tools.cli.stitch_cmd import _resolve_mfr_pad_gap_edge
+    from kicad_tools.cli.stitch_cmd import (
+        _resolve_mfr_pad_gap_edge,
+        _resolve_mfr_trace_gap_edge,
+    )
 
     # None without ``--manufacturer``: nothing to resolve from, so the band
     # guard stays OFF rather than guessing a fab -- the stitcher's
@@ -11288,6 +11325,18 @@ def _apply_manufacturer_trace_width_floor(args, pcb_path, *, quiet: bool = False
     # stackup (issue #8974 review: no fab literal on the no-``--mfr`` path).
     args._mfr_pad_gap_band_edge = (
         _resolve_mfr_pad_gap_edge(str(manufacturer), layers or 4, copper_outer or 1.0)
+        if manufacturer
+        else None
+    )
+
+    # Issue #9215 (follow-up to #9208): the trace-population sibling edge for
+    # the via-annulus-vs-own-net-trace band guard, resolved at the same
+    # single point and threaded through the same ``DesignRules(...)`` sites
+    # as the pad edge above.  Same fail-closed contract: ``None`` (no
+    # ``--manufacturer``, no dfm table, or no stackup entry) keeps the trace
+    # band guard OFF rather than guessing an edge.
+    args._mfr_trace_gap_band_edge = (
+        _resolve_mfr_trace_gap_edge(str(manufacturer), layers or 4, copper_outer or 1.0)
         if manufacturer
         else None
     )
@@ -12117,6 +12166,246 @@ def _crossing_aware_net_order(router: "Autorouter") -> list[int]:
     return crossing_aware_order(skeletons, priority_key, class_band)
 
 
+#: Foreign net id the second probe's copper is marked under.  A sentinel, not
+#: any real net: ``RoutingGrid.is_blocked_for_net`` lets *same*-net copper
+#: through (``cell.net == 0 or cell.net != net``), so marking the best route
+#: under the net's own id would leave the second search untouched and give
+#: every net a regret of 0 -- the silently-inert failure mode Issue #9001
+#: finding (4) calls out.  The sentinel is ``max(net id) + 1`` (never 0), so it
+#: is foreign to every net on the board, including preserved copper.
+def _regret_sentinel_net_id(router: "Autorouter") -> int:
+    return max(router.nets.keys(), default=0) + 1
+
+
+def _probe_net_regret(
+    router: "Autorouter",
+    net_id: int,
+    sentinel_net: int,
+) -> tuple[float, bool]:
+    """Measure one net's regret with two empty-board probes (#9001, #9003 reuse point).
+
+    The probes run on the *prepared* grid -- pad halos, keepouts and any
+    ``--preserve-existing`` copper are already marked by the loader, so the
+    measurement is against the board the real routes will land on.  Nothing
+    has been committed yet, so no fresh copper competes with the probe.
+
+    Probe 1 searches the net's **longest Euclidean-MST flight-line edge**
+    alone (the representative connection from
+    ``crossing_order.minimum_spanning_skeleton``; for a 2-pad net -- the
+    overwhelming majority on the fleet boards -- that is exactly the whole
+    net).  Probe 2 re-searches it with probe 1's copper marked under a
+    **foreign sentinel net id**, i.e. "the best route with the first corridor
+    forbidden" -- parameter-free and deterministic.  Regret is the cost
+    difference, in the A*'s own cost units
+    (:func:`kicad_tools.router.regret_order.route_probe_cost`).
+
+    Pollution guards (the four accumulators a probe must not touch, per the
+    analysis shared with Issue #9003):
+
+    * ``Autorouter.commit_journal`` -- the grid's ``commit_observer`` is
+      suppressed around the mark/unmark pair, so the probe copper never
+      enters the journal (``net-status --why`` and the ``.access_witness.json``
+      replay contract stay clean).
+    * grid occupancy -- restored by ``mark_route`` / ``unmark_route``'s
+      net-aware rip-up (Issue #3545 static snapshot), mirrored to the paired
+      C++ grid exactly as ``load_existing_routes`` does.
+    * nogood cache / negotiated history -- untouched by construction: the
+      probes call the pathfinder's plain ``route()``, not the negotiated
+      helpers that write those.
+    * ``search_failures_by_net`` -- snapshot and restored by the caller
+      (:func:`_regret_net_order`); a probe failure must not surface as the
+      net's reason in the ``.search_failures.json`` sidecar.
+
+    Args:
+        router: A loaded, prepared router (``nets``/``pads``/``grid`` present).
+        net_id: The net to probe.
+        sentinel_net: Foreign net id to mark probe 1's copper under (see
+            :func:`_regret_sentinel_net_id`).
+
+    Returns:
+        ``(regret, first_probe_ok)``.  Conventions, both pinned by tests:
+
+        * first probe found no path -> ``(0.0, False)``: unknown measurement,
+          never a promotion or a demotion;
+        * second probe found no path -> ``(math.inf, True)``: exactly one
+          corridor exists -- the strongest commit-first signal there is;
+        * otherwise ``max(0.0, cost2 - cost1)`` (clamped: the second search's
+          constraint set is a superset, so a negative float-noise epsilon is
+          meaningless).
+    """
+    import math as _math
+    from dataclasses import replace as _dc_replace
+
+    from kicad_tools.router.crossing_order import minimum_spanning_skeleton
+    from kicad_tools.router.primitives import Route
+    from kicad_tools.router.regret_order import route_probe_cost
+
+    points: list[tuple[float, float]] = []
+    pad_by_point: dict[tuple[float, float], Pad] = {}
+    for pad_key in router.nets.get(net_id, []):
+        pad = router.pads.get(pad_key)
+        if pad is not None:
+            point = (float(pad.x), float(pad.y))
+            points.append(point)
+            pad_by_point.setdefault(point, pad)
+
+    skeleton = minimum_spanning_skeleton(points)
+    if not skeleton:
+        # Single-pad / degenerate net: nothing to probe.  Unknown measurement.
+        return (0.0, False)
+
+    # Longest MST edge = the representative connection.  ``max`` keeps the
+    # first maximum in Prim's visit order, so ties are deterministic.
+    edge = max(skeleton, key=lambda seg: _math.dist(seg[0], seg[1]))
+    start_pad = pad_by_point[edge[0]]
+    end_pad = pad_by_point[edge[1]]
+
+    pathfinder = router.router
+    via_cost = float(getattr(router.rules, "cost_via", 10.0))
+    # Resolve the net class from the Autorouter's CURRENT map: the
+    # pathfinder's own copy is only synced inside ``_prepare_routing``
+    # (core.py), which runs after this ordering pre-pass.
+    net_class = router.net_class_map.get(router.net_names.get(net_id, ""))
+
+    route1 = pathfinder.route(start_pad, end_pad, net_class=net_class)
+    if route1 is None:
+        return (0.0, False)
+    cost1 = route_probe_cost(route1, via_cost)
+
+    # Probe 2: the same search with the first corridor forbidden.  Mark under
+    # the sentinel so the net's own search sees it as foreign copper, then
+    # rip it up.  The marked copper is trimmed back from both pads
+    # (:func:`kicad_tools.router.regret_order.trimmed_probe_copper`): best and
+    # second-best legitimately share the pad-approach window, and copper
+    # marked into the pad halo would make the C++ post-route validator reject
+    # every candidate on a foreign seg-seg artifact at the shared pad.  The
+    # trim leaves the forbid where it matters -- the mid-corridor the regret
+    # measures.  Journal suppressed so the probe never reaches
+    # commit_journal; C++ mirror added because ``grid.mark_route`` is
+    # Python-side only (parity with load_existing_routes).
+    from kicad_tools.router.regret_order import trimmed_probe_copper
+
+    sentinel_route = trimmed_probe_copper(
+        Route(
+            net=sentinel_net,
+            net_name=f"regret-probe-{net_id}",
+            segments=[_dc_replace(seg, net=sentinel_net) for seg in route1.segments],
+            vias=[_dc_replace(via, net=sentinel_net) for via in route1.vias],
+        ),
+        trim_mm=1.0,
+    )
+    grid = router.grid
+    saved_observer = grid.commit_observer
+    grid.commit_observer = None
+    try:
+        if sentinel_route.segments or sentinel_route.vias:
+            grid.mark_route(sentinel_route)
+            grid._mark_route_on_cpp_cells(sentinel_route)
+            try:
+                route2 = pathfinder.route(start_pad, end_pad, net_class=net_class)
+            finally:
+                grid.unmark_route(sentinel_route)
+        else:
+            # Route shorter than the two trim windows: no mid-corridor to
+            # forbid, the second probe degenerates to the first.
+            route2 = pathfinder.route(start_pad, end_pad, net_class=net_class)
+    finally:
+        grid.commit_observer = saved_observer
+
+    if route2 is None:
+        return (_math.inf, True)
+    cost2 = route_probe_cost(route2, via_cost)
+    return (max(0.0, cost2 - cost1), True)
+
+
+def _regret_net_order(router: "Autorouter", quiet: bool = False) -> list[int]:
+    """Net order from per-net regret (Issue #9001).
+
+    Bridges the router's prepared grid to
+    :func:`kicad_tools.router.regret_order.regret_order`: each non-pour net is
+    probed twice on the empty board (:func:`_probe_net_regret` -- best route,
+    then best route with that corridor forbidden), and nets are ranked by
+    descending regret within each net-class priority band (never across one).
+    The biggest-loss nets pick their corridors while the grid is still empty;
+    nets with many equally good options go late and adapt.
+
+    Cost: two A* searches per probed connection (one if the first already
+    fails), logged in the ``Net order:`` line so the pre-pass's share of a
+    run's A* call count is visible next to the harness's load-independent
+    ``astar_calls`` column.  Pour nets (``_get_net_priority`` band 99) are
+    kept in the returned order -- callers run ``_filter_pour_nets``
+    afterwards -- but are pinned last by their class band and consume no
+    probe searches.
+
+    Failure conventions (fail safe, never reorder on a failed measurement):
+    a net whose *second* probe finds no path has exactly one corridor and
+    sorts first within its band (``+inf`` regret); a net whose *first* probe
+    fails -- or that has no connection to probe -- gets regret 0.0 and keeps
+    its default position, with the count of such nets logged.
+
+    Args:
+        router: A loaded router (``nets``/``pads`` populated; probes want the
+            grid prepared exactly as the loader leaves it).
+
+    Returns:
+        A permutation of ``router.nets``' keys, suitable for
+        ``router._forced_net_order``.
+    """
+    import math as _math
+
+    from kicad_tools.cli.progress import flush_print
+    from kicad_tools.router.regret_order import UNKNOWN_REGRET, regret_order
+
+    priority_key: dict[int, tuple] = {}
+    class_band: dict[int, int] = {}
+    for net_id in router.nets:
+        key = router._get_net_priority(net_id)
+        priority_key[net_id] = key
+        class_band[net_id] = key[0]
+
+    regrets: dict[int, float] = {}
+    probed = 0
+    single_corridor = 0
+    unmeasured = 0
+    astar_calls = 0
+    sentinel_net = _regret_sentinel_net_id(router)
+
+    # Snapshot the failure store so no probe's no_path can surface as a real
+    # net's search-failure reason in the sidecar (restored in ``finally``).
+    failure_store = getattr(router.router, "search_failures_by_net", None)
+    saved_failures = dict(failure_store) if isinstance(failure_store, dict) else None
+
+    try:
+        for net_id in router.nets:
+            if class_band[net_id] >= 99:
+                # Pour band: pinned last by class band, no probe searches.
+                regrets[net_id] = UNKNOWN_REGRET
+                continue
+            regret, first_ok = _probe_net_regret(router, net_id, sentinel_net)
+            regrets[net_id] = regret
+            if not first_ok:
+                unmeasured += 1
+                continue
+            probed += 1
+            astar_calls += 2
+            if _math.isinf(regret):
+                single_corridor += 1
+    finally:
+        if isinstance(failure_store, dict) and saved_failures is not None:
+            failure_store.clear()
+            failure_store.update(saved_failures)
+
+    order = regret_order(regrets, priority_key, class_band)
+    if not quiet:
+        flush_print(
+            f"  Net order: --order-method regret "
+            f"(biggest-loss first, {len(order)} nets; {probed} probed "
+            f"({astar_calls} probe A* calls), {single_corridor} single-corridor, "
+            f"{unmeasured} unmeasured)"
+        )
+    return order
+
+
 def _apply_order_method(
     router: "Autorouter",
     args,
@@ -12167,6 +12456,12 @@ def _apply_order_method(
                 f"  Net order: --order-method crossing "
                 f"(flight-line conflict degree, {len(order)} nets)"
             )
+        return
+
+    if method == "regret":
+        # Issue #9001: _regret_net_order prints its own Net order line (with
+        # the probe/A*-call accounting the method exists to make visible).
+        router._forced_net_order = _regret_net_order(router, quiet=quiet)
         return
 
     from kicad_tools.optim.routing import RoutingOptimizer
@@ -12224,17 +12519,19 @@ def _apply_crossing_order_escalation(
     ``docs/research/kct-route-net-order-experiment.md``).
 
     This helper is the escalation-path counterpart, deliberately narrowed to
-    the ``crossing`` method: it is pure geometry on the already-loaded router
-    (:func:`_crossing_aware_net_order`), so it is safe to run inside an attempt
-    loop.  The four pre-existing methods (``greedy``, ``critical_first``,
-    ``congestion``, ``hybrid``) are **not** wired up here, because
-    :meth:`RoutingOptimizer.optimize_net_order` evaluates its candidate with a
-    throw-away *full route* and needs a fresh-router factory the attempt loop
-    does not build; running it against the live ``router`` would pollute the
-    attempt.  Issue #5908: instead of remaining silent no-ops here, those four
-    are now rejected before routing by
-    :func:`_validate_order_method_for_dispatch`, so this helper only ever
-    sees ``None`` or ``crossing`` on a real CLI invocation.
+    the methods that are safe to run inside an attempt loop: ``crossing`` (pure
+    geometry on the already-loaded router) and ``regret`` (Issue #9001 -- two
+    empty-board A* probes per net, each fully ripped up before the next, so
+    the attempt's grid, journal and failure bookkeeping are byte-identical
+    afterwards).  The four pre-existing methods (``greedy``,
+    ``critical_first``, ``congestion``, ``hybrid``) are **not** wired up here,
+    because :meth:`RoutingOptimizer.optimize_net_order` evaluates its candidate
+    with a throw-away *full route* and needs a fresh-router factory the attempt
+    loop does not build; running it against the live ``router`` would pollute
+    the attempt.  Issue #5908: instead of remaining silent no-ops here, those
+    four are now rejected before routing by
+    :func:`_validate_order_method_for_dispatch`, so this helper only ever sees
+    ``None``, ``crossing`` or ``regret`` on a real CLI invocation.
 
     Args:
         router: The attempt's loaded router.
@@ -12244,18 +12541,30 @@ def _apply_crossing_order_escalation(
     Returns:
         True when an order was installed on ``router._forced_net_order``.
     """
-    if getattr(args, "order_method", None) != "crossing":
+    if getattr(args, "order_method", None) not in _PER_ATTEMPT_ORDER_METHODS:
         return False
     _apply_order_method(router, args, quiet=quiet)
     return True
+
+
+# ``--order-method`` values applicable per attempt by
+# :func:`_apply_crossing_order_escalation`.  ``crossing`` is pure geometry;
+# ``regret`` (Issue #9001) spends two A* probes per net but leaves no trace
+# (see :func:`_probe_net_regret`'s pollution guards), so both are safe inside
+# an attempt loop.  Deliberately disjoint from
+# ``_SINGLE_ATTEMPT_ONLY_ORDER_METHODS``: a method there needs the
+# fresh-router factory the attempt loops do not build.
+_PER_ATTEMPT_ORDER_METHODS = frozenset({"crossing", "regret"})
 
 
 # Issue #5908: ``--order-method`` values that are only supported on the
 # single-attempt path.  They go through
 # :meth:`RoutingOptimizer.optimize_net_order`, which evaluates its candidate
 # with a throw-away full route and needs a fresh-router factory that the
-# escalation attempt loops do not build.  ``crossing`` is absent: it is pure
-# geometry and is applied per attempt by :func:`_apply_crossing_order_escalation`.
+# escalation attempt loops do not build.  ``crossing`` and ``regret`` are
+# absent: they are applied per attempt by
+# :func:`_apply_crossing_order_escalation` (see
+# ``_PER_ATTEMPT_ORDER_METHODS``).
 _SINGLE_ATTEMPT_ONLY_ORDER_METHODS = frozenset({"greedy", "critical_first", "congestion", "hybrid"})
 
 
@@ -12335,7 +12644,8 @@ def _validate_order_method_for_dispatch(args, argv=None) -> int:
         "would be silently ignored there.  Either route a single attempt with "
         f"--order-method {method} by passing --layers N or --no-auto-layers "
         "(without --adaptive-rules, --auto-pcb-size or --auto-mfr-tier), or "
-        "use --order-method crossing, which is supported on every path.",
+        "use --order-method crossing or --order-method regret, which are "
+        "supported on every path.",
         file=sys.stderr,
     )
     return 2
@@ -12680,6 +12990,8 @@ def route_with_layer_escalation(
         mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
         # Issue #8974: the stackup-aware same-net pad slit-band edge.
         same_net_pad_gap_band_edge_mm=getattr(args, "_mfr_pad_gap_band_edge", None),
+        # Issue #9215: the trace-population sibling edge (the #9208 guard).
+        same_net_trace_gap_band_edge_mm=getattr(args, "_mfr_trace_gap_band_edge", None),
         # Issue #2891: forward escalation-in-progress flag so the escape
         # router demotes the #2880 ERROR log when an outer wrapper will
         # retry on a tier that supports via-in-pad.
@@ -14250,6 +14562,9 @@ def route_with_rule_relaxation(
             mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
             # Issue #8974: the stackup-aware same-net pad slit-band edge.
             same_net_pad_gap_band_edge_mm=getattr(args, "_mfr_pad_gap_band_edge", None),
+            # Issue #9215: the trace-population sibling edge (the #9208
+            # guard).
+            same_net_trace_gap_band_edge_mm=getattr(args, "_mfr_trace_gap_band_edge", None),
             # Issue #2891: forward escalation-in-progress flag.
             auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
             # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
@@ -16755,6 +17070,9 @@ def route_with_combined_escalation(
                 mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
                 # Issue #8974: the stackup-aware same-net pad slit-band edge.
                 same_net_pad_gap_band_edge_mm=getattr(args, "_mfr_pad_gap_band_edge", None),
+                # Issue #9215: the trace-population sibling edge (the #9208
+                # guard).
+                same_net_trace_gap_band_edge_mm=getattr(args, "_mfr_trace_gap_band_edge", None),
                 # Issue #2891: forward escalation-in-progress flag.
                 auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
                 # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
@@ -20513,7 +20831,7 @@ def _route_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--order-method",
-        choices=["greedy", "critical_first", "congestion", "hybrid", "crossing"],
+        choices=["greedy", "critical_first", "congestion", "hybrid", "crossing", "regret"],
         default=None,
         help=(
             "Compute the net routing order with a named heuristic (Issue #3897) "
@@ -20525,13 +20843,18 @@ def _route_parser() -> argparse.ArgumentParser:
             "be obtained the command warns and falls back to 'greedy'. "
             "'crossing' (Issue #5787) ranks nets by flight-line crossing "
             "degree -- most-contended first -- within each net-class priority "
-            "band, without spending an evaluation route. 'crossing' works on "
-            "every routing path; the other four are supported only on the "
-            "single-attempt path (--layers N or --no-auto-layers, without "
-            "--adaptive-rules, "
-            "--auto-pcb-size or --auto-mfr-tier) and are rejected with exit "
-            "code 2 on the escalation paths (Issue #5908). When "
-            "omitted, ordering is byte-identical to the default behaviour."
+            "band, without spending an evaluation route. 'regret' (Issue "
+            "#9001) ranks nets by how much they lose if they miss their "
+            "preferred corridor -- cost(second-best) minus cost(best) from two "
+            "empty-board A* probes per net -- and commits the biggest-loss "
+            "nets first; a net with only one corridor sorts first in its "
+            "band, a failed probe leaves the net at its default position. "
+            "'crossing' and 'regret' work on every routing path; the other "
+            "four are supported only on the single-attempt path (--layers N "
+            "or --no-auto-layers, without --adaptive-rules, --auto-pcb-size "
+            "or --auto-mfr-tier) and are rejected with exit code 2 on the "
+            "escalation paths (Issue #5908). When omitted, ordering is "
+            "byte-identical to the default behaviour."
         ),
     )
     parser.add_argument(
@@ -21444,9 +21767,12 @@ def _route_parser() -> argparse.ArgumentParser:
             "sidecar. Roughly doubles search work (one extra A* per "
             "connection). Diagnostic only: the probe restores all router "
             "state it touches and never changes the exit code, so routed "
-            "copper is identical with and without the flag -- except when "
-            "a wall-clock limit (--timeout) cuts the run short, since the "
-            "probe's searches count against that limit (issue #9003). "
+            "copper is identical with and without the flag, including "
+            "under a binding --timeout (the probe's cost is excluded from "
+            "the routing budgets, issue #9244). The hard supervisor cap "
+            "(KCT_ROUTE_INVOCATION_DEADLINE) still bounds the whole "
+            "invocation: under a binding hard cap the flag can change the "
+            "output exactly as a slower machine would. "
             "Grid engine only; a no-op on the mesh/lattice engines."
         ),
     )
@@ -23855,6 +24181,8 @@ def _run_main_impl(args, parser, argv) -> int:
         mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
         # Issue #8974: the stackup-aware same-net pad slit-band edge.
         same_net_pad_gap_band_edge_mm=getattr(args, "_mfr_pad_gap_band_edge", None),
+        # Issue #9215: the trace-population sibling edge (the #9208 guard).
+        same_net_trace_gap_band_edge_mm=getattr(args, "_mfr_trace_gap_band_edge", None),
         # Issue #2891: forward escalation-in-progress flag so the escape
         # router demotes the #2880 ERROR log when an outer wrapper will
         # retry on a tier that supports via-in-pad.

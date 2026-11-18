@@ -130,14 +130,14 @@ def _via_pad_gap(path, pad_size=2):
 
 def test_relocation_walks_out_of_same_net_slit_band(tmp_path, recipe, monkeypatch):
     """Issue #9114: a relocated via must not open a (0, edge) same-net slit."""
-    pad_edge, _trace_edge = via_clearance.same_net_band_edges()
+    pad_edge, _trace_edge = via_clearance.same_net_band_edges("jlcpcb", 4, 1.0, 0.5)
     assert pad_edge > 0  # jlcpcb 4layer_1oz resolves a pad_spacing edge
 
     # Control: with the band disabled the ring seats the via at +0.9 mm east,
     # an annulus gap of ~0.05 mm to its own pad -- inside (0, edge).
     control = tmp_path / "control.kicad_pcb"
     write_overlap_board(control, count=1, pad_size=2, via_dx=0.45)
-    monkeypatch.setattr(via_clearance, "same_net_band_edges", lambda: (0.0, 0.0))
+    monkeypatch.setattr(via_clearance, "same_net_band_edges", lambda *a, **k: (0.0, 0.0))
     assert recipe._legalize_signal_vias(control) == 1
     assert 0 < _via_pad_gap(control) < pad_edge
 
@@ -160,9 +160,11 @@ def test_grid_escape_seat_is_graded_through_the_band():
 
     pad = [(-1.0, -1.0, 1.0, 1.0)]
     dia = 0.5
-    # Annulus edge 0.05 from the pad (in band) / touching / clear of the band.
+    # Annulus edge 0.05 from the pad (in band) / tangent / clear of the band.
     assert not via_clearance.same_net_band_seat_ok(1.3, 0, dia, [], pad, 0.15, 0.15)
-    assert via_clearance.same_net_band_seat_ok(1.25, 0, dia, [], pad, 0.15, 0.15)
+    # Tangent (Issue #9124): a one-point touch is a wedge, not a union.
+    assert not via_clearance.same_net_band_seat_ok(1.25, 0, dia, [], pad, 0.15, 0.15)
+    assert via_clearance.same_net_band_seat_ok(1.2, 0, dia, [], pad, 0.15, 0.15)
     assert via_clearance.same_net_band_seat_ok(1.5, 0, dia, [], pad, 0.15, 0.15)
     # Same-net segment / via copper grade on the trace edge.
     seg = LineString([(0, 1.65), (3, 1.65)]).buffer(0.075)
@@ -266,6 +268,55 @@ def test_leg_band_predicate_grades_slits_but_not_unions_or_bends(recipe):
     assert ok(*leg, [seg(0.2, 0.2, 0.6, 0.2)], [], [(1.0, 0.125, 1.5, 0.6)], 0.0, 0.0)
 
 
+def test_leg_band_predicate_sibling_legs_contract(recipe):
+    """Issue #9196: pin the #9186 ``sibling_legs`` contract on the predicate itself.
+
+    Constructed ``sibling_legs`` rather than the end-to-end dogleg boards, so a
+    refactor of the chain growth cannot silently flip a case to permissive.
+    """
+    from shapely.geometry import LineString
+
+    def seg(x1, y1, x2, y2, w=0.15):
+        return LineString([(x1, y1), (x2, y2)]).buffer(w / 2), w / 2
+
+    def ok(sibling_legs, segments=()):
+        return recipe._same_net_leg_band_ok(
+            (0.0, 0.0),
+            (1.0, 0.0),
+            0.15,
+            list(segments),
+            [],
+            [],
+            0.15,
+            0.1016,
+            sibling_legs=list(sibling_legs),
+        )
+
+    # Touching: a sibling chain the leg grows out of is one copper union, graded
+    # exactly like the same pieces passed as ``segments``.
+    chain = [seg(0.0, 0.0, 0.0, 0.05), seg(0.0, 0.05, 0.0, 0.1), seg(0.0, 0.1, 0.0, 0.15)]
+    assert ok(chain)
+    assert ok([], segments=chain)
+    # A touching sibling that bends back beside the leg is graded as ``segments`` would be.
+    bend = [seg(1.0, 0.0, 1.0, 0.2), seg(1.0, 0.2, 0.7, 0.2)]
+    assert ok(bend) == ok([], segments=bend)
+
+    # Detached: a parallel sibling the leg never touches is a real slit and is
+    # graded; one clear of the edge is fine.
+    assert not ok([seg(0.2, 0.2, 0.6, 0.2)])
+    assert ok([seg(0.2, 0.3, 0.6, 0.3)])
+    assert ok([seg(0.2, 0.2, 0.6, 0.2)]) == ok([], segments=[seg(0.2, 0.2, 0.6, 0.2)])
+
+    # Self: the graded leg must be filtered out of its own sibling list *by the
+    # caller* (``_leg_ok``).  Passing it back in puts (p0, p1) in the initial
+    # chain, both endpoints become joins and the 45-degree notch reach widens
+    # unconditionally -- the slit below flips to permissive.
+    diag_then_up = [seg(0.0, 0.0, 1.0, 0.2), seg(1.0, 0.2, 1.0, 0.4)]
+    leg_as_sibling = seg(0.0, 0.0, 1.0, 0.0)
+    assert not ok([], segments=diag_then_up)
+    assert ok([leg_as_sibling], segments=diag_then_up)
+
+
 def test_fixture_relocation_same_net_slit_residual_is_the_accepted_one(tmp_path, recipe):
     """Issue #9187: the one same-net slit family the leg check lets through.
 
@@ -276,9 +327,13 @@ def test_fixture_relocation_same_net_slit_residual_is_the_accepted_one(tmp_path,
     wedge whose first non-touching chain pieces sit 0.0841 / 0.0664 mm from
     the leg (trace band ``(0, 0.1016)``).  It is accepted, not drained:
 
-    * same net -- no short, only the fab-view notch warning, and
-      ``(physical_copper_gap, USB2_D-)`` is already an acknowledged identity
-      in ``DIFFPAIR_FIXTURE_ALLOWED_FINDINGS``;
+    * same net -- no short, and it needs no allowance route either: #9212
+      deleted the last USB2_D- ``physical_copper_gap`` identity (the
+      annulus-vs-own-net-TRACE slit #9208 drained), and on the seed-42 regen
+      the CI gate judges, ``USB2_D-`` now carries no ``physical_copper_gap``
+      finding at any severity (re-measured 2026-11-18, 0 unallowed /
+      0 stale) -- this wedge is a committed-fixture geometry the gate's
+      regen does not reproduce;
     * the notch is the junction itself: halving the chain reach in
       ``_same_net_leg_band_ok`` leaves it (0.0945 / 0.0768 mm), and a reach
       of 0 leaves two vias unrepairable (``RuntimeError``), so no cheap
@@ -356,12 +411,12 @@ def test_drill_pair_slide_walks_out_of_same_net_slit_band(tmp_path, recipe, monk
     slide keeps the victim's chain and only adds connectors, so the only
     exclusion the check needs is the victim via itself.
     """
-    pad_edge, _trace_edge = via_clearance.same_net_band_edges()
+    pad_edge, _trace_edge = via_clearance.same_net_band_edges("jlcpcb", 4, 1.0, 0.5)
     assert pad_edge > 0
 
     control = tmp_path / "control.kicad_pcb"
     write_drill_pair_slide_board(control)
-    monkeypatch.setattr(via_clearance, "same_net_band_edges", lambda: (0.0, 0.0))
+    monkeypatch.setattr(via_clearance, "same_net_band_edges", lambda *a, **k: (0.0, 0.0))
     assert recipe._legalize_signal_vias(control) == 1
     assert 0 < _slid_via_pad_gap(control) < pad_edge
 
@@ -429,6 +484,10 @@ def test_staple_collapse_skips_annulus_it_deletes(tmp_path, recipe):
     The collapse deletes the victim via, so its annulus is post-repair air;
     grading leg 2 against it rejects a legal repair and the legalizer falls
     through to the slide (which keeps both vias).
+
+    Not a guard on ``skip_uuids`` alone: ablated, dropping only the uuid skip
+    still passes (the sibling union subsumes it); this test and the notch test
+    below pin the pair of changes together (Issue #9196).
     """
     path = tmp_path / "collapse.kicad_pcb"
     _write_staple_collapse_board(path)
@@ -446,6 +505,9 @@ def test_staple_collapse_sibling_leg_notch_is_not_a_slit(tmp_path, recipe):
     bridging the mouth grades clean under ``check_physical_copper_gap_fab_view``
     (the scan skips gaps whose connector crosses a third shape), so the
     per-leg band check must not reject the collapse for it either.
+
+    Not a guard on ``skip_uuids`` alone: ablated, dropping only the uuid skip
+    still passes (the sibling union subsumes it) (Issue #9196).
     """
     path = tmp_path / "collapse.kicad_pcb"
     _write_staple_collapse_board(path, dy=0.27)

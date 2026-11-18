@@ -37,7 +37,7 @@ import dataclasses
 import os
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
@@ -939,7 +939,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     # Issue #8975 / #9150: the same-net band edges the fab-view grader
     # resolves for this board's stackup, from the one shared resolver (never
     # literals; a missing profile entry disables the band, 0.0).
-    SAME_NET_PAD_GAP_MM, SAME_NET_TRACE_GAP_MM = same_net_band_edges()
+    SAME_NET_PAD_GAP_MM, SAME_NET_TRACE_GAP_MM = same_net_band_edges("jlcpcb", 4, 1.0, 0.5)
 
     # Segments: (geom, net, layer)
     seg_index: list[tuple] = []
@@ -1913,7 +1913,7 @@ def _same_net_leg_band_ok(
     pad_bboxes: list[tuple[float, float, float, float]],
     pad_edge_mm: float,
     trace_edge_mm: float,
-    sibling_legs: list = (),
+    sibling_legs: Sequence[tuple[object, float]] = (),
 ) -> bool:
     """True iff a connector leg ``p0 -> p1`` opens no same-net fab-view slit.
 
@@ -1961,21 +1961,24 @@ def _same_net_leg_band_ok(
     """
     from shapely.geometry import LineString, Point, box
 
+    from kicad_tools.router.via_clearance import (
+        SAME_NET_BAND_UNION_EPS_MM,
+        SAME_NET_BAND_WRITE_SLACK_MM,
+    )
+
     if pad_edge_mm <= 0 and trace_edge_mm <= 0:
         return True
-    touch = 1e-6
+    touch = SAME_NET_BAND_UNION_EPS_MM
     leg = LineString([p0, p1]).buffer(width / 2)
-    # ``+ 1.5e-3`` covers both sides' 3-decimal write rounding (as #8975).
-    pad_limit = pad_edge_mm + 1.5e-3
-    trace_limit = trace_edge_mm + 1.5e-3
+    # ``+ SAME_NET_BAND_WRITE_SLACK_MM`` covers both sides' 3-decimal write
+    # rounding (as #8975).
+    pad_limit = pad_edge_mm + SAME_NET_BAND_WRITE_SLACK_MM
+    trace_limit = trace_edge_mm + SAME_NET_BAND_WRITE_SLACK_MM
     # Issue #9186: the connector's own sibling legs are chain candidates on
     # exactly the terms of existing segments -- touching ones chain (the
     # finished connector is one copper union at its bends), detached ones
     # are graded.
-    segments = [
-        *segments,
-        *((geom, half_width) for geom, half_width in sibling_legs),
-    ]
+    segments = [*segments, *sibling_legs]
 
     # Chain of segments grown from those the leg touches.
     sin45 = 0.7071
@@ -2132,7 +2135,7 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
                     return False
         return True
 
-    band_pad_edge, band_trace_edge = same_net_band_edges()
+    band_pad_edge, band_trace_edge = same_net_band_edges("jlcpcb", 4, 1.0, 0.5)
 
     def _leg_ok(
         net, p0, p1, layer, width, vias, skip_uuids=frozenset(), clearance=CLEAR, siblings=()
@@ -3569,10 +3572,13 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # band guard (the drain for this board's via-banded population) is OFF.
     # Resolved from the profile table via the stitcher's helper, never a
     # literal, matching ``route_cmd``'s own resolution idiom.
-    from kicad_tools.cli.stitch_cmd import _resolve_mfr_pad_gap_edge
+    from kicad_tools.cli.stitch_cmd import _resolve_mfr_pad_gap_edge, _resolve_mfr_trace_gap_edge
     from kicad_tools.router import DesignRules, DifferentialPairConfig, load_pcb_for_routing
 
     _same_net_pad_gap_edge_mm = _resolve_mfr_pad_gap_edge("jlcpcb", 4, 1.0)
+    # Issue #9208: and the trace-population edge (jlcpcb 4-layer 1oz ->
+    # 0.1016 mm) for the via-annulus-vs-own-trace twin of that guard.
+    _same_net_trace_gap_edge_mm = _resolve_mfr_trace_gap_edge("jlcpcb", 4, 1.0)
     from kicad_tools.router.optimizer import (
         GridCollisionChecker,
         OptimizationConfig,
@@ -3631,6 +3637,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # jlcpcb 4-layer 1oz stackup, so the C++ pathfinder's via seats stay
         # out of the band ``kct check`` grades (``physical_copper_gap``).
         same_net_pad_gap_band_edge_mm=_same_net_pad_gap_edge_mm,
+        same_net_trace_gap_band_edge_mm=_same_net_trace_gap_edge_mm,
     )
 
     # Power and ground nets are handled via copper pours on the inner planes

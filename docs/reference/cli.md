@@ -39,7 +39,7 @@ kct [--help] [--version] [--verbose] [-q] [--units {mm,mils}] <command> [options
 | | `net-status` | Report net connectivity status for a PCB |
 | | `constraints` | Constraint conflict detection and management |
 | | `detect-mistakes` | Detect common PCB design mistakes |
-| **Repair** | `fix-drc` | Automated DRC violation repair (clearance + drill) |
+| **Repair** | `fix-drc` | Automated DRC violation repair (clearance + drill + mask-copper) |
 | | `fix-erc` | Automated ERC violation repair (PWR_FLAG + no-connect) |
 | | `fix-vias` | Fix vias to meet manufacturer specifications |
 | | `fix-silkscreen` | Fix silkscreen line widths to meet manufacturer specs; `--clip-to-pads` also trims silk lines too close to pads; `--clip-to-holes` clips footprint silk lines/polygons off every drilled hole (run after routing) |
@@ -420,6 +420,15 @@ timestamps. `spaced` mode has no legs and writes no sidecar. `--format json`
 embeds the list as `wires`; `kct pcb reinforce BOARD --list-wires [--net NET]
 [--format json]` prints it read-only from the sidecar.
 
+`kct pcb reinforce BOARD --adopt [--net NET] [--dry-run]` records wires that are
+already on the board (e.g. hand-adjusted after a Gerber review) without moving
+copper or writing the board: each solder-mask strip chain running between two
+same-net anchor holes of a wire gauge's drill becomes a sidecar record, which
+`mask_to_copper` then uses to excuse the run's strip, anchors and end holes on
+both mask sides. Wires the sidecar already records are kept, so a re-run changes
+nothing; strips that cannot be resolved (branched, or an end with no anchor hole)
+are reported, never guessed.
+
 Declared current paths that do not resolve (moved/removed pad, ambiguous
 loop) are listed under `unresolved_paths` and warned about on stderr; they
 get no anchors and the exit code stays 0. `--format json` adds `anchor_mode`,
@@ -648,7 +657,10 @@ to full agreement (#8949): an *explicitly requested* mask check that cannot run 
 FAILED, so `coverage.mask_to_copper` is `unknown` (and in
 `summary.coverage_blocking_unknown`) while the list does not name it — the list is
 exhaustive only for default-applied checks. `fab_dfm_parity.incomplete_categories`
-is table-only (static JLCDFM parity coverage, run-independent).
+names the danger-capable JLCDFM categories with no kct rule (static table data)
+plus, since #9234, the categories whose kct check did not complete this run
+(`solder_mask_opening_exposing_trace` whenever a default-applied
+`mask_to_copper` assessment is incomplete).
 
 Exit codes: `0` pass (or `incomplete` with `--allow-incomplete`); `2` the check
 ran and the board fails (DRC errors, warnings with `--strict`, an ERC/LVS/manifest
@@ -729,6 +741,44 @@ not run (file not found, wrong file type, audit crash). `--format json` keeps
 the top-level `verdict` (`ready`|`warning`|`not_ready`) and adds `gate_verdict`
 (`pass`|`fail`) and `exit_code`, the process exit code (#7230). See
 [Sign-off exit codes](#sign-off-exit-codes).
+
+---
+
+## Repair Commands
+
+### `fix-drc`
+
+Automated DRC violation repair. By default it repairs clearance violations by
+nudging traces, drill-clearance violations by de-duplicating or sliding vias,
+and mask-to-copper findings when the report carries them. `--only` restricts
+the run to a single repair pass:
+
+| `--only` value | Repairs |
+|----------------|---------|
+| `clearance` | Copper-clearance violations between tracks, vias and pads (nudge traces) |
+| `drill-clearance` | Hole-to-hole clearance violations (de-duplicate or slide vias) |
+| `mask-copper` | A track entering its own pad's opening off-centre (see below) |
+
+```bash
+kct fix-drc board.kicad_pcb --only mask-copper --dry-run
+```
+
+Without `--drc-report`, the mask-copper pass detects its findings itself by
+running the pure-Python `kct check` on the board. For the other `--only`
+values (and the default set), detection resolves in order: `--drc-report` if
+given, else kicad-cli's DRC if it is installed, else the pure-Python checker.
+
+`mask-copper` addresses the `same-net own-pad entry` class of the
+`mask_to_copper` check (see the [mask-to-copper guide](../guides/mask-to-copper.md)):
+the offending track is re-centred. Detection uses `kct check`'s rules, not
+kicad-cli, and the pass also runs in the default set when the report carries
+such findings. Because the repairer cannot run the native mask assessment, a
+move is kept only when a post-save `kct check` re-check confirms it; otherwise
+it is reverted and reported as unrepaired with a reason:
+`finding_not_cleared` (the finding is still present), `new_mask_finding` (the
+move exposed a new finding on the moved segment or its pad) or
+`recheck_unavailable` (the re-check could not run — an unverified move is
+never kept).
 
 ---
 
@@ -2819,6 +2869,15 @@ text envelopes; review it and use native DRC before relying on the placement.
 
 Footprint references must be unique, including hidden references. Duplicate
 references are rejected before planning; assign unique references first.
+
+Coordinate frames: reported positions (`old/new_position_mm` in JSON, the
+moved positions in the text report) are board-relative, while a `reason`
+obstacle label quotes sheet-absolute coordinates — the frame the KiCad
+editor shows — when it carries any, e.g. `pad aperture drill via at
+(130.000, 80.000)` (#9364). The text report labels each frame
+(`[board-relative]` / `[sheet coords]`), and the JSON output carries `frame`
+plus `origin_mm`, so `origin_mm + position_mm` recovers the sheet point a
+reason quotes.
 
 Search spacing must be finite and positive, distances finite and nonnegative,
 and the search is limited to 4096 rings. An explicit `--output` is written even

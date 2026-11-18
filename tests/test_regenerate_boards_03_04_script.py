@@ -51,3 +51,52 @@ def test_remap_changes_only_uuid_strings(mod, tmp_path):
     mod.remap_routed(old, unrouted, routed)
     out = routed.read_text()
     assert UUID.sub("U", out) == UUID.sub("U", original)
+
+
+def _args(mod, **kw):
+    import argparse
+
+    defaults = {
+        "known_issue": [],
+        "resolve_known_issue": [],
+        "ack_warnings": [],
+        "ack_trace_quality": [],
+    }
+    return argparse.Namespace(**{**defaults, **kw})
+
+
+def test_receipt_argv_forwards_acks(mod):
+    """Issue #9143: ack flags compose into the kct readiness argv."""
+    argv = mod.receipt_argv(
+        _args(
+            mod,
+            ack_warnings=["silk_hole_overlap"],
+            ack_trace_quality=["redundant_copper_duplicate=reviewed"],
+        )
+    )
+    assert argv == (
+        "--ack-warnings",
+        "silk_hole_overlap",
+        "--ack-trace-quality",
+        "redundant_copper_duplicate=reviewed",
+    )
+
+
+def test_receipt_argv_joins_multiple_ack_rules_into_one_flag(mod):
+    """kct readiness splits ONE comma-separated --ack-warnings value; never a bare repeat."""
+    argv = mod.receipt_argv(_args(mod, ack_warnings=["a", "b"]))
+    assert argv == ("--ack-warnings", "a,b")
+
+
+def test_receipt_argv_empty_and_known_issue_pairs(mod):
+    argv = mod.receipt_argv(_args(mod))
+    assert argv == ()
+    argv = mod.receipt_argv(
+        _args(mod, known_issue=["6269:J1 silk:advisory"], resolve_known_issue=["7"])
+    )
+    assert argv == (
+        "--known-issue",
+        "6269:J1 silk:advisory",
+        "--resolve-known-issue",
+        "7",
+    )

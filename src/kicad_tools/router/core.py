@@ -2271,6 +2271,14 @@ class Autorouter:
         self.report_detour_ratio: bool = False
         self.detour_probe_records: list[DetourConnectionRecord] | None = None
         self._detour_unattributed_drawn_mm: float = 0.0
+        # Issue #9244: wall-clock seconds the probe pre-pass consumed (0.0
+        # when it never ran on this Autorouter).  Drivers that hold a stage
+        # clock across the probe re-base it by this amount, and the CLI's
+        # ``on_probe_elapsed`` hook shifts its ``args`` deadlines forward by
+        # it, so the flag cannot change which real searches a binding
+        # ``--timeout`` cuts short.
+        self.detour_probe_elapsed_s: float = 0.0
+        self.on_probe_elapsed: Callable[[float], None] | None = None
 
         # Issue #9013: ``--detour-repair`` attribute-on-router pattern (same
         # shape as ``report_detour_ratio`` above).  When True the alone-on-empty
@@ -11512,7 +11520,12 @@ class Autorouter:
         # grid is still the empty board (see the negotiated driver's hook
         # for the guard enumeration).  Reuses the net order computed above
         # so report rows follow the run's own ordering.
+        _probe_elapsed_before = self.detour_probe_elapsed_s
         self._probe_alone_on_empty_lengths(net_order)
+        # Issue #9244: the probe's wall-clock cost must not consume this
+        # driver's outer budget -- re-base the stage clock stamped above by
+        # the DELTA (a re-entered call whose probe was skipped adds 0.0).
+        _route_all_start += self.detour_probe_elapsed_s - _probe_elapsed_before
 
         # Issue #1603: Sub-grid escape pre-pass for off-grid pads
         escape_routes = self._run_subgrid_prepass()
@@ -12813,11 +12826,20 @@ class Autorouter:
           on the alone-on-empty board the only such copper is fixed copper,
           which a read-only probe must never edit.
 
-        What is NOT covered: wall-clock time.  The probe's searches run
-        before the real route and count against any wall-clock limit the
-        run is under (``--timeout``, the installed wall deadline), so a run
-        that a time limit cuts short can differ with the flag on.  Per-net
-        timeouts are per call and unaffected.
+        Wall-clock time IS covered (issue #9244): the probe measures itself
+        into :attr:`detour_probe_elapsed_s`, drivers re-base the stage
+        clocks they hold across the probe by that amount, and the CLI
+        shifts its ``args`` deadline stamps forward through
+        :attr:`on_probe_elapsed`, so a binding ``--timeout`` cannot change
+        which real searches time out and therefore the copper.  Probe
+        searches also run under :func:`~kicad_tools.router.wall_deadline.suspended`
+        so an installed excursion deadline cannot clamp them (a clamped
+        probe would change the report, not the copper).  Residual: the hard
+        supervisor kill (``KCT_ROUTE_INVOCATION_DEADLINE``,
+        :mod:`kicad_tools.cli.route_deadline`) still bounds the invocation
+        as a whole -- under a binding hard cap the flag can still change
+        the output exactly as a slower machine would.  Per-net timeouts are
+        per call and unaffected.
 
         A failed connection is reported, never dropped: every edge whose
         probe search failed (one ``RoutingFailure`` per failed edge, read
@@ -12850,6 +12872,10 @@ class Autorouter:
         grid = self.grid
         pathfinder = self.router
         records: list[DetourConnectionRecord] = []
+        # Issue #9244: measure the probe's own wall-clock cost (snapshot
+        # setup, searches, restore -- everything from here to the records
+        # assignment) so the budgets it must not consume can be re-based.
+        _probe_started = time.monotonic()
 
         journal_mark = self._commit_journal.mark()
         snapshots = [
@@ -12884,81 +12910,105 @@ class Autorouter:
         self.record_decisions = False
         self._detour_probe_active = True
 
-        try:
-            # Inside the snapshot: the priority sort fills lazy caches
-            # (component pitches, congestion estimator) that are restored.
-            if net_order is None:
-                net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
-            probe_nets = self._filter_pour_nets(list(net_order))
-            model = self._kicad_length_model(grid.num_layers)
-            for net in probe_nets:
-                start = len(self.routes)
-                failures_before = sum(1 for f in self.routing_failures if f.net == net)
-                try:
-                    self.route_net(net)
-                except Exception as exc:  # noqa: BLE001 - a probe never fails a route
-                    flush_print(
-                        f"  Warning: detour probe failed for net "
-                        f"{self.net_names.get(net, net)} ({type(exc).__name__}: {exc})"
-                    )
-                probed = self.routes[start:]
-                failed_edges = [f for f in self.routing_failures if f.net == net][failures_before:]
-                net_name = self.net_names.get(net, f"Net_{net}")
-                # Escape stubs (sub-grid retry) are pre-pass copper, not
-                # connections -- the drawn side excludes them too.
-                connections = [
-                    r for r in probed if r.segments and not getattr(r, "is_escape", False)
-                ]
-                net_rows_start = len(records)
-                for route in connections:
-                    records.append(
-                        DetourConnectionRecord(
-                            net_name=net_name,
-                            connection_index=len(records) - net_rows_start,
-                            alone_mm=model.route_length(route),
-                            endpoints=route_path_ends(route),
+        # Issue #9244: run under ``suspended()`` -- an installed excursion
+        # deadline clamps every A* search, and a clamped probe search would
+        # change the report (a slower machine would measure different
+        # alone-on-empty lengths).  Inside the block the probe is unbudgeted
+        # exactly like the ``stuck_classifier``'s routability probe (#7832).
+        with _wall_deadline.suspended():
+            try:
+                # Inside the snapshot: the priority sort fills lazy caches
+                # (component pitches, congestion estimator) that are restored.
+                if net_order is None:
+                    net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
+                probe_nets = self._filter_pour_nets(list(net_order))
+                model = self._kicad_length_model(grid.num_layers)
+                for net in probe_nets:
+                    start = len(self.routes)
+                    failures_before = sum(1 for f in self.routing_failures if f.net == net)
+                    try:
+                        self.route_net(net)
+                    except Exception as exc:  # noqa: BLE001 - a probe never fails a route
+                        flush_print(
+                            f"  Warning: detour probe failed for net "
+                            f"{self.net_names.get(net, net)} ({type(exc).__name__}: {exc})"
                         )
-                    )
-                # Every edge the alone-board search failed is reported as
-                # probe-no-path rather than dropped -- including the failed
-                # edges of a multi-terminal net whose other edges routed
-                # (issue #9003).  A routable net that connected nothing and
-                # recorded no failure (an exception above) still gets one row.
-                no_path = len(failed_edges)
-                if not connections and not no_path and len(self.nets.get(net, [])) >= 2:
-                    no_path = 1
-                for _ in range(no_path):
-                    records.append(
-                        DetourConnectionRecord(
-                            net_name=net_name,
-                            connection_index=len(records) - net_rows_start,
-                            alone_mm=None,
-                            probe_no_path=True,
+                    probed = self.routes[start:]
+                    failed_edges = [f for f in self.routing_failures if f.net == net][
+                        failures_before:
+                    ]
+                    net_name = self.net_names.get(net, f"Net_{net}")
+                    # Escape stubs (sub-grid retry) are pre-pass copper, not
+                    # connections -- the drawn side excludes them too.
+                    connections = [
+                        r for r in probed if r.segments and not getattr(r, "is_escape", False)
+                    ]
+                    net_rows_start = len(records)
+                    for route in connections:
+                        records.append(
+                            DetourConnectionRecord(
+                                net_name=net_name,
+                                connection_index=len(records) - net_rows_start,
+                                alone_mm=model.route_length(route),
+                                endpoints=route_path_ends(route),
+                            )
                         )
-                    )
-                # Unmark every probe route, on both grids and both lists,
-                # mirroring NegotiatedRouter.rip_up_nets.
-                for route in probed:
-                    grid.unmark_route_usage(route)
-                    grid.unmark_route(route)
-                del self.routes[start:]
-        except Exception as exc:  # noqa: BLE001 - a probe never fails a route
-            flush_print(
-                f"  Warning: detour-ratio probe skipped "
-                f"({type(exc).__name__}: {exc}); no report will be printed"
-            )
-            records = []
-        finally:
-            # Restore every attribute the probe could have touched (see the
-            # docstring), then the planes, then invalidate occupancy caches.
-            for snapshot in snapshots:
-                snapshot.restore()
-            rng_snapshot.restore()
-            for name, saved in planes.items():
-                getattr(grid, name)[...] = saved
-            grid.bump_occupancy_generation()  # Issue #4794
-            self._commit_journal.truncate_to(*journal_mark)
+                    # Every edge the alone-board search failed is reported as
+                    # probe-no-path rather than dropped -- including the failed
+                    # edges of a multi-terminal net whose other edges routed
+                    # (issue #9003).  A routable net that connected nothing and
+                    # recorded no failure (an exception above) still gets one row.
+                    no_path = len(failed_edges)
+                    if not connections and not no_path and len(self.nets.get(net, [])) >= 2:
+                        no_path = 1
+                    for _ in range(no_path):
+                        records.append(
+                            DetourConnectionRecord(
+                                net_name=net_name,
+                                connection_index=len(records) - net_rows_start,
+                                alone_mm=None,
+                                probe_no_path=True,
+                            )
+                        )
+                    # Unmark every probe route, on both grids and both lists,
+                    # mirroring NegotiatedRouter.rip_up_nets.
+                    for route in probed:
+                        grid.unmark_route_usage(route)
+                        grid.unmark_route(route)
+                    del self.routes[start:]
+            except Exception as exc:  # noqa: BLE001 - a probe never fails a route
+                flush_print(
+                    f"  Warning: detour-ratio probe skipped "
+                    f"({type(exc).__name__}: {exc}); no report will be printed"
+                )
+                records = []
+            finally:
+                # Restore every attribute the probe could have touched (see the
+                # docstring), then the planes, then invalidate occupancy caches.
+                for snapshot in snapshots:
+                    snapshot.restore()
+                rng_snapshot.restore()
+                for name, saved in planes.items():
+                    getattr(grid, name)[...] = saved
+                grid.bump_occupancy_generation()  # Issue #4794
+                self._commit_journal.truncate_to(*journal_mark)
         self.detour_probe_records = records
+        # Issue #9244: the probe's wall-clock cost leaves the budgets it must
+        # not consume.  ``detour_probe_elapsed_s`` re-bases every driver
+        # stage clock held across the probe; the ``_lattice_deadline`` is an
+        # absolute stamp taken before the probe that the (post-probe) real
+        # lattice negotiation would otherwise see reduced by it; and the
+        # CLI-installed ``on_probe_elapsed`` hook shifts its ``args``
+        # deadline stamps the same way.  Assigned only when the probe ran --
+        # the early returns above leave 0.0 so re-entered drivers never
+        # double-shift.
+        probe_elapsed = time.monotonic() - _probe_started
+        self.detour_probe_elapsed_s = probe_elapsed
+        if self._lattice_deadline is not None:
+            self._lattice_deadline += probe_elapsed
+        _probe_hook = self.on_probe_elapsed
+        if _probe_hook is not None:
+            _probe_hook(probe_elapsed)
 
     def finalize_detour_probe_records(self) -> None:
         """Pair the settled routes into the probe records (#9003).
@@ -13439,7 +13489,14 @@ class Autorouter:
         # report-only and grid-untouching (every accumulator restored --
         # see ``_probe_alone_on_empty_lengths``); the grid here is still
         # the empty board, which is the metric's denominator substrate.
+        _probe_elapsed_before = self.detour_probe_elapsed_s
         self._probe_alone_on_empty_lengths()
+        # Issue #9244: the probe's wall-clock cost must not consume this
+        # stage's budget -- ``start_time`` was stamped before the probe, so
+        # re-base it by the DELTA (every deadline below -- ``relief_deadline``,
+        # ``secs_left``, the grace-pass checks -- derives from it; a
+        # re-entered call whose probe was skipped adds 0.0).
+        start_time += self.detour_probe_elapsed_s - _probe_elapsed_before
 
         # Issue #1603: Sub-grid escape pre-pass for off-grid pads
         self._run_subgrid_prepass()
@@ -22043,6 +22100,10 @@ class Autorouter:
             # The checker above is a pre-repair snapshot; this makes later
             # repairs clear the chords earlier ones added (issue #8930).
             clearance=float(self.grid.rules.trace_clearance),
+            # ...and this stops them being vetoed by legs earlier repairs
+            # removed (issue #9355).  Only the vector checker can; the raster
+            # fallback has no such method and keeps its snapshot.
+            path_is_clear_ignoring=getattr(checker, "ignoring", None),
         )
         if not result.repairs:
             if result.skipped:
@@ -27105,6 +27166,7 @@ class Autorouter:
 
         # --- Pass 1: Route on the current (coarse) grid ---
         flush_print("\n--- Pass 1: Coarse grid routing ---")
+        _probe_elapsed_before = self.detour_probe_elapsed_s
         if use_negotiated:
             self.route_all_negotiated(
                 max_iterations=max_iterations,
@@ -27121,6 +27183,13 @@ class Autorouter:
                 timeout=timeout,
                 suppress_no_timeout_warning=True,
             )
+        # Issue #9244: the Pass-1 callee re-bases ITS stage clock for the
+        # detour probe, but this driver's own ``start_time`` below (the
+        # fine-grid pass decision) still saw the probe's cost -- re-base it
+        # by the delta too, or a binding ``timeout`` could skip the
+        # fine-grid pass with ``--report-detour-ratio`` on and run it
+        # without the flag.
+        start_time += self.detour_probe_elapsed_s - _probe_elapsed_before
 
         coarse_stats = self.get_statistics()
         coarse_routed = coarse_stats["nets_routed"]
@@ -27456,6 +27525,7 @@ class Autorouter:
 
         # Pass 1: Route with standard clearance
         print(f"\n--- Pass 1: Standard clearance ({original_clearance:.3f}mm) ---")
+        _probe_elapsed_before = self.detour_probe_elapsed_s
         self.route_all_negotiated(
             max_iterations=max_iterations,
             timeout=timeout,
@@ -27463,6 +27533,11 @@ class Autorouter:
             use_targeted_ripup=True,
             adaptive=True,
         )
+        # Issue #9244: re-base this driver's own ``start_time`` (the
+        # relaxation-pass timeout checks below) past any detour probe the
+        # Pass-1 callee ran -- same rationale as
+        # ``route_all_multi_resolution``.
+        start_time += self.detour_probe_elapsed_s - _probe_elapsed_before
 
         # Get initial statistics
         initial_stats = self.get_statistics()

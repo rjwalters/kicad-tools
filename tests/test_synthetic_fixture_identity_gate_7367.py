@@ -117,19 +117,80 @@ def with_board07_synthetic(gate):
     return gate
 
 
-# Issue #9018: the leg-side band guard drained the pad-vs-trace population
-# (MIPI_*_N out); the six TMDS survivors are the re-sited gateway fan vias'
-# tangency wedges, re-pointed under the #8962 via-population child.
-BOARD07_GAP_NETS = (
-    "TMDS_D0_N",
-    "TMDS_D0_P",
-    "TMDS_D1_N",
-    "TMDS_D1_P",
+# Issue #9018 drained the pad-vs-trace population (MIPI_*_N out); the six
+# TMDS entries it left were the re-sited gateway fan vias' tangency wedges.
+# Issue #9124: the same-net slit-band guard no longer seats a TANGENT via
+# (touch-at-a-point leaves a wedge), so those findings stopped firing on the
+# seed-42 regen and their entries are deleted -- the fab-gap allowance is
+# empty.  The
+# #8962 via-population re-baseline note is retired with them: the wedges were
+# exactly the tangent seats #9124 rejects, so none is pending re-baselining.
+BOARD07_GAP_NETS: tuple[str, ...] = ()
+
+# Issue #8858 (board 07 increment, measured 2026-11-18, pinned image, seed-42
+# regen at main 163f4a175): every ``mask_to_copper`` error net signature the
+# regeneration carries.  Three independent regenerations (two in the pinned
+# image, one on a worker through KCT_KICAD_DOCKER) reproduced all 19
+# signatures and their per-net counts exactly (54 findings: 52 violation +
+# 2 uncertain, all same-net).  The committed allowance must list exactly
+# these; a net that starts failing or stops failing trips the gate.
+BOARD07_MASK_NETS = (
+    "+1V8",
+    "A0",
+    "A2",
+    "A3",
+    "A5",
+    "A7",
+    "DM0",
+    "DQ0",
+    "DQ1",
+    "DQ2",
+    "DQ3",
+    "DQ4",
+    "DQ5",
+    "DQ6",
+    "DQ7",
+    "GND",
+    "MIPI_CLK_P",
     "TMDS_D2_N",
     "TMDS_D2_P",
 )
 
-BOARD06_GAP_NETS = ("GND", "MIPI_CLK+", "PCIE_RX+", "USB2_D-")
+# #9124 drained the PCIE_RX+ face-aligned corner wedge (a tangent via seat)
+# alongside board 07's six; #9208 drained the USB2_D- annulus-vs-own-net-TRACE
+# slit (via re-seated 0.1 mm further out, C++ own-net-trace band check).
+BOARD06_GAP_NETS = ("GND", "MIPI_CLK+")
+
+# Issue #8858 (measured 2026-11-18, pinned image, seed-42 regen at main
+# 304c70e2c): every ``mask_to_copper`` error net signature the regeneration
+# carries.  Two independent regenerations reproduced all 22 signatures and
+# their per-net counts exactly (200 findings: 122 same-net pass-throughs,
+# 78 same-net own-pad entries).  The committed allowance must list exactly
+# these; a net that starts failing or stops failing trips the gate.
+BOARD06_MASK_NETS = (
+    "+1V2",
+    "+3V3",
+    "GND",
+    "MIPI_CLK+",
+    "MIPI_CLK-",
+    "MIPI_D0+",
+    "MIPI_D0-",
+    "MIPI_RST",
+    "PCIE_RX+",
+    "PCIE_RX-",
+    "PCIE_TX+",
+    "PCIE_TX-",
+    "USB2_D+",
+    "USB2_D-",
+    "USB3_RX1+",
+    "USB3_RX1-",
+    "USB3_RX2+",
+    "USB3_RX2-",
+    "USB3_TX1-",
+    "USB3_TX2+",
+    "USB_CC1",
+    "USB_CC2",
+)
 
 
 def fab_gap_allowance(nets: tuple[str, ...]) -> dict:
@@ -138,13 +199,23 @@ def fab_gap_allowance(nets: tuple[str, ...]) -> dict:
     return {("physical_copper_gap", net): 8962 for net in nets}
 
 
+def mask_allowance(nets: tuple[str, ...]) -> dict:
+    """Issue #8858: the board 06 mask_to_copper entries, all citing #8858."""
+    return {("mask_to_copper", net): 8858 for net in nets}
+
+
 def test_board07_committed_allowance():
-    """Issues #5333/#6448 emptied the pair/group/skew entries: board 07's
-    allowance holds only the #8957 fab-view ``physical_copper_gap`` nets
-    (net-signature keyed -- the board is regenerated each CI run, so
-    geometry-keyed identities are ephemeral)."""
+    """Issue #9124's tangent-seat rejection drained the last six fab-view
+    ``physical_copper_gap`` entries (the re-sited gateway fan vias'
+    tangency wedges), and issue #8858's board 07 increment added the
+    seed-42 regen's ``mask_to_copper`` net signatures (net-signature keyed
+    -- the board is regenerated each CI run, so the mask rule's
+    opening/conductor UUID items are ephemeral): board 07's allowance
+    holds exactly those 19 mask nets."""
     gate = load("check_matchgroup_coverage")
-    assert fab_gap_allowance(BOARD07_GAP_NETS) == gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
+    expected = fab_gap_allowance(BOARD07_GAP_NETS)
+    expected.update(mask_allowance(BOARD07_MASK_NETS))
+    assert expected == gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
     assert gate.board_allowance(BOARD07_KEY) == gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
 
 
@@ -281,15 +352,20 @@ def with_board06_synthetic(gate):
 
 
 def test_board06_committed_allowance():
-    """Issue #7548 emptied the skew entry: board 06's allowance holds only
-    the #8957 fab-view ``physical_copper_gap`` nets (net-signature keyed --
-    the board is regenerated each CI run, so geometry-keyed identities are
-    ephemeral).  Issue #8994's C++ mirror landed but the PCIE_RX+/USB2_D-
-    findings survive (corner-wedge + trace-population pairs, see the
-    allowance comment in check_diffpair_coverage.py), so their entries
-    stay."""
+    """Issue #7548 emptied the skew entry: board 06's allowance holds the
+    #8957 fab-view ``physical_copper_gap`` nets plus, since issue #8858, the
+    seed-42 regen's ``mask_to_copper`` net signatures (both net-signature
+    keyed -- the board is regenerated each CI run, so geometry-keyed
+    identities are ephemeral: the gap rule's items are via/track refs and
+    the mask rule's items are opening/conductor UUIDs).  #9124's
+    tangent-seat rejection drained the PCIE_RX+ face-aligned corner wedge
+    and #9208's C++ own-net-trace slit refusal drained the USB2_D-
+    trace-population finding (both entries deleted; see the allowance
+    comment in check_diffpair_coverage.py)."""
     gate = load("check_diffpair_coverage")
-    assert fab_gap_allowance(BOARD06_GAP_NETS) == gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
+    expected = fab_gap_allowance(BOARD06_GAP_NETS)
+    expected.update(mask_allowance(BOARD06_MASK_NETS))
+    assert expected == gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
     assert not hasattr(gate, "DIFFPAIR_SKEW_TRACKER")
     assert gate.DIFFPAIR_ALLOWANCES.get(BOARD06_KEY) == gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
 
@@ -413,11 +489,81 @@ def test_physical_gap_identity_is_the_net_signature():
     assert identity.violation_identity(gap_violation(("A", "B"))) == "A/B"
 
 
+def mask_violation(
+    net: str, uuids=("4ea1b8f0-b43c-4e0a-ba9f-c10e52daf681", "729d5602-2572-4c4a-a80c-e4a36f48410c")
+):
+    """One ``kct check`` mask_to_copper error record (#8858)."""
+    return {
+        "rule_id": "mask_to_copper",
+        "severity": "error",
+        "nets": [net],
+        "items": list(uuids),
+    }
+
+
+def test_mask_identity_is_the_net_signature():
+    """Issue #8858: mask_to_copper joins NET_IDENTITY_RULES.  Its items are
+    the opening and conductor UUIDs the native geometry pass re-mints on
+    every synthetic-board regeneration; the owner + conductor net names in
+    ``nets`` are what reproduces, so the identity (and the allowance slot)
+    must key on them.  An empty ``nets`` falls back to the ephemeral
+    ``items``, so such a finding fails closed: no stable allowance slot
+    can cover it."""
+    identity = load("identity_allowance")
+    assert "mask_to_copper" in identity.NET_IDENTITY_RULES
+    one = mask_violation("USB2_D-")
+    regen = mask_violation("USB2_D-", uuids=("00000000-1111-2222-3333-444444444444",))
+    assert identity.violation_identity(one) == "USB2_D-"
+    assert identity.violation_identity(one) == identity.violation_identity(regen)
+    assert identity.violation_identity(mask_violation("USB2_D-", uuids=())) == "USB2_D-"
+    empty = {
+        "rule_id": "mask_to_copper",
+        "severity": "error",
+        "nets": [],
+        "items": ["4ea1b8f0-b43c-4e0a-ba9f-c10e52daf681", "729d5602-2572-4c4a-a80c-e4a36f48410c"],
+    }
+    assert identity.violation_identity(empty) == (
+        "4ea1b8f0-b43c-4e0a-ba9f-c10e52daf681/729d5602-2572-4c4a-a80c-e4a36f48410c"
+    )
+    assert identity.violation_identity(empty) != identity.violation_identity(
+        dict(
+            empty,
+            items=("00000000-1111-2222-3333-444444444444", "729d5602-2572-4c4a-a80c-e4a36f48410c"),
+        )
+    )
+
+
+def test_board06_measured_mask_population_passes_and_drains():
+    """Issue #8858: the measured seed-42 population (one record per listed
+    net; per-net counts are irrelevant to an identity allowance) passes the
+    committed gate; a NEW net carrying mask errors fails; a net the router
+    stops exposing goes stale and forces its entry out."""
+    gate = load("check_diffpair_coverage")
+    found = [mask_violation(net) for net in BOARD06_MASK_NETS]
+    # The #8957 slit population fires alongside the mask findings.
+    found += [gap_violation((net,)) for net in BOARD06_GAP_NETS]
+    ids = identities_of(found)
+    assert gate.unexpected_baseline_errors(BOARD06_KEY, rule_counts(found), ids) == {}
+    assert gate.unallowed_blocking(BOARD06_KEY, found) == []
+    assert gate.stale_allowances(BOARD06_KEY, ids) == []
+    regressed = found + [mask_violation("ADDR_BUS")]
+    assert gate.unallowed_blocking(BOARD06_KEY, regressed) == [("mask_to_copper", "ADDR_BUS")]
+    last_mask_net = BOARD06_MASK_NETS[-1]
+    drained = [
+        v for v in found if not (v["rule_id"] == "mask_to_copper" and v["nets"] == [last_mask_net])
+    ]
+    stale = gate.stale_allowances(BOARD06_KEY, identities_of(drained))
+    assert stale == [("mask_to_copper", last_mask_net, 8858)]
+
+
 def test_regenerated_population_passes_and_a_new_net_fails():
     """Two runs with disjoint geometry but identical net signatures both
-    match the #8962-re-pointed fab-gap allowance; a NEW net's slits are
-    unallowed, and a net that stops carrying slits goes stale."""
-    gate = load("check_matchgroup_coverage")
+    match a fab-gap allowance keyed by net signature; a NEW net's slits are
+    unallowed, and a net that stops carrying slits goes stale.  (#9124
+    drained the committed board 07 allowance, so the TMDS entries this
+    exercises are installed synthetically on the freshly loaded gate.)"""
+    gate = with_board07_synthetic(load("check_matchgroup_coverage"))
+    gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS.update(fab_gap_allowance(("TMDS_D0_N", "TMDS_D0_P")))
     run_a = [gap_violation(("TMDS_D0_N",)) for _ in range(3)] + [gap_violation(("TMDS_D0_P",))]
     run_b = [
         gap_violation(("TMDS_D0_N",), items=("Via@1.1/1.1:F.Cu-B.Cu:d0.3/s0.6",)) for _ in range(2)
@@ -469,12 +615,15 @@ def _stub_matchgroup(
 class TestBoard07CheckBoard:
     def test_clean_reroute_passes_on_the_committed_allowance(self, monkeypatch, tmp_path, capsys):
         """Issue #5333: the measured ``--differential-pairs`` re-route has no
-        blocking finding beyond the #8957 fab-gap nets, and every committed
-        allowance entry fires, so nothing is stale."""
+        blocking finding beyond the committed allowance's entries, and every
+        committed entry fires, so nothing is stale.  #8858: the committed
+        entries carry two rule_ids now (the drained fab-gap set and the
+        ``mask_to_copper`` net signatures), so the synthetic measurements
+        reuse each entry's own rule_id -- an entry judged under the wrong
+        rule reads unallowed."""
         gate = load("check_matchgroup_coverage")
         found = [
-            violation("physical_copper_gap", net)
-            for _rule, net in sorted(gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS)
+            violation(rule, net) for rule, net in sorted(gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS)
         ] + [violation("connectivity", "TMDS_D0_N")]
         groups = set(gate.MATCHGROUP_ALLOWED_GROUPS[BOARD07_KEY])
         gate, board = _stub_matchgroup(monkeypatch, tmp_path, found, groups, synthetic=False)

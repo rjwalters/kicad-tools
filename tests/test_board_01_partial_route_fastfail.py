@@ -106,6 +106,17 @@ class TestBoard01PartialRouteFastFail:
         monkeypatch.setattr(
             "kicad_tools.cli.pcb_add_board_info.run_add_board_info", lambda *a, **k: 0
         )
+        # Issue #9058: the post-route via repair (Step 5.55) and the final
+        # native refill + UUID re-canonicalization (Step 5.65) read and
+        # rewrite the routed board, which the stubbed route never wrote.
+        # The repair itself is covered by tests/test_board01_via_opening_repair_9058.py.
+        monkeypatch.setattr(module, "repair_same_net_via_opening_overlaps", lambda *a, **k: [])
+        monkeypatch.setattr(module, "_snapshot_board_uuids", lambda *a, **k: set())
+        monkeypatch.setattr(module, "refill_zones_native", lambda *a, **k: True)
+        monkeypatch.setattr(
+            "kicad_tools.core.canonical_uuids.canonicalize_pcb_file_uuids",
+            lambda *a, **k: 0,
+        )
         monkeypatch.setattr(module, "run_drc", lambda *a, **k: True)
 
         lvs_called: list[bool] = []

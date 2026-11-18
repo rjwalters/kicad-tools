@@ -170,6 +170,43 @@ def test_same_net_conductor_inside_the_opening_is_flagged_without_overlapping(
 
 
 @pytest.mark.parametrize(
+    "owner_net,conductor_net,expected_nets",
+    [
+        ("N", "N", ("N",)),
+        ("P", "C", ("C", "P")),
+        ("N", None, ("N",)),
+    ],
+)
+def test_violation_names_its_nets_for_identity_baselines(owner_net, conductor_net, expected_nets):
+    """Issue #8858: each mask_to_copper record names the owner pad's and the
+    exposed conductor's nets, so the synthetic-fixture CI gates can baseline
+    findings by the regeneration-stable net signature -- their ``items``
+    are opening/conductor UUIDs the native pass re-mints every run."""
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    geometry, _, _ = toy_geometry(
+        conductor_x=1.05,
+        overlap_owner=False,
+        owner_net=owner_net,
+        conductor_net=conductor_net,
+    )
+    result = assess_attributed_geometry(
+        geometry,
+        MaskCopperPolicy(
+            clearance_mm=0.09,
+            source="order",
+            process="process",
+            revision="rev",
+            warning_clearance_mm=0.15,
+        ),
+    )
+    violations = [v for v in assessment_results(result).violations if v.rule_id == "mask_to_copper"]
+    assert len(violations) == 1
+    assert violations[0].severity == "error"
+    assert violations[0].nets == expected_nets
+
+
+@pytest.mark.parametrize(
     "conductor_kind,mode",
     [
         (kind, mode)
@@ -1419,3 +1456,37 @@ def test_same_net_conductor_over_merged_region_prints_bare_same_net(trace_kind):
     ]
     assert len(labels) == 1
     assert labels[0].endswith("; same-net")
+
+
+@pytest.mark.parametrize(
+    "pad_b_net,expected_nets",
+    [
+        ("M", ("M", "N")),  # owners on N and M, conductor on N: M must survive
+        ("", ("N",)),  # unnamed owner pad mixed with a named one
+        ("N", ("N",)),  # same net on every owner stays single-net
+    ],
+)
+def test_merged_region_nets_carry_every_owner_net(pad_b_net, expected_nets):
+    """Issue #9374: a merged region owned by pads on 2+ nets has no scalar
+    ``owner_net``; its finding's ``nets`` must still name every owner net, so
+    a ``("mask_to_copper", "N")`` allowance entry cannot also cover it."""
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    geometry = _merged_region_geometry("segment")
+    geometry.objects["00000000-0000-0000-0000-000000000002"]["net"] = pad_b_net
+    assessment = assess_attributed_geometry(geometry, _POLICY)
+    merged = [m for m in assessment.measurements if m.opening_kind == "merged_region"]
+    assert len(merged) == 1
+    assert merged[0].owner_nets == tuple(sorted({n for n in ("N", pad_b_net) if n}))
+    findings = [
+        v
+        for v in assessment_results(assessment).violations
+        if v.rule_id == "mask_to_copper" and "opening merged_region" in v.message
+    ]
+    assert len(findings) == 1
+    assert findings[0].nets == expected_nets
+    # Round trip keeps the field.
+    reloaded = MaskCopperAssessment.from_dict(assessment.to_dict())
+    assert [m.owner_nets for m in reloaded.measurements] == [
+        m.owner_nets for m in assessment.measurements
+    ]

@@ -102,6 +102,7 @@ def generate_pcb():
     _PCB_UUIDS.reset()  # Issue #6076: same sequence every build
     header = """(kicad_pcb (version 20260206) (generator "kicad-tools")
     (general (thickness 1.6)) (paper "A4")
+    (title_block (title "USB joystick controller - ATmega32U4") (date "2026-09") (rev "B"))
     (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal)
       (34 "B.Paste" user) (35 "F.Paste" user) (36 "B.SilkS" user) (37 "F.SilkS" user)
       (38 "B.Mask" user) (39 "F.Mask" user) (44 "Edge.Cuts" user)

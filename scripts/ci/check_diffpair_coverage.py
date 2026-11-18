@@ -232,11 +232,89 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # fire (0 unallowed, 0 stale), reach 21/21, pour audit OK.  CI's
 # regeneration remains the authority on the final counts (host-sensitive
 # board).
+# Issue #9124 (fresh seed-42 regen, 2026-11-17): the slit-band predicate no
+# longer accepts a TANGENT seat (``gap == 0``, centre exactly one annulus
+# radius from a pad face or corner) as a union -- touch-at-a-point leaves a
+# wedge -- in the Python point predicate, the ring form and the C++ mirror.
+# The PCIE_RX+ face-aligned corner wedge is gone and its entry is deleted.
+# Issue #9208 (measured 2026-11-17, fresh seed-42 regen): the USB2_D-
+# annulus-vs-own-net-TRACE slit is drained -- ``DesignRules.
+# same_net_trace_gap_band_edge_mm`` (the ``trace_spacing`` detection edge,
+# 0.1016 on jlcpcb 4-layer 1oz) is threaded into both C++ via checks, which
+# now refuse a via annulus whose gap to its own net's committed trace copper
+# falls in ``(0, edge)``.  The offending via (114.15, 56.05; trace-then-via:
+# the pair's trunk at x=113.7025 is already stored when the leg seats it)
+# re-seats at (114.25, 56.05), 0.1 mm further out, and the USB2_D- entry is
+# deleted.  Merged (Doctor, PR #9209 onto #9208): both drains apply, so both
+# entries are gone -- 13 findings remain (MIPI_CLK+ 11, GND 2); CI's
+# regeneration remains the authority on the final counts (host-sensitive
+# board).  The C++ mirror ships both fixes as BUILD_VERSION 70.
+# Issue #9140 AC4 (all-boards re-measurement recorded 2026-11-18 at
+# 47aa7bdca): the #9019/#9140 family is INERT outside this fixture --
+# ``same_net_pad_gap_band_edge_mm`` / ``same_net_trace_gap_band_edge_mm``
+# resolve only in boards/06-diffpair-test/generate_design.py (#9019), and
+# every gate in the family returns True before touching copper when an
+# edge is 0 (#9195), so no other board's allowance can move because of
+# it.  This fixture: fresh seed-42 regen + identity gate at 47aa7bdca
+# (through #9337's escape-router rotated-pad AABB) -- 13 blocking
+# physical_copper_gap findings (MIPI_CLK+ 11, GND 2), 0 unallowed, 0
+# stale (both sibling via populations drained by #9124/#9208 stay gone),
+# reach 21/21, all 3 diff-pair rules exercised, pour audit OK, and the
+# LVDS1_P..4_P population the issue filed is 0.  The regen exits 1 on
+# the documented pre-existing pour-repair/check gate, independent of the
+# guard.  Boards 00/01/07 are green in CI at dc51c4b6 (#9195's merge:
+# Board 00/01 End-to-End, Board 07 End-to-End, Match-Group) and boards
+# 00/07 again at #9209's PR run; boards 02/03/04/05 fail on main from
+# pre-existing out-of-scope floods (boards 02/03/05 red since
+# <= 2026-11-13 and board 04 since 2026-11-14, all before #9156: board
+# 03 mask_to_copper #8900, board 05 strict-gate flood #9068, board 02
+# same-net gap + tht_smd_spacing #9325/#9332, board 04 unaccepted
+# silk_hole_overlap advisories #9097).  CI's regeneration remains the
+# authority on the final counts (host-sensitive board).
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("physical_copper_gap", "GND"): 8962,
     ("physical_copper_gap", "MIPI_CLK+"): 8962,
-    ("physical_copper_gap", "PCIE_RX+"): 8962,
-    ("physical_copper_gap", "USB2_D-"): 8962,
+    # Issue #8858 (measured 2026-11-18 at main 304c70e2c, pinned image
+    # kicad/kicad@sha256:18693567 -- the digest CI's KICAD_IMAGE pins): the
+    # seed-42 regeneration of this board carries 200 ``mask_to_copper``
+    # errors (122 same-net pass-throughs, 78 same-net own-pad entries; the
+    # #9326/#9332 repair path's population) across the 22 net signatures
+    # listed below.  Two independent regenerations reproduced every
+    # signature and per-net count exactly, so the entries are keyed by NET
+    # SIGNATURE like the #8957 slits (mask_to_copper's items are
+    # opening/conductor UUIDs, re-minted by every regeneration; the rule
+    # now names ``nets`` on each finding).  A net that starts carrying
+    # mask errors still fails the gate; a net the router stops exposing
+    # goes stale and forces its entry out.  Each entry's value is the
+    # tracking issue number (#8858), the same convention as the
+    # physical_copper_gap entries' 8962 -- the gate judges identity,
+    # never count; the measured per-net populations are recorded in the
+    # research note.  Verify with:
+    #   KCT_KICAD_DOCKER=1 uv run kct check \
+    #     boards/06-diffpair-test/regression-output/diffpair_test_routed.kicad_pcb \
+    #     --mfr jlcpcb --errors-only --format json
+    ("mask_to_copper", "+1V2"): 8858,
+    ("mask_to_copper", "+3V3"): 8858,
+    ("mask_to_copper", "GND"): 8858,
+    ("mask_to_copper", "MIPI_CLK+"): 8858,
+    ("mask_to_copper", "MIPI_CLK-"): 8858,
+    ("mask_to_copper", "MIPI_D0+"): 8858,
+    ("mask_to_copper", "MIPI_D0-"): 8858,
+    ("mask_to_copper", "MIPI_RST"): 8858,
+    ("mask_to_copper", "PCIE_RX+"): 8858,
+    ("mask_to_copper", "PCIE_RX-"): 8858,
+    ("mask_to_copper", "PCIE_TX+"): 8858,
+    ("mask_to_copper", "PCIE_TX-"): 8858,
+    ("mask_to_copper", "USB2_D+"): 8858,
+    ("mask_to_copper", "USB2_D-"): 8858,
+    ("mask_to_copper", "USB3_RX1+"): 8858,
+    ("mask_to_copper", "USB3_RX1-"): 8858,
+    ("mask_to_copper", "USB3_RX2+"): 8858,
+    ("mask_to_copper", "USB3_RX2-"): 8858,
+    ("mask_to_copper", "USB3_TX1-"): 8858,
+    ("mask_to_copper", "USB3_TX2+"): 8858,
+    ("mask_to_copper", "USB_CC1"): 8858,
+    ("mask_to_copper", "USB_CC2"): 8858,
 }
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key
@@ -739,10 +817,9 @@ def count_errors_via_kct_check(
         str(pcb_path),
         "--mfr",
         "jlcpcb",
-        # Issue #8842: mask_to_copper is default-on under --mfr but has no baseline
-        # in this gate; skipped until the #8839 threshold table lands.
-        "--skip",
-        "mask_to_copper",
+        # Issue #8858: mask_to_copper findings are judged by net-signature
+        # identity like every other blocking rule (see
+        # DIFFPAIR_FIXTURE_ALLOWED_FINDINGS) -- the #8842 skip is gone.
         "--errors-only",
         "--format",
         "json",

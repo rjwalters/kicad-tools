@@ -364,7 +364,17 @@ namespace router {
 // inside ``Grid3D::get_negotiated_cost``.  A v66 .so prices negotiated cells
 // without the term (and lacks the two verbs), so Python/C++ cost parity
 // breaks silently; it must be rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 67;
+// v68 (Issue #9124): ``same_net_pad_gap_in_band`` rejects the tangent
+// ``gap == 0`` seat (centre exactly one radius from a pad face/corner) it used
+// to accept as a union.  (Number reserved while #9124 / PR #9209 was open.)
+// v69 (Issue #9208): ``DesignRules::same_net_trace_gap_band_edge_mm`` + the
+// same-net via-annulus-vs-own-trace slit-band refusal in both A* via checks
+// (``same_net_segment_gap_in_band``).  A v67 .so seats via annuli in the
+// ``(0, edge)`` slit band beside their own net's stored trace copper.
+// v70 (Issues #9124 + #9208, merged): the first build carrying BOTH fixes --
+// a v69 .so still seats the tangent wedge (no #9124 fix) and a v68 .so lacks
+// the trace-slit refusal, so both older builds must be rejected.
+constexpr int ROUTER_CPP_BUILD_VERSION = 70;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -785,6 +795,13 @@ struct DesignRules {
     // ``via_clearance.same_net_pad_gap_acceptable``.  0 (Python ``None``)
     // disables: never guess a literal edge (#8974 AC-3).
     float same_net_pad_gap_band_edge_mm = 0.0f;
+    // Issue #9208: the same-net via-annulus-vs-own-TRACE slit band's detection
+    // edge in mm (Python ``DesignRules.same_net_trace_gap_band_edge_mm``, the
+    // caller-resolved ``trace_spacing`` dfm entry's
+    // ``GapBand.detection_edge_mm``; 0.1016 on jlcpcb 4layer_1oz).  Same two
+    // acceptable regions as the pad edge, measured against stored own-net
+    // segments.  0 (Python ``None``) disables: never a literal.
+    float same_net_trace_gap_band_edge_mm = 0.0f;
     // Issue #4071: soft corridor-attractor bonus (mirrors Python
     // ``DesignRules.cost_corridor_attractor``, default 3.0).  Subtracted
     // from a cell's positive step cost when the cell is reserved for the
@@ -890,9 +907,10 @@ inline void same_net_pad_aabb_half_extents(const PadInfo& pad, float& half_w,
 // Issue #8994: the same-net pad slit-band verdict, the faithful C++ mirror of
 // Python ``via_clearance.same_net_pad_gap_acceptable`` for a via ANNULUS of
 // radius ``annulus_half_mm`` at world ``(wx, wy)`` against one same-net SMD
-// pad.  Two acceptable regions, not a floor: ``gap <= 0`` (annulus unions
-// with its own pad -- one copper body, no slit) and ``gap >= edge_mm`` are
-// both ACCEPTED; only the open band ``(0, edge_mm)`` in between is rejected.
+// pad.  Two acceptable regions, not a floor: ``gap < 0`` (annulus overlaps
+// its own pad -- one copper body, no slit) and ``gap >= edge_mm`` are both
+// ACCEPTED; only ``[0, edge_mm)`` in between is rejected, tangent ``gap == 0``
+// included (#9124: touch-at-a-point is not a union).
 // The 1e-9 slack on both band edges mirrors the Python predicate's
 // float-noise tolerance for a gap computed as exactly 0 or exactly the edge.
 // Computed in double: Python measures in float64, and a float32 gap could
@@ -908,7 +926,17 @@ inline bool same_net_pad_gap_in_band(double wx, double wy, double annulus_half_m
         {static_cast<double>(pad.y - half_h) - wy,
          wy - static_cast<double>(pad.y + half_h), 0.0});
     const double gap = std::hypot(dx, dy) - annulus_half_mm;
-    return 1e-9 < gap && gap < edge_mm - 1e-9;
+    // Issue #9124: the lower edge is the TANGENT tolerance, not ``0``.  An
+    // annulus whose centre sits exactly one radius from a pad face or corner
+    // (``gap == 0``) touches the pad at a single point; the receding arc
+    // leaves a sub-edge wedge the fab-view checker grades, so it is a slit,
+    // not a union -- only real overlap (``gap`` below ``-tangent_eps``) is
+    // accepted.  Mirrors the Python point branch's ``-1e-9``, widened to
+    // ``kTangentEpsMm`` because the pad box edges arrive as float32 (ulp
+    // ~1.5e-5 mm at 174 mm), so an exactly-tangent seat measures a few
+    // 1e-5 off 0 here where Python's float64 reads ~1e-14.
+    constexpr double kTangentEpsMm = 1e-4;
+    return -kTangentEpsMm < gap && gap < edge_mm - 1e-9;
 }
 
 // Stored segment for validation (Issue #2439)
@@ -922,6 +950,29 @@ struct StoredSegment {
     // neutralised (0.0 = defer to the grid's per-net floors).
     float authored_floor = 0.0f;
 };
+
+// Issue #9208: the trace-population sibling of ``same_net_pad_gap_in_band`` --
+// true when a via ANNULUS (radius ``annulus_half_mm`` at world ``(wx, wy)``)
+// leaves a copper gap to the OWN-net stored segment ``seg`` strictly inside
+// the open slit band ``(0, edge_mm)``.  Mirrors Python
+// ``via_clearance.same_net_segment_pad_gap_acceptable``'s regions for the
+// round-vs-swept-segment case: ``gap <= 0`` (the annulus touches or overlaps
+// the trace, so they are one copper union -- a centerline that reaches the
+// annulus is the ``gap == 0`` case) and ``gap >= edge`` are both ACCEPTED, with
+// the same 1e-9 float-noise slack.  The caller owns the own-net / layer
+// filter.  A zero-length segment degenerates to point-vs-point distance.
+inline bool same_net_segment_gap_in_band(double wx, double wy, double annulus_half_mm,
+                                         const StoredSegment& seg, double edge_mm) {
+    const double ax = seg.x1, ay = seg.y1;
+    const double dx = static_cast<double>(seg.x2) - ax;
+    const double dy = static_cast<double>(seg.y2) - ay;
+    const double len_sq = dx * dx + dy * dy;
+    double t = 0.0;
+    if (len_sq > 0.0) t = std::clamp(((wx - ax) * dx + (wy - ay) * dy) / len_sq, 0.0, 1.0);
+    const double dist = std::hypot(wx - (ax + t * dx), wy - (ay + t * dy));
+    const double gap = dist - annulus_half_mm - static_cast<double>(seg.width) / 2.0;
+    return 1e-9 < gap && gap < edge_mm - 1e-9;
+}
 
 // Stored via for validation (Issue #2439)
 // Vias from completed routes, used for clearance checking.
