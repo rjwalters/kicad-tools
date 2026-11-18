@@ -357,8 +357,12 @@ def _owner_id(value: str | None) -> str | None:
     return value
 
 
-def _record(event: dict[str, Any]) -> None:
-    """Append one permit record; diagnostics must never break a workload."""
+def _record(event: dict[str, Any], time_ns: int | None = None) -> None:
+    """Append one permit record; diagnostics must never break a workload.
+
+    ``time_ns`` lets a caller stamp the moment something *happened* rather than
+    the moment this (slower: mkdir + open + write) function ran.
+    """
     directory = os.environ.get(ENV_LOG) or os.environ.get(ENV_OBSERVER_OUTPUT)
     if not directory:
         return
@@ -371,7 +375,7 @@ def _record(event: dict[str, Any]) -> None:
             stream.write(
                 json.dumps(
                     {
-                        "time_ns": time.time_ns(),
+                        "time_ns": time.time_ns() if time_ns is None else time_ns,
                         "pid": os.getpid(),
                         "worker": os.environ.get("PYTEST_XDIST_WORKER"),
                         "owner": _owner_id(os.environ.get("PYTEST_CURRENT_TEST")),
@@ -405,9 +409,16 @@ class _Permit:
         fd, self._fd = self._fd, None
         if fd is None:
             return
+        # Issue #9120: stamp the release BEFORE closing the fd. Closing drops
+        # the flock, after which the next holder can acquire and log its
+        # "acquire" while this process is still in _record() (mkdir + open +
+        # write). Stamping afterwards made a handoff look like two holders at
+        # once (13 inversions, 3.6 s of phantom "permit concurrency 3" in one
+        # bulk run) although flock never granted a third permit.
+        released_ns = time.time_ns()
         with suppress(OSError):
             os.close(fd)
-        _record({"event": "release", "slot": self.index})
+        _record({"event": "release", "slot": self.index}, time_ns=released_ns)
 
 
 def _try_slot(directory: Path, index: int) -> int | None:
