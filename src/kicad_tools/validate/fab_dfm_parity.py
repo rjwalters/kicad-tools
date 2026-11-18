@@ -35,8 +35,8 @@ Rules for editing the table:
   vertices are kct-only over-reporting under the #8848 operator ruling --
   the fab flagged none of them).
   ``count_rule_ids`` adds no parity *claim*; re-keying an existing row's
-  attribution (as #8972 did) does bump :data:`TABLE_VERSION`, which moves
-  the stanza header's version with it.
+  attribution (as #8972 did) changes the row's content, which moves
+  :data:`TABLE_VERSION` (and the stanza header) with it automatically.
 * Every rule named in ``kct_rules`` of a ``covered`` / ``partial`` row must be
   something ``kct check`` can actually emit -- a real category
   (``cli/check_categories.py``) or a finer rule id registered in
@@ -49,45 +49,22 @@ Rules for editing the table:
   so registering one fails the test until this row is flipped.  A rule PR that
   forgets its row therefore cannot merge green; add the new id to the mapping
   in the same PR.
-* Bump :data:`TABLE_VERSION` on any row change.
+* Do not hand-edit a version: :data:`TABLE_VERSION` is a content hash of the
+  rows (see :func:`compute_table_version`), so it changes by itself on any row
+  change and two PRs editing different rows cannot collide on it (issue #9242).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import json
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, Mapping, Sequence
 
 from .violations import DRCViolation
 
 Status = Literal["covered", "partial", "not_covered"]
-
-#: Version of the table below; bump on any row change.
-#: 6: #8938 -- fab-view gap bands come from the resolved stackup's
-#:    ``dfm_thresholds`` entry; same-net sub-danger pad gaps are errors;
-#:    zone-fill (pour) gaps report at info (not fab-judged).
-#: 7: #8972 -- trace-band vs pad-band ``physical_copper_gap`` findings are
-#:    attributed to their own rows (``trace_spacing`` / ``pad_spacing``) via
-#:    the ``rule_id#fab_band`` qualified key; the rule id itself is unchanged.
-#: 8: #9034 -- pad_spacing note records the issue-reported kct:fab ratio as
-#:    reported-not-reproduced and the measured per-pair counting
-#:    granularity; no threshold, severity or attribution change.
-#: 9: #8840 -- ``sharp_trace_corner`` and ``missing_plated_through_hole``
-#:    rows flip from ``not_covered`` now that both rules ship.
-#: 10: #9037 -- the ``sharp_trace_corner`` row attributes only the
-#:    two-segment bend population (``sharp_trace_corner#bend``) to JLCDFM's
-#:    category; the junction findings are kct-only and stay deliberately
-#:    unattributed, separable via ``DRCViolation.corner_class``.  No status
-#:    or severity change.
-#: 11: #8858 -- ``solder_mask_opening_exposing_trace`` note records the
-#:    ``within_own_pad`` class (a clean single entry) and what stays an
-#:    error; status, attribution and danger-capability unchanged.
-#: 12: #9284 -- ``solder_mask_opening_exposing_trace`` note records the
-#:    ``own_pour_thermal`` class (a pad tied to its own pour by thermal
-#:    spokes, JLCDFM result on board 01) and the different-net pour parity
-#:    check (R2.1 0.13 mm warning, R1.1/R1.2 0.2 mm good); status,
-#:    attribution, thresholds and danger-capability unchanged.
-TABLE_VERSION = 12
 
 #: Where the observed categories/thresholds came from (counts are hand-recorded).
 SOURCE = "https://github.com/rjwalters/kicad-tools/issues/8838"
@@ -367,6 +344,25 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
 )
 
 
+def compute_table_version(rows: Sequence[ParityRow]) -> str:
+    """Content-derived identifier for a parity table (issue #9242).
+
+    The first 8 hex chars of the SHA-256 of the rows' canonical JSON.  Every
+    :class:`ParityRow` field is included (``dataclasses.asdict``, not
+    :meth:`ParityRow.to_dict`, which omits ``count_rule_ids``), keys are
+    sorted and tuples serialize as lists, so the value is identical across
+    runs, processes and Python versions and changes iff a row changes.
+    """
+    canonical = json.dumps([asdict(r) for r in rows], sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:8]
+
+
+#: Content hash of :data:`PARITY_TABLE`; derived, never hand-edited, so two PRs
+#: touching different rows cannot claim the same number.  Row history lives in
+#: git and ``changelog.d/``.
+TABLE_VERSION: str = compute_table_version(PARITY_TABLE)
+
+
 @dataclass(frozen=True)
 class RowComparison:
     """One row's kct-vs-fab count comparison (issue #8940).
@@ -402,12 +398,14 @@ class ParityReport:
 
     manufacturer: str
     rows: tuple[ParityRow, ...]
-    #: Issue #9062: TABLE-ONLY -- the JLCDFM parity categories that are
-    #: danger-capable and ``not_covered`` by this static table, whatever
-    #: happened on any given run.  It never reflects run-time state; the
-    #: categories whose check did not complete *this* run are serialized as
-    #: ``meta_checks.incomplete_categories`` in the ``kct check`` JSON
-    #: report.
+    #: The JLCDFM parity categories that are danger-capable and whose
+    #: kct-vs-fab comparison is unavailable: either ``not_covered`` by this
+    #: static table (#9062) or backed by a kct rule that did not complete
+    #: this run (#9234, via :func:`evaluate_parity`'s ``incomplete_rules``).
+    #: The static subset alone -- the one that drives the ``fab_dfm_parity``
+    #: entry in ``meta_checks.incomplete_categories`` and the verdict -- is
+    #: :attr:`table_incomplete_categories`; the run-state subset is
+    #: :attr:`run_incomplete_categories`.
     incomplete_categories: tuple[str, ...]
     #: Per-category kct-vs-fab counts; ``None`` unless a recorded result was
     #: supplied (issue #8940).
@@ -417,11 +415,29 @@ class ParityReport:
     unmapped_recorded: tuple[str, ...] = ()
 
     @property
+    def table_incomplete_categories(self) -> tuple[str, ...]:
+        """The static ``not_covered`` subset (#9062's table-only contract)."""
+        return tuple(
+            r.category for r in self.rows if r.danger_capable and r.status == "not_covered"
+        )
+
+    @property
+    def run_incomplete_categories(self) -> tuple[str, ...]:
+        """Categories named only because their kct rule did not complete (#9234)."""
+        table = set(self.table_incomplete_categories)
+        return tuple(c for c in self.incomplete_categories if c not in table)
+
+    @property
+    def table_incomplete(self) -> bool:
+        """A danger-capable row kct has no rule for (#8845, run-independent)."""
+        return bool(self.table_incomplete_categories)
+
+    @property
     def incomplete(self) -> bool:
         return bool(self.incomplete_categories)
 
     def to_dict(self) -> dict:
-        data = {
+        data: dict[str, object] = {
             "table_version": TABLE_VERSION,
             "source": SOURCE,
             "retrieved": RETRIEVED,
@@ -513,11 +529,20 @@ def evaluate_parity(
     *,
     findings: Sequence[DRCViolation] = (),
     recorded_counts: Mapping[str, Mapping[str, int]] | None = None,
+    incomplete_rules: Sequence[str] = (),
 ) -> ParityReport | None:
     """Evaluate the parity table for *manufacturer*; ``None`` when it does not apply.
 
     A danger-capable ``not_covered`` row makes the report ``incomplete``;
-    ``partial`` rows are listed but never trigger it.
+    ``partial`` rows are listed but never trigger it.  With
+    *incomplete_rules* (#9234) -- kct rule ids whose check did not complete
+    this run, e.g. ``("mask_to_copper",)`` -- every danger-capable row that
+    counts findings from one of those rules (``count_rule_ids``, ignoring any
+    ``#band`` qualifier) is also named in ``incomplete_categories``: the
+    fab-parity comparison for that category is unavailable on this run.  That
+    run-state subset does not by itself reach ``meta_checks`` or the verdict
+    (see :attr:`ParityReport.table_incomplete`), which stay keyed on the
+    static ``not_covered`` rows as in #9062.
 
     With *recorded_counts* (issue #8940) the report also carries a
     :class:`RowComparison` per row: kct error/warning counts over *findings*
@@ -528,7 +553,16 @@ def evaluate_parity(
     """
     if not applies_to(manufacturer):
         return None
-    incomplete = tuple(r.category for r in table if r.danger_capable and r.status == "not_covered")
+    rule_gaps = {rule.split("#", 1)[0] for rule in incomplete_rules}
+    incomplete = tuple(
+        r.category
+        for r in table
+        if r.danger_capable
+        and (
+            r.status == "not_covered"
+            or any(rule.split("#", 1)[0] in rule_gaps for rule in r.count_rule_ids)
+        )
+    )
     comparisons: tuple[RowComparison, ...] | None = None
     unmapped: tuple[str, ...] = ()
     if recorded_counts is not None:
@@ -582,8 +616,8 @@ def format_parity_stanza(report: ParityReport) -> str:
     lines = [
         "",
         f"Fab DFM parity (JLCDFM, table v{TABLE_VERSION}, {RETRIEVED}): "
-        f"{len(report.incomplete_categories)} danger-capable categor"
-        f"{'y' if len(report.incomplete_categories) == 1 else 'ies'} not covered",
+        f"{len(report.table_incomplete_categories)} danger-capable categor"
+        f"{'y' if len(report.table_incomplete_categories) == 1 else 'ies'} not covered",
     ]
     comparisons = (
         {c.category: c for c in report.comparisons} if report.comparisons is not None else None
@@ -611,9 +645,20 @@ def format_parity_stanza(report: ParityReport) -> str:
         lines.append(
             "  recorded categories not in the parity table: " + ", ".join(report.unmapped_recorded)
         )
-    if report.incomplete:
+    if report.table_incomplete:
         lines.append(
             "  INCOMPLETE: kct has no rule for the categories above; a pass here does "
             "not mean JLCDFM is clean (use --allow-incomplete to exit 0)."
+        )
+    if report.run_incomplete_categories:
+        # Run-state incompleteness (#9234): kct HAS a rule for these
+        # categories, but it did not complete this run, so the counts beside
+        # them are not comparable and a zero must not read as parity.
+        lines.append(
+            "  INCOMPLETE (this run): "
+            + ", ".join(report.run_incomplete_categories)
+            + ": the kct check behind this category did not complete, so its "
+            "kct-vs-fab comparison is unavailable (see "
+            "meta_checks.incomplete_categories; use --allow-incomplete to exit 0)"
         )
     return "\n".join(lines)

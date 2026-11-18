@@ -110,6 +110,11 @@ def main():
         if identity in requested:
             continue
         for item in found:
+            # A rule area (keepout) plots no copper or mask material, so it
+            # is deliberately absent from the inventory and must not be
+            # reported as an uninventoried native object either (#9234).
+            if isinstance(item, pcbnew.ZONE) and item.GetIsRuleArea():
+                continue
             if hasattr(item, "IsVisible") and not item.IsVisible():
                 continue
             participating = [name for name, layer in layers.items() if item.IsOnLayer(layer)]

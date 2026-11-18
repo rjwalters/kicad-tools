@@ -106,10 +106,15 @@ HOST_PATH_IN_TEXT = re.compile(r"/(?:Users|home)/[A-Za-z0-9._-]+/")
 #: Not hash-bound: unlike board evidence there is no allowlist, any hit fails.
 NON_BOARD_EVIDENCE_SCOPES = (
     "data/research/**",
-    "docs/diagnostics/**",
+    "docs/**",  # includes docs/diagnostics/** (Issue #9276)
     "benchmarks/**",
     "boards/*/engineering/**",
 )
+
+#: Doc directories whose absolute-looking paths are ``YOUR_USERNAME`` /
+#: ``name`` placeholders in setup instructions, not leaked host paths
+#: (Issue #9276). One entry per directory; keep this list short and audited.
+ALLOWED_PLACEHOLDER_DOC_DIRS = ("docs/mcp/",)
 
 
 def _committed_non_board_evidence() -> list[str]:
@@ -122,7 +127,13 @@ def _committed_non_board_evidence() -> list[str]:
         ).stdout
     except (OSError, subprocess.CalledProcessError):
         pytest.skip("not a git checkout")
-    return sorted({p for p in out.decode().split("\0") if p})
+    return sorted(
+        {
+            p
+            for p in out.decode().split("\0")
+            if p and not p.startswith(ALLOWED_PLACEHOLDER_DOC_DIRS)
+        }
+    )
 
 
 def test_committed_research_and_diagnostics_records_no_host_path():
@@ -137,7 +148,7 @@ def test_committed_research_and_diagnostics_records_no_host_path():
         if HOST_PATH_IN_TEXT.search(data.decode("utf-8", errors="replace")):
             offenders.append(rel)
     assert not offenders, (
-        "Committed research/benchmark/diagnostic evidence records an absolute "
+        "Committed research/benchmark/diagnostic/docs evidence records an absolute "
         "host path (Issue #9238). Record the path repo-relative or as a "
         "placeholder (<repo>, <chorus>) instead:\n  " + "\n  ".join(offenders)
     )
