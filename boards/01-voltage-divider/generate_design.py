@@ -651,12 +651,18 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     return success
 
 
-# Same-net via / pad-opening repair constants (issue #9058).  KiCad's
-# default pad mask expansion grows each pad aperture by this much per
-# side; board 01's pads carry no per-pad override, so the board default
-# applies.  The relocated via must clear the pad aperture by
-# ``_VIA_OPENING_CLEARANCE_MM`` measured between the two apertures (via
-# land + expansion vs pad copper + expansion).
+# Same-net via / pad-opening repair constants (issue #9058).
+# ``_PAD_MASK_EXPANSION_MM`` is NOT the board's mask expansion: board 01
+# sets ``(pad_to_mask_clearance 0)`` (``.kicad_pro``
+# ``solder_mask_clearance`` 0.0), its signal pads carry no per-pad
+# ``solder_mask_margin`` (only the net-less fiducials do, and they land
+# after this repair and are skipped by it), and its vias are tented, so
+# the real pad aperture is exactly the pad copper.  0.1 mm per side is a
+# deliberate conservative over-estimate of that aperture: it can only
+# push a via further out, never leave one inside the real opening.  The
+# relocated via must clear the pad aperture by ``_VIA_OPENING_CLEARANCE_MM``
+# measured between the two over-estimated apertures (via land + expansion
+# vs pad copper + expansion).
 _PAD_MASK_EXPANSION_MM = 0.1
 _VIA_OPENING_CLEARANCE_MM = 0.25
 
@@ -672,11 +678,11 @@ def _snapshot_board_uuids(pcb_path: Path) -> set[str]:
 def refill_zones_native(routed_path: Path) -> bool:
     """Re-fill all zones with the native kicad-cli filler.
 
-    ``kct route`` fills zones natively after routing
-    (``runner.run_fill_zones``), so the saved fill polygons carve around
-    the routed copper.  Any post-route copper edit must re-run that same
-    native fill; ``kct zones fill`` is the identical kicad-cli fill
-    exposed as a command (idempotent for already-filled boards).
+    ``kct route`` fills zones natively after routing, so the saved fill
+    polygons carve around the routed copper.  Any post-route copper edit
+    must re-fill; this shells out to ``python -m kicad_tools.cli zones
+    fill`` (``kct zones fill``, the kicad-cli filler exposed as a
+    command; idempotent for already-filled boards).
     """
     print("\n   Re-filling zones (native kicad-cli filler)...")
     result = subprocess.run(
@@ -715,10 +721,12 @@ def repair_same_net_via_opening_overlaps(routed_path: Path) -> list[str]:
     native zone refill that follows recomputes the pour carve-outs
     around the final copper.
 
-    Fails closed: a via whose attachment geometry the slide cannot prove
-    safe (no attached segment, an attached segment not aligned with the
-    slide axis, a target that still touches an aperture or crosses a
-    different-net one) raises instead of shipping suspect copper.
+    Fails closed on apertures only: a via whose attachment geometry the
+    slide cannot prove safe (no attached segment, an attached segment not
+    aligned with the slide axis, a target that still touches an aperture
+    or crosses a different-net one) raises instead of shipping suspect
+    copper.  The target is NOT checked against other-net tracks, vias or
+    zone clearance here; the Step 6 DRC is the backstop for those.
 
     Returns a list of human-readable move descriptions (empty when the
     router left nothing to repair).
