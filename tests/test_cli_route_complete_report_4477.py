@@ -242,9 +242,13 @@ class TestBlockingCopperReport:
         assert entry["link"] == {"start": "R2.1", "end": "U1.1"}
         assert entry["reason"]  # a decline reason is always present
         assert "WALL" in entry["blocking_copper"]
-        # Elapsed/deadline bookkeeping is per-link too (issue #4477 scope).
-        assert entry["elapsed_s"] >= 0.0
-        assert entry["budget_s"] > 0.0
+        # Issue #9581: this link was attempted and declined for a geometric
+        # reason (generous per-net budget, run deadline never hit) -- run
+        # totals stay at report level; per-link timing is null.
+        assert entry["attempted"] is True
+        assert entry["deadline_hit"] is False
+        assert entry["elapsed_s"] is None
+        assert entry["budget_s"] is None
 
     def test_no_report_file_when_nothing_unroutable(self, tmp_path: Path):
         # A fully-solvable board (no walled pocket) must not fabricate a
@@ -315,3 +319,159 @@ class TestExitSemantics:
             [str(board), "-o", str(out), "--complete", "--backend", "cpp", "--skip-drc"]
         )
         assert rc == 0
+
+
+class TestPerLinkDeadlineFlags:
+    """AC2/AC3 (issue #9581): per-link deadline truth, not run totals.
+
+    A run whose negotiation hit its deadline used to flag EVERY link as
+    ``deadline_hit`` (the run-level ``stats.deadline_hit`` was OR-ed into
+    each entry) and copied the whole-run ``elapsed_s``/``budget_s`` onto
+    every link.  The honest per-link signal is the decline reason itself:
+    ``route_netset`` stamps a link it never reached with
+    ``"deadline-exceeded"``; any other reason means the link was attempted.
+    """
+
+    @staticmethod
+    def _stub_router():
+        from types import SimpleNamespace
+
+        # Run-level totals: the negotiation DID hit its deadline.
+        stats = SimpleNamespace(deadline_hit=True, elapsed_s=12.345, budget_s=30.0)
+        return SimpleNamespace(
+            _lattice_negotiation_stats=stats,
+            _lattice_failure_reasons={
+                (101, 0): "deadline-exceeded",
+                (102, 0): "no-path-found",
+            },
+            _lattice_connection_endpoints={
+                (101, 0): ("A.1", "A.2"),
+                (102, 0): ("B.1", "B.2"),
+            },
+            _complete_creepage_refusals=[
+                {
+                    "net": "NETC",
+                    "reason": "creepage-rolled-back",
+                    "link": {"start": "C.1", "end": "C.2"},
+                    "blocking_net": "WALL",
+                    "measured_mm": 0.2,
+                    "required_mm": 0.4,
+                }
+            ],
+            net_names={101: "NETA", 102: "NETB"},
+        )
+
+    def test_three_link_classes_get_distinct_flags(self, tmp_path: Path):
+        from kicad_tools.cli.route_cmd import _build_complete_link_report
+
+        report = _build_complete_link_report(self._stub_router(), tmp_path / "absent.kicad_pcb")
+        assert report is not None
+        # Run level still reports the whole-run truth.
+        assert report["deadline_hit"] is True
+        assert isinstance(report["elapsed_s"], int | float)
+        assert report["budget_s"] is not None
+
+        by_net = {entry["net"]: entry for entry in report["unroutable_links"]}
+        deadline_link = by_net["NETA"]
+        attempted_link = by_net["NETB"]
+        creepage_link = by_net["NETC"]
+
+        # Never reached before the deadline.
+        assert deadline_link["deadline_hit"] is True
+        assert deadline_link["attempted"] is False
+        # Attempted, declined for a geometric reason.
+        assert attempted_link["deadline_hit"] is False
+        assert attempted_link["attempted"] is True
+        # Attempted (committed by the search), rolled back for creepage.
+        assert creepage_link["deadline_hit"] is False
+        assert creepage_link["attempted"] is True
+
+        # Per-link timing is null -- run totals stay at report level only.
+        for entry in (deadline_link, attempted_link, creepage_link):
+            assert entry["elapsed_s"] is None
+            assert entry["budget_s"] is None
+
+    def test_printer_distinguishes_not_attempted_from_declined(self, tmp_path: Path, capsys):
+        from kicad_tools.cli.route_cmd import (
+            _build_complete_link_report,
+            _print_complete_link_report,
+        )
+
+        report = _build_complete_link_report(self._stub_router(), tmp_path / "absent.kicad_pcb")
+        assert report is not None
+        _print_complete_link_report(report)
+        text = capsys.readouterr().out
+        # Exactly one not-attempted note, and it belongs to the deadline link.
+        assert text.count("not attempted: the run's deadline passed") == 1
+        neta_block = text.split("[NETA]")[1].split("[NETB]")[0]
+        assert "not attempted" in neta_block
+
+
+class TestBudgetDerivationLine:
+    """AC1 (issue #9581): a --complete run with --timeout states the
+    reserve derivation on stdout, using the values
+    ``_set_wall_clock_deadline`` stamps."""
+
+    def test_complete_run_prints_derivation(self, capsys):
+        from types import SimpleNamespace
+
+        from kicad_tools.cli import route_cmd
+
+        args = SimpleNamespace(timeout=100.0, auto_fix=False, complete=True)
+        route_cmd._set_wall_clock_deadline(args)
+        text = capsys.readouterr().out
+        # --auto-fix absent -> auto-fix reserve 0; the post-route reserve is
+        # whatever the helper computes for this timeout (floor/fraction/cap).
+        post_route = route_cmd._post_route_reserve(args, 100.0)
+        assert (
+            f"--timeout 100s - auto-fix reserve 0s - post-route reserve {post_route:.0f}s" in text
+        )
+        assert f"= routing budget {100.0 - post_route:.1f}s" in text
+
+    def test_line_absent_without_complete_flag(self, capsys):
+        from types import SimpleNamespace
+
+        from kicad_tools.cli import route_cmd
+
+        route_cmd._set_wall_clock_deadline(SimpleNamespace(timeout=100.0, auto_fix=False))
+        assert "--timeout" not in capsys.readouterr().out
+
+    def test_line_absent_without_timeout(self, capsys):
+        from types import SimpleNamespace
+
+        from kicad_tools.cli import route_cmd
+
+        route_cmd._set_wall_clock_deadline(SimpleNamespace(timeout=None, complete=True))
+        assert "routing budget" not in capsys.readouterr().out
+
+
+class TestStdoutLineBuffering:
+    """AC5 (issue #9581): stdout is line-buffered from the route entry
+    onward, so progress reaches a redirected log during the run."""
+
+    def test_entry_line_buffers_a_non_tty_stream(self, monkeypatch):
+        import io
+        import sys
+
+        from kicad_tools.cli.route_cmd import _in_process_main
+
+        wrapper = io.TextIOWrapper(io.BytesIO(), line_buffering=False)
+        assert wrapper.line_buffering is False
+        monkeypatch.setattr(sys, "stdout", wrapper)
+        with pytest.raises(SystemExit):
+            # ``--help`` exits at argparse -- i.e. after the entry-level
+            # stream setup has run, without loading any board.
+            _in_process_main(["--help"])
+        assert wrapper.line_buffering is True
+
+    def test_stream_without_reconfigure_is_tolerated(self, monkeypatch):
+        import io
+        import sys
+
+        from kicad_tools.cli.route_cmd import _in_process_main
+
+        stream = io.StringIO()
+        assert not hasattr(stream, "reconfigure")
+        monkeypatch.setattr(sys, "stdout", stream)
+        with pytest.raises(SystemExit):
+            _in_process_main(["--help"])

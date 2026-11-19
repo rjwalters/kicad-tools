@@ -783,6 +783,17 @@ def _set_wall_clock_deadline(args) -> None:
             float(timeout),
             reserve,
         )
+        # Issue #9581: state the derivation on stdout, at the start of a
+        # ``--complete`` run with ``--timeout`` -- the reserves are real time
+        # off the budget the user typed, and until now they were only visible
+        # in the logger.info line above, which never reaches a redirected
+        # log.  Exactly the values stamped on ``args`` below this branch.
+        if getattr(args, "complete", False) and not getattr(args, "quiet", False):
+            print(
+                f"--timeout {float(timeout):.0f}s - auto-fix reserve "
+                f"{float(reserve):.0f}s - post-route reserve {float(post_route):.0f}s "
+                f"= routing budget {float(timeout) - float(reserve) - float(post_route):.1f}s"
+            )
     else:
         args._wall_clock_deadline = None
         args._auto_fix_reserve = 0.0
@@ -19186,12 +19197,19 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
     already exist independently:
 
     * **Timing** -- the lattice netset negotiation's per-connection decline
-      reason (``LatticePathfinder.failure_reasons``, issue #4278) plus the
-      per-link wall-clock budget stats (``LatticeNegotiationStats``,
-      issue #4472): elapsed time, the granted budget, and whether the
-      deadline was hit.  A connection never reached before the deadline is
-      declined with the honest reason ``"deadline-exceeded"`` (see
-      :meth:`~kicad_tools.router.lattice.pathfinder.LatticePathfinder.route_netset`).
+      reason (``LatticePathfinder.failure_reasons``, issue #4278).  The
+      per-link deadline signal IS that reason: a connection never reached
+      before the deadline is declined with the honest reason
+      ``"deadline-exceeded"``
+      (:meth:`~kicad_tools.router.lattice.pathfinder.LatticePathfinder.route_netset`),
+      any other reason means the link was attempted (and declined or
+      rolled back).  Per link, ``deadline_hit`` is true only for the
+      deadline-exceeded reason and ``attempted`` is its complement
+      (issue #9581: they used to be OR-ed with / copied from the
+      whole-run negotiation totals, so once a run hit its deadline every
+      link was flagged as deadline-hit).  Per-link ``elapsed_s`` /
+      ``budget_s`` are ``None`` -- the wall-clock totals are whole-run
+      quantities and stay at report level only.
     * **Blocking copper** -- the SAME obstruction enumeration
       ``kct net-status --why`` prints
       (:func:`~kicad_tools.router.stuck_classifier.classify_stuck_nets`),
@@ -19277,7 +19295,14 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
             "net": net_name,
             "reason": reason,
             "link": {"start": ep[0], "end": ep[1]} if ep else None,
-            "deadline_hit": bool(reason == "deadline-exceeded" or stats.deadline_hit),
+            # Issue #9581: per-link truth.  The reason IS the per-link
+            # deadline signal -- ``route_netset`` stamps a link it never
+            # reached with ``"deadline-exceeded"``; any other reason means
+            # the link was attempted.  (This used to be OR-ed with the
+            # whole-run ``stats.deadline_hit``, so once a run hit its
+            # deadline every link was flagged.)
+            "deadline_hit": bool(reason == "deadline-exceeded"),
+            "attempted": bool(reason != "deadline-exceeded"),
             # Issue #4979: machine-readable "this residual is layer-
             # constrained" flag.  A link the hard layer intent declined
             # (``layer-constrained-start``/``-end``, or a search the hard
@@ -19288,8 +19313,12 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
             # reason, because the remedy is different (relax/repoint the
             # net-class ``avoid_layers``, or give the net a legal corridor).
             "layer_constrained": _is_layer_constrained_reason(reason),
-            "elapsed_s": round(stats.elapsed_s, 3),
-            "budget_s": round(stats.budget_s, 3) if stats.budget_s is not None else None,
+            # Issue #9581: ``stats.elapsed_s`` / ``stats.budget_s`` are
+            # WHOLE-negotiation totals, not this link's; copying them onto
+            # every entry made a deadline run look like each link burned
+            # the full budget.  Run totals stay at report level only.
+            "elapsed_s": None,
+            "budget_s": None,
             "blocking_copper": list(diag.blocking_nets) if diag else [],
             "nearest_blocker_mm": (
                 round(diag.nearest_blocker_mm, 4)
@@ -19307,10 +19336,15 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
         links.append(
             {
                 **ref,
+                # Issue #9581: a creepage-rolled-back link WAS attempted
+                # (committed by the search, then rolled back for pairwise
+                # creepage) -- attempted, not deadline-hit, and the timing
+                # totals below are run-level quantities, not per link.
                 "deadline_hit": False,
+                "attempted": True,
                 "layer_constrained": False,
-                "elapsed_s": round(stats.elapsed_s, 3),
-                "budget_s": round(stats.budget_s, 3) if stats.budget_s is not None else None,
+                "elapsed_s": None,
+                "budget_s": None,
                 "blocking_copper": [ref["blocking_net"]],
                 "nearest_blocker_mm": ref["measured_mm"],
                 "stuck_classification": None,
@@ -19345,6 +19379,11 @@ def _print_complete_link_report(report: dict) -> None:
         link = entry["link"]
         ep = f"{link['start']} <-> {link['end']}" if link else "(pads unknown)"
         print(f"  [{entry['net']}] {ep} -- {entry['reason']}")
+        # Issue #9581: say explicitly when a link was never attempted
+        # because the run's deadline passed first -- distinct from an
+        # attempted link that the search declined on its own merits.
+        if entry.get("attempted") is False:
+            print("      not attempted: the run's deadline passed before this link was reached")
         if entry.get("required_mm") is not None:
             print(
                 f"      creepage: {entry['net']} vs {entry['blocking_net']}: "
@@ -19989,6 +20028,15 @@ def _list_unverified_sets(output_path: object, *, file=None) -> list[Path]:
 
 
 def _in_process_main(argv: list[str] | None = None) -> int:
+    # Issue #9581: the route command mixes bare print() with flush_print();
+    # with stdout redirected Python block-buffers the bare prints and a
+    # long run shows nothing until exit.  Line-buffer once here -- the
+    # single entry every path shares (CLI, supervised worker, tests) --
+    # rather than sprinkling flush=True over hundreds of call sites.
+    # Guarded: a stream without reconfigure (canned test doubles) keeps
+    # its own buffering.
+    with contextlib.suppress(AttributeError, ValueError):
+        sys.stdout.reconfigure(line_buffering=True)  # type: ignore[union-attr]
     from .route_receipt import run
 
     return run(lambda: _in_process_main_impl(argv))
