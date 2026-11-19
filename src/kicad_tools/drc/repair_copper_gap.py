@@ -34,10 +34,11 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from shapely.geometry import LineString, Point, box  # type: ignore[import-untyped]
+from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
 from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
 
 from ..sexp import SExp
@@ -179,6 +180,16 @@ def _xy(node: SExp | None) -> tuple[float, float] | None:
     if len(atoms) < 2:
         return None
     return float(atoms[0]), float(atoms[1])
+
+
+def _pair_within_tol(
+    a: Sequence[tuple[float, float]],
+    b: Sequence[tuple[float, float]],
+) -> bool:
+    """Pointwise endpoint match within ``_DESCRIPTOR_TOL_MM``."""
+    return (
+        math.dist(a[0], b[0]) <= _DESCRIPTOR_TOL_MM and math.dist(a[1], b[1]) <= _DESCRIPTOR_TOL_MM
+    )
 
 
 class CopperGapRepairer(DrillClearanceRepairer):
@@ -335,7 +346,15 @@ class CopperGapRepairer(DrillClearanceRepairer):
             if w_node is None or abs(_num(w_node) - width) > _DESCRIPTOR_TOL_MM:
                 continue
             start, end = _xy(seg_node.find("start")), _xy(seg_node.find("end"))
-            if start is None or end is None or sorted((start, end)) != ends:
+            if start is None or end is None:
+                continue
+            # Descriptor endpoints are quantised to 1 um and sorted *after*
+            # quantisation (``copper_refs.segment_ref``), while these are raw
+            # file coordinates -- so match as an unordered pair within the
+            # descriptor tolerance (the two sorts can disagree for endpoints
+            # within ~1 um of each other).
+            pair = sorted((start, end))
+            if not (_pair_within_tol(pair, ends) or _pair_within_tol(pair, (ends[1], ends[0]))):
                 continue
             return start, end, _num(w_node), self._net_name(seg_node)
         return None
@@ -360,10 +379,15 @@ class CopperGapRepairer(DrillClearanceRepairer):
         The identity is the same one ``validate/rules/physical_gap.py``
         writes into a finding's ``items`` (``pad.uuid`` else
         ``"<reference>:pad:<enumerate index>"``), so a finding's pad side
-        resolves without parsing its message.
+        resolves without parsing its message.  The polygon is the rule's own
+        model (``clearance._pad_polygon``, board-relative) translated by the
+        board origin into the file frame the descriptors use.
         """
+        from shapely.affinity import translate  # type: ignore[import-untyped]
+
         from kicad_tools.core.geometry import rotate_pad_offset
         from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.rules.clearance import _pad_polygon
 
         pcb = PCB(self.doc)
         ox, oy = pcb._board_origin
@@ -377,9 +401,17 @@ class CopperGapRepairer(DrillClearanceRepairer):
                 identity = pad.uuid or f"{fp.reference}:pad:{index}"
                 if identity in pads:
                     continue
-                poly = self._pad_polygon(pad, cx, cy)
+                # The same pads ``physical_gap`` collects (``#9399``): any
+                # other shape can never be a finding's pad side.
+                if pad.type == "np_thru_hole":
+                    continue
+                if pad.shape not in {"circle", "rect", "oval", "obround", "roundrect"}:
+                    continue
+                poly = _pad_polygon(pad, fp)
                 if poly is None:
                     continue
+                if ox or oy:
+                    poly = translate(poly, ox, oy)
                 pads[identity] = (
                     poly,
                     (cx, cy),
@@ -388,36 +420,6 @@ class CopperGapRepairer(DrillClearanceRepairer):
                     f"{fp.reference}/{pad.number}",
                 )
         return pads
-
-    @staticmethod
-    def _pad_polygon(pad, cx: float, cy: float) -> BaseGeometry | None:
-        """Copper outline of a pad (the shapes ``physical_gap`` collects)."""
-        w, h = pad.size
-        if w <= 0 or h <= 0:
-            return None
-        shape = pad.shape
-        if shape == "rect":
-            poly: BaseGeometry = box(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
-        elif shape == "roundrect":
-            r = min(max(pad.roundrect_rratio, 0.0) * min(w, h), min(w, h) / 2)
-            inner = box(cx - w / 2 + r, cy - h / 2 + r, cx + w / 2 - r, cy + h / 2 - r)
-            poly = inner.buffer(r, quad_segs=16) if r > 0 else inner
-        elif shape == "circle":
-            poly = Point(cx, cy).buffer(w / 2, quad_segs=32)
-        elif shape in ("oval", "oblong"):
-            if w >= h:
-                half = (w - h) / 2
-                poly = LineString([(cx - half, cy), (cx + half, cy)]).buffer(h / 2, quad_segs=16)
-            else:
-                half = (h - w) / 2
-                poly = LineString([(cx, cy - half), (cx, cy + half)]).buffer(w / 2, quad_segs=16)
-        else:
-            return None
-        if pad.rotation % 360:
-            from shapely.affinity import rotate  # type: ignore[import-untyped]
-
-            poly = rotate(poly, -pad.rotation, origin=(cx, cy))
-        return poly
 
     # ------------------------------------------------------------------
     # Repair strategies

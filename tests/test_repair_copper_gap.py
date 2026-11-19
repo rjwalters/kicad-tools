@@ -99,8 +99,32 @@ TANGENT = _seg("trk-t", (95, 105.3), (105, 105.3)) + (
     '  (via (at 100 105.75) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-t"))\n'
     + LINK
 )
+# Sub-micron variant of TANGENT: the file coordinates sit 0.3 um off whole
+# micrometres, so the descriptor (TRACE above) quantises 95.0003 -> 95 and
+# 105.0003 -> 105 while the segment itself stays sub-micron -- the endpoint
+# match must tolerate the quantisation (judge note on PR #9396).
+TANGENT_SUBUM = _seg("trk-t", (95.0003, 105.3), (105.0003, 105.3)) + (
+    '  (via (at 100 105.75) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-t"))\n'
+    + LINK
+)
 # A track ending at the fan-out via's centre: it must move with the via.
 ATTACHED = _seg("trk-v", (100, 103), (100, 100.9))
+
+# A same-net obround pad (the shape name ``physical_gap`` collects) with the
+# same fan-out geometry as PAD_VIA: pad edge y=105.5, via edge y=105.6.
+OBROUND_PAD = (
+    '  (footprint "test:R3" (layer "F.Cu") (at 110 105)\n'
+    '    (property "Reference" "R3" (at 0 -1.5 0) (layer "F.SilkS")\n'
+    "      (effects (font (size 1 1) (thickness 0.15))))\n"
+    '    (property "Value" "R" (at 0 1.5 0) (layer "F.Fab")\n'
+    "      (effects (font (size 1 1) (thickness 0.15))))\n"
+    '    (pad "1" smd obround (at 0 0) (size 2 1) (layers "F.Cu" "F.Paste" "F.Mask") '
+    '(net 1 "N1") (uuid "pad-r3-1"))\n'
+    "  )\n"
+    '  (via (at 110 105.9) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-o"))'
+)
+OBROUND = "pad-r3-1"
+VIA_OBROUND = "Via@110/105.9:F.Cu-B.Cu:d0.3/s0.6"
 
 
 def _board(tmp_path: Path, copper: str) -> Path:
@@ -165,6 +189,21 @@ def test_via_beside_own_pad_moves_clear_of_the_pad(tmp_path):
     assert y == pytest.approx(100.96, abs=0.005)
 
 
+def test_via_beside_own_obround_pad_is_repaired(tmp_path):
+    # Regression (#9399): the hand-rolled pad model matched "oblong", a shape
+    # name KiCad never writes, so obround pad sides were declined
+    # ``side_not_found``.  The rule's own ``clearance._pad_polygon`` model is
+    # reused now, so the pad resolves and the via is pushed clear.
+    board = _board(tmp_path, OBROUND_PAD)
+    repairer = CopperGapRepairer(board)
+    result = repairer.repair_gaps([_finding([OBROUND, VIA_OBROUND])], max_displacement=1.0)
+    assert result.repaired == 1 and result.opened == 1 and not result.unrepaired
+    repairer.save(board)
+    x, y = _via(board, "via-o")
+    assert x == 110.0
+    assert y == pytest.approx(105.96, abs=0.005)
+
+
 def test_via_snaps_to_pad_centre_when_a_process_is_declared(tmp_path):
     from kicad_tools.manufacturers.base import DesignRules
 
@@ -226,6 +265,43 @@ def test_tangent_track_snaps_the_via_onto_the_centreline(tmp_path):
     # The track itself never moves.
     assert _end(board, "trk-t", "start") == (95.0, 105.3)
     assert _end(board, "trk-t", "end") == (105.0, 105.3)
+
+
+def test_tangent_track_with_submicron_endpoints_still_snaps(tmp_path):
+    # Regression (judge note on PR #9396): exact endpoint equality against the
+    # 1 um-quantised descriptor silently declined sub-micron geometry as
+    # ``track_not_found`` -- 35% of candidate segments on board 07.
+    board = _board(tmp_path, TANGENT_SUBUM)
+    repairer = CopperGapRepairer(board)
+    result = repairer.repair_gaps([_finding([TRACE, VIA_TANGENT], required=0.127, actual=0.05)])
+    assert result.repaired == 1 and result.snapped_to_track == 1 and not result.unrepaired
+    repairer.save(board)
+    assert _via(board, "via-t") == (100.0, 105.3)
+    # The track itself never moves (sub-micron coordinates included).
+    assert _end(board, "trk-t", "start") == (95.0003, 105.3)
+    assert _end(board, "trk-t", "end") == (105.0003, 105.3)
+
+
+def test_tangent_track_descriptor_sort_flip_still_resolves(tmp_path):
+    # Endpoints whose raw and 1 um-quantised sorts disagree (both x quantise
+    # to 100 while the raw x order is opposite to the y order): the descriptor
+    # sorts (100/100) first, the raw coordinates sort (100.0, 105.3) first,
+    # so the match must try both orderings.
+    copper = _seg("trk-f", (100.0004, 100), (100.0, 105.3)) + (
+        '  (via (at 100.45 102.65) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") '
+        '(net 1) (uuid "via-f"))'
+    )
+    board = _board(tmp_path, copper)
+    result = CopperGapRepairer(board).repair_gaps(
+        [
+            _finding(
+                ["Trace@F.Cu:w0.2:100/100~100/105.3", "Via@100.45/102.65:F.Cu-B.Cu:d0.3/s0.6"],
+                required=0.127,
+                actual=0.05,
+            )
+        ]
+    )
+    assert result.repaired == 1 and result.snapped_to_track == 1 and not result.unrepaired
 
 
 def test_dry_run_predicts_without_modifying(tmp_path):
