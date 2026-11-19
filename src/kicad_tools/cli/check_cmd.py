@@ -1446,25 +1446,34 @@ def _resolve_check_scope(args: argparse.Namespace, parser: argparse.ArgumentPars
     return scope
 
 
-def _inactive_input_driven_rules(checker: Any) -> frozenset[str]:
-    """Rules that could not produce findings this run for lack of input.
+def _inactive_rules_from_coverage(coverage: dict[str, Any]) -> frozenset[str]:
+    """Categories that could not produce findings this run, from the coverage map.
 
-    Mirrors :func:`kicad_tools.validate.coverage.precheck`: ``ampacity`` needs
-    a net-class-map carrying ``target_ampacity`` entries, ``path_ampacity``
-    needs ``--current-paths`` specs.  ``--migrate-waivers`` uses this so an
-    orphan whose rule never ran is reported as such instead of implying the
-    key changed (issue #9504).  ``--only``/``--skip`` cannot combine with
-    ``--migrate-waivers``, so input absence is the only way a rule goes
-    unevaluated there.
+    ``run_selected_checks`` records one
+    :class:`~kicad_tools.validate.coverage.Coverage` per category, and a
+    ``skipped`` state there means the category's inputs were absent (or the
+    category is opt-in and was not opted in), so its rule could not produce
+    findings.  Deriving the inactive set from those recorded states -- instead
+    of re-deriving :func:`kicad_tools.validate.coverage.precheck`'s conditions
+    by hand -- covers every skip reason (issue #9529): the two the previous
+    hand-mirrored helper knew (``ampacity``, ``path_ampacity``) and the nine
+    more ``precheck`` carries, with no drift when ``precheck`` grows another.
+
+    ``unknown`` states are deliberately *not* inactive: there the rule did run
+    and may still produce findings (a diff-pair rule for pairs the net-class
+    map cannot judge, ampacity with declared-but-unmapped currents), so an
+    orphan naming one keeps the generic wording.
+
+    ``--migrate-waivers`` uses this so an orphan whose rule never ran is
+    reported as such instead of implying the key changed (issue #9504).
+    ``--only``/``--skip`` cannot combine with ``--migrate-waivers``, so the
+    ``deselected:*`` skip reasons never reach this path.
     """
-    from kicad_tools.validate.coverage import _declares_ampacity
+    from kicad_tools.validate.coverage import SKIPPED
 
-    inactive: set[str] = set()
-    if not _declares_ampacity(getattr(checker, "net_class_map", None)):
-        inactive.add("ampacity")
-    if not getattr(checker, "current_path_specs", None):
-        inactive.add("path_ampacity")
-    return frozenset(inactive)
+    return frozenset(
+        name for name, cov in coverage.items() if getattr(cov, "state", None) == SKIPPED
+    )
 
 
 def _run_waiver_migration(
@@ -2863,7 +2872,7 @@ def main(argv: list[str] | None = None) -> int:
             pcb,
             gw_path,
             write=args.migrate_write,
-            inactive_rules=_inactive_input_driven_rules(checker),
+            inactive_rules=_inactive_rules_from_coverage(coverage),
         )
 
     # Issue #5946: ``--waive KEY`` records reviewed, evidence-bound waivers for

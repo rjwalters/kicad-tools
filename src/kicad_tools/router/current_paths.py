@@ -284,6 +284,14 @@ _PAD_EPS = 1e-6
 # copper (Issue #7210).
 _VIA_CENTRE_EPS = 1e-3
 
+# Same-layer branches of a parallel group must overlap by more than this
+# (mm) to merge into one conductor (issue #9542). At exactly half the summed
+# widths of centreline offset the two tracks touch along one line with no
+# shared area -- current sharing across a tangency is no better established
+# than across a gap, so that boundary stays ambiguous like a gap. Floating
+# point alone must not flip the verdict either way.
+_SAME_LAYER_OVERLAP_EPS = 1e-6
+
 
 # Which waveform assumption produced a path's thermal design current
 # (:meth:`CurrentPathSpec.thermal_design_current`). Reported verbatim in
@@ -794,9 +802,11 @@ class ParallelGroup:
 
     Attributes:
         branches: One tuple of segments per branch. Each branch lies on a
-            single copper layer, branches sit on pairwise distinct layers, and
-            they follow the same route, so they share current as one wider
-            conductor whose capacity is judged on the summed cross-section.
+            single copper layer and follows the same route. Branches either
+            sit on pairwise distinct layers, or share a layer only when
+            their copper overlaps into one contiguous bar (issue #9542), so
+            they share current as one wider conductor whose capacity is
+            judged on the effective width :attr:`width_mm` reports.
     """
 
     branches: tuple[tuple[Segment, ...], ...]
@@ -805,12 +815,96 @@ class ParallelGroup:
     def segments(self) -> tuple[Segment, ...]:
         return tuple(seg for branch in self.branches for seg in branch)
 
+    @property
+    def same_layer(self) -> bool:
+        """True when two branches share a copper layer (issue #9542)."""
+        layers = [branch[0].layer for branch in self.branches]
+        return len(layers) != len(set(layers))
+
+    def layer_widths(self) -> dict[str, float]:
+        """Effective conductor width this group provides, per copper layer.
+
+        Branches on distinct layers each contribute their own narrowest
+        width, so a 2 x 1.0 mm two-layer bar reports 1.0 mm per layer.
+        Branches on one layer overlap into a single bar whose width is the
+        union extent of the merged copper -- centreline offset plus both
+        half-widths (issue #9542) -- never their sum: two 1.0 mm tracks
+        offset 0.6 mm are 1.6 mm of copper, not 2.0 mm. A branch wholly
+        inside another's shadow therefore under-reports, the fail-closed
+        direction.
+        """
+        by_layer: dict[str, list[tuple[Segment, ...]]] = {}
+        for branch in self.branches:
+            by_layer.setdefault(branch[0].layer, []).append(branch)
+        widths: dict[str, float] = {}
+        for layer, layer_branches in by_layer.items():
+            widths[layer] = (
+                _merged_same_layer_width(layer_branches)
+                if len(layer_branches) > 1
+                else _branch_min_width(layer_branches[0])
+            )
+        return widths
+
+    @property
+    def width_mm(self) -> float:
+        """The one width figure every surface reports for this group.
+
+        The sum of :meth:`layer_widths` -- merged within a layer, summed
+        across layers -- so ``min_width`` and ``path_ampacity`` can never
+        print two different figures for one group.
+        """
+        return sum(self.layer_widths().values())
+
     def describe(self) -> str:
         parts = [
             f"{branch[0].layer} {min(seg.width for seg in branch):.3f}mm"
             for branch in self.branches
         ]
         return "parallel group " + " + ".join(parts)
+
+
+def _branch_min_width(branch: Sequence[Segment]) -> float:
+    """The branch's pinch width -- the width its capacity is judged on."""
+    return min(seg.width for seg in branch)
+
+
+def _max_branch_distance(a: Sequence[Segment], b: Sequence[Segment]) -> float:
+    """Largest nearest-centreline distance between two branches.
+
+    For each endpoint of either branch's segments, the distance to the
+    closest segment of the other branch; the maximum over both directions.
+    For two branches that step sideways then run parallel, this is their
+    centreline offset (the step's pad-end endpoints sit at distance zero).
+    """
+
+    def one_way(src: Sequence[Segment], dst: Sequence[Segment]) -> float:
+        return max(
+            min(point_to_segment_distance(*point, *ref.start, *ref.end) for ref in dst)
+            for seg in src
+            for point in (seg.start, seg.end)
+        )
+
+    return max(one_way(a, b), one_way(b, a))
+
+
+def _merged_same_layer_width(branches: Sequence[Sequence[Segment]]) -> float:
+    """Union extent of overlapping same-layer branches (issue #9542).
+
+    The extreme ordered pair of branches sets the extent: their centreline
+    offset plus both pinch half-widths. Exact for parallel straight runs of
+    any widths; only reached from :meth:`ParallelGroup.layer_widths` with
+    two or more branches on one layer.
+    """
+    width = 0.0
+    for i, a in enumerate(branches):
+        for b in branches[i + 1 :]:
+            width = max(
+                width,
+                _max_branch_distance(a, b)
+                + _branch_min_width(a) / 2.0
+                + _branch_min_width(b) / 2.0,
+            )
+    return width
 
 
 def _segment_midpoint(segment: Segment) -> tuple[float, float]:
@@ -833,15 +927,17 @@ class MinimumWidth:
 
     Attributes:
         width_mm: The narrowest width along the whole path. A deliberately
-            doubled stretch (:class:`ParallelGroup`) contributes its
-            **summed** width -- the same expression ``path_ampacity``
-            prints for that group -- not one branch's width, so a 2 x 1.0 mm
-            run counts as 2.0 mm rather than 1.0 mm.
+            doubled stretch (:class:`ParallelGroup`) contributes
+            :attr:`ParallelGroup.width_mm` -- the same expression
+            ``path_ampacity`` prints for that group -- not one branch's
+            width, so a 2 x 1.0 mm run counts as 2.0 mm rather than 1.0 mm,
+            and two overlapping 1.0 mm F.Cu tracks offset 0.6 mm count as
+            1.6 mm of merged copper (#9542).
         layer: Copper layer of the element that set ``width_mm``. For a
             parallel group, the layer of its narrowest branch's pinch
             segment.
         position: Midpoint of that segment, in **board** coordinates (mm).
-        parallel_group: True when ``width_mm`` is a group's summed width,
+        parallel_group: True when ``width_mm`` is a group's effective width,
             so a reader never mistakes it for one trace's width.
     """
 
@@ -1138,11 +1234,13 @@ class PathResolution:
 
         Deliberately doubled copper is measured as one conductor, mirroring
         how ``path_ampacity`` judges it: a :class:`ParallelGroup` contributes
-        a single candidate, its **summed** width
-        ``sum(min(seg.width for seg in branch) for branch in branches)`` --
-        the same expression that rule's own message prints -- while every
-        ungrouped segment contributes its own width. So a stretch doubled on
-        two layers at 1.0 mm enters as 2.0 mm, not twice as 1.0 mm.
+        a single candidate at :attr:`ParallelGroup.width_mm`, its effective
+        width -- per layer, overlapping same-layer branches merge at their
+        union extent while distinct layers each contribute their own narrowest
+        width (#9542) -- the same expression that rule's own message prints.
+        So a stretch doubled on two layers at 1.0 mm enters as 2.0 mm, not
+        twice as 1.0 mm, and two overlapping 1.0 mm F.Cu tracks offset 0.6 mm
+        enter as 1.6 mm of merged copper, not 2.0 mm.
 
         ``sense_taps`` are excluded by construction: a Kelvin sense tap is
         never part of ``segments``, so thin sense copper off an endpoint pad
@@ -1160,10 +1258,10 @@ class PathResolution:
         }
 
         def _group_candidate(group: ParallelGroup) -> MinimumWidth:
-            # The summed-width expression ``path_ampacity`` prints for this
-            # group, so the audit and the check never report two different
-            # "summed width" figures for one group.
-            width = sum(min(seg.width for seg in branch) for branch in group.branches)
+            # The one width figure every surface reports for this group
+            # (``path_ampacity``'s message included), so the audit and the
+            # check never report two different figures for one group.
+            width = group.width_mm
             branch = min(group.branches, key=lambda b: min(seg.width for seg in b))
             pinch = min(branch, key=lambda seg: seg.width)
             return MinimumWidth(
@@ -1924,16 +2022,31 @@ class _SPEdge:
 
 
 def _group_qualifies(branches: list[list[Segment]]) -> bool:
-    """A simple parallel group: one layer per branch, distinct layers, same route."""
+    """A simple parallel group: one layer per branch, same route, overlapped
+    same-layer copper.
+
+    Branches on different layers must follow the same route (each endpoint
+    within half the group's narrowest width of the other branch). Branches
+    on one layer must instead **overlap** -- their copper forms one
+    contiguous bar -- which holds while the centreline offset stays under
+    half the pair's summed widths (issue #9542); a tangency or a real gap
+    does not share current any better than two separate conductors, so it
+    stays unsupported.
+    """
     if any(not b or len({s.layer for s in b}) != 1 for b in branches):
-        return False
-    if len({b[0].layer for b in branches}) != len(branches):
         return False
     tol = min(s.width for b in branches for s in b) / 2.0
     # Branches span the same two junctions, so each must lie on every other.
     for branch in branches:
         for other in branches:
             if other is branch:
+                continue
+            if branch[0].layer == other[0].layer:
+                overlap = (
+                    _branch_min_width(branch) + _branch_min_width(other)
+                ) / 2.0 - _max_branch_distance(branch, other)
+                if overlap <= _SAME_LAYER_OVERLAP_EPS:
+                    return False
                 continue
             for seg in branch:
                 for point in (seg.start, seg.end):
@@ -2022,6 +2135,36 @@ def _reduce_parallel_groups(
         if stubs:
             edges = [e for e in edges if e not in stubs]
             changed = True
+        # Series-merge non-load degree-2 junctions to a fixpoint BEFORE the
+        # grouping pass below. A half-merged junction pair -- some branches
+        # already merged, one still in pieces -- would otherwise qualify and
+        # group with only some of its parallel branches, then group AGAIN
+        # around the merged edge on a later pass, nesting one group inside
+        # another and double-listing the first group's segments across the
+        # two (three overlapping same-layer bars, issue #9542). Series
+        # merging never changes a node's degree besides removing the merged
+        # node itself, so running it straight to exhaustion before grouping
+        # or stub pruning is order-safe.
+        while True:
+            incident: dict[_Node, list[_SPEdge]] = {}
+            for e in edges:
+                incident.setdefault(e.u, []).append(e)
+                incident.setdefault(e.v, []).append(e)
+            merged_one = False
+            for node, inc in incident.items():
+                if node in keep or len(inc) != 2 or inc[0] is inc[1]:
+                    continue
+                a, b = inc
+                ends = [x for e in (a, b) for x in (e.u, e.v) if x != node]
+                if len(ends) != 2 or ends[0] == ends[1]:
+                    continue
+                merged = _SPEdge(ends[0], ends[1], a.segments + b.segments, a.grouped or b.grouped)
+                edges = [e for e in edges if e is not a and e is not b] + [merged]
+                merged_one = True
+                break
+            if not merged_one:
+                break
+            changed = True
         by_pair: dict[frozenset[_Node], list[_SPEdge]] = {}
         for e in edges:
             by_pair.setdefault(frozenset((e.u, e.v)), []).append(e)
@@ -2039,21 +2182,6 @@ def _reduce_parallel_groups(
             )
             edges = [e for e in edges if e not in members] + [merged]
             changed = True
-        incident: dict[_Node, list[_SPEdge]] = {}
-        for e in edges:
-            incident.setdefault(e.u, []).append(e)
-            incident.setdefault(e.v, []).append(e)
-        for node, inc in incident.items():
-            if node in keep or len(inc) != 2 or inc[0] is inc[1]:
-                continue
-            a, b = inc
-            ends = [x for e in (a, b) for x in (e.u, e.v) if x != node]
-            if len(ends) != 2 or ends[0] == ends[1]:
-                continue
-            merged = _SPEdge(ends[0], ends[1], a.segments + b.segments, a.grouped or b.grouped)
-            edges = [e for e in edges if e is not a and e is not b] + [merged]
-            changed = True
-            break
     nodes = {n for e in edges for n in (e.u, e.v)}
     if edges and len(edges) > len(nodes) - 1:
         return None
@@ -2106,15 +2234,50 @@ def describe_witness(witness: dict[str, object], origin: tuple[float, float] = (
     return out
 
 
+def _chain_branch_segments(branch: list[Segment]) -> list[Segment]:
+    """Order a branch's segments into one path-ordered chain.
+
+    Series merging concatenates a branch's edges in reduction order, so a
+    stepped branch reaches the blocking-branches witness as e.g.
+    ``[rejoin, step, run]``; a witness that wants the branch's true
+    endpoints needs them chained first (the ambiguity message of issue
+    #9542, whose stepped bars otherwise render a degenerate start==end
+    span). Segments that do not form one chain keep their given order.
+    """
+    remaining = list(branch)
+    if not remaining:
+        return remaining
+    chain = [remaining.pop(0)]
+    while remaining:
+        tail = _node_key(chain[-1].end)
+        head = _node_key(chain[0].start)
+        for i, seg in enumerate(remaining):
+            if _node_key(seg.start) == tail:
+                chain.append(seg)
+                break
+            if _node_key(seg.end) == head:
+                chain.insert(0, seg)
+                break
+        else:
+            break
+        remaining.pop(i)
+    return chain
+
+
 def _blocking_branches_witness(blockers: list[list[Segment]]) -> list[dict[str, object]]:
-    return [
-        {
-            "layer": b[0].layer,
-            "start": [b[0].start[0], b[0].start[1]],
-            "end": [b[-1].end[0], b[-1].end[1]],
-        }
-        for b in blockers
-    ]
+    witness: list[dict[str, object]] = []
+    for branch in blockers:
+        chain = _chain_branch_segments(list(branch))
+        if not chain:
+            continue
+        witness.append(
+            {
+                "layer": chain[0].layer,
+                "start": [chain[0].start[0], chain[0].start[1]],
+                "end": [chain[-1].end[0], chain[-1].end[1]],
+            }
+        )
+    return witness
 
 
 def _pad_covers(pcb: PCB, ref: str, pad_number: str, point: tuple[float, float]) -> bool:
@@ -2422,14 +2585,25 @@ def resolve_current_path(
         witness = _component_cycle_witness(adjacency, start, arrays)
         if witness and blockers:
             witness["blocking_branches"] = _blocking_branches_witness(blockers)
+        reason = (
+            "declared endpoints sit on a net whose routed copper contains a "
+            "loop/parallel return path reachable from them -- current split "
+            "between branches cannot be determined from a single resolved path"
+        )
+        # Same-layer blocking branches name their own case (issue #9542):
+        # parallel same-layer copper is supported only when the tracks
+        # overlap into one conductor, so say what to draw instead.
+        blocker_layers = [branch[0].layer for branch in blockers if branch]
+        if len(blocker_layers) > len(set(blocker_layers)):
+            reason += (
+                "; parallel same-layer copper resolves only when the tracks "
+                "overlap into one conductor -- use overlapping tracks, a "
+                "zone, or a two-layer parallel group"
+            )
         return PathResolution(
             spec=spec,
             status=STATUS_AMBIGUOUS,
-            reason=(
-                "declared endpoints sit on a net whose routed copper contains a "
-                "loop/parallel return path reachable from them -- current split "
-                "between branches cannot be determined from a single resolved path"
-            ),
+            reason=reason,
             source=source,
             sink=sink,
             witness=witness,
