@@ -249,12 +249,13 @@ def test_excluded_custom_pad_with_unsupported_primitive_still_refuses(board):
         board.read_text().replace(
             '(pad "1" smd rect (at 0 0) (size 0.6 0.6)',
             '(pad "1" smd custom (at 0 0) (size 0.6 0.6) '
-            "(primitives (gr_circle (center 0 0) (end 0.3 0) (width 0) (fill yes)))",
+            "(primitives (gr_rect (start 0 0) (end 0.3 0.3) "
+            "(stroke (width 0) (type default)) (fill yes)))",
             1,
         )
     )
     result = analyze_routing_placement(board)
-    with pytest.raises(ValueError, match="gr_circle"):
+    with pytest.raises(ValueError, match="gr_rect"):
         load_pcb_for_routing(str(board), placement_disposition=result, force_python=True)
 
 
