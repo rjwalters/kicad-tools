@@ -34,11 +34,20 @@ Rules come from ``kct check`` itself (:func:`.check_cmd.build_check_rule_set`
 + :func:`.check_cmd.run_selected_checks`), so a probe/check disagreement is a
 bug -- there is no second clearance tolerance anywhere in this module.  The
 categories run are :data:`PROBE_CHECK_CATEGORIES` (pairwise copper clearance
-and shorts, zone-fill clearance, board-edge clearance, trace/via dimensions,
-authored net-class clearances on copper, via-in-pad / via-type / via-under-
-body, zero-length segments).  Arcs are checked through a 1 um-sagitta
-tessellation appended for the check pass only; the board itself is written
-with a real ``(arc ...)`` node.
+and shorts, the net-agnostic fab-view copper-gap pass, thin-copper slivers,
+zone-fill clearance, board-edge clearance, trace/via dimensions, authored
+net-class clearances on copper, via-in-pad / via-type / via-under-body,
+zero-length segments).  The remaining default ``kct check`` copper categories
+are out of scope on purpose: ``sharp_trace_corner``, ``dangling_copper``,
+``width_consistency``, ``isolated_copper``, ``redundant_copper`` and
+``missing_plated_hole`` are routing-style / process advisories that report at
+warning severity, so excluding them cannot produce the probe-clean /
+check-failed disagreement this command exists to prevent, and
+``netclass_floor`` grades the declared net-class sidecar rather than written
+copper.  Arcs are checked through a 1 um-sagitta tessellation appended for
+the check pass only (with the check width inflated by twice the sagitta
+bound so the tessellated copper always covers the arc the board would
+carry); the board itself is written with a real ``(arc ...)`` node.
 
 Exit codes (both commands): ``0`` clean; ``1`` problems found, bad input, or
 nothing to do; ``2`` refused -- the board changed under us, or a KiCad lock
@@ -81,6 +90,8 @@ __all__ = [
 #: ``kicad_tools.cli.check_categories.CHECK_CATEGORIES``.
 PROBE_CHECK_CATEGORIES: tuple[str, ...] = (
     "clearance",
+    "physical_copper_gap",
+    "copper_sliver",
     "segment_zone",
     "via_zone",
     "edge",
@@ -321,6 +332,11 @@ def _append_for_check(pcb: Any, items: list[ProbeItem]) -> dict[str, set[int]]:
     Arcs are appended as a 1 um-sagitta tessellation of straight segments
     (the pairwise clearance rules walk ``pcb.segments``; ``(arc ...)`` copper
     is outside them today, so a real arc node would be silently unchecked).
+    The chords lie on the arc's concave side, so the real copper extends up
+    to one sagitta beyond the tessellation on the convex side; the check
+    width is inflated by twice the sagitta bound so the tessellated copper
+    always *covers* the arc the board would carry (the probe can only be
+    stricter than ``kct check``, never looser -- Issue #9590 review).
     Everything goes through the public ``PCB.add_trace`` / ``add_via`` APIs.
     """
     from kicad_tools.schema.pcb import Arc, Segment, Via
@@ -358,8 +374,9 @@ def _append_for_check(pcb: Any, items: list[ProbeItem]) -> dict[str, set[int]]:
                 net_number=0,
             )
             points = arc.centerline_points(max_error_mm=_ARC_TESSELLATION_UM)  # already relative
+            check_width = item.width + 2 * _ARC_TESSELLATION_UM  # cover the sagitta (see docstring)
             for a, b in zip(points, points[1:], strict=False):
-                appended = pcb.add_trace(a, b, width=item.width, layer=item.layer, net=item.net)
+                appended = pcb.add_trace(a, b, width=check_width, layer=item.layer, net=item.net)
                 for seg in appended:
                     descriptors.setdefault(segment_ref(seg, origin), set()).add(item.index)
         else:
@@ -443,13 +460,10 @@ def _run_rule_set(pcb_path: Path, pcb: Any, manufacturer: str | None) -> Any:
     """``kct check``'s own rule-set builder, pointed at *pcb* (Issue #9590)."""
     from .check_cmd import build_check_rule_set
 
-    ruleset = build_check_rule_set(pcb_path, manufacturer=manufacturer, pcb=pcb)
-    # ``build_check_rule_set`` predates the fab-view passes; ``kct check``
-    # runs ``tht_smd_spacing`` under jlcpcb (its default --mfr), so the probe
-    # must too or a probe/check disagreement ships by construction.  The gap
-    # policy is left alone (``physical_copper_gap`` is not a probe category).
-    ruleset.checker.fab_view = ruleset.manufacturer == "jlcpcb"
-    return ruleset
+    # ``build_check_rule_set`` resolves the fab-view passes (gap policy,
+    # copper oz, ``fab_view`` under jlcpcb) the same way the CLI does, so the
+    # probe inherits them instead of hand-copying ``kct check``'s settings.
+    return build_check_rule_set(pcb_path, manufacturer=manufacturer, pcb=pcb)
 
 
 def _selected_findings(ruleset: Any, pcb_path: Path) -> Any:

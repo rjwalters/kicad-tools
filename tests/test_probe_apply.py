@@ -228,6 +228,25 @@ class TestProbe:
         )
         assert rc == 0 and doc["ok"] is True, doc["problems"]
 
+    def test_same_net_slit_fails_via_fab_gap_pass(self, board, capsys):
+        # Issue #9590 review: a same-net parallel track 0.08 mm from an
+        # existing track passes every pairwise rule (same net, no short) but
+        # fails ``kct check``'s default net-agnostic ``physical_copper_gap``
+        # pass under jlcpcb -- the probe must run that category too.
+        # Center distance 0.305 = 0.08 edge gap + half-widths (0.1 + 0.125).
+        rc, doc = _run(
+            capsys,
+            "probe",
+            str(board),
+            str(_items_file(board.parent, _seg("FOE", 115.305, 105, 115.305, 112))),
+            "--format",
+            "json",
+        )
+        assert rc == 1
+        slit = next(p for p in doc["problems"] if p["rule_id"] == "physical_copper_gap")
+        assert slit["severity"] == "error"
+        assert slit["proposed_item"] == 1
+
     def test_edge_clearance_fails(self, board, capsys):
         rc, doc = _run(
             capsys,
@@ -509,7 +528,14 @@ def committed(tmp_path_factory) -> Path:
 class TestCheckAgreement:
     """AC: probe agrees with ``kct check`` on the committed board (Issue #9590)."""
 
-    ONLY = ",".join(PROBE_CHECK_CATEGORIES)
+    #: The reference is the *default* ``kct check`` category set (no
+    #: ``--only``): restricting it to the probe's own list is how the
+    #: ``physical_copper_gap`` omission shipped unnoticed (Issue #9590
+    #: review).  Findings are filtered to the copper-gap/short rule ids so
+    #: categories outside the probe's copper scope (silkscreen, netlist,
+    #: placement, ...) keep their pre-existing counts and never gate the
+    #: before/after comparison.
+    COPPER_RULE_PREFIXES = ("clearance", "physical_copper_gap")
 
     @staticmethod
     def _sheet_pad(pcb: PCB, ref: str, pad: str) -> tuple[float, float]:
@@ -518,9 +544,13 @@ class TestCheckAgreement:
         return (pos[0] + ox, pos[1] + oy)
 
     def _check_errors(self, capsys, board: Path) -> int:
-        rc, doc = _run(capsys, "check", str(board), "--only", self.ONLY, "--format", "json")
+        rc, doc = _run(capsys, "check", str(board), "--format", "json")
         assert rc in (0, 1, 2), doc
-        return doc["summary"]["errors"]
+        return sum(
+            1
+            for v in doc["violations"]
+            if v["severity"] == "error" and v["rule_id"].startswith(self.COPPER_RULE_PREFIXES)
+        )
 
     def test_good_and_bad_items_agree_with_kct_check(self, committed, tmp_path, capsys):
         pcb = PCB.load(str(committed))
