@@ -46,6 +46,7 @@ from ..primitives import Route
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from contextlib import AbstractContextManager
 
     from ..primitives import Pad, Segment
 
@@ -308,8 +309,22 @@ class KelvinBoardGate:
         net_name: str,
         segments: list[Segment],
         optimize_fn: Callable[[list[Segment]], list[Segment]],
+        pad_guard: Callable[[list[Segment], list[Segment]], bool] | None = None,
+        defer_pad_guard: Callable[[], AbstractContextManager[None]] | None = None,
     ) -> list[Segment] | None:
-        """Gated optimization of a Kelvin net, or ``None`` for any other net."""
+        """Gated optimization of a Kelvin net, or ``None`` for any other net.
+
+        When *pad_guard* / *defer_pad_guard* are given (issue #9524), the
+        pad-escape guard embedded in ``optimize_fn`` is suspended while the
+        branch proposal is built, so this gate vets -- and, when it
+        refuses, reports -- rewrites that would also break a pad escape.
+        The guard is then re-applied to every rewrite the gate accepts: a
+        branch the pad guard refuses keeps its original geometry too.  The
+        guard is re-ordered around this gate, never skipped.  Because it
+        judges each branch's whole multi-pass proposal at once, one
+        escape-breaking pass discards that branch's entire optimization --
+        more conservative than the per-pass guard on an ordinary net.
+        """
         net = self.net_ids.get(net_name)
         if net is None or net not in self.gate.kelvin:
             return None
@@ -317,13 +332,24 @@ class KelvinBoardGate:
         for i, branch in enumerate(list(current)):
             if not branch.segments:
                 continue
+            proposal_segments = list(branch.segments)
+            if defer_pad_guard is not None and pad_guard is not None:
+                with defer_pad_guard():
+                    proposal_segments = optimize_fn(proposal_segments)
+            else:
+                proposal_segments = optimize_fn(proposal_segments)
             optimized = Route(
                 net=net,
                 net_name=net_name,
-                segments=optimize_fn(list(branch.segments)),
+                segments=proposal_segments,
                 vias=list(branch.vias),
             )
             siblings = [other for j, other in enumerate(current) if j != i]
-            if self.gate.accepts(branch, optimized, siblings):
-                current[i] = optimized
+            if not self.gate.accepts(branch, optimized, siblings):
+                continue
+            if pad_guard is not None and not pad_guard(list(branch.segments), proposal_segments):
+                # The Kelvin gate allows the rewrite but the pad-escape
+                # guard refuses it (#9524): keep the branch's geometry.
+                continue
+            current[i] = optimized
         return [segment for branch in current for segment in branch.segments]
