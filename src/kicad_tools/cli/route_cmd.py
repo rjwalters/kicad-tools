@@ -18279,6 +18279,10 @@ def _warn_escalation_flags_ignored(args) -> None:
     this warning the run silently behaves as if it was not passed.  Stderr, so
     ``--format json`` stdout is untouched; guarded by a flag on ``args`` so the
     wrappers' repeated ladder entries do not repeat it.
+
+    Issue #9621: ``--group-length-window`` rides on ``--bus-routing`` and is
+    ignored by the same branches; ``0.0`` is a set value, so the check is
+    "is not None / not False", not plain truthiness.
     """
     if getattr(args, "_escalation_flags_warned", False):
         return
@@ -18287,8 +18291,9 @@ def _warn_escalation_flags_ignored(args) -> None:
         for flag, attr in (
             ("--progressive-clearance", "progressive_clearance"),
             ("--bus-routing", "bus_routing"),
+            ("--group-length-window", "group_length_window"),
         )
-        if getattr(args, attr, False)
+        if (value := getattr(args, attr, None)) is not None and value is not False
     ]
     if not ignored:
         return
@@ -18301,6 +18306,105 @@ def _warn_escalation_flags_ignored(args) -> None:
         file=sys.stderr,
         flush=True,
     )
+
+
+def _bus_flags_ignored_reason(
+    args,
+    *,
+    use_adaptive_grid: bool,
+    use_escape_routing: bool = False,
+) -> str | None:
+    """Name the dispatch that will ignore the bus flags, or ``None`` if honoured.
+
+    PR #9633 review: only the single-attempt ``--strategy basic`` dispatch
+    honours ``--bus-routing`` (the ``route_all_with_buses`` branch); every
+    branch that pre-empts it in :func:`route_cmd`'s dispatch order is listed
+    here in the same order, so the reason names the branch that would
+    actually run.  ``use_adaptive_grid`` mirrors ``multi_res_plan is not
+    None`` (the ``--grid auto`` adaptive plan, or its dense-package escape
+    fallback) and ``use_escape_routing`` the escape pre-phase decision --
+    both pre-empt the strategy chain.  ``--two-phase`` only pre-empts under
+    ``--strategy negotiated`` (a basic two-phase run falls through to the
+    bus branch); ``--differential-pairs`` under basic routes diff pairs
+    before the bus branch and never reads ``bus_config``.
+    """
+    if not getattr(args, "bus_routing", False):
+        return None
+    if use_adaptive_grid:
+        return "the adaptive multi-resolution grid"
+    if use_escape_routing:
+        return "the escape pre-phase"
+    if getattr(args, "progressive_clearance", False):
+        return "--progressive-clearance"
+    if getattr(args, "multi_resolution", False):
+        return "--multi-resolution"
+    if getattr(args, "two_phase", False) and args.strategy == "negotiated":
+        return "--two-phase"
+    if args.strategy != "basic":
+        return f"--strategy {args.strategy}"
+    if getattr(args, "differential_pairs", False):
+        return "--differential-pairs"
+    return None
+
+
+def _warn_bus_flags_ignored(args, reason: str) -> None:
+    """Warn once per run that the resolved dispatch ignores the bus flags (#9621).
+
+    PR #9633 review: this used to be called from inside the ``negotiated``
+    dispatch branches, after the cache-hit return, the two-phase return and
+    the adaptive-grid / escape / progressive-clearance / multi-resolution
+    returns -- so those runs printed ``Bus: enabled`` and silently behaved
+    as if ``--bus-routing`` was not passed.  It is now emitted once, before
+    the cache lookup and the strategy dispatch (see
+    :func:`_warn_bus_flags_ignored_early`), with the reason naming the
+    dispatch that ignores the flags.  Stderr, so ``--format json`` stdout is
+    untouched; guarded by a flag on ``args`` so repeated dispatches (the
+    diff-pair pre-pass wrapper) do not repeat it.
+    """
+    if getattr(args, "_bus_flags_warned", False):
+        return
+    ignored = []
+    if getattr(args, "bus_routing", False):
+        ignored.append("--bus-routing")
+    if getattr(args, "group_length_window", None) is not None:
+        ignored.append("--group-length-window")
+    if not ignored:
+        return
+    with contextlib.suppress(AttributeError):  # frozen namespace
+        args._bus_flags_warned = True
+    print(
+        f"warning: {', '.join(ignored)} ignored: {reason} does not support "
+        "bus-aware routing; re-run with --strategy basic and a single-attempt "
+        "dispatch to use it",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _warn_bus_flags_ignored_early(args, router, multi_res_plan=None) -> None:
+    """Emit the bus-flags warning before the cache lookup and strategy dispatch.
+
+    PR #9633 review: resolves, from ``args`` plus the pre-dispatch state
+    that is already computed at this point (the ``--grid auto`` multi-
+    resolution plan and the escape-pre-phase decision), which dispatch this
+    run will take -- then warns when that dispatch does not honour the bus
+    flags.  Running here means the cache-hit branch, the two-phase return
+    and every other early return can no longer skip the warning.  The
+    escape decision is the silent core of :func:`_escape_routing_decision`
+    (its message is still printed exactly once, inside the dispatch, per
+    issue #6666); calling it here adds one ``detect_dense_packages`` scan
+    on ``--bus-routing`` runs only.
+    """
+    if not getattr(args, "bus_routing", False):
+        return
+    use_escape, _ = _escape_routing_decision(router, _resolve_escape_routing_flag(args))
+    reason = _bus_flags_ignored_reason(
+        args,
+        use_adaptive_grid=multi_res_plan is not None,
+        use_escape_routing=use_escape,
+    )
+    if reason is not None:
+        _warn_bus_flags_ignored(args, reason)
 
 
 def _run_post_save_stitching(args, output_path: Path, *, quiet: bool = False):
@@ -21169,6 +21273,20 @@ def _route_parser() -> argparse.ArgumentParser:
         help="Minimum signals to form a bus group (default: 2)",
     )
     parser.add_argument(
+        "--group-length-window",
+        type=float,
+        default=None,
+        metavar="PCT",
+        help=(
+            "Group non-bus nets whose MST lengths fall within PCT percent of a "
+            "cluster's reference length into synthetic bus groups, and order "
+            "each group by escape feasibility (fewest open pad directions "
+            "first) (Issue #9621).  Requires --bus-routing --strategy basic; "
+            "ignored with a warning on --strategy negotiated and the "
+            "escalation ladders"
+        ),
+    )
+    parser.add_argument(
         "--differential-pairs",
         action="store_true",
         help=(
@@ -22640,6 +22758,35 @@ def _chain_complete_argv(
     ``--auto-fix`` are excluded because the outer run's result already covers them
     (see the guard test).
 
+    Issue #9621 -- the bus family is forwarded together: ``--bus-routing``,
+    ``--bus-mode``, ``--bus-spacing``, ``--bus-min-width`` and
+    ``--group-length-window``.  The length window rides on ``--bus-routing``
+    (without it the pass only draws the "requires --bus-routing" warning), so
+    forwarding the window alone would pin a flag the pass can never honour.
+    Under ``--complete`` the strategy is coerced to basic, so forwarding
+    ``--bus-routing`` flips the pass's basic-strategy dispatch from
+    ``route_all`` to ``route_all_with_buses`` with the outer run's bus
+    configuration -- and that swap is NOT copper-neutral.  The bus driver
+    routes per group member and never runs ``route_all``'s preamble/tail
+    (``_prepare_routing``, ``_filter_pour_nets``,
+    ``_detect_and_apply_matrix_preferences``, ``_interleave_match_groups``,
+    ``_apply_byte_lane_inner_priority``, ``_probe_alone_on_empty_lengths``,
+    ``_run_subgrid_prepass``, and the ``BLOCKED_BY_COMPONENT`` rescue
+    ``_attempt_blocked_component_ripup``), so completion copper measurably
+    differs: on the 6-net row fixture of
+    ``tests/router/test_group_length_window.py`` the bus dispatch measured
+    246.818 mm / 57 segments where ``route_all`` measured 235.310 mm / 53
+    (+4.9% total trace length), both closing 6/6 -- pinned by
+    ``TestCompletionDispatchCopper`` there.  A separate, true fact: on the
+    pass's lattice engine the one-shot netset negotiation
+    (:meth:`Autorouter._negotiate_lattice_netset`) is order-independent, so
+    within either dispatch the operator's bus ordering changes only
+    ``route_net`` call order and logging, not per-net copper -- but that fact
+    says nothing about equality across the two dispatches.  Forwarding is
+    still deliberate: the operator asked for bus treatment, and honouring it
+    on the pass at the disclosed copper cost above beats silently running
+    the flag at its default.
+
     Deliberately not forwarded:
 
     * ``--auto-layers``, ``--route-engine``, ``--grid`` and the grid-engine
@@ -22748,6 +22895,27 @@ def _chain_complete_argv(
     # forwarding, the pass would only auto-tune via ``checker_limit``.
     if getattr(args, "length_match_groups", False):
         chain_argv.append("--length-match-groups")
+    # Issue #9621: the bus family is forwarded together (see the docstring's
+    # Issue #9621 note).  --bus-mode and --bus-min-width carry value defaults
+    # ("parallel" / 2), so only an explicit value is passed on, like
+    # --via-drill above; --bus-spacing and --group-length-window default to
+    # None, so a set value is always the operator's.
+    if getattr(args, "bus_routing", False):
+        chain_argv.append("--bus-routing")
+    for flag, attr in (
+        ("--bus-mode", "bus_mode"),
+        ("--bus-min-width", "bus_min_width"),
+    ):
+        value = getattr(args, attr, None)
+        if value is not None and _flag_passed_explicitly(argv, (flag,)):
+            chain_argv.extend([flag, str(value)])
+    for flag, attr in (
+        ("--bus-spacing", "bus_spacing"),
+        ("--group-length-window", "group_length_window"),
+    ):
+        value = getattr(args, attr, None)
+        if value is not None:
+            chain_argv.extend([flag, str(value)])
     return chain_argv
 
 
@@ -24434,6 +24602,8 @@ def _run_main_impl(args, parser, argv) -> int:
             print(f"Skip:     {', '.join(skip_nets)}")
         if args.bus_routing:
             print(f"Bus:      enabled ({args.bus_mode} mode)")
+            if getattr(args, "group_length_window", None) is not None:
+                print(f"          length window: {args.group_length_window}% (Issue #9621)")
         if args.differential_pairs:
             print("DiffPair: enabled")
 
@@ -24934,6 +25104,7 @@ def _run_main_impl(args, parser, argv) -> int:
             mode=bus_mode_map[args.bus_mode],
             spacing=args.bus_spacing,
             min_bus_width=args.bus_min_width,
+            length_window=getattr(args, "group_length_window", None),
         )
 
         # Show detected buses
@@ -24946,6 +25117,15 @@ def _run_main_impl(args, parser, argv) -> int:
                     print(f"    - {group['name']}: {group['width']} bits ({status})")
             else:
                 print("\n  No bus signals detected")
+
+    elif getattr(args, "group_length_window", None) is not None:
+        # Issue #9621: the window rides on bus routing; without --bus-routing
+        # there is no bus_config to carry it.
+        print(
+            "warning: --group-length-window ignored: it requires --bus-routing",
+            file=sys.stderr,
+            flush=True,
+        )
 
     # Configure differential pair routing if enabled
     diffpair_config = None
@@ -24996,6 +25176,13 @@ def _run_main_impl(args, parser, argv) -> int:
 
     _rss = RSSTracer()
     _rss.mark("route-start")
+
+    # PR #9633 review: the bus-flags-ignored warning must fire BEFORE the
+    # cache lookup and the strategy dispatch -- a cache hit or an early
+    # dispatch return (two-phase, adaptive grid, escape, progressive
+    # clearance, multi-resolution) used to skip it while still printing
+    # ``Bus: enabled``.
+    _warn_bus_flags_ignored_early(args, router, multi_res_plan)
 
     # Check cache for existing routing result (unless --no-cache)
     cache_key = None
@@ -25477,6 +25664,8 @@ def _run_main_impl(args, parser, argv) -> int:
                 # The negotiated loop honors prerouted nets via the new skip
                 # logic in route_all_negotiated.  coupled_only=True so
                 # unsupported pad configurations fall through cleanly.
+                # (Bus-flags warning: emitted before the cache lookup, see
+                # _warn_bus_flags_ignored_early.)
                 def _neg_strategy():
                     return router.route_all_negotiated(
                         **_negotiated_kwargs(
@@ -25501,6 +25690,8 @@ def _run_main_impl(args, parser, argv) -> int:
                 diffpair_budget_exit_pairs.extend(router.diffpair_budget_exit_pair_names())
                 return result
             elif args.strategy == "negotiated":
+                # (Bus-flags warning: emitted before the cache lookup, see
+                # _warn_bus_flags_ignored_early.)
                 return router.route_all_negotiated(
                     **_negotiated_kwargs(
                         args, timeout=_budgeted_timeout(args), checkpoint_callback=_checkpoint_cb
