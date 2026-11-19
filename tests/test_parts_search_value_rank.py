@@ -17,16 +17,18 @@ from unittest.mock import patch
 import pytest
 
 from kicad_tools.cli import parts_cmd
-from kicad_tools.parts.models import Part, SearchResult
+from kicad_tools.cost.suggest import candidate_resistances
+from kicad_tools.parts.models import Part, PartCategory, SearchResult
 
 
-def _part(lcsc: str, mfr: str, description: str, stock: int) -> Part:
+def _part(lcsc: str, mfr: str, description: str, stock: int, category=PartCategory.OTHER) -> Part:
     return Part(
         lcsc_part=lcsc,
         mfr_part=mfr,
         description=description,
         package="2512",
         stock=stock,
+        category=category,
     )
 
 
@@ -160,6 +162,107 @@ def test_no_exact_match_in_page_prints_note(capsys):
 
 
 def test_note_suppressed_when_nothing_parses_to_a_resistance(capsys):
-    order = _search_json("16M crystal", capsys, client=_CrystalClient)
-    assert order == [p.lcsc_part for p in CRYSTAL_CATALOG]
+    with patch("kicad_tools.parts.LCSCClient", _CrystalClient):
+        rc = parts_cmd.main(["search", "16M crystal"])
+    assert rc == 0
+    assert "no result in this page" not in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Category gate (issue #9551): LED colour temperatures (``6500K``), CCT ranges
+# (``13172K~100000K``), MOSFET ``Rds(on)`` figures (``47mΩ@1.8V``) and crystal
+# MPN/ESR tokens are not resistances, so parts in a known non-resistor category
+# must yield no nominal from ``candidate_resistances``.
+
+
+def _part_of_category(category: PartCategory, description: str) -> Part:
+    return Part(
+        lcsc_part="C1",
+        mfr_part="MFR1",
+        description=description,
+        package="0402",
+        stock=1000,
+        category=category,
+    )
+
+
+@pytest.mark.parametrize(
+    ("category", "description"),
+    [
+        (PartCategory.LED, "6500K White 0603 LED Emitters ROHS"),
+        (PartCategory.LED, "13172K~100000K CCT 0402 LED ROHS"),
+        (PartCategory.TRANSISTOR, "47mΩ@1.8V N-Channel MOSFET SOT-23 ROHS"),
+        (PartCategory.CRYSTAL, "SMD Crystal Resonator 16M 20ppm ESR 50Ω HC-49S"),
+    ],
+)
+def test_non_resistor_categories_yield_no_nominal(category, description):
+    assert candidate_resistances(_part_of_category(category, description)) == []
+
+
+@pytest.mark.parametrize(
+    ("category", "description", "expected"),
+    [
+        (PartCategory.RESISTOR, "Thick Film Resistor 4R7 2512", [4.7]),
+        (PartCategory.RESISTOR, "Thick Film Resistor 10k 0603", [10_000.0]),
+        (PartCategory.OTHER, "Chip part 2.2 ohm 0402", [2.2]),
+        (PartCategory.OTHER, "Chip Resistor 10kΩ 1% 0402", [10_000.0]),
+    ],
+)
+def test_resistor_and_other_categories_parse_as_today(category, description, expected):
+    assert candidate_resistances(_part_of_category(category, description)) == expected
+
+
+def test_other_category_description_with_both_ohm_and_k_parses_as_today():
+    part = _part_of_category(PartCategory.OTHER, "Thick Film Resistor 10kΩ 1% 6500K marking")
+    assert candidate_resistances(part) == [10_000.0, 6_500_000.0]
+
+
+# An LED whose colour-temperature token parses to the queried nominal must not
+# tier above a real resistor of that value.
+LED_VS_RESISTOR_CATALOG = [
+    _part(
+        "C26545", "LED-0603-6500K", "6500K White 0603 LED Emitters ROHS", 90_000, PartCategory.LED
+    ),
+    _part(
+        "C6500000",
+        "25121WF6M5T4E",
+        "1W 6.5MΩ Thick Film Resistor ±1% 2512 Chip Resistor ROHS",
+        500,
+    ),
+]
+
+
+class _LedClient(_FakeClient):
+    catalog = LED_VS_RESISTOR_CATALOG
+
+
+def test_value_query_does_not_tier0_an_led_above_real_resistors(capsys):
+    order = _search_json("6.5M", capsys, client=_LedClient)
+    assert order == ["C6500000", "C26545"]
+
+
+# Crystal rows whose ESR/MPN tokens *do* parse: the false positives that kept
+# the no-match note printing on a crystal page (#9551).
+CRYSTAL_FALSE_POSITIVE_CATALOG = [
+    _part(
+        "C902",
+        "XTAL-49S-8M",
+        "SMD Crystal Resonator 8MHz 20ppm ESR 50Ω HC-49S",
+        9000,
+        PartCategory.CRYSTAL,
+    ),
+    _part(
+        "C903", "XTAL-49S-12M", "Crystal Unit HC-49/4H 12MHz ESR 90Ω", 4000, PartCategory.CRYSTAL
+    ),
+]
+
+
+class _CrystalFalsePositiveClient(_FakeClient):
+    catalog = CRYSTAL_FALSE_POSITIVE_CATALOG
+
+
+def test_note_suppressed_when_only_non_resistors_false_positive(capsys):
+    with patch("kicad_tools.parts.LCSCClient", _CrystalFalsePositiveClient):
+        rc = parts_cmd.main(["search", "16M crystal"])
+    assert rc == 0
     assert "no result in this page" not in capsys.readouterr().err
