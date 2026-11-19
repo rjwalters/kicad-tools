@@ -75,19 +75,11 @@ EXPECTED_STALE: dict[str, str] = {
         "(wedge fix + #8532 fiducials/board-ID) is ahead of the committed "
         "copper too; the gate-pass rebuild owns the re-pin."
     ),
-    # Issue #9097 (PR #9131) adds recipe passes to board 04's
-    # ``generate_design.py`` (fragment merge, silk-over-drill clip,
-    # staircase compression), which changes the file ``readiness.json``
-    # pins.  Regenerating + re-pinning the committed artifact in the same PR
-    # turned 22 tests red (pinned reviewed-escape geometry, the #5744 "routing
-    # never touches footprint silk" invariant, remap identity, strict XPASS on
-    # the DRU), each needing an owner decision, so the regen was backed out.
-    # Issue #9455 owns the regen + re-pin; remove the entry when it lands.
-    "04-stm32-devboard": (
-        "Issue #9455: board 04's recipe moved in #9097 (PR #9131) ahead of the "
-        "committed copper and readiness evidence; the regen + re-pin (and the "
-        "#5744 silk-invariant decision) is owned by #9455."
-    ),
+    # Issue #9097 (PR #9131) added recipe passes to board 04's
+    # ``generate_design.py``; #9455 landed the via slide + silk-hole gate, and
+    # #9536 regenerated the committed copper/evidence from that recipe on the
+    # pinned toolchain (readiness re-pinned ``ready``).  Removed from this
+    # dict by #9536.
     "07-matchgroup-test": (
         "Issue #8399: the #8602 copper prune changed board 07's authored/reviewed "
         "sources; `refresh_readiness.py` refuses to re-pin while redundant_copper_* "
