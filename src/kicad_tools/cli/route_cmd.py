@@ -19272,10 +19272,13 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
     * **Timing** -- the lattice netset negotiation's per-connection decline
       reason (``LatticePathfinder.failure_reasons``, issue #4278).  The
       per-link deadline signal IS that reason: ``"deadline-exceeded"``
-      means the deadline cut the best pass before the link was reached in
-      ANY pass -- a link an earlier pass attempted and declined on its own
-      merits keeps that real reason even when a later truncated pass became
-      the best pass (:meth:`~kicad_tools.router.lattice.pathfinder.LatticePathfinder.route_netset`),
+      means the deadline cut the best pass before the link reached any
+      decline -- never attempted in ANY pass, or its most recent earlier
+      outcome was a successful route.  A link an earlier pass attempted
+      and declined on its own merits keeps that real reason even when a
+      later truncated pass became the best pass -- unless a still later
+      pass routed it, which clears the record
+      (:meth:`~kicad_tools.router.lattice.pathfinder.LatticePathfinder.route_netset`);
       any other reason means the link was attempted (and declined or
       rolled back).  Per link, ``deadline_hit`` is true only for the
       deadline-exceeded reason; ``attempted`` comes from the negotiation's
@@ -19379,9 +19382,10 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
         # per-PASS, so a link declined on its own merits in an early
         # pass carries it in a later truncated pass that became the
         # best pass (the pathfinder now restores the earlier real
-        # reason for such links; the set still decides ``attempted``
-        # for a link that ROUTED in an earlier pass and so has no
-        # decline reason on record).  ``deadline_hit`` keeps meaning
+        # reason for such links, as long as that decline is still the
+        # link's most recent outcome -- a pass that routes the link
+        # clears the record, so it reads as the deadline stamp instead;
+        # the set still decides ``attempted`` either way).  ``deadline_hit`` keeps meaning
         # "this reason is the deadline stamp".  (Both flags used to be
         # OR-ed with / copied from the whole-run negotiation totals,
         # so once a run hit its deadline every link was flagged.)
