@@ -269,7 +269,7 @@ def parts() -> list[Part]:
         ("C3", "1u 16V", "VREG_2V7", "GND", (10, 23), C),
         ("C4", "4.7n 50V", "PMOS_SOURCE", "PMOS_GATE", (39, 31), C),
         ("C5", "10u 50V", "VIN", "GND", (53, 29), "Capacitor_SMD:C_1206_3216Metric"),
-        ("C6", "100n 50V", "VIN", "GND", (55.15, 29), C),
+        ("C6", "100n 50V", "VIN", "GND", (55.2, 29), C),
         ("C7", "100n 50V", "BOOT_CAP", "SW", (61, 23), C),
         ("C8", "22u 25V", "VOUT_PRE", "GND", (50, 16), "Capacitor_SMD:C_1206_3216Metric"),
         ("C9", "22u 25V", "VOUT_PRE", "GND", (56, 16), "Capacitor_SMD:C_1206_3216Metric"),
