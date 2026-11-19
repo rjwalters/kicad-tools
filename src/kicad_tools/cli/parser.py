@@ -243,6 +243,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_route_stub(subparsers)
     _add_route_auto_parser(subparsers)
     _add_route_link_parser(subparsers)
+    _add_probe_parser(subparsers)
+    _add_apply_parser(subparsers)
     _add_retune_lengths_parser(subparsers)
     _add_reason_parser(subparsers)
     _add_optimize_parser(subparsers)
@@ -4674,6 +4676,28 @@ def _add_route_link_parser(subparsers) -> None:
         help="Route individual links between chosen pads/points (with --probe, read-only)",
     )
     add_route_link_arguments(route_link_parser)
+
+
+def _add_probe_parser(subparsers) -> None:
+    """Add probe subcommand parser (Issue #9590)."""
+    from .probe_cmd import add_probe_arguments
+
+    probe_parser = subparsers.add_parser(
+        "probe",
+        help="Check a batch of proposed tracks/vias/arcs against the board; write nothing",
+    )
+    add_probe_arguments(probe_parser)
+
+
+def _add_apply_parser(subparsers) -> None:
+    """Add apply subcommand parser (Issue #9590)."""
+    from .probe_cmd import add_apply_arguments
+
+    apply_parser = subparsers.add_parser(
+        "apply",
+        help="Apply a batch of proposed copper --checked: probe first, write only if all pass",
+    )
+    add_apply_arguments(apply_parser)
 
 
 def _add_route_auto_parser(subparsers) -> None:

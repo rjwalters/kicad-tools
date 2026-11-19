@@ -729,6 +729,62 @@ List nets that still need routing.
 
 ---
 
+### probe_items
+
+Check a batch of proposed tracks, arcs and vias against a board; write nothing.
+
+**Description**: Appends the items to an in-memory copy of the board and runs the same rule set `kct check` runs (clearances and shorts, zone fills, board edge, trace/via dimensions, authored net-class clearances, via placement). Only findings the batch adds are reported, so pre-existing board problems never fail a probe. Arcs are checked through a 1 um-sagitta tessellation (Issue #9590).
+
+**Parameters**:
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `pcb_path` | string | Yes | - | Path to .kicad_pcb file |
+| `items` | array | Yes | - | Proposed copper items, same shape as the `kct probe` items file (`type` `segment`/`arc`/`via` with `net`, `layer`, `width`, `start`/`mid`/`end`/`at`/`size`/`drill`/`layers` as each type needs; absolute board millimetres) |
+| `mfr` | string | No | - | Manufacturer rules (default: resolved like `kct check`) |
+
+**Response**:
+
+```json
+{
+  "success": true,
+  "ok": true,
+  "items": [{"index": 1, "type": "segment", "net": "GND"}],
+  "problems": [],
+  "warnings": [],
+  "error_count": 0,
+  "warning_count": 0,
+  "categories": ["clearance", "segment_zone", "via_zone", "edge", "dimensions"]
+}
+```
+
+Each problem carries `rule_id`, `severity`, `message`, `location`, `layer`,
+`items` (the clashing copper), `nets` and `proposed_item` (the 1-based batch
+item it involves, when attributable).
+
+---
+
+### apply_items_checked
+
+Probe a batch of proposed copper, then write it to the board only when every item passes.
+
+**Description**: The checked form of `probe_items` (Issue #9590). The write is atomic (sibling temp file + rename), the previous bytes are backed up, and a board that changed on disk between read and write is refused with nothing written. A failed probe leaves the board byte-identical.
+
+**Parameters**:
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `pcb_path` | string | Yes | - | Path to .kicad_pcb file (written in place) |
+| `items` | array | Yes | - | Proposed copper items (same shape as `probe_items`) |
+| `backup_path` | string | No | `<pcb>.kicad_pcb.bak` | Backup path for the previous bytes |
+| `mfr` | string | No | - | Manufacturer rules (default: resolved like `kct check`) |
+
+**Response**: the `probe_items` report plus `written` (the board path, or
+`null` when nothing was written), `backup` and `refused` (the refusal reason,
+or `null`).
+
+---
+
 ## Parts Tools
 
 ### parts_search
