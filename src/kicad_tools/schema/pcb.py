@@ -29,6 +29,7 @@ from ..footprints.library_path import (
     detect_kicad_library_path,
     guess_standard_library,
     parse_library_id,
+    recorded_footprint_bytes,
 )
 
 if TYPE_CHECKING:
@@ -6539,7 +6540,15 @@ class PCB:
             ... )
         """
         # Load the footprint from file
-        fp_sexp = load_footprint(kicad_mod_path)
+        recorded = recorded_footprint_bytes(kicad_mod_path)
+        if recorded is not None:
+            # An evidence scope that recorded this file hands back the exact
+            # bytes it digested: parse those, so the placed geometry is always
+            # the recorded identity, even across repeated placements or a
+            # mid-run library edit (Issue #9526 review).
+            fp_sexp = load_footprint(kicad_mod_path, text=recorded.decode("utf-8"))
+        else:
+            fp_sexp = load_footprint(kicad_mod_path)
 
         # Keep the Library:Footprint lib ID so kicad-cli's schematic-parity
         # check can match it against the symbol's Footprint field (#7213).

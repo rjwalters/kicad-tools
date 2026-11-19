@@ -26,6 +26,7 @@ import pytest
 from kicad_tools.cli import kicad_toolchain, runner
 from kicad_tools.footprints.library_path import (
     detect_kicad_library_path,
+    recorded_library_reads,
     reset_library_reads,
 )
 
@@ -198,6 +199,73 @@ def test_no_reads_record_version_only(host_with_pinned_kicad):
         "kicad_version": kicad_toolchain.PINNED_KICAD_VERSION,
         "footprint_library": None,
     }
+
+
+def test_repeated_placements_use_the_recorded_bytes(host_with_pinned_kicad, monkeypatch, tmp_path):
+    """Two real placements in one run parse the bytes the record digested.
+
+    ``add_footprint`` used to reopen the file for parsing, so an edit between
+    placements moved the pads while the digest stayed at the first
+    consumption (Issue #9526 review).  The parser now reuses the recorded
+    snapshot: both placements place the first-consumed geometry, and the
+    identity is the digest of exactly those bytes."""
+    from kicad_tools.schema.pcb import PCB
+
+    root = make_library(tmp_path / "lib")
+    monkeypatch.setenv(kicad_toolchain.KICAD_FOOTPRINT_DIR_ENV, str(root))
+    with kicad_toolchain.evidence_toolchain():
+        board = PCB.create(width=20, height=20)
+        first = board.add_footprint("Capacitor_SMD:C_0805_2012Metric", reference="C1", x=5.0, y=5.0)
+        # A geometry change lands in the library between the placements.
+        (root / FP_NAME).write_text(FP_TEXT.replace("-0.9375", "-2.5"))
+        second = board.add_footprint(
+            "Capacitor_SMD:C_0805_2012Metric", reference="C2", x=12.0, y=5.0
+        )
+        identity = kicad_toolchain.evidence_provenance()["footprint_library"]
+    first_pads = sorted(p.position for p in first.pads)
+    assert first_pads == [(-0.9375, 0.0), (0.9375, 0.0)]
+    assert sorted(p.position for p in second.pads) == first_pads
+    consumed = hashlib.sha256(FP_TEXT.encode()).hexdigest()
+    assert identity["files"] == [FP_NAME]
+    assert identity["sha256"] == hashlib.sha256(f"{FP_NAME}\0{consumed}\n".encode()).hexdigest()
+
+
+def test_lookup_without_a_scope_does_not_read_the_file(monkeypatch, tmp_path):
+    """Path resolution outside an evidence run performs no provenance read.
+
+    ``kct sch set-footprint`` resolves library paths with no producer active;
+    its best-effort validation sits at the parse, not the lookup (Issue #9526
+    review).  An unreadable file must therefore resolve fine and record
+    nothing, instead of failing the resolution."""
+    root = make_library(tmp_path / "lib")
+    fp = root / FP_NAME
+    monkeypatch.setenv(kicad_toolchain.KICAD_FOOTPRINT_DIR_ENV, str(root))
+    fp.chmod(0o000)
+    try:
+        assert read_one() == fp
+        assert recorded_library_reads() == ()
+    finally:
+        fp.chmod(0o644)
+
+
+def test_pad_count_validation_degrades_on_unreadable_library(monkeypatch, tmp_path):
+    """``set-footprint``'s pad-count validator keeps its best-effort contract.
+
+    Resolution outside an evidence run no longer opens the file, so a mode-000
+    library file reaches the parse-side ``try`` and yields "cannot validate"
+    rather than raising ``PermissionError`` out of the lookup (Issue #9526
+    review)."""
+    from kicad_tools.cli.sch_set_footprint import _footprint_pad_count
+
+    root = make_library(tmp_path / "lib")
+    fp = root / FP_NAME
+    monkeypatch.setenv(kicad_toolchain.KICAD_FOOTPRINT_DIR_ENV, str(root))
+    fp.chmod(0o000)
+    try:
+        paths = detect_kicad_library_path()
+        assert _footprint_pad_count(paths, "Capacitor_SMD:C_0805_2012Metric") is None
+    finally:
+        fp.chmod(0o644)
 
 
 def test_provenance_is_none_outside_the_toolchain(host_with_pinned_kicad):

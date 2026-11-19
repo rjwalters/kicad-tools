@@ -10,7 +10,7 @@ import hashlib
 import os
 import platform
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from kicad_tools.kicad_install import windows_kicad_base_dirs, windows_kicad_install_roots
@@ -101,50 +101,88 @@ class LibraryRead:
     path: Path
     """The resolved ``.kicad_mod`` file."""
     sha256: str
-    """Digest of the file's bytes, captured at consumption time (Issue #9526
-    review).  Recorded here -- not re-read at evidence time -- so a later edit
-    of the library file cannot rewrite what the producer actually used."""
+    """Digest of the bytes the producer consumed, snapshotted when the file
+    was first read (Issue #9526 review).  Recorded here -- not re-read at
+    evidence time -- so a later edit of the library file cannot rewrite what
+    the producer actually used; the parser reuses the same snapshot
+    (:func:`recorded_footprint_bytes`), so the digest always describes the
+    geometry that was placed."""
 
 
-#: Reads recorded outside any :func:`library_read_scope` (plain library use),
-#: deduplicated per ``(root, path)`` in first-seen order.  Recording is fed
-#: unconditionally (it is cheap); only evidence producers *read* it back, via
-#: :func:`kicad_tools.cli.kicad_toolchain.footprint_library_identity`.
-_DEFAULT_READS: dict[tuple[str, str], LibraryRead] = {}
+@dataclass
+class _ReadScope:
+    """One evidence run's collection.
 
-#: Stack of per-evidence-run collections.  Each :func:`library_read_scope`
-#: (one :func:`kicad_tools.cli.kicad_toolchain.evidence_toolchain` context)
-#: pushes a fresh dict so consecutive runs never see each other's reads and a
+    ``reads`` records each consumed file (deduplicated per ``(root, path)``
+    in first-seen order); ``snapshots`` keeps the bytes each read returned so
+    ``PCB.add_footprint_from_file`` parses exactly what the digest describes,
+    however many times the same footprint is placed (Issue #9526 review).
+    """
+
+    reads: dict[tuple[str, str], LibraryRead] = field(default_factory=dict)
+    snapshots: dict[str, bytes] = field(default_factory=dict)
+
+
+#: Stack of per-evidence-run scopes.  Each :func:`library_read_scope` (one
+#: :func:`kicad_tools.cli.kicad_toolchain.evidence_toolchain` context) pushes
+#: a fresh scope so consecutive runs never see each other's reads and a
 #: nested exit restores the outer collection untouched (Issue #9526 review).
-_READ_SCOPES: list[dict[tuple[str, str], LibraryRead]] = []
+#: Outside any scope nothing is recorded *or read*: plain path resolution
+#: stays free of provenance reads (Issue #9526 review).
+_READ_SCOPES: list[_ReadScope] = []
 
 
-def _active_reads() -> dict[tuple[str, str], LibraryRead]:
-    """The collection new reads record into: the innermost scope, else default."""
-    return _READ_SCOPES[-1] if _READ_SCOPES else _DEFAULT_READS
+def _active_scope() -> _ReadScope | None:
+    """The scope new reads record into, or None outside any evidence run."""
+    return _READ_SCOPES[-1] if _READ_SCOPES else None
 
 
 def record_library_read(root: Path, source: str, path: Path) -> None:
     """Record *path* as consumed from the library *root* (idempotent).
 
-    The bytes are digested now, at consumption, together with the *source* the
-    lookup resolved under -- so later file edits or environment changes cannot
-    rewrite the record (Issue #9526 review).
+    Only an active :func:`library_read_scope` collects -- that is, an evidence
+    producer.  Plain lookups (``kct sch set-footprint`` validation and
+    friends) resolve paths without opening anything, keeping their best-effort
+    error handling (Issue #9526 review).  Inside a scope the bytes are read
+    once, at consumption: digested into the record and snapshotted for the
+    parser, together with the *source* the lookup resolved under -- so later
+    file edits or environment changes cannot rewrite the record, and repeated
+    placements reuse the recorded bytes instead of re-reading the file.
     """
-    reads = _active_reads()
+    scope = _active_scope()
+    if scope is None:
+        return
     key = (str(root), str(path))
-    if key not in reads:
-        reads[key] = LibraryRead(
+    if key not in scope.reads:
+        data = Path(path).read_bytes()
+        scope.reads[key] = LibraryRead(
             root=Path(root),
             source=source,
             path=Path(path),
-            sha256=hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+            sha256=hashlib.sha256(data).hexdigest(),
         )
+        scope.snapshots[str(path)] = data
 
 
 def recorded_library_reads() -> tuple[LibraryRead, ...]:
-    """The standard-library reads recorded in the active scope, first-seen order."""
-    return tuple(_active_reads().values())
+    """The standard-library reads recorded in the active scope, first-seen order.
+
+    Empty outside any :func:`library_read_scope` -- no producer, no record."""
+    scope = _active_scope()
+    return tuple(scope.reads.values()) if scope else ()
+
+
+def recorded_footprint_bytes(path: str | Path) -> bytes | None:
+    """The bytes the active scope recorded for *path*, if it has.
+
+    ``PCB.add_footprint_from_file`` parses from this snapshot instead of
+    reopening the file, so the geometry it places is always the bytes the
+    provenance digest describes -- across repeated placements of one
+    footprint and across a mid-run library edit (Issue #9526 review)."""
+    scope = _active_scope()
+    if scope is None:
+        return None
+    return scope.snapshots.get(str(Path(path)))
 
 
 @contextlib.contextmanager
@@ -157,7 +195,7 @@ def library_read_scope() -> Iterator[None]:
     each evidence run's provenance its own, with no manual reset between
     consecutive runs.
     """
-    _READ_SCOPES.append({})
+    _READ_SCOPES.append(_ReadScope())
     try:
         yield
     finally:
@@ -166,7 +204,6 @@ def library_read_scope() -> Iterator[None]:
 
 def reset_library_reads() -> None:
     """Forget every recorded read, in every scope (test isolation)."""
-    _DEFAULT_READS.clear()
     _READ_SCOPES.clear()
 
 
