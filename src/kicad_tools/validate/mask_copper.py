@@ -435,9 +435,68 @@ class MaskCopperAssessment:
             "binding": self.binding.to_dict() if self.binding else None,
             "measurements": [m.to_dict() for m in self.measurements],
             "intent_audit": self.intent_audit,
-            "geometry_provenance": self.geometry_provenance,
+            "geometry_provenance": committed_geometry_provenance(self.geometry_provenance),
             "evaluated_pairs": self.evaluated_pairs,
         }
+
+
+def _wkt_digest(wkt_text):
+    """Provenance record standing in for one raw WKT string in committed evidence.
+
+    Issue #9575: the raw polygon text made a poured board's assessment tens of
+    megabytes per file. The digest keeps each layer's payload identifiable and
+    tamper-evident without shipping it; the raw geometry stays in memory, where
+    the assessment's own tests and any further measurement read it.
+    """
+    import hashlib
+
+    payload = wkt_text.encode("utf-8")
+    return {"sha256": hashlib.sha256(payload).hexdigest(), "bytes": len(payload)}
+
+
+def _digested_wkt_entry(entry):
+    """One ``layers_wkt``-bearing provenance mapping, digests in the WKT's place.
+
+    Passes through anything that does not carry a ``layers_wkt`` map, and keeps
+    non-string layer values (an already-digested record) as they are, so
+    serializing a reloaded assessment changes nothing.
+    """
+    if not isinstance(entry, dict) or not isinstance(entry.get("layers_wkt"), dict):
+        return entry
+    return {
+        **entry,
+        "layers_wkt": {
+            layer: _wkt_digest(text) if isinstance(text, str) else text
+            for layer, text in entry["layers_wkt"].items()
+        },
+    }
+
+
+def committed_geometry_provenance(provenance):
+    """``geometry_provenance`` as ``MaskCopperAssessment.to_dict`` ships it (#9575).
+
+    Every ``layers_wkt`` map -- export-level, per ``source_geometries`` entry
+    and per ``source_objects`` entry -- is replaced by per-layer
+    ``_wkt_digest`` records. The in-memory dict is copied, never mutated, and
+    every other key (``features``, ``gerber_sha256``, ``objects``, ...) is
+    carried as-is.
+    """
+    committed = dict(provenance)
+    export = provenance.get("export")
+    if isinstance(export, dict):
+        export = _digested_wkt_entry(dict(export))
+        if isinstance(export.get("source_geometries"), dict):
+            export["source_geometries"] = {
+                key: _digested_wkt_entry(value)
+                for key, value in export["source_geometries"].items()
+            }
+        committed["export"] = export
+    if isinstance(provenance.get("source_objects"), dict):
+        committed["source_objects"] = {
+            identity: _digested_wkt_entry(value)
+            for identity, value in provenance["source_objects"].items()
+        }
+    return committed
 
 
 def source_binding(geometry):
