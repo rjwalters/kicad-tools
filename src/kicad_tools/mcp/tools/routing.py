@@ -558,6 +558,20 @@ def _detect_stub_terminals_for_pcb(pcb: PCB, region_box: tuple[float, float, flo
         return {}
 
 
+def _stat_signature(path: Path) -> tuple[int, int, int] | None:
+    """File identity for the #9599 row-4 stale-write guard.
+
+    ``(ino, size, mtime_ns)`` of *path*, or ``None`` when it does not exist.
+    A changed signature between a run's load and its save means another
+    writer touched the board in between.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
 def route_net_auto(
     pcb_path: str,
     net_name: str,
@@ -672,6 +686,16 @@ def route_net_auto(
         pcb = PCB.load(pcb_path)
     except Exception as e:
         raise ParseError(f"Failed to parse PCB file: {e}") from e
+
+    # Issue #9599 row 4 (stale-write guard): snapshot the output file's
+    # identity NOW, immediately after the load, so the save below can refuse
+    # to overwrite content this run never read.  ``route_net_auto`` rewrites
+    # the board wholesale from its in-memory copy, so an external edit landing
+    # between this load and the save would otherwise be silently clobbered
+    # ("a killed router process finished later and rewrote the board").
+    # Captured after the load (not before) so a write that preceded the load
+    # -- content this run's copy already includes -- does not false-reject.
+    _output_sig_at_load = _stat_signature(Path(output_path)) if output_path else None
 
     # Find the net
     net_number = None
@@ -963,6 +987,24 @@ def route_net_auto(
     # before saving, and surface a clear failure when the orchestrator
     # reports success but produced no physical segments.
     if output_path and should_persist:
+        # Issue #9599 row 4 (stale-write guard): refuse the wholesale rewrite
+        # when the output file changed since the load this run's copy came
+        # from.  ``pcb.save`` replaces the whole board with the in-memory
+        # state, so saving now would silently undo the other writer's edit.
+        _stale_error: str | None = None
+        _sig_now = _stat_signature(Path(output_path))
+        if _sig_now != _output_sig_at_load:
+            _stale_error = (
+                "Output file changed since this run loaded the board "
+                f"({output_path}); refusing to save over it with this run's "
+                "in-memory copy (stale-write guard, issue #9599 row 4). "
+                "Re-run the command against the current file."
+            )
+        if _stale_error is not None:
+            result_dict["success"] = False
+            result_dict["error_message"] = _stale_error
+            result_dict["warnings"] = result_dict.get("warnings", []) + [_stale_error]
+            return result_dict
         (
             segments_written,
             vias_written,
