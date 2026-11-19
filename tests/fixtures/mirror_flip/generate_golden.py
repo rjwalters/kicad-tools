@@ -22,7 +22,8 @@ the outputs are committed):
     /Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/\
 Versions/Current/bin/python3 tests/fixtures/mirror_flip/generate_golden.py
 
-Generated with KiCad 10.0.5.
+Originally generated with KiCad 10.0.5; the custom pad 5 (Issue #9530) was
+added and the pair regenerated with the KiCad release named in the commit/PR.
 """
 
 from __future__ import annotations
@@ -84,6 +85,34 @@ def add_pad(
     fp.Add(pad)
 
 
+def add_custom_pad(
+    fp: pcbnew.FOOTPRINT,
+    number: str,
+    x_mm: float,
+    y_mm: float,
+    poly_mm: list[tuple[float, float]],
+) -> None:
+    """Add an SMD custom pad with a small anchor plus one asymmetric ``gr_poly``.
+
+    The polygon is NOT symmetric about the pad's x axis (an L-shape reaching
+    mostly toward +y), so a missing y-mirror of ``(primitives ...)`` changes the
+    copper and the golden can tell (Issue #9530).  Coordinates are pad-local.
+    """
+    pad = pcbnew.PAD(fp)
+    pad.SetNumber(number)
+    pad.SetAttribute(PAD_ATTRIB_SMD)
+    pad.SetShape(pcbnew.PAD_SHAPE_CUSTOM)
+    pad.SetAnchorPadShape(pcbnew.F_Cu, PAD_SHAPE_CIRCLE)
+    pad.SetSize(VECTOR2I(mm(0.4), mm(0.4)))
+    pad.SetLayerSet(pad.SMDMask())
+    pad.SetFPRelativePosition(VECTOR2I(mm(x_mm), mm(y_mm)))
+    outline = pcbnew.VECTOR_VECTOR2I()
+    for px, py in poly_mm:
+        outline.append(VECTOR2I(mm(px), mm(py)))
+    pad.AddPrimitivePoly(pcbnew.F_Cu, outline, 0, True)
+    fp.Add(pad)
+
+
 def add_silk_line(fp: pcbnew.FOOTPRINT, x1: float, y1: float, x2: float, y2: float) -> None:
     line = pcbnew.PCB_SHAPE(fp)
     line.SetShape(pcbnew.SHAPE_T_SEGMENT)
@@ -119,6 +148,16 @@ def main() -> int:
     add_pad(fp, "2", -1.6, 1.0, 1.2, 0.6, 45.0, PAD_SHAPE_ROUNDRECT, PAD_ATTRIB_SMD)
     add_pad(fp, "3", 0.4, 0.0, 1.0, 0.5, 20.0, PAD_SHAPE_RECT, PAD_ATTRIB_SMD)
     add_pad(fp, "4", 2.0, -0.8, 1.1, 1.1, 0.0, PAD_SHAPE_CIRCLE, PAD_ATTRIB_PTH, drill_mm=0.6)
+
+    # Asymmetric custom pad (L-shaped ``gr_poly`` reaching toward +y) -- the
+    # applicator must y-mirror its (primitives ...) like KiCad's Flip (#9530).
+    add_custom_pad(
+        fp,
+        "5",
+        0.4,
+        1.6,
+        [(-0.3, -0.2), (0.9, -0.2), (0.9, 0.3), (0.2, 0.3), (0.2, 1.1), (-0.3, 1.1)],
+    )
 
     # An asymmetric silk mark (pin-1 tick) so the cosmetic side-flip is
     # observable in the golden too.

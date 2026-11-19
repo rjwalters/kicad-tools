@@ -89,12 +89,12 @@
 	)
 	(footprint ""
 		(layer "B.Cu")
-		(uuid "e67d0893-09a5-4d60-a955-02b8a4847e18")
+		(uuid "69f8ef43-08bf-4734-a22b-f1472b08a0ee")
 		(at 100 100 150)
 		(property "Reference" "U1"
 			(at 0 0 150)
 			(layer "B.SilkS")
-			(uuid "1d481b9d-e8cf-47e7-a934-98e97dac575b")
+			(uuid "5a6d8c9d-df14-468d-ac11-1389475261fd")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -105,7 +105,7 @@
 		(property "Value" "MIRROR_GOLDEN"
 			(at 0 0 150)
 			(layer "B.Fab")
-			(uuid "409b9246-7e14-466a-94bc-2c5f8beb9f26")
+			(uuid "43431433-bbee-4593-bf67-0c7643e34453")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -117,7 +117,7 @@
 			(at 0 0 150)
 			(layer "B.Fab")
 			(hide yes)
-			(uuid "d0089647-6fd3-468f-a30e-c5e8b8e3ef30")
+			(uuid "93125391-e90d-496c-9566-201aed5d0211")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -129,7 +129,7 @@
 			(at 0 0 150)
 			(layer "B.Fab")
 			(hide yes)
-			(uuid "a90790ed-cfc1-4466-ae6f-87360e1dee6a")
+			(uuid "0e841987-f498-4b42-9fe5-55a509d1d75b")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -146,7 +146,7 @@
 				(type default)
 			)
 			(layer "B.SilkS")
-			(uuid "449e1909-4688-4919-a94d-0fcdefa51716")
+			(uuid "7ca0a2e0-2457-4d80-a434-cf27f594f9d9")
 		)
 		(pad "1" smd roundrect
 			(at -1.600001 1 150)
@@ -154,7 +154,7 @@
 			(layers "B.Cu" "B.Mask" "B.Paste")
 			(roundrect_rratio 0.25)
 			(thermal_bridge_angle 45)
-			(uuid "9610e48f-2cb3-4f23-a18b-2c2f8dfc6d48")
+			(uuid "365bdadd-f08f-4ec0-aa4d-900b70e7c0b8")
 		)
 		(pad "2" smd roundrect
 			(at -1.6 -0.999999 105)
@@ -162,14 +162,14 @@
 			(layers "B.Cu" "B.Mask" "B.Paste")
 			(roundrect_rratio 0.25)
 			(thermal_bridge_angle 45)
-			(uuid "2a4136b6-7e3b-480a-af60-2cceabd8c3d0")
+			(uuid "1eced0dc-07ad-4479-8522-11c083318c03")
 		)
 		(pad "3" smd rect
 			(at 0.4 0 130)
 			(size 1 0.5)
 			(layers "B.Cu" "B.Mask" "B.Paste")
 			(thermal_bridge_angle 45)
-			(uuid "98599d95-6b82-40e9-82ad-652675a400fd")
+			(uuid "16b10fe3-8b18-489f-b972-6ab958db29db")
 		)
 		(pad "4" thru_hole circle
 			(at 2 0.8 150)
@@ -177,7 +177,26 @@
 			(drill 0.6)
 			(layers "*.Cu" "*.Mask")
 			(remove_unused_layers no)
-			(uuid "94607851-a98f-4e18-9df0-8d06fb4afa8b")
+			(uuid "70fb7d57-1602-4d52-8a70-d5b8917da986")
+		)
+		(pad "5" smd custom
+			(at 0.4 -1.6 150)
+			(size 0.4 0.4)
+			(layers "B.Cu" "B.Mask" "B.Paste")
+			(options
+				(clearance outline)
+				(anchor circle)
+			)
+			(primitives
+				(gr_poly
+					(pts
+						(xy -0.3 0.2) (xy 0.9 0.2) (xy 0.9 -0.3) (xy 0.2 -0.3) (xy 0.2 -1.1) (xy -0.3 -1.1)
+					)
+					(width 0)
+					(fill yes)
+				)
+			)
+			(uuid "e8144fbb-14bf-4200-82df-92cac4bf0afb")
 		)
 		(embedded_fonts no)
 	)
@@ -190,7 +209,7 @@
 		)
 		(fill no)
 		(layer "Edge.Cuts")
-		(uuid "152e74ae-3391-4d38-a205-c02c7b674de8")
+		(uuid "b58b7e88-057d-4ef6-9c7a-534dc4cfe8a0")
 	)
 	(embedded_fonts no)
 )

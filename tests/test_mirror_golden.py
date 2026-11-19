@@ -262,3 +262,100 @@ class TestJustifyResidue:
         justify = effects.find_child("justify")
         assert justify is not None, "non-empty justify node must survive un-mirroring"
         assert justify.values == ["left"]
+
+
+def _custom_pad(fp, number: str = "5"):
+    return next(p for p in fp.pads if p.number == number)
+
+
+def _primitive_points(pad) -> list[float]:
+    """Flat ``[x0, y0, x1, y1, ...]`` of every ``(xy x y)`` under the pad's
+    ``(primitives ...)`` source node (flat so ``pytest.approx`` can compare)."""
+    primitives = pad._sexp_node.find_child("primitives")
+    assert primitives is not None
+    pts: list[float] = []
+
+    def walk(node) -> None:
+        for child in node.iter_children():
+            if child.tag == "xy":
+                pts.extend((child.get_float(0), child.get_float(1)))
+            else:
+                walk(child)
+
+    walk(primitives)
+    return pts
+
+
+class TestMirrorCustomPadPrimitives:
+    """Issue #9530: a custom pad's ``(primitives ...)`` live only in its source
+    node, so the pad-attribute write-through never reached them.  Pad 5 of the
+    golden pair is an L-shaped ``gr_poly`` that is NOT symmetric about the
+    pad's x axis, so a missing y-mirror changes the copper."""
+
+    def test_primitive_points_equal_kicad_flip(self):
+        flipped = _custom_pad(_u1(_flip_front()))
+        golden = _custom_pad(_u1(PCB.load(str(_BACK))))
+        mine = _primitive_points(flipped)
+        theirs = _primitive_points(golden)
+        assert len(mine) == len(theirs) == 12
+        assert mine == pytest.approx(theirs, abs=_TOL)
+
+    def test_primitive_points_are_y_negated_originals(self):
+        original = _primitive_points(_custom_pad(_u1(PCB.load(str(_FRONT)))))
+        # The fixture really is asymmetric: negating y changes the point set.
+        negated = [v if i % 2 == 0 else -v for i, v in enumerate(original)]
+        pairs = lambda flat: sorted(zip(flat[::2], flat[1::2], strict=True))  # noqa: E731
+        assert pairs(original) != pairs(negated)
+        flipped = _primitive_points(_custom_pad(_u1(_flip_front())))
+        assert flipped == pytest.approx(negated, abs=_TOL)
+
+    def test_double_mirror_restores_primitives(self):
+        original = _primitive_points(_custom_pad(_u1(PCB.load(str(_FRONT)))))
+        pcb = PCB.load(str(_FRONT))
+        applicator = StrategyApplicator()
+        applicator.apply_strategy(pcb, _mirror_strategy())
+        applicator.apply_strategy(pcb, _mirror_strategy())
+        restored = _primitive_points(_custom_pad(_u1(pcb)))
+        assert restored == pytest.approx(original, abs=_TOL)
+
+    def test_primitives_survive_save_and_reparse(self, tmp_path: Path):
+        out = tmp_path / "flipped.kicad_pcb"
+        _flip_front().save(str(out))
+        reloaded = _custom_pad(_u1(PCB.load(str(out))))
+        golden = _custom_pad(_u1(PCB.load(str(_BACK))))
+        assert _primitive_points(reloaded) == pytest.approx(_primitive_points(golden), abs=_TOL)
+
+    def test_custom_pad_copper_matches_kicad_flipped_geometry(self):
+        pytest.importorskip("shapely")
+        from kicad_tools.router.fixed_copper import custom_pad_copper
+
+        def copper(fp):
+            pad = _custom_pad(fp)
+            x, y = _abs_pad_positions(fp)[pad.number]
+            return custom_pad_copper(
+                pad._sexp_node.to_string(),
+                reference=fp.reference,
+                pad_number=pad.number,
+                x=x,
+                y=y,
+                rotation=pad.rotation,
+                source_net="",
+                source_net_id=0,
+            ).geometry
+
+        mine = copper(_u1(_flip_front()))
+        theirs = copper(_u1(PCB.load(str(_BACK))))
+        assert theirs.area > 0
+        assert mine.symmetric_difference(theirs).area == pytest.approx(0.0, abs=1e-6)
+
+    def test_pads_without_primitives_and_test_doubles_are_noops(self):
+        # Non-custom pads carry no (primitives ...) node and must stay untouched.
+        pad = next(p for p in _u1(PCB.load(str(_FRONT))).pads if p.number == "1")
+        assert pad._sexp_node.find_child("primitives") is None
+        StrategyApplicator._mirror_pad_primitives(pad)
+        assert pad._sexp_node.find_child("primitives") is None
+
+        class _Double:  # no ``_sexp_node`` attribute at all
+            pass
+
+        StrategyApplicator._mirror_pad_primitives(_Double())

@@ -317,6 +317,8 @@ class StrategyApplicator:
           ``a -> (180 - a)``;
         * pad ``layers``: per-name side swap (through-hole ``*.Cu``/``*.Mask``
           unchanged);
+        * custom-pad ``(primitives ...)``: local ``y`` negation of every point
+          (``xy``/``start``/``end``/``mid``/``center``) -- Issue #9530;
         * footprint texts/graphics: local ``y`` negation + side swap +
           ``(justify mirror)`` toggle (#4560);
         * text angles (ABSOLUTE, like pad angles): ``a -> -a``, applied by the
@@ -370,6 +372,7 @@ class StrategyApplicator:
                 pad.rotation = (180.0 - float(pad.rotation)) % 360.0
             if hasattr(pad, "layers"):
                 pad.layers = [_flip_layer_side(layer) for layer in pad.layers]
+            self._mirror_pad_primitives(pad)
 
         self._mirror_footprint_cosmetics(fp)
         # ``Flip(LEFT_RIGHT)`` ends with ``FOOTPRINT::Rotate(180)``, which
@@ -526,6 +529,26 @@ class StrategyApplicator:
             if child.tag not in self._COSMETIC_SEXP_TAGS:
                 continue
             self._mirror_cosmetic_node(child)
+
+    @staticmethod
+    def _mirror_pad_primitives(pad) -> None:
+        """Y-mirror a custom pad's ``(primitives ...)`` in the S-expression (#9530).
+
+        Custom-pad copper lives only in the pad's source node (``Pad`` has no
+        Python-side primitives field), so ``Pad.__setattr__`` write-through
+        cannot reach it.  KiCad's left/right ``Flip`` negates the local ``y``
+        of every primitive point; the same helper ``flip_footprint_children_to_back``
+        uses for back-side placement (#8581) performs that transform.  No-ops
+        for pads without primitives and for test doubles without ``_sexp_node``.
+        """
+        from kicad_tools.schema.pcb import _mirror_local_y
+
+        pad_node = getattr(pad, "_sexp_node", None)
+        if pad_node is None:
+            return
+        primitives = pad_node.find_child("primitives")
+        if primitives is not None:
+            _mirror_local_y(primitives)
 
     @staticmethod
     def _mirror_cosmetic_node(node) -> None:
