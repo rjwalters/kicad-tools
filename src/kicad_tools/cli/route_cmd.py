@@ -19211,13 +19211,17 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
 
     * **Timing** -- the lattice netset negotiation's per-connection decline
       reason (``LatticePathfinder.failure_reasons``, issue #4278).  The
-      per-link deadline signal IS that reason: a connection never reached
-      before the deadline is declined with the honest reason
-      ``"deadline-exceeded"``
-      (:meth:`~kicad_tools.router.lattice.pathfinder.LatticePathfinder.route_netset`),
+      per-link deadline signal IS that reason: ``"deadline-exceeded"``
+      means the deadline cut the best pass before the link was reached in
+      ANY pass -- a link an earlier pass attempted and declined on its own
+      merits keeps that real reason even when a later truncated pass became
+      the best pass (:meth:`~kicad_tools.router.lattice.pathfinder.LatticePathfinder.route_netset`),
       any other reason means the link was attempted (and declined or
       rolled back).  Per link, ``deadline_hit`` is true only for the
-      deadline-exceeded reason and ``attempted`` is its complement
+      deadline-exceeded reason; ``attempted`` comes from the negotiation's
+      attempted-keys set (true when the search reached the link in ANY
+      pass), falling back to the reason's complement when the set is
+      absent
       (issue #9581: they used to be OR-ed with / copied from the
       whole-run negotiation totals, so once a run hit its deadline every
       link was flagged as deadline-hit).  Per-link ``elapsed_s`` /
@@ -19250,6 +19254,10 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
     if stats is None:
         return None
     reasons: dict[object, str] = dict(getattr(router, "_lattice_failure_reasons", {}) or {})
+    # Issue #9581: keys whose search started in ANY pass of the negotiation.
+    # ``None`` when the router predates the field (duck-typed stand-ins);
+    # the attempted flag then falls back to the reason-derived form below.
+    attempted_keys: frozenset[object] | None = getattr(router, "_lattice_attempted_keys", None)
     # Issue #8396: links committed by the search but rolled back for creepage.
     creepage_refusals: list[dict] = list(getattr(router, "_complete_creepage_refusals", []) or [])
     if not reasons and not creepage_refusals:
@@ -19304,18 +19312,28 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
         net_name = _net_name_for_lattice_key(router, key)
         ep = endpoints.get(key)
         diag = diag_by_net.get(net_name)
+        # Issue #9581: per-link truth.  ``attempted`` is the honest
+        # cross-pass signal -- True when the search reached this link in
+        # ANY pass (the pathfinder's attempted-keys set).  A bare
+        # ``"deadline-exceeded"`` reason cannot carry it: the stamp is
+        # per-PASS, so a link declined on its own merits in an early
+        # pass carries it in a later truncated pass that became the
+        # best pass (the pathfinder now restores the earlier real
+        # reason for such links; the set still decides ``attempted``
+        # for a link that ROUTED in an earlier pass and so has no
+        # decline reason on record).  ``deadline_hit`` keeps meaning
+        # "this reason is the deadline stamp".  (Both flags used to be
+        # OR-ed with / copied from the whole-run negotiation totals,
+        # so once a run hit its deadline every link was flagged.)
+        deadline_reason = reason == "deadline-exceeded"
         entry: dict = {
             "net": net_name,
             "reason": reason,
             "link": {"start": ep[0], "end": ep[1]} if ep else None,
-            # Issue #9581: per-link truth.  The reason IS the per-link
-            # deadline signal -- ``route_netset`` stamps a link it never
-            # reached with ``"deadline-exceeded"``; any other reason means
-            # the link was attempted.  (This used to be OR-ed with the
-            # whole-run ``stats.deadline_hit``, so once a run hit its
-            # deadline every link was flagged.)
-            "deadline_hit": bool(reason == "deadline-exceeded"),
-            "attempted": bool(reason != "deadline-exceeded"),
+            "deadline_hit": bool(deadline_reason),
+            "attempted": bool(
+                (key in attempted_keys) if attempted_keys is not None else (not deadline_reason)
+            ),
             # Issue #4979: machine-readable "this residual is layer-
             # constrained" flag.  A link the hard layer intent declined
             # (``layer-constrained-start``/``-end``, or a search the hard

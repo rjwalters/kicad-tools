@@ -406,6 +406,142 @@ class TestPerLinkDeadlineFlags:
         neta_block = text.split("[NETA]")[1].split("[NETB]")[0]
         assert "not attempted" in neta_block
 
+    def test_deadline_stamp_is_cross_pass_honest(self, tmp_path: Path, monkeypatch, capsys):
+        """PR #9603 review: ``"deadline-exceeded"`` is a per-PASS stamp.
+
+        The negotiation re-routes every connection on each pass, and a
+        deadline-truncated LATER pass can become the best pass (its prefix
+        routed more than any full pass).  Such a pass used to stamp every
+        not-yet-reached link ``"deadline-exceeded"`` -- relabelling links an
+        earlier pass had attempted and declined as "never attempted".
+        ``attempted`` must mean the search reached the link in ANY pass, and
+        a link declined on its own merits earlier keeps that real reason.
+
+        The per-item search outcomes are stubbed (the negotiation's history
+        pressure would produce them on a congested board); the unit under
+        test is the cross-pass reason bookkeeping in the real
+        ``_route_netset_once`` loop, driven by a fake pathfinder clock.
+        """
+        import time as _time
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.route_cmd import (
+            _build_complete_link_report,
+            _print_complete_link_report,
+        )
+        from kicad_tools.router.lattice import pathfinder as pf_mod
+        from kicad_tools.router.lattice.pathfinder import LatticePathfinder
+        from kicad_tools.router.layers import Layer, LayerStack
+        from kicad_tools.router.primitives import Pad
+        from kicad_tools.router.rules import DesignRules
+
+        outline = [(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)]
+
+        def _pad(x: float, y: float, net: int, pin: str) -> Pad:
+            return Pad(
+                x=x,
+                y=y,
+                net=net,
+                net_name=f"NET{net}",
+                layer=Layer.F_CU,
+                ref=f"J{net}",
+                pin=pin,
+                width=0.6,
+                height=0.6,
+            )
+
+        # Six singles at strictly increasing lengths (8..13) so every pass
+        # visits them shortest-first in the order A..F (x keeps the
+        # corridors far apart; only the stubbed outcomes matter).
+        connections = []
+        for net, length in enumerate((8.0, 9.0, 10.0, 11.0, 12.0, 13.0), start=1):
+            x = 1.0 + 2.0 * (net - 1)
+            connections.append(((net, 0), _pad(x, 0.0, net, "1"), _pad(x, length, net, "2"), None))
+
+        pf = LatticePathfinder(
+            outline,
+            [p for c in connections for p in (c[1], c[2])],
+            DesignRules(trace_width=0.2, trace_clearance=0.15, manufacturer="jlcpcb"),
+            LayerStack.two_layer(),
+        )
+
+        # The deadline is anchored to the REAL clock (+1000 s) so machinery
+        # outside the pathfinder module (escape planning) reading its own
+        # ``time`` still sees time to spare; the pathfinder module's clock
+        # is the fake below, and only it decides when a pass is cut.
+        real_now = _time.monotonic()
+        deadline = real_now + 1000.0
+        clock = {"now": real_now}
+        monkeypatch.setattr(pf_mod, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
+
+        calls: dict[object, int] = {}
+
+        def fake_single(item, routes, **_kwargs):
+            key = item[0]
+            calls[key] = calls.get(key, 0) + 1
+            if key == (6, 0):
+                # F: declined on its own merits in every pass that reaches it.
+                return "no-path-found"
+            if key in ((2, 0), (3, 0), (4, 0)) and calls[key] == 1:
+                # B, C, D: declined in pass 1, ROUTED in pass 2 -- the
+                # truncated pass 2 then scores 4 > pass 1's 2 and becomes
+                # the best pass.
+                return "no-path-found"
+            if key == (4, 0):
+                # D's pass-2 success jumps the fake clock past the deadline,
+                # so the NEXT item (E) is cut before its pass-2 attempt.
+                clock["now"] = real_now + 2000.0
+            return None
+
+        monkeypatch.setattr(pf, "_route_single_into", fake_single)
+
+        routes, stats = pf.route_netset(connections, deadline=deadline)
+
+        # The truncated pass 2 became the best pass: F (declined pass 1,
+        # cut pass 2) keeps its real decline reason, E (routed pass 1, cut
+        # pass 2) keeps the deadline stamp, and every key's search started
+        # in some pass.
+        assert stats.deadline_hit is True
+        assert stats.iterations == 2
+        assert pf.failure_reasons[(6, 0)] == "no-path-found"
+        assert pf.failure_reasons[(5, 0)] == "deadline-exceeded"
+        assert stats.attempted_keys == frozenset((n, 0) for n in range(1, 7))
+
+        router = SimpleNamespace(
+            _lattice_negotiation_stats=stats,
+            _lattice_failure_reasons=dict(pf.failure_reasons),
+            _lattice_attempted_keys=stats.attempted_keys,
+            _lattice_connection_endpoints={
+                (5, 0): ("E.1", "E.2"),
+                (6, 0): ("F.1", "F.2"),
+            },
+            _complete_creepage_refusals=[],
+            net_names={5: "NETE", 6: "NETF"},
+        )
+        report = _build_complete_link_report(router, tmp_path / "absent.kicad_pcb")
+        assert report is not None
+        assert report["deadline_hit"] is True
+        by_net = {entry["net"]: entry for entry in report["unroutable_links"]}
+
+        # Declined on its own merits in pass 1, cut in pass 2: the real
+        # decline reason survives and the link reads as attempted.
+        f_entry = by_net["NETF"]
+        assert f_entry["reason"] == "no-path-found"
+        assert f_entry["attempted"] is True
+        assert f_entry["deadline_hit"] is False
+
+        # Routed in pass 1, cut in pass 2: attempted (any pass counts) even
+        # though its reason IS the deadline stamp of the best pass.
+        e_entry = by_net["NETE"]
+        assert e_entry["reason"] == "deadline-exceeded"
+        assert e_entry["attempted"] is True
+        assert e_entry["deadline_hit"] is True
+
+        # Neither final link was "never attempted" -- the human-readable
+        # report must not say so.
+        _print_complete_link_report(report)
+        assert "not attempted: the run's deadline passed" not in capsys.readouterr().out
+
 
 class TestBudgetDerivationLine:
     """AC1 (issue #9581): a --complete run with --timeout states the

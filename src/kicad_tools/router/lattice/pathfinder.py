@@ -321,6 +321,13 @@ class LatticeNegotiationStats:
     deadline_hit: bool = False
     elapsed_s: float = 0.0
     budget_s: float | None = None
+    # Issue #9581: the keys whose search actually started in ANY pass of
+    # this negotiation run -- the honest per-link ``attempted`` signal.  A
+    # ``"deadline-exceeded"`` decline reason cannot carry it alone: that
+    # stamp is per-PASS, so a link attempted (and declined on its own
+    # merits) in an early pass can carry it in a later truncated pass that
+    # became the best pass (see :meth:`_route_netset_once`).
+    attempted_keys: frozenset[object] = frozenset()
 
     @property
     def completion(self) -> float:
@@ -8434,7 +8441,11 @@ class LatticePathfinder:
         whole negotiation); rip-up resets only the committed-copper model.
         Returns ``(routes_by_key, stats)`` for the best pass seen;
         :attr:`failure_reasons` carries the per-connection decline diagnosis
-        for that pass.
+        for that pass.  Issue #9581: when the best pass is a deadline-
+        truncated one, a key some EARLIER pass attempted and declined keeps
+        its most recent real decline reason (``"deadline-exceeded"``
+        then means never reached in any pass), and ``stats.attempted_keys``
+        records every key whose search started in any pass.
 
         Issue #6437: ``pair_nets`` maps every detected diff-pair net id,
         engaged or not, to its partner's.  The post-negotiation pad-class repair
@@ -8532,6 +8543,15 @@ class LatticePathfinder:
         converged = False
         iterations_run = 0
         present = present_cost_initial
+        # Issue #9581: the ``"deadline-exceeded"`` stamp is per-PASS -- the
+        # mid-pass cut below stamps every item from the cut onward of THIS
+        # pass, including items attempted (and declined on their own merits)
+        # in an earlier pass.  When the truncated pass becomes the best
+        # pass, its ``reasons`` must not relabel those links as never
+        # attempted, so track per key whether its search ever started and
+        # its most recent real (non-deadline) decline reason.
+        attempted_keys: set[object] = set()
+        prior_decline_reasons: dict[object, str] = {}
 
         deadline_hit = False
         for it in range(max_iterations):
@@ -8753,10 +8773,22 @@ class LatticePathfinder:
                     # undiagnosable in the completion report).
                     for _length2, kind2, item2 in items[_idx:]:
                         key2 = item2.key if kind2 == 1 else item2[0]
-                        reasons[key2] = "deadline-exceeded"
+                        # Issue #9581: a key the search already reached in
+                        # an earlier pass WAS attempted -- keep its most
+                        # recent real decline reason instead of the deadline
+                        # stamp.  (A key routed in every earlier pass has no
+                        # decline on record and keeps the stamp: the deadline
+                        # cutting this pass before re-reaching it is then
+                        # exactly why it is missing from the best pass.)
+                        reasons[key2] = prior_decline_reasons.get(key2, "deadline-exceeded")
                         if kind2 == 1:
                             pair_outcomes[key2] = SegmentOutcome("deadline-exceeded")
                     break
+                # Issue #9581: reaching the item here means its search starts
+                # this pass (the deadline check above is the only gate
+                # between it and the search calls) -- record the key as
+                # attempted in this run.
+                attempted_keys.add(item.key if kind == 1 else item[0])
                 if kind == 1:
                     # Issue #6883: a class that prefers a layer none of the
                     # pads share (opted in via ``allow_plane_layers``) gets
@@ -8879,6 +8911,14 @@ class LatticePathfinder:
                 routed_items += 1
 
             flush_fallbacks()
+
+            # Issue #9581: fold this pass's real decline reasons into the
+            # cross-pass record -- a later truncated pass that becomes the
+            # best pass restores them instead of stamping "deadline-exceeded"
+            # over a link this run already tried and declined.
+            for _dk, _dr in reasons.items():
+                if _dr != "deadline-exceeded":
+                    prior_decline_reasons[_dk] = _dr
 
             score = (
                 (routed_items, coupled_count, hybrid_count, fallback_legs)
@@ -9063,6 +9103,7 @@ class LatticePathfinder:
             deadline_hit=deadline_hit,
             elapsed_s=time.monotonic() - start_time,
             budget_s=budget_s,
+            attempted_keys=frozenset(attempted_keys),
         )
         return best_routes, stats
 
