@@ -2145,11 +2145,10 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                     nx, ny = _sheet(narrowest.position)
                     # Say when the figure is a group's effective width, so
                     # 2.0 mm is not misread as one trace's width (#8917) --
-                    # naming the shape: merged same-layer copper or a sum
-                    # across layers (#9557).
+                    # naming the shape: merged same-layer copper, a sum
+                    # across layers, or both at once (#9557, #9560).
                     if narrowest.parallel_group:
-                        shape = "merged" if narrowest.merged else "summed"
-                        doubled = f" ({shape} parallel group)"
+                        doubled = f" ({narrowest.shape} parallel group)"
                     else:
                         doubled = ""
                     print(
