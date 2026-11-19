@@ -2700,6 +2700,51 @@ Provides an interactive shell for exploring and modifying PCB files.
 
 ---
 
+### `voltage-map-merge`
+
+Merge two or more per-scenario voltage maps into one **envelope map** for the
+interval-aware `--voltage-map` consumers (`kct creepage`, `kct audit`,
+`kct repair-creepage`, `kct route-link`). Author one map per operating
+scenario of the board (e.g. mains forward vs. reverse) and merge, instead of
+hand-writing an envelope of ranges plus one `_pair_bounds` entry per
+varying-net pair:
+
+```bash
+kct voltage-map-merge forward.json reverse.json -o envelope.json
+```
+
+Each net becomes the span of its per-scenario potentials (`{"min": …, "max": …}`;
+a plain scalar when every scenario agrees). For every net pair whose envelope
+span overstates its real difference — nets that move together across scenarios
+(a follower bank riding the line) but not in the envelope — a generated
+`_pair_bounds` entry caps the pair back to its worst per-scenario |ΔV|
+("always the same potential" is `max_dv: 0`). A net present in only one
+scenario is treated as 0 V in the others (the consumers' own unmapped-net
+default). The scenarios must agree on `_edge_voltage` and must not carry
+their own `_pair_bounds` (issue #9582).
+
+`--format json` (see [Machine output](machine-output.md)) emits one JSON
+document on stdout — the input/output paths, the net and generated
+`_pair_bounds` counts, and the `route_understated_pairs` array (below) — so
+machine consumers need not scrape stderr; failure paths emit
+`{"error": …}` with unchanged exit codes.
+
+> **Route-time limitation (#4411):** `kct route` and `kct pcb` read the map
+> through `load_signed_voltage_map`, which collapses each net's range to its
+> largest-magnitude endpoint *with its sign*. On a merged envelope a
+> sign-flipping net and its opposite bank can collapse to the same endpoint,
+> scoring those pairs **below** the census value — down to 0 V, dropping them
+> from the route widening matrix entirely. When the merged map contains such
+> pairs the command warns on stderr, naming them, and the `--format json`
+> document carries them in its `route_understated_pairs` array. For
+> route-time spacing,
+> drive `kct route` / `kct pcb` with a **per-scenario** map (correct within
+> each scenario) and use the merged envelope for the `kct creepage` /
+> `kct audit` gate. Teaching the route consumers to difference intervals is
+> #4411 follow-up work.
+
+---
+
 ## Output Formats
 
 Most commands support multiple output formats:

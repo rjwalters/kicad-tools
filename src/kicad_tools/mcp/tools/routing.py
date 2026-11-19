@@ -682,20 +682,24 @@ def route_net_auto(
     if path.suffix != ".kicad_pcb":
         raise ParseError(f"Invalid file extension: {path.suffix} (expected .kicad_pcb)")
 
+    # Issue #9599 row 4 / #9663 (stale-write guard): snapshot the output
+    # file's identity BEFORE the board file is read, so the save below can
+    # refuse to overwrite content this run never read.  ``route_net_auto``
+    # rewrites the board wholesale from its in-memory copy, so an external
+    # edit landing between this load and the save would otherwise be silently
+    # clobbered ("a killed router process finished later and rewrote the
+    # board").  Stat-before-read, not after the load (#9663): a write that
+    # preceded the stat is in both the signature and the content this run
+    # reads (no false reject); a write between the stat and the read only
+    # false-rejects -- the safe direction -- whereas a stat taken after the
+    # read misses a write that landed in the read-to-stat window and lets
+    # the save clobber it.
+    _output_sig_at_load = _stat_signature(Path(output_path)) if output_path else None
+
     try:
         pcb = PCB.load(pcb_path)
     except Exception as e:
         raise ParseError(f"Failed to parse PCB file: {e}") from e
-
-    # Issue #9599 row 4 (stale-write guard): snapshot the output file's
-    # identity NOW, immediately after the load, so the save below can refuse
-    # to overwrite content this run never read.  ``route_net_auto`` rewrites
-    # the board wholesale from its in-memory copy, so an external edit landing
-    # between this load and the save would otherwise be silently clobbered
-    # ("a killed router process finished later and rewrote the board").
-    # Captured after the load (not before) so a write that preceded the load
-    # -- content this run's copy already includes -- does not false-reject.
-    _output_sig_at_load = _stat_signature(Path(output_path)) if output_path else None
 
     # Find the net
     net_number = None

@@ -31,7 +31,12 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.cli.route_cmd import main as route_main
-from kicad_tools.router.pairwise_clearance import subthreshold_coverage_gap
+from kicad_tools.router.pairwise_clearance import (
+    load_pair_bounds,
+    load_signed_voltage_map,
+    load_voltage_intervals,
+    subthreshold_coverage_gap,
+)
 
 # A +/-10 V map is a real 20 V span -- below the 30 V threshold, so the router
 # holds it at the DRU floor, while IEC 60664-1 PD2/IIIa requires 0.48 mm at
@@ -174,6 +179,53 @@ def test_gap_is_empty_when_the_threshold_is_disarmed() -> None:
     assert gap.pair_count == 0
 
 
+def test_gap_applies_the_device_cap_before_the_threshold(tmp_path: Path) -> None:
+    """A device-bounded cap brings a 300 V interval pair below the threshold.
+
+    The matrix applies ``_pair_bounds`` BEFORE the ``--hv-threshold`` test
+    (#8043); the advisory must measure the same capped stress, or a pair whose
+    raw interval span is above the threshold but whose real stress is
+    device-limited below it is invisible everywhere (#9613 review).
+    """
+    vmap = _write_map(
+        tmp_path,
+        {
+            "/BANK_POS": {"min": -150, "max": 150},
+            "/BANK_NEG": {"min": -130, "max": 130},
+            "_pair_bounds": [{"nets": ["/BANK_POS", "/BANK_NEG"], "max_dv": 20, "why": "Q1 V_DS"}],
+        },
+    )
+    gap = subthreshold_coverage_gap(
+        load_signed_voltage_map(vmap),
+        dru=0.2,
+        pair_bounds=load_pair_bounds(vmap),
+        net_intervals=load_voltage_intervals(vmap),
+    )
+    assert gap.pair_count == 1
+    assert gap.worst_pair == ("BANK_NEG", "BANK_POS")
+    assert gap.worst_delta_v == pytest.approx(20.0)
+    assert gap.max_required_mm == pytest.approx(REQUIRED_AT_20V)
+
+
+def test_gap_normalises_raw_loader_interval_keys(tmp_path: Path) -> None:
+    """Raw loader outputs work unmodified: ``/A``-keyed intervals still match.
+
+    ``net_voltages`` keys are normalised inside the helper; the interval map
+    must be too, or a leading-slash sidecar silently reports ``0`` pairs
+    (#9613 review).
+    """
+    vmap = _write_map(tmp_path, {"/A": {"min": -14, "max": 14}, "/B": {"min": -14, "max": 14}})
+    gap = subthreshold_coverage_gap(
+        load_signed_voltage_map(vmap),
+        dru=0.2,
+        net_intervals=load_voltage_intervals(vmap),
+    )
+    assert gap.pair_count == 1
+    assert gap.worst_pair == ("A", "B")
+    assert gap.worst_delta_v == pytest.approx(28.0)
+    assert gap.max_required_mm == pytest.approx(0.53)
+
+
 # ---------------------------------------------------------------------------
 # The CLI surface
 # ---------------------------------------------------------------------------
@@ -191,6 +243,31 @@ def test_run_reports_the_hidden_pairs(board: Path, tmp_path: Path, capsys) -> No
     assert "1 further pair(s) sit below the 30V --hv-threshold" in captured
     assert "BANK_NEG<->BANK_POS at 20V -> 0.480mm" in captured
     assert "--hv-threshold 0" in captured
+
+
+def test_capped_range_pair_keeps_the_advisory(board: Path, tmp_path: Path, capsys) -> None:
+    """A 20 V device cap hides a 300 V interval pair from the matrix, not the note.
+
+    The banner's ``0 cross-pairs`` is correct -- the capped pair sits below the
+    30 V threshold -- but the advisory must still name the capped stress the
+    census will score (#9613 review).
+    """
+    vmap = _write_map(
+        tmp_path,
+        {
+            "/BANK_POS": {"min": -150, "max": 150},
+            "/BANK_NEG": {"min": -130, "max": 130},
+            "_pair_bounds": [{"nets": ["/BANK_POS", "/BANK_NEG"], "max_dv": 20, "why": "Q1 V_DS"}],
+        },
+    )
+
+    rc = route_main(_route_args(board, tmp_path / "capped.kicad_pcb", vmap))
+    captured = capsys.readouterr().out
+
+    assert rc == 0, captured
+    assert "HV pairwise clearance: 2 mapped nets, 0 cross-pairs" in captured
+    assert "1 further pair(s) sit below the 30V --hv-threshold" in captured
+    assert "BANK_NEG<->BANK_POS at 20V -> 0.480mm" in captured
 
 
 def test_disarming_the_threshold_enforces_the_hidden_pair(
