@@ -384,26 +384,34 @@ def _rules_for_link(args: argparse.Namespace, pcb: Any, base: Any, spec: LinkSpe
             if other == me:
                 continue
             pair = (me, other) if me <= other else (other, me)
+            bound = (pair_bounds or {}).get(frozenset((me, other)))
             mm = (required or {}).get(pair)
-            if mm is None and (me not in voltages or other not in voltages):
+            if mm is None and (bound is not None or me not in voltages or other not in voltages):
                 # A net absent from the map is 0 V, as in the creepage census
                 # (compute_creepage_census); fail closed on the same pair the gate
                 # checks instead of silently falling back to --clearance (#8546).
                 # An authored _pair_bounds cap names this pair the same way the
-                # census sees it, so it must bound |ΔV| here too (#9644).
+                # census sees it, so it must bound |ΔV| here too (#9644).  The
+                # census gates HV membership on the pair's *uncapped* magnitude
+                # (resolve_hv_nets) but then scores the pair at the capped ΔV
+                # with no threshold of its own, so the sub-threshold pre-check
+                # runs on the uncapped ΔV and only the lookup voltage is capped:
+                # a 300 V pair capped at 25 V keeps its 0.500 mm floor instead
+                # of dropping back to --clearance, and a bound-named pair the
+                # preloaded table omitted (cap below --hv-threshold, explicit
+                # ``"SIG": 0`` included) is re-derived here the same way.
                 dv = abs(voltages.get(me, 0.0) - voltages.get(other, 0.0))
-                bound = (pair_bounds or {}).get(frozenset((me, other)))
-                if bound is not None:
-                    dv = min(dv, bound[0])
                 if dv == 0.0 or dv < threshold:
                     continue
+                if bound is not None:
+                    dv = min(dv, bound[0])
                 try:
                     mm = build_required_by_domain_pair(
                         {me: voltages.get(me, 0.0), other: voltages.get(other, 0.0)},
                         standard_id=getattr(args, "creepage_standard", "iec60664"),
                         pollution_degree=getattr(args, "pollution_degree", 2),
                         material_group=getattr(args, "material_group", "IIIa"),
-                        hv_threshold=threshold,
+                        hv_threshold=0.0 if bound is not None else threshold,
                         pair_bounds=pair_bounds,
                     ).get(pair)
                 except StandardLookupError as exc:
