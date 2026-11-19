@@ -233,6 +233,7 @@ def build_required_by_domain_pair(
     hv_threshold: float = 30.0,
     pair_bounds: Mapping[frozenset[str], tuple[float, str]] | None = None,
     include_intra_domain: bool = False,
+    domain_intervals: Mapping[str, tuple[float, float]] | None = None,
 ) -> dict[tuple[str, str], float]:
     """Build the per-domain-pair required-creepage table.
 
@@ -263,6 +264,15 @@ def build_required_by_domain_pair(
             across its own members, #9659).  Scalar (degenerate) domains span
             ``0 V`` and never produce a self-pair, so the default ``False``
             contract is unchanged for every existing caller.
+        domain_intervals: Optional per-domain closed ``[lo, hi]`` working-voltage
+            intervals (#4411, consumed end-to-end for issue #9602). When a
+            domain of a pair carries an entry here it **overrides** the
+            interval derived from its *domain_voltages* value, and the pair
+            stress is the census' worst-case endpoint combination
+            ``dv = max(|a.hi - b.lo|, |b.hi - a.lo|)`` (via
+            :func:`interval_pair_dv`, #9659); a domain absent from the mapping
+            keeps its *domain_voltages* value (scalar or interval), so an
+            all-scalar (or ``None``) input is unchanged by construction.
 
     Returns:
         ``{(domain_a, domain_b): required_mm}`` with order-independent keys.
@@ -273,6 +283,17 @@ def build_required_by_domain_pair(
     """
     std = get_standard(standard_id)
     ivals = {d: as_domain_interval(v) for d, v in domain_voltages.items()}
+    ids = sorted(ivals)
+    out: dict[tuple[str, str], float] = {}
+    std = get_standard(standard_id)
+    ivals = {d: as_domain_interval(v) for d, v in domain_voltages.items()}
+    if domain_intervals:
+        # #9602 override: an explicit per-domain interval wins over the value
+        # carried in domain_voltages (a domain absent there was never iterated
+        # on main either, so unknown keys stay ignored).
+        for d, iv in domain_intervals.items():
+            if d in ivals:
+                ivals[d] = as_domain_interval(iv)
     ids = sorted(ivals)
     out: dict[tuple[str, str], float] = {}
     pairs: list[tuple[str, str]] = [

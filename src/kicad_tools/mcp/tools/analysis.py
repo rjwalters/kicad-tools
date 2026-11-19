@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from kicad_tools.analysis.net_status import NetStatusAnalyzer
+from kicad_tools.core.types import Severity
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import ParseError
 from kicad_tools.manufacturers import get_all_manufacturer_names
@@ -857,8 +858,14 @@ def get_drc_violations(
         severity_filter: Which violations to *return* (a view filter; the
                         verdict is always computed from every violation):
                         "all" - return all violations
-                        "error" - return only errors
-                        "warning" - return only warnings
+                        "error" - return only blocking errors (``is_error``:
+                            severity ``error`` and not waived)
+                        "warning" - return only ``warning``-severity findings
+                        ``info`` findings (the fab-view passes' advisory
+                        rows, reachable since ``build_check_rule_set``
+                        enables them for the jlcpcb family) appear only
+                        under "all", so every view's returned set matches
+                        the severity its name promises.
         allow_incomplete: Like ``kct check --allow-incomplete``: an
             ``incomplete`` verdict exits 0 (``passed`` stays false).
         schematic_path: Explicit ``.kicad_sch`` for the ERC/LVS meta rollup
@@ -923,10 +930,16 @@ def get_drc_violations(
     type_counts: Counter[str] = Counter()
 
     for i, v in enumerate(results.violations):
-        # Apply severity filter
+        # Apply severity filter.  Both views select so that every returned
+        # violation carries the severity its view name promises: "error"
+        # keeps the blocking ``is_error`` bit (severity ``error`` minus
+        # waived), and "warning" matches on the reported severity itself --
+        # an ``info`` finding (fab-view advisory rows, reachable since the
+        # default rule set enables the fab-view passes) or a waived error
+        # must not surface as a "warning".
         if severity_filter == "error" and not v.is_error:
             continue
-        if severity_filter == "warning" and v.is_error:
+        if severity_filter == "warning" and v.severity != Severity.WARNING:
             continue
 
         mcp_violation = _convert_violation(v, i)
