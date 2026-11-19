@@ -3,14 +3,17 @@ together already exists and routes detected bus members as a group.
 
 The audit row reported "no way to route N nets as a group of similar length".
 The grouping half is refuted as filed for *named* buses: ``kct route
---strategy basic --bus-routing`` (``router/bus.py`` detection +
-``router/bus_routing.py`` coordination) detects bus members by naming
-convention and routes each group together before the non-bus nets.
+--no-auto-layers --strategy basic --bus-routing`` (``router/bus.py``
+detection + ``router/bus_routing.py`` coordination) detects bus members by
+naming convention and routes each group together before the non-bus nets.
 ``--strategy basic`` is required: the bus driver
 (``BusRouter.route_all_with_buses``) is dispatched only on the basic strategy
 (``route_cmd.py``), so under the default ``negotiated`` strategy
-``--bus-routing`` only changes the option banner.  This test pins that
-capability end-to-end: a DATA[0..3] bus on a small synthetic board must route
+``--bus-routing`` only changes the option banner.  ``--no-auto-layers`` is
+required too: it is on by default, and the escalation ladder warns
+``--bus-routing ignored`` and routes per-attempt without the bus driver, so
+the documented invocation must name it.  This test pins that capability
+end-to-end: a DATA[0..3] bus on a small synthetic board must route
 completely with bus mode enabled, and the run log must name the bus phase and
 the per-group routing line.
 

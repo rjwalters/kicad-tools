@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from .primitives import Route
 
 
-def _budget_search_failure_labels(router: Autorouter, unrouted_ids: set[int]) -> dict[int, str]:
+def _budget_search_failure_labels(router: Autorouter, target_ids: set[int]) -> dict[int, str]:
     """Budget-labelled give-ups (timeout / iteration cap), keyed by net id.
 
     Reads the grid pathfinder's ``search_failures_by_net`` store (C++
@@ -24,9 +24,14 @@ def _budget_search_failure_labels(router: Autorouter, unrouted_ids: set[int]) ->
     same way ``route_cmd._write_search_failures_sidecar`` does, and keeps only
     the codes :func:`stuck_classifier.is_budget_search_failure` classifies as
     budget failures (``timeout``, ``iteration_limit``, ``deadline``, ...).
-    Empty when the router recorded nothing budget-labelled -- or when the
-    object has no store at all (a non-grid engine, a test mock), so callers
-    never see a fabricated label.
+    ``target_ids`` are the nets the summary may blame: unrouted nets plus
+    partially connected ones (issue #9601 review: a net whose remaining
+    pad-to-pad search was cut off still deserves the budget remedy); fully
+    connected nets are excluded because the store can retain a failure code
+    from an earlier attempt that later succeeded.  Empty when the router
+    recorded nothing budget-labelled -- or when the object has no store at
+    all (a non-grid engine, a test mock), so callers never see a fabricated
+    label.
     """
     from .stuck_classifier import is_budget_search_failure, normalize_search_failure
 
@@ -36,7 +41,7 @@ def _budget_search_failure_labels(router: Autorouter, unrouted_ids: set[int]) ->
         return {}
     out: dict[int, str] = {}
     for nid, code in by_id.items():
-        if nid not in unrouted_ids:
+        if nid not in target_ids:
             continue
         label = normalize_search_failure(code)
         if label and is_budget_search_failure(label):
@@ -205,13 +210,38 @@ def show_routing_summary(
         f"  Unrouted: {unrouted_count}/{nets_to_route} ({unrouted_pct:.0f}%) -- no segments at all"
     )
 
+    # Issue #9601 (audit row 5): a net whose search was cut off by its
+    # wall-clock/iteration budget must not be reported as a bare
+    # "No path found" -- the remedy (raise the budget / coarser grid) is
+    # entirely different from a geometric blocker.  The negotiated loop
+    # records each net's last C++ FAILURE_* code on the pathfinder
+    # (``search_failures_by_net``, #6369); budget-labelled codes are
+    # surfaced here.  The lookup covers partially connected nets too
+    # (#9601 review): a net whose remaining pad-to-pad search was cut off
+    # still deserves the budget label and remedy, while fully connected
+    # nets are excluded -- the store can retain a code from an earlier
+    # attempt that later succeeded.
+    budget_search_labels = _budget_search_failure_labels(
+        router, unrouted_ids | set(partially_connected_nets)
+    )
+
     # Show partially-connected nets (have segments but not all pads connected)
     if partially_connected_nets:
         print(f"\n  Partially connected nets ({len(partially_connected_nets)}):")
         for net_id in sorted(partially_connected_nets):
             info = partially_connected_nets[net_id]
             net_name = reverse_net.get(net_id, f"Net_{net_id}")
-            print(f"    {net_name}: {info['connected_pads']}/{info['total_pads']} pads connected")
+            line = f"    {net_name}: {info['connected_pads']}/{info['total_pads']} pads connected"
+            # A partially connected net can itself be a budget give-up (its
+            # committed pads routed, the remaining search cut off); the pad
+            # counts stay visible and the budget reason rides along (#9601).
+            partial_budget_label = budget_search_labels.get(net_id)
+            if partial_budget_label:
+                line += (
+                    f" -- {partial_budget_label} (search budget spent before"
+                    " the remaining pad(s) were reached)"
+                )
+            print(line)
 
     # Show cleanup statistics if any artifacts were removed
     cleanup_stats = getattr(router, "_cleanup_stats", None)
@@ -245,15 +275,6 @@ def show_routing_summary(
     # Show unrouted nets section first if there are failures (more important)
     if unrouted_ids:
         print("\nUnrouted nets:")
-
-    # Issue #9601 (audit row 5): a net whose search was cut off by its
-    # wall-clock/iteration budget must not be reported as a bare
-    # "No path found" -- the remedy (raise the budget / coarser grid) is
-    # entirely different from a geometric blocker.  The negotiated loop
-    # records each net's last C++ FAILURE_* code on the pathfinder
-    # (``search_failures_by_net``, #6369); budget-labelled codes are
-    # surfaced here.
-    budget_search_labels = _budget_search_failure_labels(router, unrouted_ids)
 
     # Show failed routes first with detailed diagnostics
     shown_nets_first: set[int] = set()
@@ -413,8 +434,15 @@ def show_routing_summary(
             pct = count / total_failed * 100 if total_failed > 0 else 0
             print(f"  {cause.upper()}: {count} net{'s' if count != 1 else ''} ({pct:.0f}%)")
 
-    # Generate pattern-based suggestions
-    if unrouted_ids:
+    # Generate pattern-based suggestions.  A partially connected net whose
+    # remaining pad-to-pad search was cut off by its budget is as
+    # suggestion-worthy as an unrouted one (#9601 review), so the gate
+    # covers both populations.  ``budget_search_labels`` already restricts
+    # itself to unrouted AND partially connected nets (excluding fully
+    # connected ones), so its key set is exactly the budget-affected
+    # population.
+    budget_nets = set(budget_search_labels)
+    if unrouted_ids or budget_nets:
         print(f"\n{'=' * 60}")
         print("Routing Suggestions")
         print(f"{'=' * 60}")
@@ -427,7 +455,6 @@ def show_routing_summary(
         # budget remedy (raise it / shrink the search space), not a geometry
         # remedy -- without this block the summary's only advice was
         # monte-carlo / more layers, and the net read as unroutable.
-        budget_nets = {nid for nid in unrouted_ids if nid in budget_search_labels}
         if budget_nets:
             count = len(budget_nets)
             suggestions_shown += 1
@@ -437,12 +464,28 @@ def show_routing_summary(
             print("   These nets stopped at their search budget (wall-clock deadline")
             print("   or iteration cap) -- the search was cut off before it could")
             print("   establish whether a path exists.")
+            # The suggested grid must be one the CLI accepts: the route flow
+            # refuses ``--grid`` above the effective clearance ("Grid
+            # resolution ... exceeds clearance ...", route_cmd.py), and
+            # ``rules.trace_clearance`` is exactly that clearance
+            # (``DesignRules(trace_clearance=args.clearance)``).  Bound the
+            # doubled resolution by it and omit the line when no legal
+            # coarser grid exists (clearance unknown counts as unverifiable,
+            # so the hint is omitted rather than risking an illegal value).
             grid_res_hint = getattr(router.grid, "resolution", None)
-            if isinstance(grid_res_hint, (int, float)) and grid_res_hint > 0:
-                print(
-                    f"   Try: a coarser grid, e.g. --grid {grid_res_hint * 2:g}, to shrink"
-                    " the per-net A* space; and/or"
-                )
+            eff_clearance = getattr(getattr(router.grid, "rules", None), "trace_clearance", None)
+            if (
+                isinstance(grid_res_hint, (int, float))
+                and grid_res_hint > 0
+                and isinstance(eff_clearance, (int, float))
+                and eff_clearance > 0
+            ):
+                coarse_grid_hint = min(grid_res_hint * 2, eff_clearance)
+                if coarse_grid_hint > grid_res_hint:
+                    print(
+                        f"   Try: a coarser grid, e.g. --grid {coarse_grid_hint:g}, to shrink"
+                        " the per-net A* space; and/or"
+                    )
             # The remedy names the flag that actually bounds the failed
             # searches: a wall-clock cut-off is answered by --per-net-timeout,
             # an iteration_limit by the per-net cap / backstop pair (the
@@ -613,7 +656,7 @@ def show_routing_summary(
             else:
                 print(f"  Try: kct route{pcb_arg} --auto-layers")
                 print(f"  Or:  kct route{pcb_arg} --layers 4")
-        elif num_layers < 4:
+        elif unrouted_ids and num_layers < 4:
             print(
                 f"\nTip: {failed_count}/{nets_to_route} nets failed on {num_layers} layers "
                 f"({failure_pct:.0f}% failure rate)."
