@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+from pathlib import Path
 
 import pytest
 
@@ -72,6 +73,27 @@ class TestGroupByLengthWindow:
         groups = group_by_length_window(nets, 20.0)
         assert len(groups) == 1
         assert [s.net_name for s in groups[0].signals] == ["SEED", "EDGE"]
+
+    def test_exact_boundary_survives_float_roundoff(self):
+        # PR #9633 review: 50.0 * 1.15 evaluates to 57.49999999999999, which
+        # used to drop a net at exactly 57.5 mm from its cluster.
+        nets = {1: ("A", 50.0), 2: ("B", 57.5)}
+        groups = group_by_length_window(nets, 15.0)
+        assert len(groups) == 1
+        assert [s.net_name for s in groups[0].signals] == ["A", "B"]
+
+    def test_exact_boundary_whole_millimetres_survive_roundoff(self):
+        # The review's second case: 100.0 * 1.15 == 114.99999999999999.
+        nets = {1: ("A", 100.0), 2: ("B", 115.0)}
+        groups = group_by_length_window(nets, 15.0)
+        assert len(groups) == 1
+        assert [s.net_name for s in groups[0].signals] == ["A", "B"]
+
+    def test_just_outside_roundoff_boundary_still_excluded(self):
+        # 57.6 is 0.1 mm past the 57.5 boundary -- outside even with the
+        # roundoff tolerance.
+        nets = {1: ("A", 50.0), 2: ("B", 57.6)}
+        assert group_by_length_window(nets, 15.0) == []
 
     def test_just_outside_window_seeds_new_cluster_and_drops_singles(self):
         # ref 10.0, window 20% -> 12.5 > 12.0 seeds a second, single-member
@@ -125,6 +147,13 @@ class TestGroupByLengthWindow:
         groups = group_by_length_window(nets, 0.0)
         assert len(groups) == 1
         assert [s.net_name for s in groups[0].signals] == ["A", "B"]
+
+    def test_zero_pct_window_stays_exact_under_tolerance(self):
+        # PR #9633 review: the roundoff tolerance applies to positive
+        # windows only -- a zero-percent window must keep the exact
+        # comparison so a hair-above value does not sneak in.
+        assert len(group_by_length_window({1: ("A", 50.0), 2: ("B", 50.0)}, 0.0)) == 1
+        assert group_by_length_window({1: ("A", 50.0), 2: ("B", 50.000000001)}, 0.0) == []
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +441,108 @@ class TestDetectLengthWindowGroups:
         assert "DISTANT" not in names
 
 
+def _rotated_pad_router(width: float, height: float, rotation: float) -> Autorouter:
+    """The PR #9633 review geometry: two equal-length nets, SIG_B's source
+    pad rotated at a non-cardinal angle and flanked by a small foreign pad.
+
+    The same physical pad is authored two equivalent ways -- 2 x 0.4 mm at
+    45 deg and 0.4 x 2 mm at 135 deg occupy the same board-space box -- so
+    every board-space probe must agree between the encodings.
+    """
+    router = Autorouter(25, 16, force_python=True)
+    router.add_component(
+        "U1",
+        [
+            {
+                "number": "1",
+                "x": 5,
+                "y": 11,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "SIG_A",
+            },
+            {
+                "number": "2",
+                "x": 5,
+                "y": 5,
+                "width": width,
+                "height": height,
+                "rotation": rotation,
+                "net": 2,
+                "net_name": "SIG_B",
+            },
+        ],
+    )
+    router.add_component(
+        "U2",
+        [
+            {
+                "number": "1",
+                "x": 17,
+                "y": 11,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "SIG_A",
+            },
+            {
+                "number": "2",
+                "x": 17,
+                "y": 5,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 2,
+                "net_name": "SIG_B",
+            },
+        ],
+    )
+    router.add_component(
+        "FOREIGN",
+        [
+            {
+                "number": "1",
+                "x": 6.6,
+                "y": 5,
+                "width": 0.2,
+                "height": 0.2,
+                "net": 0,
+                "net_name": "",
+            },
+        ],
+    )
+    return router
+
+
+class TestRotatedPadEncodingStability:
+    """PR #9633 review finding 1: rotating a pad's local axes must not
+    change the escape openness (and so the group's routing order) for
+    identical board-space copper."""
+
+    def test_openness_is_encoding_independent(self):
+        bus_45 = BusRouter(_rotated_pad_router(2.0, 0.4, 45.0))
+        bus_135 = BusRouter(_rotated_pad_router(0.4, 2.0, 135.0))
+        for net_id in (1, 2):
+            assert bus_45._net_escape_openness(net_id) == bus_135._net_escape_openness(net_id)
+
+    def test_group_order_is_encoding_independent(self):
+        config = BusRoutingConfig(enabled=True, length_window=50.0)
+        groups_45 = BusRouter(_rotated_pad_router(2.0, 0.4, 45.0)).detect_length_window_groups(
+            config, exclude=set()
+        )
+        groups_135 = BusRouter(_rotated_pad_router(0.4, 2.0, 135.0)).detect_length_window_groups(
+            config, exclude=set()
+        )
+        assert len(groups_45) == 1 and len(groups_135) == 1
+        order_45 = [s.net_name for s in groups_45[0].signals]
+        order_135 = [s.net_name for s in groups_135[0].signals]
+        assert order_45 == order_135
+        # The foreign pad makes SIG_B the tighter escape: it routes first
+        # under BOTH encodings (the review measured the pre-fix bug as
+        # SIG_B, SIG_A vs SIG_A, SIG_B).
+        assert order_45[0] == "SIG_B"
+
+
 # ---------------------------------------------------------------------------
 # route_all_with_buses integration: synthetic groups route through the bus path
 # ---------------------------------------------------------------------------
@@ -507,11 +638,13 @@ class TestCliFlag:
         assert captured.out == "" and captured.err == ""
 
     def test_negotiated_warns_on_stderr(self, capsys):
-        from kicad_tools.cli.route_cmd import _warn_bus_flags_ignored_on_negotiated
+        from kicad_tools.cli.route_cmd import _bus_flags_ignored_reason, _warn_bus_flags_ignored
 
-        args = argparse.Namespace(bus_routing=True, group_length_window=20.0)
-        _warn_bus_flags_ignored_on_negotiated(args)
-        _warn_bus_flags_ignored_on_negotiated(args)  # guarded: once per run
+        args = argparse.Namespace(bus_routing=True, group_length_window=20.0, strategy="negotiated")
+        reason = _bus_flags_ignored_reason(args, use_adaptive_grid=False)
+        assert reason == "--strategy negotiated"
+        _warn_bus_flags_ignored(args, reason)
+        _warn_bus_flags_ignored(args, reason)  # guarded: once per run
         captured = capsys.readouterr()
         assert captured.out == ""
         assert "--bus-routing, --group-length-window ignored" in captured.err
@@ -519,21 +652,178 @@ class TestCliFlag:
         assert captured.err.count("warning:") == 1
 
     def test_negotiated_warns_for_window_alone(self, capsys):
-        from kicad_tools.cli.route_cmd import _warn_bus_flags_ignored_on_negotiated
+        from kicad_tools.cli.route_cmd import _warn_bus_flags_ignored
 
         args = argparse.Namespace(bus_routing=False, group_length_window=12.5)
-        _warn_bus_flags_ignored_on_negotiated(args)
+        _warn_bus_flags_ignored(args, "--strategy negotiated")
         captured = capsys.readouterr()
         assert "--group-length-window ignored" in captured.err
         assert "--bus-routing" not in captured.err
 
     def test_negotiated_silent_without_flags(self, capsys):
-        from kicad_tools.cli.route_cmd import _warn_bus_flags_ignored_on_negotiated
+        from kicad_tools.cli.route_cmd import _bus_flags_ignored_reason, _warn_bus_flags_ignored
 
-        _warn_bus_flags_ignored_on_negotiated(argparse.Namespace(bus_routing=False))
-        _warn_bus_flags_ignored_on_negotiated(argparse.Namespace())
+        args = argparse.Namespace(bus_routing=False)
+        assert _bus_flags_ignored_reason(args, use_adaptive_grid=False) is None
+        _warn_bus_flags_ignored(args, "--strategy negotiated")
         captured = capsys.readouterr()
         assert captured.out == "" and captured.err == ""
+
+    def test_reason_names_each_preempting_dispatch(self):
+        from kicad_tools.cli.route_cmd import _bus_flags_ignored_reason
+
+        def ns(**kw):
+            base = {
+                "bus_routing": True,
+                "strategy": "basic",
+                "progressive_clearance": False,
+                "multi_resolution": False,
+                "two_phase": False,
+                "differential_pairs": False,
+            }
+            base.update(kw)
+            return argparse.Namespace(**base)
+
+        # The basic single-attempt bus dispatch honours the flags: no warning.
+        assert _bus_flags_ignored_reason(ns(), use_adaptive_grid=False) is None
+        # Every pre-empting dispatch is named, in dispatch order.
+        assert (
+            _bus_flags_ignored_reason(ns(), use_adaptive_grid=True)
+            == "the adaptive multi-resolution grid"
+        )
+        assert (
+            _bus_flags_ignored_reason(ns(), use_adaptive_grid=False, use_escape_routing=True)
+            == "the escape pre-phase"
+        )
+        assert (
+            _bus_flags_ignored_reason(ns(progressive_clearance=True), use_adaptive_grid=False)
+            == "--progressive-clearance"
+        )
+        assert (
+            _bus_flags_ignored_reason(ns(multi_resolution=True), use_adaptive_grid=False)
+            == "--multi-resolution"
+        )
+        assert (
+            _bus_flags_ignored_reason(
+                ns(two_phase=True, strategy="negotiated"), use_adaptive_grid=False
+            )
+            == "--two-phase"
+        )
+        assert (
+            _bus_flags_ignored_reason(ns(strategy="negotiated"), use_adaptive_grid=False)
+            == "--strategy negotiated"
+        )
+        assert (
+            _bus_flags_ignored_reason(ns(differential_pairs=True), use_adaptive_grid=False)
+            == "--differential-pairs"
+        )
+        # --two-phase under basic falls through to the bus branch: honoured.
+        assert _bus_flags_ignored_reason(ns(two_phase=True), use_adaptive_grid=False) is None
+
+
+FIXTURE_PCB = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "route_entry_paths" / "routable.kicad_pcb"
+)
+
+
+class TestBusWarningBeforeDispatch:
+    """PR #9633 review finding 3: the bus-flags-ignored warning must fire
+    before the cache lookup and the strategy dispatch, so a cache hit or an
+    early dispatch return (two-phase) cannot print ``Bus: enabled`` and
+    silently skip it.  Driven through the real ``route_cmd.main`` on the
+    same fixture the review probed; only the routing dispatch itself is
+    stubbed."""
+
+    def _argv(self, tmp_path, *, strategy="negotiated", extra=()):
+        # No ``--timeout``: a bounded timeout makes ``run_attempt`` re-exec
+        # the route in a supervised SUBPROCESS, where in-process dispatch
+        # mocks and capsys cannot see it (the dispatch itself is stubbed, so
+        # the run is fast without a deadline).
+        return [
+            str(FIXTURE_PCB),
+            "-o",
+            str(tmp_path / "out.kicad_pcb"),
+            "--quiet",
+            "--backend",
+            "python",
+            "--grid",
+            "0.1",
+            "--no-auto-layers",
+            "--strategy",
+            strategy,
+            "--bus-routing",
+            "--group-length-window",
+            "150",
+            "--iterations",
+            "1",
+            *extra,
+        ]
+
+    def test_negotiated_cold_run_warns(self, tmp_path, capsys):
+        from unittest import mock
+
+        from kicad_tools.cli import route_cmd
+
+        with mock.patch.object(Autorouter, "route_all_negotiated", return_value=[]):
+            route_cmd.main(self._argv(tmp_path, extra=["--no-cache"]))
+        err = capsys.readouterr().err
+        assert "--bus-routing, --group-length-window ignored" in err
+        assert "--strategy negotiated does not support bus-aware routing" in err
+        assert err.count("warning:") == 1
+
+    def test_cache_hit_still_warns(self, tmp_path, capsys):
+        from datetime import datetime, timezone
+        from unittest import mock
+
+        from kicad_tools.cli import route_cmd
+        from kicad_tools.router.cache import CachedRoutingResult, RoutingCache
+
+        # An empty-but-valid cache entry: the hit branch restores zero
+        # routes and skips the dispatch entirely -- exactly the return that
+        # used to skip the warning.
+        payload = RoutingCache(cache_dir=tmp_path / "cache").serialize_routes([], route_usage={})
+        fake = CachedRoutingResult(
+            cache_key="test",
+            routes_data=payload,
+            success_count=0,
+            failure_count=0,
+            total_segments=0,
+            total_vias=0,
+            compute_time_ms=1,
+            created_at=datetime.now(timezone.utc),
+            last_accessed=datetime.now(timezone.utc),
+        )
+        with (
+            mock.patch.object(RoutingCache, "__init__", lambda self, *a, **k: None),
+            mock.patch.object(RoutingCache, "get", return_value=fake),
+            mock.patch.object(RoutingCache, "put", mock.Mock(return_value=None)),
+        ):
+            route_cmd.main(self._argv(tmp_path))
+        err = capsys.readouterr().err
+        assert "--bus-routing, --group-length-window ignored" in err
+        assert "--strategy negotiated does not support bus-aware routing" in err
+
+    def test_two_phase_cold_run_warns(self, tmp_path, capsys):
+        from unittest import mock
+
+        from kicad_tools.cli import route_cmd
+
+        with mock.patch.object(Autorouter, "route_all_two_phase", return_value=[]):
+            route_cmd.main(self._argv(tmp_path, extra=["--two-phase", "--no-cache"]))
+        err = capsys.readouterr().err
+        assert "--bus-routing, --group-length-window ignored" in err
+        assert "--two-phase does not support bus-aware routing" in err
+
+    def test_basic_bus_dispatch_is_the_silent_control(self, tmp_path, capsys):
+        from unittest import mock
+
+        from kicad_tools.cli import route_cmd
+
+        with mock.patch.object(Autorouter, "route_all_with_buses", return_value=[]) as stub:
+            route_cmd.main(self._argv(tmp_path, strategy="basic", extra=["--no-cache"]))
+        stub.assert_called_once()  # the bus dispatch really ran
+        err = capsys.readouterr().err
+        assert "does not support bus-aware routing" not in err
 
 
 # ---------------------------------------------------------------------------

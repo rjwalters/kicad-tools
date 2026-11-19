@@ -23,6 +23,7 @@ from .bus import (
     group_by_length_window,
     order_group_by_escape,
 )
+from .primitives import pad_half_extents
 
 
 class BusRouter:
@@ -120,8 +121,16 @@ class BusRouter:
             if pad is None:
                 continue
             gx, gy = grid.world_to_grid(pad.x, pad.y)
-            half_w = max(1, math.ceil(pad.width / 2 / grid.resolution))
-            half_h = max(1, math.ceil(pad.height / 2 / grid.resolution))
+            # PR #9633 review: probe from the pad's BOARD-space extents, not
+            # its unrotated local width/height -- a pad rotated at a
+            # non-cardinal angle occupies an axis-aligned box larger than
+            # either local dimension, and two equivalent encodings of the
+            # same physical pad (2 x 0.4 mm at 45 deg vs 0.4 x 2 mm at
+            # 135 deg) must yield the same halo distance so the group's
+            # escape order cannot flip on how the footprint was authored.
+            pad_half_w, pad_half_h = pad_half_extents(pad)
+            half_w = max(1, math.ceil(pad_half_w / grid.resolution))
+            half_h = max(1, math.ceil(pad_half_h / grid.resolution))
             for dx, dy, extent in (
                 (1, 0, half_w),
                 (-1, 0, half_w),

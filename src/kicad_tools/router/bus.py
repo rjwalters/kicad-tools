@@ -236,8 +236,12 @@ def group_by_length_window(
     Nets whose MST lengths fall within ``pct`` percent of a cluster's
     reference length (the cluster's shortest member) form one cluster:
     sorted by length, each net joins the open cluster while
-    ``length <= reference * (1 + pct / 100)``, otherwise it seeds the next
-    cluster.  Clusters narrower than ``min_width`` members are dropped.
+    ``length <= reference * (1 + pct / 100)`` (a positive window compares
+    against that boundary with a 1e-12 relative tolerance so binary
+    roundoff cannot drop a net at the exact boundary; a zero-percent
+    window compares exactly, so only true ties group), otherwise it seeds
+    the next cluster.  Clusters narrower than ``min_width`` members are
+    dropped.
 
     The returned groups carry synthetic ``BusSignal`` members whose indices
     are assigned in ascending net-id order (deterministic); re-rank them by
@@ -282,7 +286,17 @@ def group_by_length_window(
             current = [entry]
             reference = length
             continue
-        if length <= reference * limit:
+        # PR #9633 review: the inclusive comparison must be robust to binary
+        # roundoff in ``reference * limit`` for a positive window -- 50.0 *
+        # 1.15 evaluates to 57.49999999999999, which used to drop a net at
+        # exactly 57.5 mm.  A relative tolerance of 1e-12 is ~10^4 ULPs of
+        # slack (roundoff is a few ULPs) yet far below any real length
+        # difference.  A zero-percent window keeps the EXACT comparison so
+        # only true ties group.
+        boundary = reference * limit
+        if length <= boundary or (
+            pct > 0 and math.isclose(length, boundary, rel_tol=1e-12, abs_tol=0.0)
+        ):
             current.append(entry)
         else:
             clusters.append(current)

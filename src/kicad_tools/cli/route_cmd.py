@@ -18161,18 +18161,60 @@ def _warn_escalation_flags_ignored(args) -> None:
     )
 
 
-def _warn_bus_flags_ignored_on_negotiated(args) -> None:
-    """Warn once per run that bus flags are ignored under --strategy negotiated (#9621).
+def _bus_flags_ignored_reason(
+    args,
+    *,
+    use_adaptive_grid: bool,
+    use_escape_routing: bool = False,
+) -> str | None:
+    """Name the dispatch that will ignore the bus flags, or ``None`` if honoured.
 
-    Only the single-attempt ``--strategy basic`` path honours
-    ``--bus-routing`` (and its ``--group-length-window`` companion); the
-    negotiated branch dispatches before the bus branch and never reads
-    ``bus_config``, so without this warning the run silently behaves as if
-    the flag was not passed.  Stderr, so ``--format json`` stdout is
+    PR #9633 review: only the single-attempt ``--strategy basic`` dispatch
+    honours ``--bus-routing`` (the ``route_all_with_buses`` branch); every
+    branch that pre-empts it in :func:`route_cmd`'s dispatch order is listed
+    here in the same order, so the reason names the branch that would
+    actually run.  ``use_adaptive_grid`` mirrors ``multi_res_plan is not
+    None`` (the ``--grid auto`` adaptive plan, or its dense-package escape
+    fallback) and ``use_escape_routing`` the escape pre-phase decision --
+    both pre-empt the strategy chain.  ``--two-phase`` only pre-empts under
+    ``--strategy negotiated`` (a basic two-phase run falls through to the
+    bus branch); ``--differential-pairs`` under basic routes diff pairs
+    before the bus branch and never reads ``bus_config``.
+    """
+    if not getattr(args, "bus_routing", False):
+        return None
+    if use_adaptive_grid:
+        return "the adaptive multi-resolution grid"
+    if use_escape_routing:
+        return "the escape pre-phase"
+    if getattr(args, "progressive_clearance", False):
+        return "--progressive-clearance"
+    if getattr(args, "multi_resolution", False):
+        return "--multi-resolution"
+    if getattr(args, "two_phase", False) and args.strategy == "negotiated":
+        return "--two-phase"
+    if args.strategy != "basic":
+        return f"--strategy {args.strategy}"
+    if getattr(args, "differential_pairs", False):
+        return "--differential-pairs"
+    return None
+
+
+def _warn_bus_flags_ignored(args, reason: str) -> None:
+    """Warn once per run that the resolved dispatch ignores the bus flags (#9621).
+
+    PR #9633 review: this used to be called from inside the ``negotiated``
+    dispatch branches, after the cache-hit return, the two-phase return and
+    the adaptive-grid / escape / progressive-clearance / multi-resolution
+    returns -- so those runs printed ``Bus: enabled`` and silently behaved
+    as if ``--bus-routing`` was not passed.  It is now emitted once, before
+    the cache lookup and the strategy dispatch (see
+    :func:`_warn_bus_flags_ignored_early`), with the reason naming the
+    dispatch that ignores the flags.  Stderr, so ``--format json`` stdout is
     untouched; guarded by a flag on ``args`` so repeated dispatches (the
     diff-pair pre-pass wrapper) do not repeat it.
     """
-    if getattr(args, "_negotiated_bus_flags_warned", False):
+    if getattr(args, "_bus_flags_warned", False):
         return
     ignored = []
     if getattr(args, "bus_routing", False):
@@ -18182,13 +18224,40 @@ def _warn_bus_flags_ignored_on_negotiated(args) -> None:
     if not ignored:
         return
     with contextlib.suppress(AttributeError):  # frozen namespace
-        args._negotiated_bus_flags_warned = True
+        args._bus_flags_warned = True
     print(
-        f"warning: {', '.join(ignored)} ignored: --strategy negotiated does "
-        "not support bus-aware routing; re-run with --strategy basic to use it",
+        f"warning: {', '.join(ignored)} ignored: {reason} does not support "
+        "bus-aware routing; re-run with --strategy basic and a single-attempt "
+        "dispatch to use it",
         file=sys.stderr,
         flush=True,
     )
+
+
+def _warn_bus_flags_ignored_early(args, router, multi_res_plan=None) -> None:
+    """Emit the bus-flags warning before the cache lookup and strategy dispatch.
+
+    PR #9633 review: resolves, from ``args`` plus the pre-dispatch state
+    that is already computed at this point (the ``--grid auto`` multi-
+    resolution plan and the escape-pre-phase decision), which dispatch this
+    run will take -- then warns when that dispatch does not honour the bus
+    flags.  Running here means the cache-hit branch, the two-phase return
+    and every other early return can no longer skip the warning.  The
+    escape decision is the silent core of :func:`_escape_routing_decision`
+    (its message is still printed exactly once, inside the dispatch, per
+    issue #6666); calling it here adds one ``detect_dense_packages`` scan
+    on ``--bus-routing`` runs only.
+    """
+    if not getattr(args, "bus_routing", False):
+        return
+    use_escape, _ = _escape_routing_decision(router, _resolve_escape_routing_flag(args))
+    reason = _bus_flags_ignored_reason(
+        args,
+        use_adaptive_grid=multi_res_plan is not None,
+        use_escape_routing=use_escape,
+    )
+    if reason is not None:
+        _warn_bus_flags_ignored(args, reason)
 
 
 def _run_post_save_stitching(args, output_path: Path, *, quiet: bool = False):
@@ -24954,6 +25023,13 @@ def _run_main_impl(args, parser, argv) -> int:
     _rss = RSSTracer()
     _rss.mark("route-start")
 
+    # PR #9633 review: the bus-flags-ignored warning must fire BEFORE the
+    # cache lookup and the strategy dispatch -- a cache hit or an early
+    # dispatch return (two-phase, adaptive grid, escape, progressive
+    # clearance, multi-resolution) used to skip it while still printing
+    # ``Bus: enabled``.
+    _warn_bus_flags_ignored_early(args, router, multi_res_plan)
+
     # Check cache for existing routing result (unless --no-cache)
     cache_key = None
     cached_result = None
@@ -25434,8 +25510,8 @@ def _run_main_impl(args, parser, argv) -> int:
                 # The negotiated loop honors prerouted nets via the new skip
                 # logic in route_all_negotiated.  coupled_only=True so
                 # unsupported pad configurations fall through cleanly.
-                _warn_bus_flags_ignored_on_negotiated(args)
-
+                # (Bus-flags warning: emitted before the cache lookup, see
+                # _warn_bus_flags_ignored_early.)
                 def _neg_strategy():
                     return router.route_all_negotiated(
                         **_negotiated_kwargs(
@@ -25460,7 +25536,8 @@ def _run_main_impl(args, parser, argv) -> int:
                 diffpair_budget_exit_pairs.extend(router.diffpair_budget_exit_pair_names())
                 return result
             elif args.strategy == "negotiated":
-                _warn_bus_flags_ignored_on_negotiated(args)
+                # (Bus-flags warning: emitted before the cache lookup, see
+                # _warn_bus_flags_ignored_early.)
                 return router.route_all_negotiated(
                     **_negotiated_kwargs(
                         args, timeout=_budgeted_timeout(args), checkpoint_callback=_checkpoint_cb
