@@ -296,6 +296,62 @@ def test_route_loader_path_pins_actual_table_and_cli_warns(tmp_path, capsys):
     assert "per-scenario" in err
 
 
+def test_cli_format_json_emits_document(tmp_path, capsys):
+    """#4674 idiom: ``--format json`` owns stdout with one parseable document.
+
+    The understated pairs the text mode only warns about on stderr are part
+    of the document, so machine consumers need not scrape stderr.
+    """
+    a = tmp_path / "fwd.json"
+    b = tmp_path / "rev.json"
+    out = tmp_path / "env.json"
+    a.write_text(json.dumps(SCEN_A))
+    b.write_text(json.dumps(SCEN_B))
+
+    rc = run_voltage_map_merge_command(
+        SimpleNamespace(inputs=[str(a), str(b)], output=str(out), format="json")
+    )
+    assert rc == 0
+    doc = json.loads(capsys.readouterr().out)  # exactly one JSON document
+    assert doc["success"] is True
+    assert doc["command"] == "voltage-map-merge"
+    assert doc["nets"] == 4 and doc["pair_bounds"] == 1
+    assert doc["output"] == str(out)
+    flagged = {tuple(e["nets"]): e for e in doc["route_understated_pairs"]}
+    assert set(flagged) == {("F1", "LINE"), ("F2", "LINE")}
+    for entry in flagged.values():
+        assert entry["census_dv"] == pytest.approx(300.0)
+        assert entry["route_dv"] == pytest.approx(0.0)
+    # The envelope artifact itself is the same file the text mode writes.
+    assert json.loads(out.read_text())["F1"] == {"min": -150.0, "max": 150.0}
+
+
+def test_cli_format_json_errors_are_documents(tmp_path, capsys):
+    """Failure paths under ``--format json``: ``{"error": ...}``, same codes."""
+    a = tmp_path / "a.json"
+    a.write_text(json.dumps(SCEN_A))
+
+    rc = run_voltage_map_merge_command(
+        SimpleNamespace(inputs=[str(a)], output=str(tmp_path / "o.json"), format="json")
+    )
+    assert rc == 1  # exit codes unchanged
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["success"] is False
+    assert "at least two" in doc["error"]
+
+    rc = run_voltage_map_merge_command(
+        SimpleNamespace(
+            inputs=[str(a), str(tmp_path / "gone.json")],
+            output=str(tmp_path / "o.json"),
+            format="json",
+        )
+    )
+    assert rc == 1
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["success"] is False
+    assert "not found" in doc["error"]
+
+
 def test_cli_errors(tmp_path, capsys):
     a = tmp_path / "a.json"
     a.write_text(json.dumps(SCEN_A))

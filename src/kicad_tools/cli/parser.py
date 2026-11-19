@@ -1010,7 +1010,7 @@ def _add_voltage_map_merge_parser(subparsers) -> None:
     interval-aware ``--voltage-map`` consumers.  ``kct route``/``kct pcb``
     collapse ranges to one signed endpoint (#4411) and can understate a
     sign-flipping pair; the command warns on stderr when its output has such
-    pairs.
+    pairs (and carries them in the ``--format json`` document).
     """
     p = subparsers.add_parser(
         "voltage-map-merge",
@@ -1030,6 +1030,14 @@ def _add_voltage_map_merge_parser(subparsers) -> None:
         "--output",
         required=True,
         help="Path to write the merged envelope map JSON",
+    )
+    add_format_flag(
+        p,
+        help_text=(
+            "Output format (default: text).  json emits one JSON document on "
+            "stdout with the merge summary and the route-understated pairs "
+            '(errors surface as {"error": ...}, exit codes unchanged)'
+        ),
     )
 
 
