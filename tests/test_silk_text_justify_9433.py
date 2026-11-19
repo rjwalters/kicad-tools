@@ -196,6 +196,49 @@ def test_same_ink_gives_same_silk_geometry_and_findings(tmp_path):
     assert _CASES[1][2] != _CASES[2][2]
 
 
+# --- hidden-reference replacement label (#9435 exemption, review round 5) ----
+# ``_has_replacement_silk_text`` tests the *ink* of the replacing gr_text, so
+# its box must honour ``(justify ...)`` like every other silk box: a
+# left-justified label whose ink sits in the courtyard but whose bare anchor
+# lies outside it would otherwise lose the exemption.
+
+
+_HIDDEN_REF_BOARD = """(kicad_pcb (version 20240108) (generator "test") (generator_version "9.0")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (37 "F.SilkS" user) (40 "F.CrtYd" user) (44 "Edge.Cuts" user))
+  (net 0 "")
+  (gr_rect (start 0 0) (end 40 40) (stroke (width 0.1) (type default))
+    (fill none) (layer "Edge.Cuts"))
+  (footprint "Test:H" (layer "F.Cu") (at 20 20)
+    (property "Reference" "U1" (at 0 0) (layer "F.SilkS") (hide yes)
+      (effects (font (size 1 1) (thickness 0.15))))
+    (fp_rect (start -1 -1) (end 1 1) (stroke (width 0.05) (type default))
+      (fill none) (layer "F.CrtYd"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask" "F.Paste")))
+  (gr_text "{text}" (at {x} 20) (layer "F.SilkS")
+    (effects (font (size 1 1) (thickness 0.15)){justify}))
+)
+"""
+
+
+def test_replacement_label_exemption_same_for_three_justifications(tmp_path):
+    """The same label ink exempts the hidden reference under all three anchors."""
+    rules = get_profile("jlcpcb").get_design_rules(layers=2)
+    results = []
+    for name, justify, shift in _CASES:
+        path = tmp_path / f"hidden_{name}.kicad_pcb"
+        path.write_text(_HIDDEN_REF_BOARD.format(text=TEXT, x=20 + shift, justify=justify))
+        pcb = PCB.load(path)
+        results.append(
+            sorted(
+                (v.rule_id, tuple(sorted(v.items)))
+                for v in silk.check_silk_ref_obscured(pcb, rules).violations
+            )
+        )
+    assert results[0] == results[1] == results[2] == []
+
+
 # --- keep-upright footprint text (Issue #9433, review round 3) ---------------
 # KiCad draws footprint text without (unlocked yes) turned 180 deg when the
 # stored absolute angle is in (90, 270], keeping the justify tokens as written.

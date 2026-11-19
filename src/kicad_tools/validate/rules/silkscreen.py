@@ -2083,7 +2083,12 @@ def _has_replacement_silk_text(
             continue
         center = (text.position[0] - ox, text.position[1] - oy)
         geom = _text_bbox_geometry(
-            text.text, text.font_size, text.font_thickness, center, text.rotation
+            text.text,
+            text.font_size,
+            text.font_thickness,
+            center,
+            text.rotation,
+            text.justify,
         )
         if geom is not None and courtyard.contains(Point(geom.centroid.x, geom.centroid.y)):
             return True
