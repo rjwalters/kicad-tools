@@ -36,8 +36,9 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING
 
 from kicad_tools.geometry.copper import pad_gate_polygon as _pad_gate_polygon
 from kicad_tools.geometry.copper import pad_waiver_polygon as _pad_waiver_polygon
@@ -420,7 +421,6 @@ class LatticeObstacleModel:
         net: int,
         half: float,
         edge_mm: float,
-        committed: CommittedCopper | None = None,
         attached: Sequence[tuple[Pt, Pt, float]] = (),
     ) -> bool:
         """True when the copper swept by segment ``a-b`` parks in the fab
@@ -460,10 +460,8 @@ class LatticeObstacleModel:
         leg may ride: a band-violating leg that stays ON the line of such a
         segment, whose copper unions the pad, is copper stacked on an
         existing escape -- it lays no band copper of its own and is accepted.
-        ``committed`` (optional) contributes that net's committed segments
-        near the leg the same way.  Everything else -- above all a leg
-        running parallel to the pad edge beside its stub (the #9011 slit
-        shape) -- is rejected as before.
+        Everything else -- above all a leg running parallel to the pad edge
+        beside its stub (the #9011 slit shape) -- is rejected as before.
         """
         if edge_mm <= 0.0:
             return False
@@ -473,7 +471,6 @@ class LatticeObstacleModel:
         ax0, ax1 = min(a[0], b[0]), max(a[0], b[0])
         ay0, ay1 = min(a[1], b[1]), max(a[1], b[1])
         eps = ka.LATTICE_CLEARANCE_EPSILON_MM
-        rides: list[tuple[Pt, Pt, float]] | None = None
         for idx in self.pads_near(x0, y0, x1, y1):
             pad = self.pads[idx]
             if pad.net != net or pad.through_hole or pad.drill > 0:
@@ -491,19 +488,10 @@ class LatticeObstacleModel:
             gap = self.pad_centerline_gap(idx, a, b) - half
             if eps < gap < edge_mm - eps:
                 # #9517: a leg riding a pad-attached same-net segment is the
-                # validator's covered connector, not a slit.  The ride set is
-                # resolved lazily and once per call -- clean legs never pay.
-                if rides is None:
-                    rides = list(attached)
-                    if committed is not None:
-                        rides.extend(
-                            (c, d, seg_hw)
-                            for c, d, cnet, seg_hw, _iclr in committed.copper[layer].query_seg(
-                                a, b, pad=half + edge_mm + 1.0
-                            )
-                            if cnet == net
-                        )
-                if rides and self._band_continuation_exempt(idx, a, b, half, rides, eps):
+                # validator's covered connector, not a slit.  Clean legs pay
+                # nothing: the ride set is scanned only for band-violating
+                # ones.
+                if attached and self._band_continuation_exempt(idx, a, b, half, attached, eps):
                     continue
                 return True
         return False
@@ -514,7 +502,7 @@ class LatticeObstacleModel:
         a: Pt,
         b: Pt,
         half: float,
-        rides: list[tuple[Pt, Pt, float]],
+        rides: Sequence[tuple[Pt, Pt, float]],
         eps: float,
     ) -> bool:
         """#9517 exemption: leg ``a-b`` rides a pad-attached same-net segment.
@@ -522,12 +510,17 @@ class LatticeObstacleModel:
         True when some ``(c, d, hw)`` ride candidate satisfies all three:
 
         * **pad-attached** -- its own swept copper unions pad ``idx``'s
-          outline (``pad_centerline_gap <= hw``); committed/stub copper that
-          never reaches the pad cannot exempt anything;
-        * **ridden** -- the leg's start sits on that segment's swept copper
-          (``seg_pt_dist(a, c, d) <= half + hw``): the leg's copper and the
-          attached copper are one connected shape, the join the validator's
-          shoulder test sees;
+          outline (``pad_centerline_gap <= hw``); stub copper that never
+          reaches the pad cannot exempt anything;
+        * **ridden** -- the leg rides that segment's swept copper: the
+          NEARER of the leg's two endpoints lies within ``half + hw`` of it
+          (``min(seg_pt_dist(c, d, a), seg_pt_dist(c, d, b))``).  Both
+          endpoints, not just whichever comes first: the leg can extend past
+          the segment's end, and A* edge legality is memoised per UNORDERED
+          edge -- a start-only test would let the node-key order decide the
+          verdict.  The collinearity test below pins the other endpoint to
+          the same line, so the leg's copper and the attached copper are one
+          connected shape -- the join the validator's shoulder test sees;
         * **collinear** -- ``a-b`` stays on that segment's line (unit cross
           product ~ 0; the tolerance is loose enough for float lattice
           coordinates, tight enough that any 45-degree dogleg corner fails
@@ -555,7 +548,7 @@ class LatticeObstacleModel:
                 continue
             if self.pad_centerline_gap(idx, c, d) > hw + eps:
                 continue
-            if seg_pt_dist(a, c, d) > half + hw + eps:
+            if min(seg_pt_dist(c, d, a), seg_pt_dist(c, d, b)) > half + hw + eps:
                 continue
             if degenerate:
                 return True

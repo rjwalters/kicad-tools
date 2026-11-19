@@ -340,6 +340,42 @@ def test_stub_end_point_probe_on_attached_copper_is_accepted() -> None:
     )
 
 
+def test_distant_parallel_band_leg_rides_nothing_even_with_attached_stub() -> None:
+    # The ride test's pin (#9517 review): a band leg parallel to the tail's
+    # axis but starting far along it rides NONE of the tail's copper -- both
+    # endpoints are beyond ``half + hw`` of the segment (0.90 / 0.45 mm off,
+    # threshold 0.2).  A ride metric that measures anything but the leg's own
+    # endpoints against the ride segment grades this slit shape an escape --
+    # exactly the #9011 shape the guard exists to reject.
+    pf = _pf([_pad(0.0, 0.0)])
+    pf.build()
+    tail = ((0.0, 0.0), (0.0, -0.42), HALF)
+    assert _band_blocked(pf, (0.45, -1.2), (0.45, -0.4))
+    assert pf.obstacles.same_net_pad_band_blocked(
+        (0.45, -1.2), (0.45, -0.4), 0, 1, HALF, EDGE, attached=(tail,)
+    )
+
+
+def test_continuation_leg_longer_than_the_ride_band_is_exempt_from_either_end() -> None:
+    # Direction-free for a leg LONGER than the ride threshold that extends
+    # past the stub end: its near endpoint rides the tail, its far endpoint
+    # is 0.33 mm beyond it (past ``half + hw`` = 0.2).  Whichever endpoint
+    # the canonical A* edge order presents as the leg's start must give the
+    # same verdict -- copper on the tail's line lays no band copper either
+    # way.  (A start-only ride test grades the far-end-first order a slit.)
+    pf = _pf([_pad(0.0, 0.0)])
+    pf.build()
+    tail = ((0.0, 0.0), (0.0, -0.42), HALF)
+    leg = ((0.0, -0.42), (0.0, -0.75))
+    assert _band_blocked(pf, *leg)
+    assert not pf.obstacles.same_net_pad_band_blocked(
+        leg[0], leg[1], 0, 1, HALF, EDGE, attached=(tail,)
+    )
+    assert not pf.obstacles.same_net_pad_band_blocked(
+        leg[1], leg[0], 0, 1, HALF, EDGE, attached=(tail,)
+    )
+
+
 def test_attached_segment_that_misses_the_pad_exempts_nothing() -> None:
     # Attachment is what makes the composite escape validator-clean: a
     # same-net segment whose copper stops short of the outline (centreline
@@ -399,8 +435,9 @@ def test_body_edge_legal_accepts_continuation_of_attached_stub() -> None:
     assert not pf._body_edge_legal(
         px_edge, 0, 1, HALF, 0.15, committed, extra=0.0, pw=None, ko=None, attached=attached
     )[0]
-    # The exemption rides the leg's START only: the same vertical edge
-    # discovered from its far end (the goal-side arrival order) is the
+    # The exemption is direction-free -- the ride test takes the NEARER of
+    # the leg's two endpoints to the ride segment -- so the same vertical
+    # edge discovered from its far end (the goal-side arrival order) is the
     # direction-free memo's answer too.
     assert pf._body_edge_legal(
         cx_edge, 0, 1, HALF, 0.15, committed, extra=0.0, pw=None, ko=None, attached=attached
