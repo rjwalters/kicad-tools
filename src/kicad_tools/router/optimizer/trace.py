@@ -32,6 +32,8 @@ from .chain import sort_into_chains
 from .collision import CollisionChecker
 from .config import OptimizationConfig, OptimizationStats
 from .geometry import (
+    PadMaskZone,
+    rewrite_keeps_pad_escapes,
     segment_direction,
     segments_touch,
     total_length,
@@ -496,6 +498,9 @@ class TraceOptimizer:
         # Issue #8250: via / pad positions per net *name* where the 45° pass
         # must not move a corner (see ``set_attachment_points``).
         self._attachment_points: dict[str, list[tuple[float, float]]] = {}
+        # Issue #9524: pad mask-opening zones (all nets), set by
+        # ``set_pad_zones``; a rewrite may not break a pad's mask-clean escape.
+        self._pad_zones: list[PadMaskZone] = []
         self._protected_vertices: list[tuple[float, float]] = []
 
         # Initialize via optimizer with matching config
@@ -536,6 +541,17 @@ class TraceOptimizer:
         a pad, never one that sits on a via.
         """
         self._pad_points = points_by_net_name
+
+    def set_pad_zones(self, zones: list[PadMaskZone]) -> None:
+        """Register every pad's mask-opening zone (Issue #9524).
+
+        While zones are set, each pass's rewrite of a chain is vetoed when it
+        would drop a terminating end inside a same-net pad opening or carry
+        new copper (a bend, a crossing) into any pad's opening -- the cleanup
+        equivalent of ``mask_to_copper``.  Callers that do not set zones get
+        the pre-#9524 behaviour.
+        """
+        self._pad_zones = zones
 
     def optimize_segments(self, segments: list[Segment]) -> list[Segment]:
         """Optimize a list of segments for a single net/layer.
@@ -627,8 +643,10 @@ class TraceOptimizer:
             for enabled, apply_pass in passes:
                 if enabled:
                     rewritten = apply_pass(result)
-                    if self._keeps_anchors(result, rewritten) and not self._lays_copper_twice(
-                        result, rewritten
+                    if (
+                        self._keeps_anchors(result, rewritten)
+                        and not self._lays_copper_twice(result, rewritten)
+                        and self._keeps_pad_escapes(result, rewritten)
                     ):
                         result = rewritten
 
@@ -638,6 +656,17 @@ class TraceOptimizer:
         self._branch_anchors = []
         self._other_copper = []
         return all_optimized
+
+    def _keeps_pad_escapes(self, old: list[Segment], new: list[Segment]) -> bool:
+        """True if *new* does not break a pad's mask-clean escape (Issue #9524).
+
+        Delegates to :func:`~.geometry.rewrite_keeps_pad_escapes` over the
+        zones registered via :meth:`set_pad_zones`; always True when none
+        were set.
+        """
+        if not self._pad_zones or not old or old == new:
+            return True
+        return rewrite_keeps_pad_escapes(old, new, self._pad_zones, self.config.tolerance)
 
     def _lays_copper_twice(self, old: list[Segment], new: list[Segment]) -> bool:
         """True if a leg *new* adds lies on the net's own copper (Issue #8603).
