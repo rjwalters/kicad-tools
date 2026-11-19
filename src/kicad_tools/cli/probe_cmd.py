@@ -16,7 +16,10 @@ is the batch form for items the agent computed itself:
   kept at ``<pcb>.kicad_pcb.bak`` (override with ``--backup``), and a board
   that changed on disk between read and write is refused (exit 2, nothing
   written) by comparing ``st_mtime_ns`` and ``st_size`` immediately before
-  the replace.
+  the replace.  Items whose exact copper is already on the board are skipped
+  by ``add_trace`` / ``add_via`` dedupe (issue #4175); the report counts
+  them separately (``items_written`` / ``items_skipped_as_duplicate``)
+  instead of claiming every proposed item was written (issue #9674).
 
 The items file is JSON with absolute board millimetres (the file's literal
 ``(at ...)`` / ``(start ...)`` sheet coordinates, as KiCad shows them)::
@@ -37,7 +40,10 @@ categories run are :data:`PROBE_CHECK_CATEGORIES` (pairwise copper clearance
 and shorts, the net-agnostic fab-view copper-gap pass, thin-copper slivers,
 zone-fill clearance, board-edge clearance, trace/via dimensions, authored
 net-class clearances on copper, via-in-pad / via-type / via-under-body,
-zero-length segments).  The remaining default ``kct check`` copper categories
+zero-length segments, THT-to-SMD pad spacing).  The copper-gap pass is
+net-agnostic: a same-net parallel track can fail a probe through it even
+though no pairwise clearance rule objects.  The remaining default ``kct
+check`` copper categories
 are out of scope on purpose: ``sharp_trace_corner``, ``dangling_copper``,
 ``width_consistency``, ``isolated_copper``, ``redundant_copper`` and
 ``missing_plated_hole`` are routing-style / process advisories that report at
@@ -395,18 +401,31 @@ def _append_for_check(pcb: Any, items: list[ProbeItem]) -> dict[str, set[int]]:
     return descriptors
 
 
-def _append_for_write(pcb: Any, items: list[ProbeItem]) -> None:
-    """Append every item to *pcb* as real board nodes (segments, vias, arcs)."""
+def _append_for_write(pcb: Any, items: list[ProbeItem]) -> tuple[int, int]:
+    """Append every item to *pcb* as real board nodes (segments, vias, arcs).
+
+    Returns ``(items_written, items_skipped_as_duplicate)``: ``add_trace`` /
+    ``add_via`` dedupe (issue #4175) skip an item whose exact copper is
+    already on the board, and apply's report distinguishes those from written
+    items instead of claiming every proposed item was written (issue #9674).
+    Arcs have no dedupe path, so they always count as written.
+    """
     ox, oy = pcb.board_origin
 
     def rel(point: tuple[float, float]) -> tuple[float, float]:
         return (point[0] - ox, point[1] - oy)
 
+    written = 0
+    skipped = 0
     for item in items:
         if item.kind == "via":
-            pcb.add_via(
+            via = pcb.add_via(
                 *rel(item.at), size=item.size, drill=item.drill, layers=item.layers, net=item.net
             )
+            if via is None:
+                skipped += 1
+            else:
+                written += 1
         elif item.kind == "arc":
             assert item.mid is not None
             pcb.add_arc(
@@ -417,10 +436,16 @@ def _append_for_write(pcb: Any, items: list[ProbeItem]) -> None:
                 layer=item.layer,
                 net=item.net,
             )
+            written += 1
         else:
-            pcb.add_trace(
+            appended = pcb.add_trace(
                 rel(item.start), rel(item.end), width=item.width, layer=item.layer, net=item.net
             )
+            if appended:
+                written += 1
+            else:
+                skipped += 1
+    return written, skipped
 
 
 def _violation_dict(
@@ -577,7 +602,10 @@ def apply_items_checked(
 
     Exit ``0`` written; ``1`` probe problems (nothing written); ``2`` refused
     (board changed under us, or a KiCad lock under the ``error`` policy --
-    nothing written either way).
+    nothing written either way).  On success the report carries
+    ``items_written`` and ``items_skipped_as_duplicate`` (issue #9674): items
+    whose exact copper was already on the board are skipped by dedupe, and
+    the report says so instead of counting them as written.
     """
     from kicad_tools.schema.pcb import PCB
 
@@ -596,6 +624,8 @@ def apply_items_checked(
     report["written"] = None
     report["backup"] = None
     report["refused"] = None
+    report["items_written"] = None
+    report["items_skipped_as_duplicate"] = None
     if not report["ok"]:
         return report, 1
 
@@ -608,7 +638,7 @@ def apply_items_checked(
         return report, 2
 
     board = PCB.load(str(pcb_path))
-    _append_for_write(board, items)
+    items_written, items_skipped = _append_for_write(board, items)
 
     backup = Path(backup_path) if backup_path else pcb_path.with_suffix(pcb_path.suffix + ".bak")
     tmp_path = pcb_path.with_suffix(pcb_path.suffix + ".probe-tmp")
@@ -629,6 +659,8 @@ def apply_items_checked(
 
     report["written"] = str(pcb_path)
     report["backup"] = str(backup)
+    report["items_written"] = items_written
+    report["items_skipped_as_duplicate"] = items_skipped
     return report, 0
 
 
@@ -776,7 +808,14 @@ def run_apply_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     else:
-        print(
-            f"apply: wrote {len(items)} item(s) to {report['written']} (backup: {report['backup']})"
+        line = (
+            f"apply: wrote {report['items_written']} item(s) to {report['written']} "
+            f"(backup: {report['backup']})"
         )
+        if report["items_skipped_as_duplicate"]:
+            line += (
+                f"; skipped {report['items_skipped_as_duplicate']} item(s) already "
+                "on the board (duplicate)"
+            )
+        print(line)
     return code

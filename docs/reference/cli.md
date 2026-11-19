@@ -1940,13 +1940,16 @@ sheet coordinates, as KiCad shows them):
 ```
 
 The items are appended to an in-memory copy of the board and checked with
-the same rule set `kct check` runs (clearances and shorts, zone fills,
+the same rule set `kct check` runs (pairwise clearances and shorts, the
+net-agnostic copper-gap and thin-copper-sliver fab passes, zone fills,
 board edge, trace/via dimensions, authored net-class clearances, via
-placement). Only findings the batch **adds** are reported, so pre-existing
-board problems never fail a probe. Arcs are checked through a 1 um-sagitta
-tessellation. Exit `1` on any added error finding or items-file problem;
-warnings are reported but do not fail. `--format json` emits the full
-report (`ok`, `problems`, `warnings`, per-item attribution).
+placement, THT-to-SMD pad spacing). The copper-gap pass is net-agnostic: a
+same-net parallel track can fail a probe through it even when no pairwise
+clearance rule objects. Only findings the batch **adds** are reported, so
+pre-existing board problems never fail a probe. Arcs are checked through a
+1 um-sagitta tessellation. Exit `1` on any added error finding or
+items-file problem; warnings are reported but do not fail. `--format json`
+emits the full report (`ok`, `problems`, `warnings`, per-item attribution).
 
 | Option | Description |
 |--------|-------------|
@@ -1973,6 +1976,14 @@ read; a board that changed underneath is refused with nothing written.
 A failed probe never writes: the board stays byte-identical. Exit `0`
 written; `1` probe problems; `2` refused (concurrent modification, or a
 KiCad lock under the `error` policy) — nothing is written on `1` or `2`.
+
+An item whose exact copper is already on the board (same net, layer,
+unordered endpoints and width for a track; same net, position and layers
+for a via) is skipped by deduplication rather than written — the copper the
+batch asked for is there. The report distinguishes them: `items_written`
+and `items_skipped_as_duplicate` in JSON, and a text line that says how
+many were skipped, so an all-duplicate batch reports `wrote 0 item(s)`
+instead of claiming a write that did not happen (Issue #9674).
 
 | Option | Description |
 |--------|-------------|

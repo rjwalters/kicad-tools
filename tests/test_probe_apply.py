@@ -431,9 +431,69 @@ class TestApplyChecked:
         assert rc == 0 and doc["ok"] is True
         assert doc["written"] == str(board)
         assert doc["backup"] == str(board) + ".bak"
+        assert doc["items_written"] == 1 and doc["items_skipped_as_duplicate"] == 0
         reloaded = PCB.load(str(board))
         assert any(s.net_name == "SIG" and s.layer == "F.Cu" for s in reloaded.segments)
         assert (board.parent / "b.kicad_pcb.bak").read_bytes() == original
+
+    def test_apply_all_duplicate_reports_zero_written(self, board, capsys):
+        # Issue #9674: proposing the board's own FOE track verbatim is clean
+        # (the copper is there) and add_trace dedupe skips the write; the
+        # report must not claim an item was written.
+        original = board.read_bytes()
+        duplicate = _seg("FOE", 115, 100.6, 115, 119.4, width=0.2)
+        rc, doc = _run(
+            capsys,
+            "apply",
+            str(board),
+            str(_items_file(board.parent, duplicate)),
+            "--checked",
+            "--format",
+            "json",
+        )
+        assert rc == 0 and doc["ok"] is True, doc["problems"]
+        assert doc["items_written"] == 0
+        assert doc["items_skipped_as_duplicate"] == 1
+        # No node was added: still exactly the one segment the fixture has.
+        reloaded = PCB.load(str(board))
+        assert len(reloaded.segments) == 1
+        assert (board.parent / "b.kicad_pcb.bak").read_bytes() == original
+
+    def test_apply_mixed_batch_splits_written_and_skipped(self, board, capsys):
+        rc, doc = _run(
+            capsys,
+            "apply",
+            str(board),
+            str(
+                _items_file(
+                    board.parent,
+                    _seg("FOE", 115, 100.6, 115, 119.4, width=0.2),  # exact duplicate
+                    _seg("SIG", 105, 105, 112, 105),  # new copper
+                )
+            ),
+            "--checked",
+            "--format",
+            "json",
+        )
+        assert rc == 0 and doc["ok"] is True, doc["problems"]
+        assert doc["items_written"] == 1
+        assert doc["items_skipped_as_duplicate"] == 1
+        reloaded = PCB.load(str(board))
+        assert len(reloaded.segments) == 2
+
+    def test_apply_text_output_distinguishes_skipped_duplicates(self, board, capsys):
+        rc = main(
+            [
+                "apply",
+                str(board),
+                str(_items_file(board.parent, _seg("FOE", 115, 100.6, 115, 119.4, width=0.2))),
+                "--checked",
+            ]
+        )
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "wrote 0 item(s)" in captured.out
+        assert "skipped 1 item(s) already on the board" in captured.out
 
     def test_apply_failure_leaves_file_byte_identical(self, board, capsys):
         before = _md5(board)
