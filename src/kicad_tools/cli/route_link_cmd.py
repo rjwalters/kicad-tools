@@ -377,6 +377,7 @@ def _rules_for_link(args: argparse.Namespace, pcb: Any, base: Any, spec: LinkSpe
         from kicad_tools.router.pairwise_clearance import _norm_net_key
 
         threshold = getattr(args, "hv_threshold", 30.0)
+        pair_bounds = getattr(args, "_pairwise_pair_bounds", None)
         me = _norm_net_key(spec.net)
         for name, num in names.items():
             other = _norm_net_key(name)
@@ -388,7 +389,12 @@ def _rules_for_link(args: argparse.Namespace, pcb: Any, base: Any, spec: LinkSpe
                 # A net absent from the map is 0 V, as in the creepage census
                 # (compute_creepage_census); fail closed on the same pair the gate
                 # checks instead of silently falling back to --clearance (#8546).
+                # An authored _pair_bounds cap names this pair the same way the
+                # census sees it, so it must bound |ΔV| here too (#9644).
                 dv = abs(voltages.get(me, 0.0) - voltages.get(other, 0.0))
+                bound = (pair_bounds or {}).get(frozenset((me, other)))
+                if bound is not None:
+                    dv = min(dv, bound[0])
                 if dv == 0.0 or dv < threshold:
                     continue
                 try:
@@ -398,6 +404,7 @@ def _rules_for_link(args: argparse.Namespace, pcb: Any, base: Any, spec: LinkSpe
                         pollution_degree=getattr(args, "pollution_degree", 2),
                         material_group=getattr(args, "material_group", "IIIa"),
                         hv_threshold=threshold,
+                        pair_bounds=pair_bounds,
                     ).get(pair)
                 except StandardLookupError as exc:
                     raise LinkSpecError(

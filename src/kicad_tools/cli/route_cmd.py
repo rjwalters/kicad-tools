@@ -9404,11 +9404,14 @@ def _preload_voltage_map(args) -> int:
     Shared by ``kct route`` and ``kct optimize-traces`` so both accept the same
     inputs and fail with the same messages.  Stashes the result on
     ``args._pairwise_voltages`` / ``args._pairwise_required`` (both ``None``
-    when ``--voltage-map`` was not supplied).  Returns 0, or 1 after printing
-    the error to stderr.
+    when ``--voltage-map`` was not supplied) and the parsed ``_pair_bounds``
+    on ``args._pairwise_pair_bounds`` (#9644, for ``route-link``'s
+    omitted-net fallback).  Returns 0, or 1 after printing the error to
+    stderr.
     """
     args._pairwise_voltages = None
     args._pairwise_required = None
+    args._pairwise_pair_bounds = None
     if getattr(args, "voltage_map", None) is not None:
         from kicad_tools.creepage.standards import StandardLookupError
         from kicad_tools.placement.hv_domains import build_required_by_domain_pair
@@ -9460,6 +9463,7 @@ def _preload_voltage_map(args) -> int:
             return 1
         args._pairwise_voltages = _voltages
         args._pairwise_required = _required
+        args._pairwise_pair_bounds = _pair_bounds or None
     return 0
 
 
