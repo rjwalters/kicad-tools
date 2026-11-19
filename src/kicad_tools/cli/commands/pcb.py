@@ -959,6 +959,47 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         return 1
     assert res is not None  # _PRUNE_MAX_PASSES >= 1, so the loop ran at least once
 
+    # Issue #9640 review: the report is the whole run's, computed once here
+    # from the board this command actually writes.  Folding the passes kept
+    # only the last pass's report, and the last pass of a board-changing run
+    # is the no-op one ("unchanged", no pairs block), so the output lost
+    # creepage_pairs_checked/_unchecked and the before/after counts exactly
+    # when edits landed.  The per-pass gate above is untouched: it still
+    # vets every edit against the input baseline.
+    if creepage_kwargs:
+        import tempfile
+
+        from kicad_tools.creepage.output_audit import audit_summary
+
+        after_pcb = pcb
+        if dry_run:
+            # Nothing is written; report the would-be board instead (this
+            # run's single pass with its kept plans applied).
+            from kicad_tools.pcb_prune import apply_plans
+            from kicad_tools.schema.pcb import PCB
+
+            after_pcb = PCB.load(pcb_path)
+            if res.accepted:
+                apply_plans(after_pcb, res.accepted)
+        with tempfile.TemporaryDirectory(prefix="kct_prune_creep_") as tmp:
+            after_path = Path(tmp) / "final.kicad_pcb"
+            after_pcb.save(after_path)
+            after_text = after_path.read_text()
+        summary = audit_summary(
+            creepage_kwargs["creepage_audit"],
+            creepage_kwargs["creepage_baseline_text"],
+            after_text,
+            creepage_kwargs["creepage_required_pairs"],
+        )
+        whole_run: dict[str, Any] = {
+            "creepage_gate": "active",
+            "creepage_audit": (
+                "unavailable" if summary["creepage_pairs_checked"] is None else "ran"
+            ),
+        }
+        whole_run.update(summary)
+        res = _replace(res, creepage=whole_run)
+
     # Quote sheet positions like the sibling commands and kct check (#8954);
     # the library's plans and uncut loops stay board-relative.
     origin_x, origin_y, _sheet, _sheet_witness = _sheet_reporters(pcb)

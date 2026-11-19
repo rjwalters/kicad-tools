@@ -1173,8 +1173,11 @@ Shaped-on-purpose copper (Issue #9640):
         stats.creepage_skips = dict(pairwise_checker.skips)
 
     # Issue #9640: name the pairs the whole-board audit scored (with margins
-    # before/after) and the voltage-map pairs it could not, from the written
-    # board -- the same text the user gets.
+    # before/after) and the voltage-map pairs it could not.  Both texts are
+    # the optimizer's output as written, before the zone refill below
+    # (#8286): the census scores stored fills, so after a refill the file
+    # on disk can score differently -- the before/after comparison stays
+    # apples-to-apples either way.
     creepage_report: dict = {}
     if creepage_audit is not None and creepage_input_text is not None and not args.dry_run:
         from kicad_tools.creepage.output_audit import audit_summary
@@ -1189,8 +1192,9 @@ Shaped-on-purpose copper (Issue #9640):
         after_n = creepage_report.get("creepage_unwaived_failures_after")
         if before_n is not None and after_n is not None and after_n > before_n:
             print(
-                f"WARNING: written board has {after_n} unwaived creepage failures "
-                f"(input: {before_n}); re-run `kct creepage` before tapeout",
+                f"WARNING: optimizer output (before zone refill) has {after_n} unwaived "
+                f"creepage failures (input: {before_n}); re-run `kct creepage` "
+                "before tapeout",
                 file=sys.stderr,
             )
         elif before_n is None:

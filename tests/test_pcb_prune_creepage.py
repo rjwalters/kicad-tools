@@ -163,6 +163,39 @@ def test_cli_voltage_map_reports_rejected_by_creepage(board, vmap, tmp_path, cap
     assert not out.exists()
 
 
+def test_cli_accepted_edit_keeps_the_creepage_report(tmp_path, capsys):
+    """A board-changing run still reports the pairs it checked (#9640 review).
+
+    Pass 1 accepts the snap (the HV pad sits far away, so it is
+    creepage-safe); pass 2 re-plans the edited board, finds nothing and
+    returns the degenerate "unchanged" report.  The JSON must still carry
+    the whole-run audit of the board actually written.
+    """
+    board = tmp_path / "safe.kicad_pcb"
+    board.write_text(
+        HEADER
+        + _pad_fp("A", 100, 100, 0.4, 0.4, 2, "LV")
+        + _pad_fp("B", 110, 100, 1.2, 0.3, 2, "LV")
+        + _pad_fp("H", 110.5, 80, 0.4, 0.4, 1, "HV")
+        + _seg((100, 100), (109.5, 100))
+        + ")\n"
+    )
+    vmap = tmp_path / "vm.json"
+    vmap.write_text(json.dumps({"HV": 150.0, "LV": 0.0}))
+    out = tmp_path / "out.kicad_pcb"
+    rc, data = _cli(board, "--voltage-map", str(vmap), "-o", str(out), capsys=capsys)
+    assert rc == 0
+    assert data["snapped"] == 1  # the edit was accepted and the board changed
+    assert out.exists()
+    creep = data["creepage"]
+    assert creep["creepage_audit"] == "ran"
+    assert {frozenset((r["net_a"], r["net_b"])) for r in creep["creepage_pairs_checked"]} == {
+        frozenset(("HV", "LV"))
+    }
+    assert creep["creepage_unwaived_failures_before"] == 0
+    assert creep["creepage_unwaived_failures_after"] == 0
+
+
 def test_cli_without_voltage_map_still_snaps(board, tmp_path, capsys):
     rc, data = _cli(board, "-o", str(tmp_path / "out.kicad_pcb"), capsys=capsys)
     assert rc == 0
