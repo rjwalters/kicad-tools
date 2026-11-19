@@ -9,6 +9,7 @@ equals the recorded one is provably unchanged and can be re-bound.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -528,6 +529,37 @@ class TestSymlinkedWaiversFile:
         assert "Error" in capsys.readouterr().err
         assert link.is_symlink()
 
+    @pytest.mark.skipif(os.geteuid() == 0, reason="chmod is not enforced for root")
+    def test_read_only_target_dir_leaves_the_original_untouched(self, tmp_path):
+        import kicad_tools.validate.rules.waivers as waivers_mod
+
+        board = _write_board(tmp_path)
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        waivers = real_dir / "w.json"
+        waivers.write_text(
+            json.dumps(
+                {"version": 3, "waivers": [_entry(COURTYARD_R1, _ev3_hash(board, COURTYARD_R1))]},
+                indent=2,
+            )
+            + "\n"
+        )
+        before = waivers.read_text()
+        link = tmp_path / "board.kct-waivers.json"
+        link.symlink_to(Path("real") / "w.json")
+        findings, pcb = _findings(board)
+        real_dir.chmod(0o555)  # temp creation beside the target fails
+        try:
+            with pytest.raises(OSError):
+                migrate_evidence_waivers(
+                    waivers, findings, EvidenceContext(pcb, recipe="ev3"), write=True
+                )
+        finally:
+            real_dir.chmod(0o755)
+        assert waivers.read_text() == before
+        assert not list(real_dir.glob(".*.tmp"))
+        assert waivers_mod.os.path.realpath(link) == str(waivers.resolve())
+
 
 class TestInactiveRuleOrphans:
     def test_ampacity_without_net_class_map_sidecar_says_not_evaluated(self, tmp_path, capsys):
@@ -634,4 +666,6 @@ class TestUntouchedListedByKey:
         text = "\n".join(format_waiver_migration(report, waivers, write=False))
         assert f"untouched (no migration needed): {COURTYARD_R2}" in text
         assert f"untouched (no migration needed): {COURTYARD_R1}" in text
-        assert "untouched (no migration needed): courtyard_missing (legacy rule/items entry)" in text
+        assert (
+            "untouched (no migration needed): courtyard_missing (legacy rule/items entry)" in text
+        )
