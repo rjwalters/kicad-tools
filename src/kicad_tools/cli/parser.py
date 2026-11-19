@@ -1297,6 +1297,25 @@ def _add_check_parser(subparsers) -> None:
             "this flag is omitted (Issue #4417)."
         ),
     )
+    # Issue #9454: ev3 -> ev4 waiver migration.  Declared on BOTH parsers +
+    # forwarded by the shim (parser-drift guard, issue #4633).
+    check_parser.add_argument(
+        "--migrate-waivers",
+        dest="migrate_waivers",
+        action="store_true",
+        help=(
+            "Re-bind evidence-bound waivers recorded under the previous "
+            "evidence version (ev3) to the current one (ev4) without "
+            "re-recording them (Issue #9454). Previews by default; add "
+            "--write to apply. Run it without --only/--skip."
+        ),
+    )
+    check_parser.add_argument(
+        "--write",
+        dest="migrate_write",
+        action="store_true",
+        help="With --migrate-waivers: apply the migration to the waivers file",
+    )
     # Issue #3061: per-board auto-derive of the pad_grid tolerance is the
     # default for the CLI.  --pad-grid-strict opts back into the PR #3057
     # fixed-0.05mm constant; --pad-grid-tolerance pins a custom value.
