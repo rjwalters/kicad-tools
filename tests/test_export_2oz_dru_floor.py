@@ -168,3 +168,85 @@ def test_dry_run_writes_nothing_when_merge_succeeds(tmp_path: Path) -> None:
     before = {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()}
     _export(pcb, dry_run=True)
     assert {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()} == before
+
+
+# ---------------------------------------------------------------------------
+# Reporter's board shape (#9422 follow-up): hand-written unscoped rule beside
+# the managed block.  The split-floor (2 oz) profile is emitted as
+# ``outer``/``inner``-scoped rules only, so the loosening gate's unscoped
+# probe used to see nothing but the hand-written rule.
+# ---------------------------------------------------------------------------
+
+_HAND_RULE = '(rule "Minimum Clearance"\n  (constraint clearance (min 0.127mm)))\n\n'
+_ZONE = (
+    '(zone (net 1) (net_name "VIN") (layer "{layer}") (connect_pads (clearance 0.2))'
+    " (polygon (pts (xy 1 1) (xy 9 1) (xy 9 9))))\n"
+)
+
+
+def _reporter_board(tmp_path: Path, zone_layer: str | None) -> Path:
+    pcb = _board(tmp_path, 2.0)
+    if zone_layer is not None:
+        text = pcb.read_text(encoding="utf-8").rstrip()
+        assert text.endswith(")")
+        pcb.write_text(text[:-1] + _ZONE.format(layer=zone_layer) + ")\n", encoding="utf-8")
+    _seed_stale_block(pcb, 0.15)
+    dru = pcb.with_suffix(".kicad_dru")
+    body = dru.read_text(encoding="utf-8").replace("(version 1)\n", "", 1)
+    dru.write_text("(version 1)\n" + _HAND_RULE + body, encoding="utf-8")
+    return pcb
+
+
+@pytest.mark.parametrize("zone_layer", [None, "In2.Cu", "F.Cu"])
+def test_hand_written_unscoped_rule_does_not_block_a_two_oz_export(
+    tmp_path: Path, zone_layer: str | None
+) -> None:
+    pcb = _reporter_board(tmp_path, zone_layer)
+
+    _export(pcb)  # used to raise: dru.resolved.track_track lowered 0.15 -> 0.127
+
+    dru = pcb.with_suffix(".kicad_dru").read_text(encoding="utf-8")
+    assert re.search(r'rule "Clearance \(outer\) - jlcpcb".*?\(min 0\.15mm\)', dru, re.S)
+    assert '(rule "Minimum Clearance"' in dru  # authored rule kept
+
+
+# ---------------------------------------------------------------------------
+# Router-declared net classes (``meta.kct_router_netclasses``, #9422 review):
+# kct's own "Reviewed clearance" rule for such a class carries an
+# ``isCoupledDiffPair()`` call and an ``A.Reference == B.Reference`` term.
+# Unmodelled, the rule dropped out of the gate and the inner-layer probe
+# landed on ``Clearance (inner)`` 0.1016 against the 0.15 net-class floor.
+# ---------------------------------------------------------------------------
+
+
+def _router_class_board(tmp_path: Path, zone_layer: str | None, *, class_name: str) -> Path:
+    pcb = _reporter_board(tmp_path, zone_layer)
+    dru = pcb.with_suffix(".kicad_dru")
+    # Drop the hand rule: the reviewer's shapes S7/S8 carry none.
+    dru.write_text(dru.read_text(encoding="utf-8").replace(_HAND_RULE, ""), encoding="utf-8")
+    pro = pcb.with_suffix(".kicad_pro")
+    data = json.loads(pro.read_text(encoding="utf-8"))
+    classes = data["net_settings"]["classes"]
+    declared = dict(classes[0], name=class_name, clearance=0.15)
+    classes.append(declared)
+    data.setdefault("meta", {})["kct_router_netclasses"] = {
+        "classes": [class_name],
+        "assignments": [],
+    }
+    pro.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return pcb
+
+
+@pytest.mark.parametrize("zone_layer", [None, "In1.Cu"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_router_declared_class_does_not_block_a_two_oz_export(
+    tmp_path: Path, zone_layer: str | None, dry_run: bool
+) -> None:
+    pcb = _router_class_board(tmp_path, zone_layer, class_name="Signal")
+
+    _export(pcb, dry_run=dry_run)  # used to raise: track_track lowered 0.15 -> 0.1016
+
+    if not dry_run:
+        dru = pcb.with_suffix(".kicad_dru").read_text(encoding="utf-8")
+        assert "isCoupledDiffPair" in dru  # the router-class rule really was written
+        assert _managed_clearance(pcb) == pytest.approx(0.15)
