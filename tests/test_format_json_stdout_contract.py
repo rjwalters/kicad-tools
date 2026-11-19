@@ -73,6 +73,9 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "creepage": ["{pcb}", "--min", "1.0"],
     "creepage-export-rules": ["{pro}"],
     "repair-creepage": ["{pcb}", "--min", "1.0", "--dry-run"],
+    # Issue #9582: deliberately-absent inputs walk the JSON error path
+    # ({"error": ..., "success": false}); no fixture files needed.
+    "voltage-map-merge": ["{dir}/missing_a.json", "{dir}/missing_b.json", "-o", "{dir}/env.json"],
     # -- sch family ---------------------------------------------------------
     "sch summary": ["{sch}"],
     "sch hierarchy": ["{sch}"],
