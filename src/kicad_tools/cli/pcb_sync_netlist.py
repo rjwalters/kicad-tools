@@ -4,6 +4,8 @@ Compares schematic components against PCB footprints and:
 - Adds missing footprints (placed at board edge)
 - Updates net assignments for renamed references
 - Reports orphaned footprints (in PCB but not schematic)
+- Copies schematic values onto matched footprints and reports value or
+  footprint lib ID drift on matched references (issue #9563)
 
 Supports --dry-run to preview changes without modifying files.
 """
@@ -49,6 +51,41 @@ class PinMismatch:
 
 
 @dataclass
+class ValueUpdate:
+    """A value difference on a matched reference (issue #9563).
+
+    The schematic value is copied onto the PCB footprint (unless
+    ``--dry-run``); equivalence rules match ``kct validate --sync`` and
+    ``kct sync --apply``.
+    """
+
+    reference: str
+    old_value: str
+    new_value: str
+
+    @property
+    def detail(self) -> str:
+        return f'{self.reference}: "{self.old_value}" -> "{self.new_value}"'
+
+
+@dataclass
+class FootprintChange:
+    """A footprint lib ID difference on a matched reference (issue #9563).
+
+    Reported only -- this command never swaps footprints; ``kct sync
+    --apply`` owns that logic.
+    """
+
+    reference: str
+    old_footprint: str
+    new_footprint: str
+
+    @property
+    def detail(self) -> str:
+        return f"{self.reference}: {self.old_footprint} -> {self.new_footprint}"
+
+
+@dataclass
 class SyncResult:
     """Result of a netlist sync operation."""
 
@@ -58,6 +95,8 @@ class SyncResult:
     removed: list[SyncAction] = field(default_factory=list)
     pin_mismatches: list[PinMismatch] = field(default_factory=list)
     net_updated: list[SyncAction] = field(default_factory=list)
+    value_updated: list[ValueUpdate] = field(default_factory=list)
+    footprint_changed: list[FootprintChange] = field(default_factory=list)
     # Pads whose ``pinfunction``/``pintype`` were written from the schematic
     # pin data (issue #5985), mirroring KiCad's "Update PCB from Schematic".
     pintype_updated: int = 0
@@ -73,6 +112,8 @@ class SyncResult:
             or self.removed
             or self.pin_mismatches
             or self.net_updated
+            or self.value_updated
+            or self.footprint_changed
             or self.pintype_updated
         )
 
@@ -216,6 +257,54 @@ def sync_netlist(
                         severity=severity,
                     )
                 )
+
+    # --- Detect value and footprint drift on matched references ---
+    # Matched references are compared for value and footprint lib ID so a
+    # wrong part value or wrong package on the board is reported instead of
+    # silently passing (issue #9563).  The equivalence helpers are the same
+    # ones ``kct validate --sync`` uses, so the two tools flag the same refs.
+    if common_refs:
+        from kicad_tools.footprints.library_path import compare_footprint_lib_ids
+        from kicad_tools.sync.reconciler import _values_equivalent
+
+        for ref in sorted(common_refs):
+            item = sch_components[ref]
+            pcb_info = pcb_refs[ref]
+
+            # Values: ``~`` is KiCad's "no value" placeholder, treated as
+            # empty; a missing value on either side is skipped -- the same
+            # rules as validate --sync's _check_values.
+            sch_value = (item.value or "").strip()
+            pcb_value = (pcb_info["value"] or "").strip()
+            if sch_value == "~":
+                sch_value = ""
+            if pcb_value == "~":
+                pcb_value = ""
+            if sch_value and pcb_value and not _values_equivalent(sch_value, pcb_value, ref):
+                result.value_updated.append(
+                    ValueUpdate(reference=ref, old_value=pcb_value, new_value=sch_value)
+                )
+
+            # Footprint lib IDs: a package or nickname mismatch is reported
+            # (never swapped here -- `kct sync --apply` owns the swap); a
+            # nickname missing on one side is the same package, warning only.
+            # (Named *_fp_id to stay clear of the pin-count loop's pcb_fp,
+            # a Footprint object, in the same function scope.)
+            sch_fp_id = item.footprint or ""
+            pcb_fp_id = pcb_info["footprint"] or ""
+            if sch_fp_id and pcb_fp_id:
+                relation = compare_footprint_lib_ids(sch_fp_id, pcb_fp_id)
+                if relation == "mismatch":
+                    result.footprint_changed.append(
+                        FootprintChange(
+                            reference=ref, old_footprint=pcb_fp_id, new_footprint=sch_fp_id
+                        )
+                    )
+                elif relation == "nickname_missing":
+                    result.warnings.append(
+                        f"{ref} footprint library nickname missing: "
+                        f"schematic {sch_fp_id}, PCB {pcb_fp_id}"
+                    )
 
     # --- Detect renames via value+footprint matching ---
     missing_refs = sch_ref_set - pcb_ref_set
@@ -386,6 +475,14 @@ def sync_netlist(
             for action in result.removed:
                 if not pcb.remove_footprint(action.reference):
                     result.errors.append(f"Failed to remove footprint {action.reference}")
+
+        # Apply value updates for matched refs (issue #9563): copy the
+        # schematic value onto the board footprint.  Footprint lib ID
+        # changes are reported only -- the swap itself is owned by
+        # ``kct sync --apply``.
+        for update in result.value_updated:
+            if not pcb.update_footprint_value(update.reference, update.new_value):
+                result.errors.append(f"Failed to update value for {update.reference}")
 
         # Update net assignments from schematic netlist unconditionally.
         # This catches stale pad-net assignments even when no footprints are
@@ -775,6 +872,19 @@ def format_text(result: SyncResult, dry_run: bool, pcb_path: Path) -> str:
         lines.append(f"  Pad pin types updated: {result.pintype_updated}")
         lines.append("")
 
+    if result.value_updated:
+        lines.append(f"  Value updates ({len(result.value_updated)}):")
+        for update in result.value_updated:
+            lines.append(f"    {update.detail}")
+        lines.append("")
+
+    if result.footprint_changed:
+        lines.append(f"  Footprint changes ({len(result.footprint_changed)}):")
+        for change in result.footprint_changed:
+            lines.append(f"    {change.detail}")
+        lines.append("    Run `kct sync --apply` to swap these footprints on the board.")
+        lines.append("")
+
     if result.orphaned:
         lines.append(f"  Orphaned footprints ({len(result.orphaned)}):")
         for action in result.orphaned:
@@ -864,9 +974,27 @@ def format_json(result: SyncResult, dry_run: bool, pcb_path: Path) -> str:
             for a in result.net_updated
         ],
         "pintype_updated": result.pintype_updated,
+        "value_updated": [
+            {
+                "reference": v.reference,
+                "old_value": v.old_value,
+                "new_value": v.new_value,
+            }
+            for v in result.value_updated
+        ],
+        "footprint_changed": [
+            {
+                "reference": c.reference,
+                "old_footprint": c.old_footprint,
+                "new_footprint": c.new_footprint,
+            }
+            for c in result.footprint_changed
+        ],
         "warnings": result.warnings,
         "errors": result.errors,
     }
+    if result.footprint_changed:
+        output["remediation"] = "Run `kct sync --apply` to swap these footprints on the board."
     return json.dumps(output, indent=2)
 
 
@@ -903,7 +1031,8 @@ def run_sync_netlist(
             ``<file>.failed-<timestamp>`` sidecar (issue #4541).
 
     Returns:
-        Exit code (0 for success, 1 for errors).
+        Exit code (0 for success, 1 for errors or unresolved footprint
+        changes -- the latter only report, pointing at ``kct sync --apply``).
     """
     # --transactional (issue #4541): the mutated file is the output path
     # when given, otherwise the input PCB (in-place overwrite).  Exceptions
@@ -980,5 +1109,10 @@ def _run_sync_netlist_impl(
         else:
             print("Renames skipped.")
 
-    # Return non-zero only on errors, not on orphaned footprints
-    return 1 if result.errors else 0
+    # Return non-zero on errors, and on unresolved footprint changes so a
+    # wrong-package board cannot pass a sync-netlist gate silently (issue
+    # #9563).  Value updates do not affect the exit code: they are applied
+    # (or previewed under --dry-run), leaving nothing unresolved.  The
+    # footprint exit is a distinct condition from result.errors, so in
+    # non-transactional runs the value/net updates above are still saved.
+    return 1 if (result.errors or result.footprint_changed) else 0
