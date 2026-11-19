@@ -86,11 +86,20 @@ def test_typecheck_mypy_step_has_no_continue_on_error(workflow: dict) -> None:
 
 def test_typecheck_job_invokes_baseline_wrapper(workflow: dict) -> None:
     """A refactor that drops the wrapper call (e.g. reverts to bare mypy with
-    its 1500+ errors) would make the job permanently red; pin the call."""
+    its 1500+ errors) would make the job permanently red; pin the call.
+
+    Issue #9340: the workflow calls the per-job script, which is the single
+    copy of the wrapper invocation the local gate also runs (2am#7561
+    ruling); assert both legs.
+    """
     steps = workflow["jobs"]["typecheck"]["steps"]
     run_blobs = " ".join(str(s.get("run", "")) for s in steps)
-    assert "check_mypy_baseline.py" in run_blobs, (
-        "typecheck job no longer invokes scripts/ci/check_mypy_baseline.py"
+    assert "scripts/ci/jobs/typecheck.sh" in run_blobs, (
+        "typecheck job no longer calls scripts/ci/jobs/typecheck.sh"
+    )
+    job_script = (REPO_ROOT / "scripts" / "ci" / "jobs" / "typecheck.sh").read_text()
+    assert "check_mypy_baseline.py" in job_script, (
+        "scripts/ci/jobs/typecheck.sh no longer invokes scripts/ci/check_mypy_baseline.py"
     )
 
 
@@ -98,11 +107,10 @@ def test_lint_job_continue_on_error_removed(workflow: dict) -> None:
     """Gate guard: issue #3464 REMOVED continue-on-error from the Lint &
     Format job so ruff format/check failures now fail CI.
 
-    The two lint steps -- ``Check formatting`` (``ruff format --check``)
-    and ``Lint`` (``ruff check .``) -- must NOT carry
-    ``continue-on-error: true``; if either is re-added, the gate goes
-    advisory again and ~860 lint / ~510 format regressions become
-    invisible (the exact failure mode #3464 fixed)."""
+    If a gating step ever regains ``continue-on-error: true`` (or the
+    shared lint script is made advisory), the gate goes advisory again and
+    ~860 lint / ~510 format regressions become invisible (the exact
+    failure mode #3464 fixed)."""
     steps = workflow["jobs"]["lint"]["steps"]
     advisory = [s for s in steps if s.get("continue-on-error") is True]
     assert advisory == [], (
@@ -110,11 +118,16 @@ def test_lint_job_continue_on_error_removed(workflow: dict) -> None:
         "continue-on-error), but these still carry continue-on-error: true: "
         + ", ".join(repr(s.get("name")) for s in advisory)
     )
-    # Sanity: the two ruff steps that do the gating are present and run ruff.
+    # Sanity: the job calls the shared lint script and the script runs both
+    # ruff commands as the gating steps (issue #9340, 2am#7561 ruling).
     run_blobs = " ".join(str(s.get("run", "")) for s in steps)
-    assert "ruff format" in run_blobs and "ruff check" in run_blobs, (
-        "expected the Lint & Format job to invoke `ruff format --check` and "
-        "`ruff check .` as the gating steps"
+    assert "scripts/ci/jobs/lint.sh" in run_blobs, (
+        "expected the Lint & Format job to call scripts/ci/jobs/lint.sh"
+    )
+    job_script = (REPO_ROOT / "scripts" / "ci" / "jobs" / "lint.sh").read_text()
+    assert "ruff format" in job_script and "ruff check" in job_script, (
+        "expected scripts/ci/jobs/lint.sh to invoke `ruff format --check` and "
+        "`ruff check .` as the gating commands"
     )
 
 
