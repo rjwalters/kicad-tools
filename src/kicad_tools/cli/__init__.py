@@ -464,6 +464,16 @@ def _dispatch_command(args) -> int:
 
         return run_route_link_command(args)
 
+    elif args.command == "probe":
+        from .probe_cmd import run_probe_command
+
+        return run_probe_command(args)
+
+    elif args.command == "apply":
+        from .probe_cmd import run_apply_command
+
+        return run_apply_command(args)
+
     elif args.command == "retune-lengths":
         from .commands.routing import run_retune_lengths_command
 
