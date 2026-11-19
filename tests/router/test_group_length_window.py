@@ -166,6 +166,14 @@ class TestOrderGroupByEscape:
         ordered = order_group_by_escape(_hand_group(), {3: 1, 4: 2})
         assert ordered.get_net_ids() == [3, 4, 1, 2]
 
+    def test_missing_openness_routes_after_any_finite_count(self):
+        # Openness is summed over a net's pads, so a net with enough pads can
+        # carry a count past any fixed sentinel (the original 4 * 64 = 256
+        # would have sorted such a net after a genuinely-missing entry).
+        # The sentinel is math.inf: missing always routes last, unconditionally.
+        ordered = order_group_by_escape(_hand_group(), {3: 1, 4: 300})
+        assert ordered.get_net_ids() == [3, 4, 1, 2]
+
     def test_input_group_unmodified(self):
         group = _hand_group()
         order_group_by_escape(group, {1: 4, 2: 8, 3: 2, 4: 8})
@@ -581,3 +589,55 @@ class TestCongestedBoardMeasurement:
         # Measured refutation: both orders complete every net.
         assert plain_routed == {1, 2, 3, 4, 5, 6}
         assert grouped_routed == {1, 2, 3, 4, 5, 6}
+
+
+class TestCompletionDispatchCopper:
+    """What the two completion dispatches produce, not just what they parse (#9621).
+
+    Forwarding ``--bus-routing`` to the chained ``--complete`` pass flips its
+    basic-strategy dispatch from ``route_all`` to ``route_all_with_buses``.
+    The bus driver never runs ``route_all``'s preamble/tail (prepare /
+    pour-filter / matrix / match-group / byte-lane / detour-probe / subgrid
+    prepasses and the ``BLOCKED_BY_COMPONENT`` rip-up rescue), so the swap is
+    NOT copper-neutral.  ``tests/test_cli_route_chain_forwarding_8694.py``
+    pins the parsed state that selects the branch; this class pins what the
+    branch does -- the recorded measurement behind the ``_chain_complete_argv``
+    docstring's Issue #9621 note.  If an engine change moves these numbers,
+    update that docstring citation too.
+    """
+
+    @staticmethod
+    def _total_length_mm(routes) -> float:
+        return sum(
+            ((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5 for r in routes for s in r.segments
+        )
+
+    def test_bus_dispatch_copper_is_not_route_all_copper(self):
+        config = BusRoutingConfig(enabled=True, length_window=30.0)
+
+        plain = _tight_row_router()
+        plain._strategy = "lattice"  # the engine --complete picks for the pass
+        with contextlib.redirect_stdout(io.StringIO()):
+            plain_routes = plain.route_all(timeout=120.0)
+
+        buses = _tight_row_router()
+        buses._strategy = "lattice"
+        with contextlib.redirect_stdout(io.StringIO()):
+            bus_routes = buses.route_all_with_buses(config)
+
+        # Both arms engaged the lattice netset negotiation, so this compares
+        # the two dispatch drivers, not two engines.
+        assert plain._lattice_net_routes is not None
+        assert buses._lattice_net_routes is not None
+        # Both dispatches close every net.
+        assert {r.net for r in plain_routes} == {1, 2, 3, 4, 5, 6}
+        assert {r.net for r in bus_routes} == {1, 2, 3, 4, 5, 6}
+
+        # Measured (deterministic; force_python=True): route_all 235.310 mm /
+        # 53 segments, bus dispatch 246.818 mm / 57 segments -- +4.9% total
+        # trace length for the same 6/6 completion.
+        assert round(self._total_length_mm(plain_routes), 3) == 235.310
+        assert round(self._total_length_mm(bus_routes), 3) == 246.818
+        assert sum(len(r.segments) for r in plain_routes) == 53
+        assert sum(len(r.segments) for r in bus_routes) == 57
+        assert self._total_length_mm(bus_routes) > self._total_length_mm(plain_routes)

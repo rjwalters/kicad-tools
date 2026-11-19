@@ -22546,13 +22546,29 @@ def _chain_complete_argv(
     ``--group-length-window``.  The length window rides on ``--bus-routing``
     (without it the pass only draws the "requires --bus-routing" warning), so
     forwarding the window alone would pin a flag the pass can never honour.
-    Under ``--complete`` the strategy is coerced to basic, so the pass
-    dispatches ``route_all_with_buses`` with the outer run's bus
-    configuration; on the pass's lattice engine the one-shot netset
-    negotiation (:meth:`Autorouter._negotiate_lattice_netset`) is
-    order-independent, so that differs from ``route_all`` only in ``route_net``
-    call order (escape-ordered groups first) and logging -- the operator's bus
-    ordering reaches the pass without changing its copper.
+    Under ``--complete`` the strategy is coerced to basic, so forwarding
+    ``--bus-routing`` flips the pass's basic-strategy dispatch from
+    ``route_all`` to ``route_all_with_buses`` with the outer run's bus
+    configuration -- and that swap is NOT copper-neutral.  The bus driver
+    routes per group member and never runs ``route_all``'s preamble/tail
+    (``_prepare_routing``, ``_filter_pour_nets``,
+    ``_detect_and_apply_matrix_preferences``, ``_interleave_match_groups``,
+    ``_apply_byte_lane_inner_priority``, ``_probe_alone_on_empty_lengths``,
+    ``_run_subgrid_prepass``, and the ``BLOCKED_BY_COMPONENT`` rescue
+    ``_attempt_blocked_component_ripup``), so completion copper measurably
+    differs: on the 6-net row fixture of
+    ``tests/router/test_group_length_window.py`` the bus dispatch measured
+    246.818 mm / 57 segments where ``route_all`` measured 235.310 mm / 53
+    (+4.9% total trace length), both closing 6/6 -- pinned by
+    ``TestCompletionDispatchCopper`` there.  A separate, true fact: on the
+    pass's lattice engine the one-shot netset negotiation
+    (:meth:`Autorouter._negotiate_lattice_netset`) is order-independent, so
+    within either dispatch the operator's bus ordering changes only
+    ``route_net`` call order and logging, not per-net copper -- but that fact
+    says nothing about equality across the two dispatches.  Forwarding is
+    still deliberate: the operator asked for bus treatment, and honouring it
+    on the pass at the disclosed copper cost above beats silently running
+    the flag at its default.
 
     Deliberately not forwarded:
 

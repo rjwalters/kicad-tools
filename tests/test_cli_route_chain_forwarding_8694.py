@@ -141,6 +141,13 @@ def test_completion_pass_takes_the_bus_dispatch_with_the_forwarded_family():
     (``args.bus_routing and args.strategy == "basic"``), so the window is
     honoured (escape-ordered groups) rather than drawing the
     "requires --bus-routing" warning a lone window would print.
+
+    This is the parsed-state half only.  What the selected branch *does* --
+    that the dispatch swap from ``route_all`` to ``route_all_with_buses``
+    changes completion copper -- is pinned by
+    ``TestCompletionDispatchCopper`` in
+    ``tests/router/test_group_length_window.py``, and the trade-off is
+    disclosed in the ``_chain_complete_argv`` docstring.
     """
     inner_argv = _chain(["--bus-routing", "--group-length-window", "25"])
     parser = route_cmd._route_parser()

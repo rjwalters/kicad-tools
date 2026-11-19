@@ -16,6 +16,7 @@ Bus signals are detected from common naming conventions:
 - Numeric suffix: DATA0, DATA1, ADDR15
 """
 
+import math
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -321,7 +322,9 @@ def order_group_by_escape(
     the tightest pad escapes (fewest open directions per pad, summed over
     the net's pads) must claim their corridor first.  Members are sorted by
     ascending ``escape_openness[net_id]`` (missing entries count as fully
-    open, i.e. routed last); ties keep the incoming index order.  Each
+    open, i.e. routed last -- the sentinel is ``math.inf``, so no finite
+    openness count, however many pads the net has, can overtake a missing
+    entry); ties keep the incoming index order.  Each
     signal's index in the returned group is its rank, so
     ``BusGroup.get_net_ids()`` yields the escape-ordered sequence.
 
@@ -334,7 +337,7 @@ def order_group_by_escape(
     """
     ordered = sorted(
         group.signals,
-        key=lambda s: (escape_openness.get(s.net_id, 4 * 64), s.index),
+        key=lambda s: (escape_openness.get(s.net_id, math.inf), s.index),
     )
     return BusGroup(
         name=group.name,
