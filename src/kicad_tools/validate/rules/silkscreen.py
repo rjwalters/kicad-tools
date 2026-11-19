@@ -271,6 +271,11 @@ def check_silkscreen_text_height(
     - Board-level text (gr_text) on silkscreen layers
     - Footprint text (fp_text) on silkscreen layers
 
+    Reference designators are held to
+    ``design_rules.min_silkscreen_reference_height_mm`` -- the fab floor unless
+    the project declared a smaller designator height (Issue #9448).  Every
+    other text keeps the fab floor.
+
     Args:
         pcb: The PCB to check
         design_rules: Design rules with min_silkscreen_height_mm
@@ -282,6 +287,7 @@ def check_silkscreen_text_height(
     """
     results = DRCResults(rules_checked=1)
     min_height = design_rules.min_silkscreen_height_mm
+    min_reference_height = design_rules.min_silkscreen_reference_height_mm
 
     # Check board-level text (never suppressed -- no footprint context)
     for text in pcb.texts:
@@ -315,7 +321,8 @@ def check_silkscreen_text_height(
                     continue
                 if fp_text.hidden:
                     continue
-                if fp_text.font_height < min_height:
+                floor = min_reference_height if fp_text.text_type == "reference" else min_height
+                if fp_text.font_height < floor:
                     results.suppressed_count += 1
             continue
 
@@ -324,7 +331,8 @@ def check_silkscreen_text_height(
                 continue
             if fp_text.hidden:
                 continue
-            if fp_text.font_height < min_height:
+            floor = min_reference_height if fp_text.text_type == "reference" else min_height
+            if fp_text.font_height < floor:
                 # Build descriptive item name
                 if fp_text.text_type == "reference":
                     item_name = f"{footprint.reference} (reference)"
@@ -339,12 +347,12 @@ def check_silkscreen_text_height(
                         severity="warning",
                         message=(
                             f"Silkscreen text height {fp_text.font_height:.2f}mm "
-                            f"< minimum {min_height:.2f}mm on {footprint.reference}"
+                            f"< minimum {floor:.2f}mm on {footprint.reference}"
                         ),
                         location=footprint.position,
                         layer=fp_text.layer,
                         actual_value=fp_text.font_height,
-                        required_value=min_height,
+                        required_value=floor,
                         items=(item_name,),
                     )
                 )

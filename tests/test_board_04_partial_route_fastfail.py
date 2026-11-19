@@ -132,6 +132,9 @@ class TestBoard04PartialRouteFastFail:
         monkeypatch.setattr(module, "compress_staircases", lambda *a, **k: True)
         # Issue #8840: so does the sharp-corner repair.
         monkeypatch.setattr(module, "repair_sharp_corners", lambda *a, **k: True)
+        # Issue #9097: and the fragment merge / silk clip that follow it.
+        monkeypatch.setattr(module, "merge_fragment_runs", lambda *a, **k: True)
+        monkeypatch.setattr(module, "clip_silk_to_holes", lambda *a, **k: True)
         monkeypatch.setattr(module, "fill_zones", lambda *a, **k: True)
         monkeypatch.setattr(module, "run_drc", lambda *a, **k: True)
         monkeypatch.setattr(module, "generate_manufacturing", lambda *a, **k: True)

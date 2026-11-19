@@ -225,12 +225,32 @@ def _existing_fiducials(pcb, side: str) -> int:
     return sum(1 for fp in pcb.footprints if _is_fiducial(fp) and fp.layer == layer)
 
 
+def _is_smd_part(fp) -> bool:
+    """True when the footprint is machine-placed: ``(attr smd)`` or any SMD pad.
+
+    The ``attr`` type token is optional in KiCad output, so SMD pads are
+    checked too. Through-hole-only footprints are hand/wave soldered and
+    need no pick-and-place fiducial (Issue #9472).
+    """
+    return fp.attr == "smd" or any(pad.type == "smd" for pad in fp.pads)
+
+
 def _populated_sides(pcb) -> list[str]:
+    """Sides carrying at least one SMD BOM part (Issue #9472).
+
+    Shared by ``--sides populated`` and the ``fiducials_missing`` /
+    ``board_id_missing`` rules so check and fix agree.
+    """
     sides = []
     for side, layer in (("front", "F.Cu"), ("back", "B.Cu")):
         for fp in pcb.footprints:
             flags: frozenset[str] | set[str] = getattr(fp, "attr_flags", frozenset())
-            if fp.layer == layer and not fp.exclude_from_bom and "board_only" not in flags:
+            if (
+                fp.layer == layer
+                and not fp.exclude_from_bom
+                and "board_only" not in flags
+                and _is_smd_part(fp)
+            ):
                 sides.append(side)
                 break
     return sides

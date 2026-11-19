@@ -279,3 +279,49 @@ def resolve_declared_currents_for_pcb(pcb_path: str | Path) -> list[str]:
         if key not in ("input", "outputs") and "current" in str(key) and value is not None:
             found.append(str(key))
     return found
+
+
+def resolve_declared_reference_height_for_pcb(pcb_path: str | Path) -> float | None:
+    """The reference-designator height a PCB's ``project.kct`` declares (issue #9448).
+
+    Reads ``requirements.manufacturing.silkscreen_min_reference_height_mm``.
+    Returns ``None`` when there is no ``project.kct``, the key is absent, or
+    the value is not a finite number >= 0.8 mm (an invalid declaration is ignored, so
+    designators stay held to the fab floor; ``load_spec`` rejects it loudly).
+    """
+    from kicad_tools.manufacturers.base import (
+        MIN_DECLARED_REFERENCE_HEIGHT_MM,
+        is_valid_declared_reference_height,
+    )
+
+    kct_path = _project_kct_for_pcb(Path(pcb_path))
+    if kct_path is None:
+        return None
+    try:
+        import yaml
+
+        data = yaml.safe_load(kct_path.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001 - unreadable spec keeps today's behaviour
+        logger.debug("Failed to read reference height from project.kct: %s", e)
+        return None
+    if not isinstance(data, dict):
+        return None
+    requirements = data.get("requirements")
+    manufacturing = requirements.get("manufacturing") if isinstance(requirements, dict) else None
+    value = (
+        manufacturing.get("silkscreen_min_reference_height_mm")
+        if isinstance(manufacturing, dict)
+        else None
+    )
+    if value is None:
+        return None
+    if not is_valid_declared_reference_height(value):
+        logger.warning(
+            "Ignoring silkscreen_min_reference_height_mm=%r in %s "
+            "(must be a finite number >= %s mm)",
+            value,
+            kct_path,
+            MIN_DECLARED_REFERENCE_HEIGHT_MM,
+        )
+        return None
+    return float(value)

@@ -187,6 +187,26 @@ class TestPathAmpacityRule:
             "not covered" in results.warnings[0].message.lower()
         )
 
+    def test_test_point_stub_resolves_with_one_uncovered_warning(self) -> None:
+        """Issue #9492: a 0.4 mm test-point stub off a two-layer power bar is
+        a dead-end branch, not a loop -- no ambiguity error, the bars still
+        sum as a parallel group, and the stub is reported once as uncovered
+        copper (warning)."""
+        pcb = PCB.create(width=100, height=100, center=False)
+        _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+        _add_pad_footprint(pcb, ref="J2", x=32, y=50, net="NET1")
+        _add_pad_footprint(pcb, ref="TP1", x=26, y=61, net="NET1")
+        for layer in ("F.Cu", "B.Cu"):
+            pcb.add_trace((20, 50), (32, 50), width=6.3, layer=layer, net="NET1")
+        pcb.add_trace((26, 50), (26, 61), width=0.4, layer="F.Cu", net="NET1")
+        rule = PathAmpacityRule(specs=[_trunk_spec(15.0)])
+        results = rule.check(pcb, _design_rules_2oz())
+        assert results.errors == []
+        assert len(results.warnings) == 1
+        assert "uncovered" in results.warnings[0].message.lower() or (
+            "not covered" in results.warnings[0].message.lower()
+        )
+
     def test_unmodeled_arc_is_warning_plus_ambiguous_error(self) -> None:
         """A same-net routed arc (#5273) makes the declared trunk ambiguous
         (error) AND is separately surfaced by name (warning) -- the warning

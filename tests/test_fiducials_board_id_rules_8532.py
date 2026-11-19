@@ -156,3 +156,30 @@ def test_board_id_short_revision_is_not_a_substring_match(tmp_path, text):
 def test_board_id_short_revision_whole_token_passes(tmp_path, text):
     _, pcb = _load(tmp_path, _board(rev="A", extra=_silk(text)))
     assert BoardIdRule().check(pcb, None).violations == []
+
+
+_THT_BACK = """(footprint "Connector_PinHeader_2.54mm:PinHeader_1x01" (layer "B.Cu") (uuid "fp-j1") (at 10 10)
+    (property "Reference" "J1" (at 0 -1.5 0) (layer "B.SilkS"))
+    (property "Value" "hdr" (at 0 1.5 0) (layer "B.Fab"))
+    (pad "1" thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 0 "")))"""
+
+
+def test_through_hole_only_back_is_not_flagged(tmp_path):
+    """#9472: a back face with only THT parts needs no fiducials."""
+    p, _ = _load(tmp_path, _board(extra=_THT_BACK))
+    # Bare board: only the SMD (front) face is flagged, never the THT-only back.
+    bare = PCB.load(str(p))
+    assert [v.layer for v in FiducialsRule().check(bare, None).violations] == ["F.Cu"]
+    # ``populated`` places front fiducials only, which satisfies the rule.
+    assert run_add_fiducials(p, sides="populated") == 0
+    assert run_add_board_info(p, auto=True) == 0
+    pcb = PCB.load(str(p))
+    assert {f.layer for f in pcb.footprints if f.reference.startswith("FID")} == {"F.Cu"}
+    assert FiducialsRule().check(pcb, None).violations == []
+    assert BoardIdRule().check(pcb, None).violations == []
+
+
+def test_through_hole_only_board_raises_neither(tmp_path):
+    _, pcb = _load(tmp_path, _board(part=False, extra=_THT_BACK))
+    assert FiducialsRule().check(pcb, None).violations == []
+    assert BoardIdRule().check(pcb, None).violations == []
