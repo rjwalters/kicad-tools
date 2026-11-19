@@ -256,6 +256,11 @@ class Via:
     # :attr:`drilled_layers` widened an imported In1/In2 buried via to a full
     # F.Cu..B.Cu barrel and :meth:`to_sexp` re-wrote it as a through via.
     span_type: str | None = None
+    # Issue #9580: the uuid this via carried in the input board, if any.
+    # :meth:`to_sexp` re-writes it so copper carried through a route pass
+    # unchanged keeps its identity; router-created vias leave it None and
+    # mint a fresh one.  Not part of equality.
+    uuid: str | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.span_type not in (None, "blind", "buried"):
@@ -299,8 +304,12 @@ class Via:
             return self.layers
         return (Layer.F_CU, Layer.B_CU)
 
-    def to_sexp(self, name_only: bool = False) -> str:
+    def to_sexp(self, name_only: bool = False, *, uuid: str | None = None) -> str:
         """Generate KiCad S-expression.
+
+        Issue #9580: ``uuid`` pins the emitted uuid; otherwise a via loaded
+        from an input board re-writes its own :attr:`uuid`, and a
+        router-created via (both None) mints a fresh one.
 
         Emits ``(via micro ...)`` when :attr:`is_micro` is True so the
         micro-via token survives the route -> finalize -> file
@@ -343,7 +352,7 @@ class Via:
 \t\t(size {_fmt(self.diameter)})
 \t\t(drill {_fmt(self.drill)})
 \t\t(layers "{layer_start}" "{layer_end}")
-\t\t(uuid "{_make_uuid()}")
+\t\t(uuid "{uuid or self.uuid or _make_uuid()}")
 \t\t(net {net_ref})
 \t)"""
 
@@ -364,6 +373,12 @@ class Segment:
     # this segment, if any.  :meth:`Route.to_sexp` writes one ``(generated
     # ...)`` block per pattern naming its segments.  Not part of equality.
     tuning_pattern: "TuningPattern | None" = field(default=None, compare=False, repr=False)
+    # Issue #9580: the uuid this segment carried in the input board, if any.
+    # :meth:`to_sexp` re-writes it, so copper carried through a route pass
+    # unchanged keeps its identity (KiCad itself keeps item uuids stable
+    # across saves); router-created segments leave it None and mint a fresh
+    # one.  Not part of equality, same rationale as ``tuning_pattern``.
+    uuid: str | None = field(default=None, compare=False, repr=False)
 
     @property
     def start(self) -> tuple[float, float]:
@@ -379,7 +394,10 @@ class Segment:
         """Generate KiCad S-expression.
 
         Issue #7521: ``uuid`` pins the emitted uuid (a tuning pattern names
-        its member segments by uuid); ``None`` mints a fresh one.
+        its member segments by uuid); ``None`` mints a fresh one -- or, when
+        the segment was loaded from an input board and carries its own
+        :attr:`uuid` (issue #9580), re-writes that so preserved copper keeps
+        its identity.  The explicit kwarg wins over :attr:`uuid`.
 
         Issue #4416: when ``name_only`` is True and :attr:`net_name` is
         known, the net reference is emitted as ``(net "name")`` to match a
@@ -427,7 +445,7 @@ class Segment:
 \t\t(end {self.x2:.4f} {self.y2:.4f})
 \t\t(width {_fmt(self.width)})
 \t\t(layer "{self.layer.kicad_name}")
-\t\t(uuid "{uuid or _make_uuid()}")
+\t\t(uuid "{uuid or self.uuid or _make_uuid()}")
 \t\t(net {net_ref})
 \t)"""
 
