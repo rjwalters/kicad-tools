@@ -39,7 +39,8 @@ the repo README, `boards/README.md`, `runs/INDEX.md`, each run's `SUMMARY.md`,
 study ([pcbjam.com/blog/fable-blind-pcb-layout](https://www.pcbjam.com/blog/fable-blind-pcb-layout),
 read 2026-11-19) for the study's own "finished" definition, its per-board
 commentary and its account of the tooling batches. No board file was opened
-and nothing was run — that is #9595's job. Quotations below are from the
+and nothing was run — that was #9595's job (since done for the first board;
+see `pcbjam-blind-pcb-results.md`). Quotations below are from the
 MIT-licensed repo and are attributed to their run. `bt` itself is **not
 published**; what we know of
 it comes only from its public command description (`sandbox/briefs/tools-bt.md`)
@@ -55,7 +56,7 @@ at the pinned commit. "Clean" = 0 DRC errors and 0 open items on the saved board
 ### 1. Boards that aren't dense finish — small or large
 
 By the raw INDEX scores, 11 of 21 runs came back literally clean (0 DRC, 0
-open): both macropads and all three macropad variants, both H4E2 keypad runs,
+open): all five macropad runs, both H4E2 keypad runs,
 the M.2 PCIe adapter (0:22, $6.93 — the cheapest run), and all three ESP32-P4
 RedBoard runs (0 DRC, 0 open, including place+route in 4:44). That raw count
 mixes tooling conditions — none of it was "unaided" in a strong sense: five of
@@ -171,7 +172,7 @@ them:
   capacity queries, via-near-pad search with rejection reasons, pair skew
   reporting and a skew-fix primitive. → #9594
 - **A benchmark with published scoring** — which is exactly what this repo
-  is. → #9595
+  is. → #9595 (first board scored; see `pcbjam-blind-pcb-results.md`)
 - Smaller recurring asks, recorded for whoever builds agent-facing tooling:
   a topology helper ("can these two pad groups be joined planarly; if not,
   which net crosses" — redboard-route-bt-b), QFN/QFP fan-out helpers, `bt rip`
@@ -188,7 +189,7 @@ them:
 | Shove ignores layers; batch JSON traps; greedy ordering; grid scaling | #9592 | Audit `kct route` against ten reported failure modes |
 | Net-less copper graphics, custom pads, footprint-local outlines ignored | #9593 | Footprint-level Edge.Cuts handled everywhere the outline is used |
 | Agents wanted lengths, lanes, vias-near-pads, skew | #9594 | `kct` layout-quality metrics report |
-| A scored external benchmark on real boards | #9595 | Run `kct` on the study boards with their briefs and scoring |
+| A scored external benchmark on real boards | #9595 — first board scored, see `pcbjam-blind-pcb-results.md` | Score the remaining eight boards with their briefs and scoring |
 
 ## Licence hygiene
 
