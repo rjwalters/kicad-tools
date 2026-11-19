@@ -393,8 +393,12 @@ def fingerprint(pcb_path: Path, net_class_map_path: Path | None = None) -> dict[
     """What a fixed-placement router must not change."""
     from kicad_tools.analysis.layout_quality import analyze_layout_quality
     from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp import parse_string
 
-    pcb = PCB.load(str(pcb_path))
+    # One read feeds the parse and the sidecar's stack resolution alike:
+    # passing pcb_path would reopen the PCB inside the loader.
+    pcb_text = pcb_path.read_bytes().decode("utf-8")
+    pcb = PCB(parse_string(pcb_text), pcb_path)
     seen: Counter[str] = Counter()
     footprints: dict[str, list[Any]] = {}
     pad_nets: dict[str, str] = {}
@@ -432,7 +436,7 @@ def fingerprint(pcb_path: Path, net_class_map_path: Path | None = None) -> dict[
         try:
             from kicad_tools.router.rules import net_class_map_from_path
 
-            net_class_map = net_class_map_from_path(net_class_map_path, pcb_path=pcb_path)
+            net_class_map = net_class_map_from_path(net_class_map_path, pcb_text=pcb_text)
         except Exception:  # noqa: BLE001
             net_class_map = None
     # The quality block is advisory metadata: a metrics bug must not lose

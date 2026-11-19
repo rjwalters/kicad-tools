@@ -337,6 +337,34 @@ ARC_PAIR_CUTOUT_PCB = """(kicad_pcb
 )
 """
 
+# The same radius-5 mm disc authored as two semicircular fp_arc elements
+# inside a footprint placed at the disc's centre: the footprint
+# representation must measure what its gr_arc twins measure (review
+# finding on #9614: the fp_arc branch zipped each tessellated chain
+# against its own shorter tail with strict=True, which raised for every
+# footprint arc and silently dropped outline_area_mm2).
+FP_ARC_PAIR_CUTOUT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+
+  (gr_rect (start 0 0) (end 100 50) (stroke (width 0.1)) (layer "Edge.Cuts"))
+
+  (footprint "Mech:BoardCutout"
+    (layer "F.Cu")
+    (at 25 15 {rot})
+    (property "Reference" "J9")
+    (fp_arc (start -5 0) (mid 0 5) (end 5 0) (stroke (width 0.1)) (layer "Edge.Cuts"))
+    (fp_arc (start 5 0) (mid 0 -5) (end -5 0) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  )
+)
+"""
+
 # Two length-matched nets with a known length difference: with a
 # net-class map declaring the match group, the block reports its skew.
 MATCH_GROUP_PCB = """(kicad_pcb
@@ -345,6 +373,30 @@ MATCH_GROUP_PCB = """(kicad_pcb
   (general (thickness 1.6))
   (layers
     (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "MA")
+  (net 2 "MB")
+
+  (gr_rect (start 0 0) (end 50 30) (stroke (width 0.1)) (layer "Edge.Cuts"))
+
+  (segment (start 5 5) (end 15 5) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 5 15) (end 5 27.5) (width 0.2) (layer "F.Cu") (net 2))
+)
+"""
+
+# MATCH_GROUP_PCB with a declared B.Cu: a sidecar whose layer tokens
+# depend on the board's copper count must resolve against the same text
+# the fingerprint parsed (review finding on #9614: the sidecar loader
+# reopened the PCB by path for stack resolution).
+MATCH_GROUP_TWO_LAYER_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
     (44 "Edge.Cuts" user)
   )
   (net 0 "")
@@ -501,6 +553,18 @@ def test_arc_pair_cutout_measured_to_tessellation_accuracy():
     assert area == pytest.approx(100 * 50 - math.pi * 25, abs=0.01)
 
 
+@pytest.mark.parametrize("rot", [0, 30, 90])
+def test_footprint_arc_pair_cutout_matches_gr_arc_representation(rot):
+    # The same r=5 disc as two fp_arcs inside a rotated footprint must
+    # measure what its gr_arc twins measure: the old fp_arc branch zipped
+    # each chain against its shorter tail (strict=True), which raised for
+    # every footprint arc and dropped outline_area_mm2 to None.
+    gr = analyze_layout_quality(_load_pcb(ARC_PAIR_CUTOUT_PCB)).outline_area_mm2
+    fp = analyze_layout_quality(_load_pcb(FP_ARC_PAIR_CUTOUT_PCB.format(rot=rot))).outline_area_mm2
+    assert fp == pytest.approx(gr, abs=1e-9)
+    assert fp == pytest.approx(100 * 50 - math.pi * 25, abs=0.01)
+
+
 def test_match_group_skew_reported_with_net_class_map():
     from kicad_tools.router.rules import NetClassRouting
 
@@ -580,6 +644,51 @@ def test_fingerprint_reports_match_group_skew_from_sidecar(tmp_path, bench):
     assert with_map["layout_quality"]["match_group_skew"] == {"GRP": 2.5}
     without_map = bench.fingerprint(path)
     assert "match_group_skew" not in without_map["layout_quality"]
+
+
+def test_fingerprint_resolves_layer_sidecar_without_reopening_the_pcb(tmp_path, bench, monkeypatch):
+    # A sidecar whose layer tokens depend on the board's copper count
+    # ("B.Cu") must be resolved from the same text the fingerprint
+    # parsed: the old loader reopened the PCB by path for stack
+    # resolution, a second read that diverges from the parsed board
+    # (review finding on #9614).
+    import json
+    from pathlib import Path
+
+    path = _write_pcb(tmp_path, MATCH_GROUP_TWO_LAYER_PCB)
+    sidecar = tmp_path / "net_class_map.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "MA": {
+                    "name": "GRP",
+                    "length_match_group": "GRP",
+                    "preferred_layers": ["B.Cu"],
+                },
+                "MB": {
+                    "name": "GRP",
+                    "length_match_group": "GRP",
+                    "preferred_layers": ["B.Cu"],
+                },
+            }
+        )
+    )
+    opens: list[str] = []
+    real_read_bytes, real_read_text = Path.read_bytes, Path.read_text
+
+    def counting_read_bytes(self: Path) -> bytes:
+        opens.append(self.name)
+        return real_read_bytes(self)
+
+    def counting_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        opens.append(self.name)
+        return real_read_text(self, *args, **kwargs)  # type: ignore[call-arg]
+
+    monkeypatch.setattr(Path, "read_bytes", counting_read_bytes)
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+    with_map = bench.fingerprint(path, sidecar)
+    assert with_map["layout_quality"]["match_group_skew"] == {"GRP": 2.5}
+    assert opens.count("bench.kicad_pcb") == 1
 
 
 def test_compare_fingerprints_ignores_layout_quality(tmp_path, bench):

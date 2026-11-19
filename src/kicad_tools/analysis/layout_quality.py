@@ -378,7 +378,11 @@ def _edge_cuts_segments(pcb: PCB) -> list[tuple[tuple[float, float], tuple[float
                     fp_point(fp, graphic.mid),
                     fp_point(fp, graphic.end),
                 )
-                segments.extend(zip(chain, chain[1:], strict=True))
+                # Equal-length slices like board_outline_segments' gr_arc
+                # branch: zip(chain, chain[1:], strict=True) is always
+                # unequal (the tail is one shorter) and raised for every
+                # tessellated footprint arc, dropping the whole area.
+                segments.extend(zip(chain[:-1], chain[1:], strict=True))
             elif kind == "poly":
                 points = [fp_point(fp, point) for point in graphic.points]
                 if len(points) < 3:

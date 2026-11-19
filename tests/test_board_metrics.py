@@ -974,6 +974,35 @@ SKEW_SIDECAR = {
     "MB": {"name": "GRP", "length_match_group": "GRP"},
 }
 
+# SKEW_PCB with a declared B.Cu, plus a sidecar whose "B.Cu" token
+# resolves against the board's copper count: the snapshot regression
+# below needs a sidecar that cannot resolve without the PCB's stack
+# (review finding on #9614).
+SKEW_TWO_LAYER_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "MA")
+  (net 2 "MB")
+
+  (gr_rect (start 0 0) (end 50 30) (stroke (width 0.1)) (layer "Edge.Cuts"))
+
+  (segment (start 5 5) (end 15 5) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 5 15) (end 5 27.5) (width 0.2) (layer "F.Cu") (net 2))
+)
+"""
+
+LAYER_SKEW_SIDECAR = {
+    "MA": {"name": "GRP", "length_match_group": "GRP", "preferred_layers": ["B.Cu"]},
+    "MB": {"name": "GRP", "length_match_group": "GRP", "preferred_layers": ["B.Cu"]},
+}
+
 
 def test_layout_quality_match_group_skew_from_declared_sidecar(tmp_path: Path):
     import yaml
@@ -1062,6 +1091,45 @@ def test_layout_quality_hash_binds_the_parsed_snapshot(tmp_path: Path, monkeypat
         lq["pcb_sha256"]
         == hashlib.sha256((board / "output" / "quality.kicad_pcb").read_bytes()).hexdigest()
     )
+
+
+def test_layout_quality_layer_sidecar_survives_pcb_vanishing(tmp_path: Path, monkeypatch):
+    # Extends the snapshot regression to a layer-dependent sidecar
+    # (#9614): "B.Cu" resolves against the copper stack of the ONE
+    # measured snapshot, so the skew survives the PCB disappearing right
+    # after its single read. The old sidecar load reopened the PCB by
+    # path for stack resolution, and that best-effort read of a vanished
+    # file silently dropped match_group_skew.
+    import yaml
+
+    board = _make_board(tmp_path, manifest=SAMPLE_MANIFEST)
+    (board / "output" / "quality.kicad_pcb").write_text(SKEW_TWO_LAYER_PCB)
+    (board / "output" / "net_class_map.json").write_text(json.dumps(LAYER_SKEW_SIDECAR))
+    project = {
+        "project": {
+            "name": "Skew",
+            "artifacts": {
+                "pcb": "output/quality.kicad_pcb",
+                "net_class_map_sidecar": "output/net_class_map.json",
+            },
+        }
+    }
+    (board / "project.kct").write_text(yaml.safe_dump(project))
+
+    reads: list[Path] = []
+    original = Path.read_bytes
+
+    def vanishing_read(self: Path) -> bytes:
+        data = original(self)
+        if self.name == "quality.kicad_pcb":
+            reads.append(self)
+            self.rename(self.with_name("gone.kicad_pcb"))
+        return data
+
+    monkeypatch.setattr(Path, "read_bytes", vanishing_read)
+    lq = extract_board_metrics(board)["layout_quality"]
+    assert len(reads) == 1
+    assert lq["match_group_skew"] == {"GRP": 2.5}
 
 
 def test_layout_quality_match_group_skew_on_committed_board07():
