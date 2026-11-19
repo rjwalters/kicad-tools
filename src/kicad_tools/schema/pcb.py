@@ -6536,11 +6536,15 @@ class PCB:
         # Library pad identities are not placed-instance identities. Persist
         # fresh IDs even when the library omits them, so native DRC findings
         # can be correlated with the saved board instead of transient IDs.
+        remap: dict[str, str] = {}
         for pad_index, pad_node in enumerate(fp_sexp.find_all("pad")):
             pad_id = self.mint_uuid("pad", new_uuid, pad_index)
             pad_uuid = pad_node.find_child("uuid")
             if pad_uuid is not None:
+                old = pad_uuid.get_first_atom()
                 pad_uuid.set_value(0, pad_id)
+                if old is not None:
+                    remap[str(old)] = pad_id
             else:
                 pad_node.append(SExp.list("uuid", pad_id))
             legacy_stamp = pad_node.find_child("tstamp")
@@ -6568,8 +6572,17 @@ class PCB:
                 continue
             if id(node) in handled or node.get_first_atom() is None:
                 continue
-            node.set_value(0, self.mint_uuid("child", new_uuid, child_index))
+            minted = self.mint_uuid("child", new_uuid, child_index)
+            remap[str(node.get_first_atom())] = minted
+            node.set_value(0, minted)
             child_index += 1
+        # A (group ...) references its children by uuid value in a
+        # (members ...) atom list, not via a (uuid ...) node, so follow the
+        # renames above or KiCad drops the group on load (PR #9487 review).
+        for members_node in fp_sexp.find_all("members"):
+            for atom in members_node.children:
+                if atom.is_atom and str(atom.value) in remap:
+                    atom.value = remap[str(atom.value)]
 
         # Update layer first (at node must come after layer)
         layer_node = fp_sexp.find("layer")
