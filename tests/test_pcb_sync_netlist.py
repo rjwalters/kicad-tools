@@ -3558,3 +3558,395 @@ class TestNameOnlyDialectPadNets:
         reloaded = PCB.load(out)
         pads = {p.number: p.net_name for p in reloaded.footprints[0].pads}
         assert pads["2"] == name
+
+
+# --- Issue #9563: value and footprint drift on matched references ---
+
+# PCB where R1's value diverges AND C1's footprint diverges on the same
+# board: sync-netlist must save the value fix while still exiting non-zero
+# for the reported (unapplied) footprint change.
+PCB_VALUE_AND_FOOTPRINT_MISMATCH = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "4.7k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+  (footprint "Capacitor_SMD:C_0805"
+    (layer "F.Cu")
+    (uuid "fp-c1")
+    (at 120 100)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "100n" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+)
+"""
+
+# PCB whose R1 footprint carries no library nickname (legacy board): the
+# package matches the schematic's Resistor_SMD:R_0402, so it is the same
+# part -- a warning, not a footprint change.
+PCB_NICKNAME_MISSING = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+  (footprint "Capacitor_SMD:C_0402"
+    (layer "F.Cu")
+    (uuid "fp-c1")
+    (at 120 100)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "100n" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+)
+"""
+
+# PCB where C1's value is KiCad's "no value" placeholder (~): nothing to
+# compare against the schematic's "100n", so no value update is flagged.
+PCB_VALUE_TILDE = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+  (footprint "Capacitor_SMD:C_0402"
+    (layer "F.Cu")
+    (uuid "fp-c1")
+    (at 120 100)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "~" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+)
+"""
+
+# PCB where R1's value differs only by case (10K vs 10k): equivalent.
+PCB_VALUE_CASE_ONLY = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10K" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+  (footprint "Capacitor_SMD:C_0402"
+    (layer "F.Cu")
+    (uuid "fp-c1")
+    (at 120 100)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "100n" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+)
+"""
+
+
+class TestValueAndFootprintDrift:
+    """sync_netlist detects value/footprint drift on matched refs (#9563)."""
+
+    def _write_pair(self, tmp_path, pcb_text):
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(pcb_text)
+        return sch, pcb
+
+    def test_value_mismatch_detected_dry_run(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_VALUE_MISMATCH)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        assert len(result.value_updated) == 1
+        update = result.value_updated[0]
+        assert update.reference == "R1"
+        assert update.old_value == "4.7k"
+        assert update.new_value == "10k"
+        assert not result.footprint_changed
+        assert not result.errors
+        assert result.has_changes
+
+    def test_value_mismatch_applied_on_real_run(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_VALUE_MISMATCH)
+
+        result = sync_netlist(sch, pcb, dry_run=False)
+
+        assert len(result.value_updated) == 1
+        assert not result.errors
+        assert '(property "Value" "10k"' in pcb.read_text()
+
+    def test_value_mismatch_second_run_reports_no_value_updates(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_VALUE_MISMATCH)
+        sync_netlist(sch, pcb, dry_run=False)
+
+        second = sync_netlist(sch, pcb, dry_run=False)
+
+        assert second.value_updated == []
+        assert not second.errors
+
+    def test_value_mismatch_dry_run_does_not_modify(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_VALUE_MISMATCH)
+        original = pcb.read_text()
+
+        sync_netlist(sch, pcb, dry_run=True)
+
+        assert pcb.read_text() == original
+
+    def test_footprint_mismatch_detected_dry_run(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_FOOTPRINT_MISMATCH)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        assert len(result.footprint_changed) == 1
+        change = result.footprint_changed[0]
+        assert change.reference == "C1"
+        assert change.old_footprint == "Capacitor_SMD:C_0805"
+        assert change.new_footprint == "Capacitor_SMD:C_0402"
+        assert not result.value_updated
+        assert not result.errors
+        assert result.has_changes
+
+    def test_footprint_mismatch_not_applied_to_board(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_FOOTPRINT_MISMATCH)
+
+        sync_netlist(sch, pcb, dry_run=False)
+
+        # The swap is owned by `kct sync --apply`; sync-netlist only reports.
+        assert '(footprint "Capacitor_SMD:C_0805"' in pcb.read_text()
+
+    def test_footprint_only_change_not_reported_in_sync(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import format_text, sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_FOOTPRINT_MISMATCH)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+        text = format_text(result, dry_run=True, pcb_path=pcb)
+
+        assert "PCB is in sync" not in text
+        assert "Footprint changes (1)" in text
+
+    def test_suffix_only_value_not_flagged(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist, sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_VALUE_SUFFIX_ONLY)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+        assert result.value_updated == []
+        assert result.footprint_changed == []
+        assert run_sync_netlist(sch, pcb, dry_run=True) == 0
+
+    def test_case_only_value_not_flagged(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_VALUE_CASE_ONLY)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        assert result.value_updated == []
+        assert not result.errors
+
+    def test_tilde_value_not_flagged(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_VALUE_TILDE)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        assert result.value_updated == []
+        assert not result.errors
+
+    def test_nickname_missing_is_warning_not_change(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist, sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_NICKNAME_MISSING)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        assert result.footprint_changed == []
+        assert any("nickname missing" in w for w in result.warnings)
+        assert run_sync_netlist(sch, pcb, dry_run=True) == 0
+
+    def test_in_sync_reports_no_drift(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, MINIMAL_PCB_MATCHING)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        assert result.value_updated == []
+        assert result.footprint_changed == []
+
+    def test_validate_sync_flags_same_refs_as_sync_netlist(self, tmp_path):
+        """Parity: kct validate --sync flags the same refs sync-netlist does."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+        from kicad_tools.validate.netlist import NetlistValidator
+
+        for pcb_text in (PCB_VALUE_MISMATCH, PCB_FOOTPRINT_MISMATCH):
+            sch, pcb = self._write_pair(tmp_path, pcb_text)
+
+            result = sync_netlist(sch, pcb, dry_run=True)
+            validation = NetlistValidator(sch, pcb).validate()
+
+            sync_value_refs = {u.reference for u in result.value_updated}
+            validate_value_refs = {i.reference for i in validation.value_mismatches}
+            assert sync_value_refs == validate_value_refs, pcb_text
+
+            sync_fp_refs = {c.reference for c in result.footprint_changed}
+            validate_fp_refs = {
+                i.reference for i in validation.footprint_mismatches if i.severity == "error"
+            }
+            assert sync_fp_refs == validate_fp_refs, pcb_text
+
+
+class TestDriftExitCodeAndJson:
+    """Exit status and JSON report for value/footprint drift (#9563)."""
+
+    def _write_pair(self, tmp_path, pcb_text):
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(pcb_text)
+        return sch, pcb
+
+    def test_footprint_change_exits_nonzero_dry_run(self, tmp_path, capsys):
+        from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_FOOTPRINT_MISMATCH)
+
+        rc = run_sync_netlist(sch, pcb, dry_run=True)
+
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "Footprint changes (1)" in out
+        assert "kct sync --apply" in out
+
+    def test_footprint_change_exits_nonzero_real_run(self, tmp_path, capsys):
+        from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_FOOTPRINT_MISMATCH)
+
+        rc = run_sync_netlist(sch, pcb, dry_run=False)
+
+        assert rc == 1
+        assert "kct sync --apply" in capsys.readouterr().out
+
+    def test_value_only_exit_zero_after_apply(self, tmp_path, capsys):
+        from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_VALUE_MISMATCH)
+
+        rc = run_sync_netlist(sch, pcb, dry_run=False)
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Value updates (1)" in out
+        assert "R1" in out
+        assert "4.7k" in out and "10k" in out
+
+    def test_combined_mismatch_saves_values_and_exits_nonzero(self, tmp_path):
+        """Non-transactional: the value fix is saved despite the exit 1."""
+        from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_VALUE_AND_FOOTPRINT_MISMATCH)
+
+        rc = run_sync_netlist(sch, pcb, dry_run=False)
+
+        assert rc == 1
+        text = pcb.read_text()
+        assert '(property "Value" "10k"' in text  # R1 value saved
+        assert '(footprint "Capacitor_SMD:C_0805"' in text  # C1 swap not done
+
+    def test_combined_mismatch_transactional_rolls_back(self, tmp_path):
+        """Transactional: a non-zero exit rolls the whole file back (#4541)."""
+        from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_VALUE_AND_FOOTPRINT_MISMATCH)
+        original = pcb.read_text()
+
+        rc = run_sync_netlist(sch, pcb, dry_run=False, transactional=True)
+
+        assert rc == 1
+        assert pcb.read_text() == original
+
+    def test_json_payload_contents(self, tmp_path, capsys):
+        from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_VALUE_AND_FOOTPRINT_MISMATCH)
+
+        rc = run_sync_netlist(sch, pcb, dry_run=True, output_format="json")
+
+        assert rc == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["value_updated"] == [
+            {"reference": "R1", "old_value": "4.7k", "new_value": "10k"}
+        ]
+        assert payload["footprint_changed"] == [
+            {
+                "reference": "C1",
+                "old_footprint": "Capacitor_SMD:C_0805",
+                "new_footprint": "Capacitor_SMD:C_0402",
+            }
+        ]
+        assert "kct sync --apply" in payload["remediation"]
