@@ -16,6 +16,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-19
 
+- **PR #9576**: perf: digest raw mask/copper WKT out of committed kct-check evidence
+- **Issue #9575** (closed): Board 06's re-pinned kct-check evidence is 31.6 MB x 2: geometry_provenance ships the full layers_wkt/source_objects dump
 - **PR #9392**: ci: single-source the gate commands in scripts/ci/jobs/<id>.sh
 - **PR #9544**: feat: record footprint-library identity in evidence provenance
 - **PR #9416**: ci: hoist !cancelled() in the two merge-group gates that bypassed it
