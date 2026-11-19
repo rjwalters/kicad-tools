@@ -391,7 +391,7 @@ def compute_pad_grid_tolerance(
         The largest per-footprint tolerance in mm, or ``floor`` for an
         empty board.
     """
-    pads = load_pads_for_analysis(pcb_path)
+    pads = load_pads_for_analysis(pcb_path, placement_only=True)
     tolerances = compute_component_pad_grid_tolerances(
         pads,
         grid_resolution=grid_resolution,
@@ -454,7 +454,7 @@ def check_pad_grid_alignment(
         >>> if not report.passed:
         ...     print(report.summary())
     """
-    pads = load_pads_for_analysis(pcb_path)
+    pads = load_pads_for_analysis(pcb_path, placement_only=True)
 
     # ``component_tolerances`` is only populated for the auto-derived path;
     # otherwise every pad is held to the single scalar ``threshold``.

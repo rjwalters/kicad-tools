@@ -2421,39 +2421,186 @@ def merge_fragment_runs(routed_path: Path) -> bool:
     return False
 
 
-def clip_silk_to_holes(routed_path: Path) -> bool:
-    """Clip footprint silk off every drilled hole (``silk_hole_overlap``, #9097).
+#: Largest slide (mm) and step (mm, the routing grid) ``slide_vias_off_silk``
+#: tries when it moves a via's drill out from under footprint silk.
+_SILK_SLIDE_MAX_MM = 0.6
+_SILK_SLIDE_STEP_MM = 0.05
 
-    A via is placed by the router/stitcher, so a fixed silk edit (the #8844
-    U2 arm) only fixes the one via it was written for; a fresh regen can put
-    another via under another silk line (J1's right edge, via (174.85, 96.35)).
-    ``SilkscreenRepairer.repair_hole_clearance`` (#9054) is the library pass for
-    this: it measures with the rule's own hole set and threshold, and removes
-    only the ink that has to go.  It never touches copper, so it can run before
-    the final re-pour.  Returns False when a finding is left on a graphic.
+
+def _silk_hole_hits(pcb: Any) -> list[tuple[Any, str]]:
+    """``(via, silk label)`` for every via drill the silk-hole rule flags.
+
+    Uses the rule's own hole set, silk set and threshold
+    (``iter_drill_holes`` / ``_iter_silk_geometries`` / ``silk_hits_hole``),
+    so "clear" here means ``silk_hole_overlap`` is clean for vias.
     """
-    from kicad_tools.drc.repair_silkscreen import SilkscreenRepairer
+    from kicad_tools.silkscreen._silk_defaults import SILK_HOLE_CLEARANCE_MM
+    from kicad_tools.validate.rules.silkscreen import (
+        _iter_silk_geometries,
+        iter_drill_holes,
+        silk_hits_hole,
+    )
+
+    silks = list(_iter_silk_geometries(pcb))
+    hits: list[tuple[Any, str]] = []
+    for via in pcb.vias:
+        for geom, _label, sides in iter_drill_holes([via], []):
+            for side, silk, label, _loc, _layer, _uuid in silks:
+                if side in sides and silk_hits_hole(silk, geom, SILK_HOLE_CLEARANCE_MM):
+                    hits.append((via, label))
+    return hits
+
+
+def slide_vias_off_silk(routed_path: Path) -> bool:
+    """Slide a via off footprint silk instead of cutting the silk (#9455).
+
+    ``silk_hole_overlap`` fires when a stitch/escape via's drill lands under a
+    footprint silk stroke (J1's right edge, via (174.85, 96.35)).  The first
+    fix (#9097) trimmed the stroke with ``SilkscreenRepairer``, but that edits
+    footprint graphics and breaks the #5744 invariant (routing never changes
+    footprint silkscreen).  A board-level silk gap cannot help either: the
+    rule adds up *all* silk, so a ``gr_line`` pair never removes the
+    footprint's own ink.  What is left is moving the copper, which is what this
+    step does.
+
+    For each flagged via it tries axis-aligned then diagonal slides on the
+    routing grid, nearest first, and takes the first spot where the drill
+    clears every silk stroke, the copper-clearance and hole-to-hole checks
+    that ``relocate_drill_clearance`` uses pass, and the connecting stub is
+    clear.  The old position is bridged to the new one with a stub on each
+    layer the via's own tracks use.  Silk is never edited.  Returns False when
+    a via is boxed in (no legal slide).
+
+    It must run before the staircase / fragment / sharp-corner passes and the
+    re-pour, so they see the final copper.
+    """
+    from kicad_tools.cli.relocate_in_pad_vias import (
+        _check_clearance,
+        _check_stub_clearance,
+        _collect_smd_pads_by_net,
+        _collect_tht_pads,
+        _endpoint_at,
+        _persist_via_with_stubs,
+    )
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.silkscreen._silk_defaults import SILK_HOLE_CLEARANCE_MM
+    from kicad_tools.validate.rules.silkscreen import (
+        _iter_silk_geometries,
+        silk_hits_hole,
+    )
 
     print("\n" + "=" * 60)
-    print("Clipping silkscreen off drilled holes (issue #9097)...")
+    print("Sliding vias off footprint silkscreen (issue #9455)...")
     print("=" * 60)
 
-    repairer = SilkscreenRepairer(routed_path)
-    result = repairer.repair_hole_clearance()
-    for fix in result.fixes:
-        print(
-            f"   {fix.footprint_ref} {fix.element_type} {fix.action} "
-            f"(crossed {', '.join(fix.holes)})"
-        )
-    if result.fixes:
-        repairer.save()
-    print(f"   {len(result.fixes)} silk graphic(s) clipped")
-    if result.marker_lost:
-        print(f"   FAILED: clipping removed the pin-1 marker of {result.marker_lost}")
+    from shapely.geometry import Point
+
+    rules = get_profile("jlcpcb-tier1").get_design_rules()
+    pcb = PCB.load(str(routed_path))
+    flagged = {via.uuid: via for via, _label in _silk_hole_hits(pcb)}
+    if not flagged:
+        print("   no via drill under silk")
+        return True
+
+    silks = list(_iter_silk_geometries(pcb))
+    pads_by_net = _collect_smd_pads_by_net(pcb)
+    tht_pads = _collect_tht_pads(pcb)
+
+    steps = int(round(_SILK_SLIDE_MAX_MM / _SILK_SLIDE_STEP_MM))
+    directions = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)]
+    ok = True
+    for via in sorted(flagged.values(), key=lambda v: (v.position[1], v.position[0])):
+        vx, vy = via.position
+        connected = [
+            (seg, far)
+            for seg in pcb.segments_in_net(via.net_number)
+            if (far := _endpoint_at(seg, vx, vy)) is not None
+        ]
+        stub_layers = list(dict.fromkeys(seg.layer for seg, _ in connected))
+        widths = [seg.width for seg, _ in connected if seg.width > 0]
+        stub_width = min(widths) if widths else 0.2
+        net_name = next((n.name for n in pcb.nets.values() if n.number == via.net_number), "")
+
+        moved = False
+        for k in range(1, steps + 1):
+            for dx, dy in directions:
+                scale = k * _SILK_SLIDE_STEP_MM
+                target = (round(vx + dx * scale, 4), round(vy + dy * scale, 4))
+                hole = Point(*target).buffer(via.drill / 2.0, quad_segs=32)
+                if any(
+                    silk_hits_hole(silk, hole, SILK_HOLE_CLEARANCE_MM) for _s, silk, *_r in silks
+                ):
+                    continue
+                if (
+                    _check_clearance(
+                        pcb,
+                        via,
+                        target[0],
+                        target[1],
+                        pads_by_net,
+                        tht_pads,
+                        rules.min_clearance_mm,
+                        rules.min_hole_to_hole_mm,
+                    )
+                    is not None
+                ):
+                    continue
+                if (
+                    _check_stub_clearance(
+                        pcb, via, target, stub_layers, stub_width, rules.min_clearance_mm
+                    )
+                    is not None
+                ):
+                    continue
+                if _persist_via_with_stubs(pcb, via, target, stub_layers, stub_width, net_name):
+                    print(
+                        f"   via ({vx:.3f}, {vy:.3f}) -> ({target[0]:.3f}, {target[1]:.3f}) "
+                        f"net '{net_name}'"
+                    )
+                    moved = True
+                    break
+            if moved:
+                break
+        if not moved:
+            print(f"   FAILED: via at ({vx:.3f}, {vy:.3f}) has no legal slide off the silk")
+            ok = False
+
+    pcb.save(str(routed_path))
+    return ok
+
+
+def check_silk_clear_of_holes(routed_path: Path) -> bool:
+    """Read-only gate: no via/pad drill under any silk (``silk_hole_overlap``, #9455).
+
+    Runs last, after the fiducials and board-ID silk land, so ink added late
+    is covered too.  It never edits the board: footprint silk is #5744's, and
+    the vias were already slid by :func:`slide_vias_off_silk`.
+    """
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.silkscreen._silk_defaults import SILK_HOLE_CLEARANCE_MM
+    from kicad_tools.validate.rules.silkscreen import (
+        _iter_silk_geometries,
+        iter_drill_holes,
+        silk_hits_hole,
+    )
+
+    print("\n" + "=" * 60)
+    print("Checking silkscreen against drilled holes (issue #9455)...")
+    print("=" * 60)
+
+    pcb = PCB.load(str(routed_path))
+    holes = list(iter_drill_holes(pcb.vias, pcb.footprints, getattr(pcb, "board_origin", (0, 0))))
+    bad = [
+        (silk_label, hole_label)
+        for side, silk, silk_label, _loc, _layer, _uuid in _iter_silk_geometries(pcb)
+        for hole, hole_label, sides in holes
+        if side in sides and silk_hits_hole(silk, hole, SILK_HOLE_CLEARANCE_MM)
+    ]
+    if bad:
+        print(f"   FAILED: silk still over a hole: {bad}")
         return False
-    if result.residual or result.text_residual:
-        print(f"   FAILED: silk still over a hole: {result.residual + result.text_residual}")
-        return False
+    print("   no silk over a drilled hole")
     return True
 
 
@@ -3194,6 +3341,13 @@ def main() -> int:
         # relocated via).
         drill_clearance_success = relocate_drill_clearance_step(routed_path)
 
+        # Step 6.35 (#9455): slide any via whose drill sits under footprint
+        # silk.  Footprint silk is never edited (#5744); a board-level gap
+        # cannot clear the rule, so the copper moves.  Before the quantize /
+        # staircase / fragment passes and the re-pour so they see final copper.
+        if not slide_vias_off_silk(routed_path):
+            raise RuntimeError("slide_vias_off_silk did not pass (#9455)")
+
         # Step 6.4: 45-degree quantize the escape copper (#3797 / #3532) -- the
         # fresh deterministic route + the fix_osc_escape re-aim + the kct stitch
         # GND pad-tails ship a few arbitrary-angle hops (the OSC_OUT re-aim
@@ -3256,8 +3410,8 @@ def main() -> int:
         # a track does not need a hand-edited artifact.
         if not merge_fragment_runs(routed_path):
             raise RuntimeError("merge_fragment_runs did not pass (#9097)")
-        if not clip_silk_to_holes(routed_path):
-            raise RuntimeError("clip_silk_to_holes did not pass (#9097)")
+        if not check_silk_clear_of_holes(routed_path):
+            raise RuntimeError("check_silk_clear_of_holes did not pass (#9455)")
 
         fill_success = fill_zones(routed_path)
 

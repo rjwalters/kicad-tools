@@ -114,7 +114,12 @@ from typing import Any
 
 from ..copper_refs import board_origin, via_ref
 from ..violations import DRCResults, DRCViolation
-from .clearance import _pad_on_layer, _pad_polygon, _transform_pad_position
+from .clearance import (
+    _pad_has_no_copper,
+    _pad_on_layer,
+    _pad_polygon,
+    _transform_pad_position,
+)
 from .silkscreen import _via_is_tented
 
 TOLERANCE = 0.001
@@ -190,6 +195,9 @@ def check_tht_smd_spacing(
     for fp in pcb.footprints:
         for index, pad in enumerate(fp.pads):
             if pad.type not in {"smd", "thru_hole"}:
+                continue
+            if _pad_has_no_copper(pad):
+                # Issue #9528: no copper layer, so no copper to space.
                 continue
             identity = pad.uuid or f"{fp.reference}:{pad.number}:pad:{index}"
             if pad.shape == "custom":
