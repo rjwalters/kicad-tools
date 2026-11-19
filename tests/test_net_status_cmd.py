@@ -613,3 +613,80 @@ class TestNetStatusPortablePcbPath:
         output_why(incomplete_pcb.resolve(), "json")
         data = json.loads(capsys.readouterr().out)
         assert data["pcb"] == "incomplete.kicad_pcb"
+
+
+# Issue #9598: GND in three pieces -- two pads joined by a track, a lone pad
+# with a via on it, and a pad-less via fragment.
+SPLIT_NET_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (gr_rect (start 0 0) (end 40 40) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (footprint "Resistor_SMD:R_0402" (layer "F.Cu") (at 10 10)
+    (property "Reference" "R1")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 1 "GND")))
+  (footprint "Resistor_SMD:R_0402" (layer "F.Cu") (at 20 10)
+    (property "Reference" "R2")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 1 "GND")))
+  (footprint "Resistor_SMD:R_0402" (layer "F.Cu") (at 10 20)
+    (property "Reference" "R3")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu" "F.Mask") (net 1 "GND")))
+  (segment (start 9.5 10) (end 19.5 10) (width 0.25) (layer "F.Cu") (net 1))
+  (via (at 9.5 20) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
+  (via (at 30 30) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
+)
+"""
+
+
+class TestNetStatusPieces:
+    """`--net` lists each disconnected piece of a split net (Issue #9598)."""
+
+    @pytest.fixture
+    def split_pcb(self, tmp_path: Path) -> Path:
+        path = tmp_path / "split.kicad_pcb"
+        path.write_text(SPLIT_NET_PCB)
+        return path
+
+    def test_json_lists_pieces(self, split_pcb: Path, capsys):
+        main([str(split_pcb), "--net", "GND", "--format", "json"])
+        net = json.loads(capsys.readouterr().out)["nets"][0]
+
+        pieces = net["pieces"]
+        assert [p["piece"] for p in pieces] == [1, 2, 3]
+        assert [p["name"] for p in pieces[0]["pads"]] == ["R1.1", "R2.1"]
+        assert [p["name"] for p in pieces[1]["pads"]] == ["R3.1"]
+        assert pieces[1]["vias"] == [[9.5, 20.0]]
+        assert pieces[2]["pads"] == []
+        assert pieces[2]["vias"] == [[30.0, 30.0]]
+        assert pieces[2]["stranded_items"]
+
+    def test_text_lists_pieces(self, split_pcb: Path, capsys):
+        main([str(split_pcb), "--net", "GND"])
+        out = capsys.readouterr().out
+
+        assert "piece 1: R1.1, R2.1" in out
+        assert "piece 2: R3.1, via @ 9.50,20.00" in out
+        assert "piece 3: via @ 30.00,30.00 [no pads]" in out
+
+    def test_no_pieces_without_net_filter(self, split_pcb: Path, capsys):
+        main([str(split_pcb), "--format", "json"])
+        net = json.loads(capsys.readouterr().out)["nets"][0]
+        assert "pieces" not in net
+
+        main([str(split_pcb)])
+        assert "piece 1" not in capsys.readouterr().out
+
+    def test_single_piece_net_prints_no_listing(self, connected_pcb: Path, capsys):
+        main([str(connected_pcb), "--net", "VCC", "--format", "json"])
+        net = json.loads(capsys.readouterr().out)["nets"][0]
+        assert "pieces" not in net
+
+        main([str(connected_pcb), "--net", "VCC"])
+        assert "Pieces" not in capsys.readouterr().out
