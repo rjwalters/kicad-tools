@@ -24,7 +24,7 @@ design_rules:
     min_hole_to_edge_mm: 0.5
     min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.15
-    min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
+    min_silkscreen_height_mm: 1.0   # 40 mil; pcb-capabilities "Characters height less than 40 mil(1.0mm) will be unidentifiable", verified 2026-11-18 (#9448)
     min_solder_mask_dam_mm: 0.1
     min_solder_mask_clearance_mm: 0.05
     # JLC rigid PCB capabilities, verified 2026-09-10; distances in mm.
@@ -53,7 +53,7 @@ design_rules:
     min_hole_to_edge_mm: 0.5
     min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.15
-    min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
+    min_silkscreen_height_mm: 1.0   # 40 mil; pcb-capabilities "Characters height less than 40 mil(1.0mm) will be unidentifiable", verified 2026-11-18 (#9448)
     min_solder_mask_dam_mm: 0.1
     min_solder_mask_clearance_mm: 0.05
     # JLC rigid PCB capabilities, verified 2026-09-10; distances in mm.
@@ -82,7 +82,7 @@ design_rules:
     min_hole_to_edge_mm: 0.4
     min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.15
-    min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
+    min_silkscreen_height_mm: 1.0   # 40 mil; pcb-capabilities "Characters height less than 40 mil(1.0mm) will be unidentifiable", verified 2026-11-18 (#9448)
     min_solder_mask_dam_mm: 0.1
     min_solder_mask_clearance_mm: 0.05
     # JLC rigid PCB capabilities, verified 2026-09-10; distances in mm.
@@ -117,7 +117,7 @@ design_rules:
     min_hole_to_edge_mm: 0.4
     min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.15
-    min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
+    min_silkscreen_height_mm: 1.0   # 40 mil; pcb-capabilities "Characters height less than 40 mil(1.0mm) will be unidentifiable", verified 2026-11-18 (#9448)
     min_solder_mask_dam_mm: 0.1
     min_solder_mask_clearance_mm: 0.05
     # JLC rigid PCB capabilities, verified 2026-09-10; distances in mm.
@@ -147,7 +147,7 @@ design_rules:
     min_hole_to_edge_mm: 0.4
     min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.15
-    min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
+    min_silkscreen_height_mm: 1.0   # 40 mil; pcb-capabilities "Characters height less than 40 mil(1.0mm) will be unidentifiable", verified 2026-11-18 (#9448)
     min_solder_mask_dam_mm: 0.1
     min_solder_mask_clearance_mm: 0.05
     # JLC rigid PCB capabilities, verified 2026-09-10; distances in mm.
@@ -176,7 +176,7 @@ design_rules:
     min_hole_to_edge_mm: 0.4
     min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.15
-    min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
+    min_silkscreen_height_mm: 1.0   # 40 mil; pcb-capabilities "Characters height less than 40 mil(1.0mm) will be unidentifiable", verified 2026-11-18 (#9448)
     min_solder_mask_dam_mm: 0.1
     min_solder_mask_clearance_mm: 0.05
     # JLC rigid PCB capabilities, verified 2026-09-10; distances in mm.
@@ -205,7 +205,7 @@ design_rules:
     min_hole_to_edge_mm: 0.4
     min_hole_to_hole_mm: 0.5      # drill-to-drill edge-to-edge
     min_silkscreen_width_mm: 0.15
-    min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
+    min_silkscreen_height_mm: 1.0   # 40 mil; pcb-capabilities "Characters height less than 40 mil(1.0mm) will be unidentifiable", verified 2026-11-18 (#9448)
     min_solder_mask_dam_mm: 0.1
     min_solder_mask_clearance_mm: 0.05
     # JLC rigid PCB capabilities, verified 2026-09-10; distances in mm.

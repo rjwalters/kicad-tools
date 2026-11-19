@@ -855,6 +855,51 @@ def test_pr_checks_red_on_any_red_job_in_any_workflow() -> None:
     assert rp.pr_checks_state(FakeForge(), "f" * 40) == ("green", [])
 
 
+def test_pr_checks_prefers_newest_verdict_over_newer_skipped_run() -> None:
+    """A job-level ``if:`` that skips an event (Changelog on non-``changelog:
+    skip`` label events, issue #8434) still records a newer ``skipped`` run;
+    the release gate must read the substantive verdict it followed, not the
+    no-verdict run that merely happens to be newest."""
+
+    class StaleSkip(FakeForge):
+        def runs_for_sha(self, sha, workflow=None):
+            runs = super().runs_for_sha(sha, workflow)
+            runs += [
+                {
+                    "id": 3,
+                    "event": "pull_request",
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "path": ".github/workflows/changelog.yml",
+                    "workflow_id": 8,
+                    "name": "Changelog",
+                    "created_at": "t0",
+                },
+                {
+                    "id": 4,
+                    "event": "pull_request",
+                    "status": "completed",
+                    "conclusion": "skipped",
+                    "path": ".github/workflows/changelog.yml",
+                    "workflow_id": 8,
+                    "name": "Changelog",
+                    "created_at": "t1",
+                },
+            ]
+            return runs
+
+        def run_jobs(self, run_id):
+            if run_id == 3:
+                return [_job("Changelog Fragment Check", "failure")]
+            if run_id == 4:
+                return [_job("Changelog Fragment Check", "skipped")]
+            return super().run_jobs(run_id)
+
+    state, reasons = rp.pr_checks_state(StaleSkip(), "f" * 40)
+    assert state == "red"
+    assert reasons == ["`Changelog` job `Changelog Fragment Check` concluded failure"]
+
+
 def test_forge_writes_use_release_token_and_reads_do_not() -> None:
     seen: list[dict[str, Any]] = []
 

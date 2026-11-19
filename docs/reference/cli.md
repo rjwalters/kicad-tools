@@ -39,7 +39,7 @@ kct [--help] [--version] [--verbose] [-q] [--units {mm,mils}] <command> [options
 | | `net-status` | Report net connectivity status for a PCB |
 | | `constraints` | Constraint conflict detection and management |
 | | `detect-mistakes` | Detect common PCB design mistakes |
-| **Repair** | `fix-drc` | Automated DRC violation repair (clearance + drill) |
+| **Repair** | `fix-drc` | Automated DRC violation repair (clearance + drill + mask-copper) |
 | | `fix-erc` | Automated ERC violation repair (PWR_FLAG + no-connect) |
 | | `fix-vias` | Fix vias to meet manufacturer specifications |
 | | `fix-silkscreen` | Fix silkscreen line widths to meet manufacturer specs; `--clip-to-pads` also trims silk lines too close to pads; `--clip-to-holes` clips footprint silk lines/polygons off every drilled hole (run after routing) |
@@ -217,6 +217,40 @@ kct pcb <subcommand> <pcb_file> [options]
 | `model-audit` | Classify every footprint's 3D model coverage (`resolved`, `embedded`, `dangling`, `no_ref`, `unresolved_var`, `hidden_only`, `lcsc_cache_miss`, `lcsc_content_changed`, `placeholder`, `exempt`); `--env host\|pinned`, `--model-dir DIR`, `--format json`. A report: exits 0 regardless of coverage (see [3D model coverage](../guides/lcsc-3d-models.md#3d-model-coverage-audit)) |
 | `diff` | Geometric diff of two boards: which tracks, vias, pads, zones and outline changed (see below) |
 | `reinforce` | Place same-net PTH buttress-wire anchors on a routed net: by default two per single-layer wire leg, at its ends (see below) |
+
+**`move-footprint --map` and the `side` key.** A batch entry takes `x`, `y`,
+optional `rotation` and optional `"side": "front" | "back"`. A part not already
+on the requested side is flipped first (the same transform as `pcb-modify flip`,
+about the footprint anchor), then `x`/`y`/`rotation` are applied; the board is
+loaded and saved once. A part already on that side is not touched, an entry
+without `side` never flips, and any other value (or a footprint on a
+non-`F.*`/`B.*` layer) is rejected before anything is changed. `--dry-run` and
+`--format json` report `old_side` / `new_side` / `side_changed` per reference.
+`--drag-endpoints` is skipped (with a warning) for a footprint whose side
+changes, as for a rotation change.
+
+`rotation` is the **stored KiCad footprint angle written after the flip**, which
+is what KiCad's Properties dialog shows for the back-side part. It is not an
+angle as seen from the front. The flip mirrors about the footprint anchor, not
+the part's centre. With an explicit `rotation` the pads land at the same board
+coordinates that stored angle gives on the front; with `rotation` omitted the
+flip rewrites the stored angle `theta -> 180 - theta`, which mirrors the pads
+about the anchor. For a two-pad through-hole part whose anchor is pad 1
+(pad 2 at local `+7.62, 0`) moved to `(50, 40)`:
+
+```bash
+# D1: anchor = pad 1, pad 2 at local (7.62, 0); currently on F.Cu at angle 0.
+# rotation omitted -> flip rewrites the angle to 180: pad 1 at (50, 40),
+# pad 2 at (42.38, 40), mirrored about the anchor
+kct pcb move-footprint board.kicad_pcb --map '{"D1": {"x": 50, "y": 40, "side": "back"}}'
+# rotation 0 -> pad 1 at (50, 40), pad 2 at (57.62, 40), the same pad layout as on the front
+kct pcb move-footprint board.kicad_pcb --map '{"D1": {"x": 50, "y": 40, "rotation": 0, "side": "back"}}'
+```
+
+Confirm a polarised part by reading pad positions back in Python:
+`PCB.load("board.kicad_pcb").get_pad_position("D1", "2")` returns the pad's
+board-relative coordinate (`kct pcb footprints --format json` reports the pad
+count and the footprint anchor, not each pad position).
 
 **`add-zone` output-path behavior:** `-o`/`--output` is optional and
 **defaults to overwriting the input in place** — consistent with `zones add`,
@@ -419,6 +453,15 @@ keeps other nets' wires and never duplicates; output is sorted and has no
 timestamps. `spaced` mode has no legs and writes no sidecar. `--format json`
 embeds the list as `wires`; `kct pcb reinforce BOARD --list-wires [--net NET]
 [--format json]` prints it read-only from the sidecar.
+
+`kct pcb reinforce BOARD --adopt [--net NET] [--dry-run]` records wires that are
+already on the board (e.g. hand-adjusted after a Gerber review) without moving
+copper or writing the board: each solder-mask strip chain running between two
+same-net anchor holes of a wire gauge's drill becomes a sidecar record, which
+`mask_to_copper` then uses to excuse the run's strip, anchors and end holes on
+both mask sides. Wires the sidecar already records are kept, so a re-run changes
+nothing; strips that cannot be resolved (branched, or an end with no anchor hole)
+are reported, never guessed.
 
 Declared current paths that do not resolve (moved/removed pad, ambiguous
 loop) are listed under `unresolved_paths` and warned about on stderr; they
@@ -732,6 +775,44 @@ not run (file not found, wrong file type, audit crash). `--format json` keeps
 the top-level `verdict` (`ready`|`warning`|`not_ready`) and adds `gate_verdict`
 (`pass`|`fail`) and `exit_code`, the process exit code (#7230). See
 [Sign-off exit codes](#sign-off-exit-codes).
+
+---
+
+## Repair Commands
+
+### `fix-drc`
+
+Automated DRC violation repair. By default it repairs clearance violations by
+nudging traces, drill-clearance violations by de-duplicating or sliding vias,
+and mask-to-copper findings when the report carries them. `--only` restricts
+the run to a single repair pass:
+
+| `--only` value | Repairs |
+|----------------|---------|
+| `clearance` | Copper-clearance violations between tracks, vias and pads (nudge traces) |
+| `drill-clearance` | Hole-to-hole clearance violations (de-duplicate or slide vias) |
+| `mask-copper` | A track entering its own pad's opening off-centre (see below) |
+
+```bash
+kct fix-drc board.kicad_pcb --only mask-copper --dry-run
+```
+
+Without `--drc-report`, the mask-copper pass detects its findings itself by
+running the pure-Python `kct check` on the board. For the other `--only`
+values (and the default set), detection resolves in order: `--drc-report` if
+given, else kicad-cli's DRC if it is installed, else the pure-Python checker.
+
+`mask-copper` addresses the `same-net own-pad entry` class of the
+`mask_to_copper` check (see the [mask-to-copper guide](../guides/mask-to-copper.md)):
+the offending track is re-centred. Detection uses `kct check`'s rules, not
+kicad-cli, and the pass also runs in the default set when the report carries
+such findings. Because the repairer cannot run the native mask assessment, a
+move is kept only when a post-save `kct check` re-check confirms it; otherwise
+it is reverted and reported as unrepaired with a reason:
+`finding_not_cleared` (the finding is still present), `new_mask_finding` (the
+move exposed a new finding on the moved segment or its pad) or
+`recheck_unavailable` (the re-check could not run — an unverified move is
+never kept).
 
 ---
 
@@ -2327,6 +2408,36 @@ kct net-status board.kicad_pcb --by-class
 kct net-status board.kicad_pcb --net DAC_CLK --why   # only DAC_CLK's diagnosis
 ```
 
+#### `--net`: the per-piece listing
+
+A net in several disconnected pieces gets a piece-by-piece listing under
+`--net` (issue #9598): the largest pad island is `piece 1`, smaller islands
+follow, and pad-less track/via fragments come last, marked `[no pads]`.
+
+```
+[!] GND (1 pads unconnected)
+  R3.1     @ (9.50, 20.00) -- needs routing
+  -> Fix: Route traces to connect 1 pads
+  Pieces (3 disconnected):
+    piece 1: R1.1, R2.1
+    piece 2: R3.1, via @ 9.50,20.00
+    piece 3: via @ 30.00,30.00 [no pads]
+```
+
+In `--format json` the same data appears as a `pieces` list on the net:
+each entry carries `piece`, `pads[]` (`name` / `position`), `vias[]` as
+`[x, y]`, and `stranded_items[]` (track/via labels) for a pad-less
+fragment. The key is **absent** (not null) for a single-piece net and in
+the board-wide view — per
+[`machine-output.md`](machine-output.md) the field is additive, so
+`schema_version` is unchanged.
+
+`--net X --why` shows the same block for a `POUR_DISCONTINUOUS` diagnosis
+(issue #9612) — the class where a split pour net is actionable — printed
+after the `evidence` line, and the net's JSON payload carries the same
+`pieces` key. Other classifications and `--why` without `--net` never
+print it.
+
 #### `--why`: the access witness
 
 `--why` classifies each incomplete net into the `ESCAPE_BLOCKED` /
@@ -2822,6 +2933,15 @@ text envelopes; review it and use native DRC before relying on the placement.
 
 Footprint references must be unique, including hidden references. Duplicate
 references are rejected before planning; assign unique references first.
+
+Coordinate frames: reported positions (`old/new_position_mm` in JSON, the
+moved positions in the text report) are board-relative, while a `reason`
+obstacle label quotes sheet-absolute coordinates — the frame the KiCad
+editor shows — when it carries any, e.g. `pad aperture drill via at
+(130.000, 80.000)` (#9364). The text report labels each frame
+(`[board-relative]` / `[sheet coords]`), and the JSON output carries `frame`
+plus `origin_mm`, so `origin_mm + position_mm` recovers the sheet point a
+reason quotes.
 
 Search spacing must be finite and positive, distances finite and nonnegative,
 and the search is limited to 4096 rings. An explicit `--output` is written even

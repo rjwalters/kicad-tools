@@ -15,6 +15,23 @@ def load(name):
     return module
 
 
+def _step_section(script_text: str, step_header: str) -> str:
+    """Return the body of one `step "..."` section of a job script (from the
+    `step` call to the next one), with comment lines dropped. Matched by
+    prefix so trailing qualifiers in the header don't matter."""
+    lines = script_text.splitlines()
+    start = next(
+        i
+        for i, line in enumerate(lines)
+        if line.strip().startswith('step "') and step_header in line
+    )
+    end = next(
+        (i for i, line in enumerate(lines[start + 1 :], start + 1) if line.startswith("step ")),
+        len(lines),
+    )
+    return "\n".join(line for line in lines[start:end] if not line.lstrip().startswith("#"))
+
+
 @pytest.mark.parametrize(
     ("board", "filename"),
     [
@@ -95,6 +112,16 @@ def _gaps(gate):
     }
 
 
+def _masks(gate):
+    """The #8858 mask_to_copper net signatures: the seed-42 regeneration
+    carries every one of them, so they are present in every ``found``."""
+    return {
+        "mask_to_copper": {
+            n for r, n in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS if r == "mask_to_copper"
+        }
+    }
+
+
 def test_board06_impedance_allowance_is_keyed_by_net_with_issue():
     """Issue #7359: identity + issue number, no count cap left."""
     gate = load("check_diffpair_coverage")
@@ -108,20 +135,25 @@ def test_board06_impedance_allowance_is_keyed_by_net_with_issue():
     assert {
         i
         for (r, _), i in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS.items()
-        if r not in ("diffpair_length_skew", "physical_copper_gap")
+        if r not in ("diffpair_length_skew", "physical_copper_gap", "mask_to_copper")
     } == set()
     # The only non-skew entries are the fab-view gap nets (net-keyed),
-    # re-pointed to the #8962 parent tracker by #8974.
+    # re-pointed to the #8962 parent tracker by #8974, and -- since issue
+    # #8858 -- the regeneration-stable mask_to_copper net signatures, all
+    # citing #8858.
     assert {
         i
         for (r, _), i in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS.items()
         if r == "physical_copper_gap"
     } == {8962}
+    assert {
+        i for (r, _), i in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS.items() if r == "mask_to_copper"
+    } == {8858}
 
 
 def test_board06_listed_impedance_findings_pass():
     gate = load("check_diffpair_coverage")
-    found = {"impedance": set(BOARD06_IMPEDANCE_NETS), **_skew(gate), **_gaps(gate)}
+    found = {"impedance": set(BOARD06_IMPEDANCE_NETS), **_skew(gate), **_gaps(gate), **_masks(gate)}
     errors: dict[str, int] = {}
     assert gate.unexpected_baseline_errors(BOARD06_KEY, errors, found) == {}
     assert gate.stale_allowances(BOARD06_KEY, found) == []
@@ -144,7 +176,12 @@ def test_board06_uncoupled_pair_fails():
 def test_board06_new_impedance_net_fails():
     """USB3_TX2+ was cleared by #7349: it cannot fail again unnoticed (#7270 Q3)."""
     gate = load("check_diffpair_coverage")
-    found = {"impedance": set(BOARD06_IMPEDANCE_NETS) | {"USB3_TX2+"}, **_skew(gate), **_gaps(gate)}
+    found = {
+        "impedance": set(BOARD06_IMPEDANCE_NETS) | {"USB3_TX2+"},
+        **_skew(gate),
+        **_gaps(gate),
+        **_masks(gate),
+    }
     errors = {"impedance": 2}
     assert gate.unexpected_baseline_errors(BOARD06_KEY, errors, found) == {"impedance": 1}
     assert gate.stale_allowances(BOARD06_KEY, found) == []
@@ -153,7 +190,7 @@ def test_board06_new_impedance_net_fails():
 def test_board06_cleared_impedance_finding_cannot_return():
     """Issue #7575: USB3_TX2-'s in-pad-stub finding is gone; it cannot come back."""
     gate = load("check_diffpair_coverage")
-    found = {"impedance": {"USB3_TX2-"}, **_skew(gate), **_gaps(gate)}
+    found = {"impedance": {"USB3_TX2-"}, **_skew(gate), **_gaps(gate), **_masks(gate)}
     errors = {"impedance": 1}
     assert gate.unexpected_baseline_errors(BOARD06_KEY, errors, found) == {"impedance": 1}
     assert gate.stale_allowances(BOARD06_KEY, found) == []
@@ -165,7 +202,7 @@ def test_board06_uncoupled_allowance_is_gone():
     assert ("diffpair_uncoupled_length", BOARD06_UNCOUPLED_PAIR) not in (
         gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
     )
-    found = {"impedance": set(BOARD06_IMPEDANCE_NETS), **_skew(gate), **_gaps(gate)}
+    found = {"impedance": set(BOARD06_IMPEDANCE_NETS), **_skew(gate), **_gaps(gate), **_masks(gate)}
     assert gate.stale_allowances(BOARD06_KEY, found) == []
 
 
@@ -225,11 +262,16 @@ def test_e2e_stages_matching_synthetic_bundle(number, board, gate):
 
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     steps = workflow["jobs"][f"board-{number}-end-to-end"]["steps"]
-    command = next(
-        step["run"]
+    # Issue #9340: the synthetic routing gate lives in the shared job script
+    # the workflow step calls (2am#7561 ruling); assert both legs.
+    script_call = next(
+        step
         for step in steps
-        if step.get("name", "").startswith("Independent synthetic routing gate")
+        if f"scripts/ci/jobs/board-{number}-end-to-end.sh" in (step.get("run") or "")
     )
+    assert not script_call.get("continue-on-error")
+    script = (ROOT / f"scripts/ci/jobs/board-{number}-end-to-end.sh").read_text()
+    command = _step_section(script, "Independent synthetic routing gate")
     assert f"cp -a /tmp/board{number}-ci/. boards/{board}/regression-output/" in command
     assert f"check_{gate}_coverage.py" in command
     assert "--skip-route" in command

@@ -453,8 +453,13 @@ The playbook that worked in the 2026-08-06 outage, now scripted:
    (`tests/router/test_board03_routing_baseline.py`) and
    `scripts/changelog_gap_report.py`. Use `--full` to add the long board
    end-to-end jobs (multiple hours), `--list` to see the job manifest, or name
-   individual jobs. The manifest is drift-guarded against
-   `.github/workflows/ci.yml` by `tests/test_local_gate_manifest.py`.
+   individual jobs. Since issue #9340 there is exactly one copy of each job's
+   check commands, in `scripts/ci/jobs/<job-id>.sh`: the same-named
+   `.github/workflows/ci.yml` job calls the identical script, so the local
+   gate and CI cannot drift (operator ruling written into 2AMLogic/2am#7561).
+   `scripts/ci/local-gate.sh` is only the runner (modes, SKIP/advisory
+   handling, dispatch loop); the three genuinely CI-only jobs (`kicad_pin`,
+   `changes`, `windows-smoke`) have no script and are not part of the gate.
 
 2. **Operator sign-off**: merging or tagging on the strength of a local gate
    run (instead of green CI) requires explicit human operator approval,

@@ -14,6 +14,297 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-19
+
+- **PR #9576**: perf: digest raw mask/copper WKT out of committed kct-check evidence
+- **Issue #9575** (closed): Board 06's re-pinned kct-check evidence is 31.6 MB x 2: geometry_provenance ships the full layers_wkt/source_objects dump
+- **PR #9392**: ci: single-source the gate commands in scripts/ci/jobs/<id>.sh
+- **PR #9544**: feat: record footprint-library identity in evidence provenance
+- **PR #9416**: ci: hoist !cancelled() in the two merge-group gates that bypassed it
+- **PR #9573**: fix: exclude auto-named Net-(...) nets from the sync-netlist convention census
+- **PR #9572**: docs: expand pcb sync-netlist help to cover net, pintype, value and drift behavior
+- **PR #9553**: fix(board06): clear the jlcpcb-tier1 gate's 48 mask_to_copper errors in the recipe
+- **PR #9568**: fix: label mixed parallel groups merged+summed from a shared three-way shape
+- **PR #9569**: fix: gate resistance parsing on part category to skip LED/CCT/Rds(on)/crystal tokens
+- **PR #9565**: fix: count off-centreline tie vias as parallel in path_ampacity layer changes
+- **PR #9564**: fix: resolve sync-netlist /-prefixed net names against the board net table
+- **PR #9567**: fix: report value and footprint drift on matched refs in pcb sync-netlist
+- **PR #9559**: fix: say 'merged parallel group' for same-layer merged group widths
+- **PR #9489**: fix: rank exact resistance matches first in kct parts search
+- **PR #9558**: fix: migrate-waivers orphan says 'not evaluated' for needs_input coverage
+- **PR #9555**: test: make GR_CIRCLE_PRIMITIVE fixture KiCad-loadable gr_circle syntax
+- **Issue #9340** (closed): Local CI gate: convert the jobs that can be a script call, record the rest, retire the job-manifest drift test
+- **Issue #9526** (closed): Evidence toolchain gates kicad-cli's version but never the footprint library's, so native-mode geometry is still host-sourced
+- **Issue #9345** (closed): ci: two merge-group job gates bypass `!cancelled()`, unlike the other 14
+- **Issue #9571** (closed): sync-netlist convention census counts KiCad auto-named `Net-(...)` nets as bare, so a new label net can be added bare on a /-prefixed board
+- **Issue #9570** (closed): pcb sync-netlist --help description omits net assignment, pintype annotation, value copy and the non-zero footprint exit
+- **Issue #9548** (closed): Board 06: clear the jlcpcb-tier1 kct_check gate (48 errors) and re-pin readiness so the manufacturing package can be regenerated
+- **Issue #9560** (closed): A parallel group that is both merged and summed is called only "merged"
+- **Issue #9551** (closed): Resistance regex false positives: CCT, colour-temperature and Rds(on) tokens parse as ohms
+- **Issue #9561** (closed): path_ampacity: layer-change rating counts only the centreline via, not tie vias in the same bar
+- **Issue #9562** (closed): pcb sync-netlist strips the leading / from root-sheet label nets and disconnects a routed board
+- **Issue #9563** (closed): pcb sync-netlist ignores footprint and value changes on existing references
+- **Issue #9557** (closed): current-paths-audit calls a merged same-layer group width "summed"
+- **Issue #9474** (closed): kct parts search returns kilo-ohm parts for an ohm-value query
+- **Issue #9552** (closed): migrate-waivers: ampacity orphan loses '[rule not evaluated in this run]' when currents are declared but unmapped
+- **Issue #9554** (closed): Test fixture GR_CIRCLE_PRIMITIVE is not loadable KiCad syntax (no `end`)
+- **PR #9556**: test: pin that mask_to_copper refuses boards whose footprints share a uuid
+- **PR #9549**: fix: judge overlapping same-layer parallel copper at its merged width
+- **PR #9547**: docs: document clearance_incomplete's info severity and its kicad-cli parity
+- **PR #9546**: test: execute board 04's via slide and silk gate on synthetic boards
+- **PR #9543**: test: pin legacy/untouched classification of non-ev3 waiver hash prefixes
+- **PR #9541**: chore(boards): regenerate board 09 readiness receipt on the pinned toolchain
+- **PR #9537**: fix(board04): slide vias off footprint silk instead of trimming the silk
+- **PR #9534**: fix: derive migrate-waivers inactive rules from coverage skip states, not hand-mirrored conditions
+- **PR #9532**: fix: skip copper-less pads in custom-pad coverage rules
+- **PR #9531**: chore: refresh Squad block and skill so unattended roles do not stop
+- **PR #9525**: fix: probe the smallest unnamed inner layer in the DRU loosening gate
+- **PR #9521**: fix: list pre-ev3 legacy waiver entries by key in the migration report
+- **PR #9520**: feat: name the failed within-own-pad condition on mask_to_copper findings
+- **PR #9516**: docs: name group-membership repair in the 9485 changelog fragment
+- **PR #9509**: fix: migrate-waivers keeps symlinked waivers files, honest orphan reasons, untouched entries listed by key
+- **PR #9508**: fix: measure custom-pad primitive copper in kct check rules
+- **PR #9502**: fix: run board 09 producers on the pinned KiCad toolchain
+- **PR #9476**: feat: add per-reference side key to pcb move-footprint --map
+- **PR #9475**: fix: resolve LCSC datasheet viewer page to the real PDF
+- **PR #9470**: fix: let kct check evaluate custom pads by placement and real copper
+- **Issue #9545** (closed): kct check: custom pads built from gr_circle primitives raise a blocking physical_copper_gap_incomplete (stock Mounting_Wuerth footprint)
+- **Issue #9542** (closed): path_ampacity: overlapping same-layer tracks (one wide conductor) are reported as an ambiguous loop
+- **Issue #9540** (closed): Unit-test board 04's slide_vias_off_silk (new #9455 recipe step has no CI-executed coverage)
+- **Issue #9539** (closed): clearance_incomplete is info, so a refused custom pad's unjudged copper does not block the gate
+- **Issue #9529** (closed): migrate-waivers: derive inactive rules from coverage states, not two hand-mirrored conditions
+- **Issue #9528** (closed): kct check reports paste-only custom pads as unmeasured copper (blocking physical_copper_gap_incomplete)
+- **Issue #9527** (closed): kct check --migrate-waivers: a forward or non-evN waiver hash is reported as "predates ev3" with a delete hint
+- **Issue #9519** (closed): Refresh board 09 readiness after the pinned producer change in #9502
+- **Issue #9512** (closed): changelog.d/9485.fixed.md omits the group-membership repair that shipped with it
+- **Issue #9504** (closed): kct check --migrate-waivers: symlinked waivers file, atomic-write test, orphan hints (follow-ups to #9456)
+- **Issue #9499** (closed): DRU loosening gate: an In1.Cu-scoped rule masks the other inner layers (residual of #9422)
+- **Issue #9498** (closed): kct check misses shorts and clearance violations against custom-pad primitive copper (anchor-only model)
+- **Issue #9495** (closed): Board 09 producers call a bare kicad-cli: committed artifacts depend on the host's KiCad release and footprint library
+- **Issue #9482** (closed): Harden the ev3->ev4 waiver migration report: pin genuine ev3 digests, test the orphan-candidate path, list non-ev3 legacy entries
+- **Issue #9477** (closed): kct check still cannot gate a custom-pad board: physical_copper_gap_incomplete is an error on 'custom' pads (follow-up to #9468)
+- **Issue #9473** (closed): kct datasheet download fails when LCSC serves an HTML page instead of the PDF
+- **Issue #9471** (closed): pcb move-footprint --map has no side key and there is no batch flip command
+- **Issue #9468** (closed): kct check aborts with ValueError on stock SOT-89-3 footprint (custom pad geometry)
+- **Issue #9466** (closed): within_own_footprint keys on parent_uuid in mask_to_copper but on a list index in physical_copper_gap
+- **Issue #9455** (closed): board04: publish the #9097 recipe regen (re-pin readiness, resolve #5744 silk conflict and pinned-geometry tests)
+- **Issue #9453** (closed): test flake: test_allowed_layers_untouched_with_explicit_opt_out times out (>60s) on the Test job
+- **Issue #9452** (closed): Re-check the original 2 oz board's RuleLooseningError after #9422's export floor fix
+- **Issue #9305** (closed): mask_to_copper: decide whether an area tolerance belongs on the 'beyond owner pad copper' test (112 of 144 consumer errors are sub-1e-6 mm² residue)
+- **PR #9513**: test: correct exact-cap gr_circle docstring and relax strip-side pin
+- **Issue #9511** (closed): test_mask_copper_reinforce_9444: exact-cap docstring names the wrong mechanism, and the pin rests on an 8e-6 overlay margin
+- **PR #9506**: fix: ignore DNP SMD parts when deciding which sides need fiducials
+- **Issue #9480** (closed): _populated_sides ignores dnp, and the fiducials rule docstring still states the pre-#9472 definition
+- **PR #9505**: fix: consider every fragment run in a chain, not just the first
+- **PR #9500**: test: bound pr-only audit-marker check to the job's own ci.yml body
+- **PR #9442**: fix: honour (justify ...) in silk text bounding boxes
+- **Issue #9497** (closed): test_ci_merge_group_invariants: audit-marker block bound never matches, so the marker check spans to EOF
+- **Issue #9433** (closed): Silkscreen checks report findings on left-justified board text that KiCad's DRC accepts (0.29.0)
+- **Issue #9133** (closed): board04 merge_fragment_runs: only the chain's FIRST sub-threshold run is considered, so an earlier stray short segment hard-fails the recipe
+- **Issue #8948** (closed): kct's own managed .kicad_dru makes mask_to_copper incomplete: admit physical_hole_clearance, text_thickness and text_height to the native context allowlist
+- **Issue #8939** (closed): mask_to_copper cannot run on a KiCad 10 board on macOS: /usr/bin/python3 has no pcbnew, Gerber reader rejects KiCad's zero-size aperture and fill regions
+- **PR #9494**: fix: prune dead-end stubs before parallel-group reduction in current paths
+- **PR #9493**: test: pin the mid-run gr_circle size envelope in mask_to_copper
+- **PR #9487**: fix: give every child of a placed library footprint a fresh uuid
+- **Issue #9492** (closed): path_ampacity: a dead-end stub to a test point makes a declared current path 'ambiguous'
+- **Issue #9490** (closed): mask_to_copper: pin and justify the mid-run gr_circle size envelope on reinforce runs
+- **Issue #9485** (closed): create-pcb copies library child uuids into every footprint instance; kct check then cannot complete mask_to_copper
+- **PR #9488**: fix(tht-smd-spacing): print distance at 4 decimals to avoid 'x < x' at band edge
+- **PR #9131**: fix(board04): clear fragment, silk-over-drill and staircase findings from the fresh regen
+- **Issue #9483** (closed): tht_smd_spacing: message rounds the measured distance into the limit at the band edge (and a 103-char docstring line)
+- **Issue #9097** (closed): Board 04 fresh regen: raw route carries 13 advisory warnings (pour_slot x10, staircase, fragments, silk_hole_overlap) - reviewed gate leg 3 red
+- **PR #9486**: test: compare design-source parity by sha256 so drift names the file
+- **PR #9479**: fix: treat only SMD-bearing faces as populated for add-fiducials
+- **PR #9458**: fix: probe concrete copper layers in the DRU loosening gate for split-floor profiles
+- **PR #9456**: feat: add kct check --migrate-waivers to re-bind ev3 waivers to ev4
+- **PR #9451**: feat: let projects declare a smaller reference-designator silk height
+- **Issue #9481** (closed): Design-source parity tests fail as an opaque 60s pytest-timeout instead of naming the drifted file
+- **Issue #9472** (closed): add-fiducials --sides populated adds back-side fiducials when the back carries only through-hole parts
+- **Issue #9448** (closed): Silkscreen: default to smaller reference designators (0.8 mm) with larger functional labels, and let a project declare it
+- **Issue #9422** (closed): kct export refuses a 2 oz board: merge_dru_floors wants to write the 1 oz clearance floor (0.1016 mm) over a project at 0.15 mm
+- **PR #9478**: test: pin ci.yml merge_group gates and concurrency invariants
+- **Issue #9307** (closed): Declare merge_group in select_routed_pcbs.py and pin the merge-group CI invariants with a test
+- **PR #9496**: docs: note the same-footprint same-net mask-bridge info exemption
+- **Issue #9484** (closed): docs: physical-copper-gap guide omits the same-footprint same-net pad mask-bridge info class
+- **PR #9469**: chore(boards): put board 09 C6 on the 0.1 mm grid; update per-footprint pad_grid docstrings
+- **PR #9446**: fix: attribute mid-run vias and anchor-size holes on a reinforce strip to the run
+- **Issue #9444** (closed): mask_to_copper after #9419: same-net untented vias on a recorded reinforce run are not attributed to it
+- **PR #9462**: fix: report same-footprint same-net pad mask bridges at info
+- **Issue #9420** (closed): Same-net pads inside one library footprint are reported as errors by physical_copper_gap and mask_to_copper (stock RF_Module:ESP32-C3-WROOM-02 ground pad array)
+- **PR #9429**: fix: raise tht_smd_spacing thresholds to 2.032/3.05 mm and record fab DFM values
+- **Issue #9421** (closed): Fab DFM limits that differ from the parity table: tht to smd 2.03/3.05 mm, a separate via-to-pad row, silk-to-hole clearance
+- **PR #9463**: docs: cite located JLCDFM rows in the within_own_footprint parity entry
+- **Issue #9450** (closed): Parity entry for within_own_footprint predates the located fab evidence on #9420
+- **PR #9460**: test: assert adopted vs production leg endpoints diverge in native chain test
+- **Issue #9457** (closed): Pin the adopted-vs-production leg-endpoint divergence the #9443 native chain test exists to cover
+
+### 2026-11-18
+
+- **PR #9438**: fix: derive pad_grid auto tolerance per footprint, not board-wide
+- **Issue #9434** (closed): pad_grid flags parts that did not move when other parts move onto round coordinates (percentile threshold)
+- **PR #9449**: fix: print sch_field_offset threshold at full precision
+- **Issue #9447** (closed): sch_field_offset message rounds a user-supplied --sch-field-threshold to 1 dp
+- **PR #9445**: test: chain pcb reinforce --adopt records through check_mask_to_copper on a native export
+- **Issue #9443** (closed): No end-to-end test chains `pcb reinforce --adopt` records through `check_mask_to_copper` on a native export
+- **PR #9439**: ci: assert paths-filter steps keep continue-on-error and outcome fallbacks
+- **Issue #9291** (closed): Assert the Detect Changes output fallbacks in verify_changes_filter.mjs
+- **PR #9425**: fix: treat same-net pads of one footprint as info in gap and mask checks
+- **PR #9440**: fix: skip silk_ref_obscured for hidden references replaced by a function label
+- **Issue #9435** (closed): silk_ref_obscured counts designators hidden on purpose and replaced by a function label
+- **PR #9437**: fix: hash footprint positions in sheet coordinates so outline-only edits keep waivers valid
+- **Issue #9432** (closed): kct export rewrites the board's .kicad_dru and drops per-zone clearance rules that a newer kct wrote (0.29.0)
+- **Issue #9431** (closed): Evidence-bound waivers go stale when only the board outline (origin) changes: netclass_clearance_copper evidence is board-relative
+- **PR #9430**: fix: pick export DRU floors from the stackup's outer copper and check them in --dry-run
+- **PR #9427**: feat: add reinforce --adopt and excuse far-side/same-net mask openings of recorded runs
+- **PR #9423**: test: make optimizer-unwind fixture SIGTERM handler one-shot to catch a lost first deadline raise
+- **Issue #9419** (closed): mask_to_copper after #9315: no way to record hand-adjusted wires, and 138 same-net errors remain at opposite-side anchor openings and under attributed strips
+- **Issue #9418** (closed): Optimizer-unwind test no longer detects a lost first deadline raise after #9297
+- **PR #9277**: fix(board01): slide same-net vias out of pad mask apertures in the recipe
+- **Issue #8858** (closed): Verify default-on mask_to_copper on native KiCad 10.0.5 and baseline 543/670 board findings (PR #8849)
+- **PR #9414**: test(ci): verify per-PR changelog admission before enabling a merge queue
+- **Issue #9413** (closed): Verify the per-PR changelog admission check before enabling a merge queue
+- **PR #9410**: ci: judge mask_to_copper by identity in the routed-DRC release gate
+- **PR #9303**: ci: qualify PR checks for GitHub merge queues
+- **Issue #9299** (closed): ci: qualify PR checks for GitHub merge queues
+- **PR #9409**: test: make the pinch-repair material-mismatch assertion falsifiable
+- **Issue #9103** (closed): Dead `material mismatch` assertion in the pinched-zone-fill regression (PR #9084)
+- **PR #9405**: fix: prefer first non-empty LCSC column when CSV headers collide
+- **PR #9398**: docs: changelog per-PR check runs --pr with a live gh pr view, not --pr-event
+- **Issue #9402** (closed): load_bom_csv and pcb/lcsc_bom accept different LCSC header spellings (shared normaliser, divergent accept-lists)
+- **Issue #9376** (closed): changelog.d/README.md still says the per-PR check runs `--pr-event`
+- **PR #9394**: ci: baseline board 07 mask_to_copper by net signature; drop the matchgroup-gate skip
+- **PR #9395**: fix: net-gate pad openings in mask_to_copper reinforce attribution
+- **PR #9391**: fix: keep every owner net in mask_to_copper signature for merged mask regions
+- **PR #9379**: fix: match LCSC BOM headers case/punctuation-insensitively in load_bom_csv
+- **PR #9369**: fix: revert mask-copper moves that create new DRC errors; restore snapshot on failed undo
+- **Issue #9374** (closed): mask_to_copper net signature drops owner nets on a merged mask region, so a different-net exposure can hide behind a same-net allowance entry
+- **Issue #9368** (closed): load_bom_csv drops the LCSC column from a real bom_jlcpcb.csv (header is `LCSC Part #`)
+- **Issue #9365** (closed): fix-drc mask-copper: clearance gate uses the manufacturer floor, not the effective net-class clearance
+- **Issue #9348** (closed): mask_to_copper reinforce attribution: owner-net override ordering, pad-kind net gate, and two per-opening recomputations
+- **PR #9393**: fix: drop empty values from merged JLCPCB BOM Comment and CPL value check
+- **PR #9370**: fix: widen CPL rotation review list and close readiness reporting edges
+- **PR #9388**: fix: give every Changelog workflow run its own concurrency group
+- **Issue #9380** (closed): JLCPCB merged BOM row: empty Value constituent is not filtered from the "; " join or split
+- **Issue #9362** (closed): CPL rotation review: widen the unreviewed-placement list (SW/Y missed) and close three reporting/verify edges
+- **Issue #9383** (closed): forge wait-checks reads a concurrency-cancelled duplicate Changelog check-run as RED, refusing approval on a green head
+- **PR #9389**: docs: document fix-drc --only mask-copper repair pass in reference docs
+- **PR #9386**: fix(parts): default check_bom quantity_needed to 1 for BOMItem
+- **PR #9385**: fix: emit one row per item in ungrouped JLCPCB/PCBWay BOM export
+- **PR #9339**: fix: skip waived findings in fix-drc --drc-report repair targets
+- **Issue #9384** (closed): docs: cli.md still describes fix-drc as clearance + drill; --only mask-copper is undocumented
+- **Issue #9382** (closed): BOM formatters silently drop designators when group_by_value=False (pre-existing)
+- **Issue #9377** (closed): LCSCClient.check_bom accesses BOMItem.quantity, which schema/bom.BOMItem does not define (kct suggest alternatives crashes on any BOM)
+- **Issue #9326** (closed): No repair path for the fab-parity rules, and fix-drc/prune side effects on waivers (consumer board: 538 check errors, fix-drc finds nothing repairable)
+- **PR #9375**: fix: evaluate the Changelog fragment check against the PR's live labels
+- **PR #9372**: fix: make readiness CPL rotation re-derivation fail visibly, not open
+- **PR #9367**: fix: name the coordinate frame of place-silk-refs placement output
+- **PR #9366**: fix: expand grouped BOM designator cells into one component each
+- **PR #9360**: docs: split red-since date per board in diffpair coverage baseline comment
+- **PR #9359**: fix(router): stop vetoing fold-back repairs against legs earlier repairs removed
+- **PR #9358**: Baseline board 06 mask_to_copper by net signature; drop the diffpair-gate skip
+- **PR #9344**: fix: exempt same-net anchor-anchor via pairs from tht_smd_spacing annulus pairing
+- **PR #9341**: fix: merge JLCPCB BOM lines sharing one LCSC part into a single row
+- **PR #9330**: fix: excuse a reinforce run's own copper in mask_to_copper via the sidecar
+- **PR #9279**: fix: enforce same-net trace slit band in Python escape and lattice via gates
+- **Issue #9371** (closed): Changelog check: two rapid changelog:skip flips can leave a stale verdict under the required name
+- **Issue #9364** (closed): place-silk-refs: RefPlacement reasons quote sheet coordinates next to board-relative positions
+- **Issue #9363** (closed): load_bom_csv treats a grouped BOM row as one component (kct estimate/suggest undercount)
+- **Issue #9356** (closed): Baseline comment: board 04's red-since date in the #9140 AC4 paragraph is off by a day
+- **Issue #9355** (closed): acute_foldback: the plan's base collision model still contains legs its own earlier repairs removed
+- **Issue #9346** (closed): kct readiness --verify: the CPL rotation re-derivation fails open on any unexpected error
+- **Issue #9325** (closed): tht_smd_spacing pairs two same-net pcb reinforce anchors (7 of 11 errors on a consumer board; fab DFM counts none)
+- **Issue #9323** (closed): JLCPCB BOM: lines sharing one LCSC part come up unticked at the fab and are silently not fitted
+- **Issue #9315** (closed): mask_to_copper fails boards on the wire-strip and anchor openings that pcb reinforce creates on purpose (281 of 438 errors on a consumer board)
+- **Issue #9272** (closed): Pure-Python router engines never apply the same-net trace slit-band guard (pad twin is implemented; the C++/Python backends disagree)
+- **PR #9353**: feat: report waiver keys invalidated by pcb prune and fix-drc edits
+- **Issue #9331** (closed): Waiver keys silently orphaned when prune/fix-drc move or merge copper
+- **PR #9328**: test: pin the removed mask-copper u-band arm with discriminating geometry
+- **Issue #9310** (closed): mask_copper tests: two own-pad cases pass on pre-#9261 code (one asserts a removed arm that was already dead)
+- **PR #9354**: fix: stop board recipe sibling imports shadowing across boards in one process
+- **Issue #9351** (closed): Board recipe loader: bare `import generate_pcb` lets one board's siblings shadow another's in-process
+- **PR #9309**: ci: skip changelog check on non-changelog:skip label events
+- **Issue #8434** (closed): Changelog Fragment Check re-runs on every label change; Loom role label churn keeps it queued
+- **Issue #9334** (closed): Repair path for mask_to_copper own-pad findings (track off-centre entry, via in mask band)
+- **PR #9349**: feat: add fix-drc --only mask-copper to re-centre own-pad track entries
+- **Issue #9287** (closed): test flake: test_expensive_optimizer_unwinds_and_saves_only_raw_partial[True] fails the 4 s post-arm budget on the Test job
+- **PR #9297**: test: drop runner-load-sensitive 4 s elapsed bound in optimizer unwind test
+- **Issue #9327** (closed): add-board-info --auto places text across a graphic mask opening; place-silk-refs board-text candidates mix frames and collide with other text
+- **PR #9343**: fix: share silk obstacle set between add-board-info and place-silk-refs
+- **Issue #9322** (closed): CPL: no per-project rotation correction, and pin headers / an SMT audio jack come out a quarter turn off at JLCPCB
+- **PR #9335**: feat: per-project CPL rotation sidecar (cpl_rotations.yaml) with readiness provenance
+- **Issue #9352** (closed): Research note still names integer fab-parity table versions (v11/v12) after #9242 made TABLE_VERSION a content hash
+- **PR #9361**: docs: cite parity table row by name and content hash, not integer v11/v12
+- **Issue #9320** (closed): test_cardinal_rotation_bbox_is_unchanged[90.0] asserts CHANGED behaviour; its comment misdescribes the pad it builds
+- **PR #9336**: test: split cardinal-rotation pad-gap test; name the unswapped 90-degree case
+- **Issue #9210** (closed): acute_foldback: cross-net clearance veto keeps copper a later same-group repair removed
+- **PR #9318**: fix(router): drop superseded chords from the fold-back cross-net veto list
+- **Issue #9152** (closed): Tighten analyze_native_observations tolerance: strict mode rounds, and the allowance is degree-blind
+- **PR #9350**: fix: make native-concurrency strict tolerance use unrounded excess time
+- **Issue #9357** (closed): analyze_native_observations: _format_overshoot still prints 0 for a sub-microsecond overshoot
+- **Issue #9140** (closed): Coupled-pair pose/stub-tail legs: keep own-net pad legs out of the slit band (#9011, board 06 LVDS)
+- **PR #9347**: docs: record the #9140 all-boards identity re-measurement in the diffpair fixture baseline
+- **Issue #9255** (closed): Residual Dependabot alerts on the python <3.11 resolution fork after the #9237 lock bump
+- **Issue #9319** (closed): Escape in-pad via nudge slides along a board axis using pre-rotation long dim, so a non-cardinal pad's via can land off its own copper
+- **PR #9333**: fix: slide escape in-pad via nudge along the pad's board-space long axis
+- **Issue #9284** (closed): mask_to_copper: stop reporting a spoke-connected own pour beside its own pad as an error (fab DFM does not list it)
+- **PR #9292**: fix(mask_copper): report a pad's thermal-spoke own pour as own_pour_thermal info
+- **Issue #9244** (closed): kct route --report-detour-ratio: the alone-on-empty probe spends the real run's --timeout and wall-deadline budget
+- **PR #9270**: fix: exclude the detour probe's wall-clock cost from routing budgets
+- **Issue #9288** (closed): Test Gerber oracle can still drop a non-zero-area ArcPoly region (gerbonara is_zero_size ignores two-arc circles)
+- **PR #9311**: test: retain arc-bearing KiCad regions in the gerbonara oracle (issue #9288)
+- **Issue #9314** (closed): Stale `BUILD_VERSION 68` references: the shipped router build version is 70
+- **PR #9329**: docs: correct stale BUILD_VERSION 68 references to 70
+- **Issue #9216** (closed): board 07: no test asserts validation.json's new off_path_mm field, and the committed evidence copies lack it
+- **PR #9342**: test: assert board 07 validation report emits off_path_mm
+- **Issue #9223** (closed): Stale USB2_D- allowance rationale in test_board06_via_overlap_legalization docstring
+- **PR #9321**: test: restate board-06 same-net slit residual rationale post-#9212
+- **PR #9337**: docs: plot-verify the mask_to_copper disjoint class; record post-repair residual
+- **Issue #9281** (closed): deps: pillow>=12 bound is not expressed for `pip install kicad-tools[all]`
+- **PR #9313**: chore(deps): declare pillow>=12 in the all extra
+- **Issue #9120** (closed): CI: native-diagnostics opt-in is a substring match on the PR body, so a PR that merely mentions the marker inherits the native-workload audit gate
+- **PR #9123**: ci: anchor native-diagnostics opt-in to its own line and state the audit tolerance
+- **Issue #9245** (closed): ci flake: 'Detect Changes' paths-filter fails on GitHub 'diff temporarily unavailable' listFiles error
+- **PR #9256**: ci: tolerate transient paths-filter failures in Detect Changes
+- **Issue #9316** (closed): main's uv.lock does not parse (bare pillow ref vs. 12.3.0/13.0.0 fork) — every CI job fails at Install dependencies
+- **PR #9324**: fix: qualify bare pillow edges in uv.lock so the lockfile parses
+- **Issue #9073** (closed): Board 05: clear the 29 physical_copper_gap errors in the reviewed routing recipe
+- **PR #9181**: fix(board05): re-seat pad-hugging fanout vias so the strict gate reads zero physical_copper_gap findings
+- **Issue #9107** (closed): mask_to_copper: per-object distance on a jogged pad exit counts copper already inside the entry track
+- **PR #9266**: test: pin per-object mask_to_copper distance for jogged pad exits
+- **Issue #9242** (closed): fab parity TABLE_VERSION is a merge-conflict hotspot: concurrent PRs keep claiming the same number
+- **PR #9293**: refactor: derive fab parity TABLE_VERSION from table contents
+- **Issue #9182** (closed): off_path_length_mm charges length-matching staircase copper, so OFF_PATH_TOLERANCE_MM tracks staircase density rather than defect presence
+- **PR #9194**: docs: record measured off-path decomposition at board-07's OFF_PATH_TOLERANCE_MM
+- **Issue #9268** (closed): board 04 repair_sharp_corners: _rule_area_blocks_tracks does not handle the *.In.Cu layer wildcard
+- **PR #9290**: fix(board04): resolve *.In.Cu keepout rule areas in repair_sharp_corners
+- **Issue #9236** (closed): Escape router's same-net pad slit check builds pad boxes from raw width/height, ignoring rotation
+- **PR #9295**: fix: use rotation-aware pad boxes in escape via placement
+- **Issue #9302** (closed): Add changelog.d/9234.upgrade.md — mask_to_copper completion on keepout boards can newly fail kct check
+- **PR #9308**: docs: add upgrade changelog fragment for mask_to_copper severity promotion
+- **Issue #9124** (closed): Board 06 drain remainder: same-net via-vs-trace slits and the face-aligned corner-wedge seat the slit-band predicate accepts
+- **PR #9209**: fix(router): reject tangent via seats in the same-net pad slit-band guard
+- **Issue #9261** (closed): mask_to_copper: an on-pad track whose end cap pokes past the pad edge is an error while a full exit is info
+- **PR #9264**: fix(mask_copper): grant entry allowance to any segment with an end inside its pad
+- **Issue #9274** (closed): deps: declare pillow as a direct dependency (kct imports PIL but pillow is only transitive)
+- **PR #9278**: chore(deps): declare pillow>=12 in screenshot extra and dev group
+- **Issue #9269** (closed): mask_to_copper: print beside_owner_excess_mm2 in the finding message
+- **PR #9283**: feat(mask_to_copper): print beside owner excess in the finding message
+- **Issue #9267** (closed): design-source/ archive can omit a live board recipe entirely (measured: board 03 silk_repair.py)
+- **PR #9280**: fix(boards): archive board 03 silk_repair.py and assert design-source completeness
+- **Issue #9300** (closed): ci: mass-cancelled Actions runs at 00:01 UTC kill the Test job mid-suite (no test failed), making PRs read red
+- **Issue #9234** (closed): mask_to_copper stays incomplete on a footprint-embedded keepout rule area (missing/ambiguous native object)
+- **PR #9250**: fix: keep keepout rule areas from blocking mask-to-copper attribution
+- **Issue #9276** (closed): Host-path scan does not cover docs/ outside docs/diagnostics/
+- **PR #9282**: test: scan docs/** for absolute host paths, allowlisting docs/mcp placeholders
+- **Issue #9301** (closed): ci: self-hosted lane shutdown cancelled 7 in-flight CI runs at 00:01Z and no CI run has started since
+
+### 2026-11-17
+
+- **Issue #9215** (closed): Same-net trace slit-band guard reaches only board 06: kct route, the Python pathfinders and the via-then-trace order are unguarded
+- **PR #9275**: fix: resolve the same-net trace slit-band edge on the kct route path
+- **Issue #9241** (closed): mypy reports 8 errors in optional-extra modules that the CI Type Check never sees
+- **PR #9263**: fix: make mypy baseline gate pass identically with and without optional extras
+
 ### 2026-11-17
 
 - **PR #9262**: test: replay the package-release drop gate over committed packages
@@ -3427,29 +3718,6 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - **Issue #5555** (closed): router: _reset_for_new_trial drops add_obstacle keepouts, silently reopening the grid
 - **Issue #5552** (closed): chore: resync installed Loom surfaces silently reverted merged fix #5543 (draft-PR fallback exclusion)
 - **Issue #5513** (closed): [Epic #5509] Phase 1a: kicad-cli clearance conformance oracle (report-only) with four adapters and named fixtures
-
-### 2026-09-18
-
-- **PR #5568**: fix(router): sum both edge directions in RoutingPlan edge entries
-- **PR #5565**: test(conformance): wrap five clearance consumers as adapters and populate the conformance table
-- **PR #5554**: perf(router): write segment clearance envelopes with slice assignment
-- **PR #5553**: feat(router): apply declared swap groups via a pad-rebind applicator
-- **PR #5549**: fix(zones): reuse an existing same-net barrel for a pour bridge (#5507)
-- **PR #5548**: feat(board-07): netlist write-back for generator-owned boards (Epic #5511 Phase 2b)
-- **PR #5547**: chore(deps): bump soupsieve from 2.8.4 to 2.9
-- **PR #5546**: chore(deps): bump devalue from 5.8.1 to 5.9.2 in /site
-- **Issue #5544** (closed): RoutingPlan.from_global_result() may disagree with get_total_overflow() on reverse-direction-only overflow
-- **PR #5542**: fix: parse kicad-cli 10 hole-to-hole 'min X mm; actual Y mm' wording
-- **PR #5540**: fix: RegionGraph.get_total_overflow() undercounts reverse-direction edge overflow
-- **Issue #5538** (closed): classify-dependency-block.sh's ref extraction treats a parenthetical epic mention as a second open blocker, wedging phase issues in DEFER forever
-- **Issue #5537** (closed): [Epic #5511] Phase 2b: netlist write-back for generator-owned boards
-- **Issue #5536** (closed): [Epic #5511] Phase 2a: pad-rebind applicator for declared swap groups
-- **Issue #5534** (closed): drc/report.py's clearance extractor doesn't parse kicad-cli 10's hole-to-hole wording
-- **Issue #5533** (closed): [Epic #5509] Phase 1a (2/2): five consumer adapters + populated clearance-conformance table
-- **Issue #5529** (closed): RegionGraph.get_total_overflow() can undercount overflow on reverse-direction edge traversals
-- **PR #5524**: ci: bound native KiCad subprocess concurrency from measured attribution
-- **Issue #5523** (closed): loom-fleet-dispatch auto-relabels draft PRs to loom:review-requested
-- **Issue #5501** (closed): CI: bound remaining native subprocess concurrency after confirmed Test cgroup OOM
 
 ### 2026-07-20 (evening)
 

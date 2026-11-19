@@ -20,23 +20,20 @@ BOARDS_DIR = Path(__file__).resolve().parent.parent / "boards"
 # directory name.  Each entry cites the issue that owns the refresh; remove the
 # entry when that lands (strict xfail turns an unexpected pass into a failure).
 EXPECTED_STALE: dict[str, str] = {
-    # Issue #9058: PR #8848 kept its regenerated board 01 copper (VOUT
-    # sharp_trace_corner wedge removed) over main's, so the evidence main
-    # re-pinned for #8937's ``.kicad_dru`` no longer applies.  Stale input:
-    # the routed ``.kicad_dru`` only; the refill under it agrees with the
-    # saved copper.  Since #9064 (closing #9009) ``mask_to_copper`` runs to
-    # completion under ``KCT_KICAD_DOCKER=1``, so the host is no longer the
-    # obstacle: the producer's ``kct check`` gate refuses on 12 completed,
-    # all same-net ``mask_to_copper`` errors (10 own-pad entry / same-net zone
-    # exposures that main's own board 01 also has, plus 2 same-net VOUT via
-    # pass-throughs at R1.2/R2.1).  Native DRC (saved and refilled), LVS,
-    # zone_fill, artifacts and bom pass.  The re-pin waits on mask_to_copper
-    # qualifying same-net exposures; #9058 owns it.
+    # Issue #9058: board 01's recipe now slides the two VOUT vias out of
+    # R1.2/R2.1's mask apertures and re-fills the pours after the
+    # fiducials land (plus UUID canonicalization), so a fresh regen no
+    # longer carries the 2 via pass-through errors and is byte-stable
+    # across runs.  The re-pin itself still waits on the operator's
+    # review of the five same-net own-pour zone findings (J1.2/J2.2
+    # front+back, R2.2) -- declaration review per the operator ruling,
+    # not a rule change.  Remove the entry when the re-pin lands.
     "01-voltage-divider": (
-        "Issue #9058: board 01 copper from PR #8848 cannot be re-pinned under "
-        "#8937's .kicad_dru while kct check refuses on 12 same-net mask_to_copper "
-        "errors (check completes since #9064/#9009); waits on same-net "
-        "mask_to_copper qualification."
+        "Issue #9058: board 01 evidence is stale against the "
+        "recipe-repaired copper (vias slid out of the R1.2/R2.1 mask "
+        "apertures, pours refilled post-fiducials); the re-pin waits on "
+        "the operator's review of the 5 same-net own-pour "
+        "mask_to_copper findings."
     ),
     # PR #9177 (issue #9143) landed the fiducials + board-ID silk on board 03
     # and refreshed its evidence, but deliberately did NOT re-issue the
@@ -78,11 +75,28 @@ EXPECTED_STALE: dict[str, str] = {
         "(wedge fix + #8532 fiducials/board-ID) is ahead of the committed "
         "copper too; the gate-pass rebuild owns the re-pin."
     ),
+    # Issue #9097 (PR #9131) adds recipe passes to board 04's
+    # ``generate_design.py`` (fragment merge, silk-over-drill clip,
+    # staircase compression), which changes the file ``readiness.json``
+    # pins.  Regenerating + re-pinning the committed artifact in the same PR
+    # turned 22 tests red (pinned reviewed-escape geometry, the #5744 "routing
+    # never touches footprint silk" invariant, remap identity, strict XPASS on
+    # the DRU), each needing an owner decision, so the regen was backed out.
+    # Issue #9455 owns the regen + re-pin; remove the entry when it lands.
+    "04-stm32-devboard": (
+        "Issue #9455: board 04's recipe moved in #9097 (PR #9131) ahead of the "
+        "committed copper and readiness evidence; the regen + re-pin (and the "
+        "#5744 silk-invariant decision) is owned by #9455."
+    ),
     "07-matchgroup-test": (
         "Issue #8399: the #8602 copper prune changed board 07's authored/reviewed "
         "sources; `refresh_readiness.py` refuses to re-pin while redundant_copper_* "
         "warnings remain (kct check allowance is 0). The last child of #8399 owns the re-pin."
     ),
+    # Board 09's entry (issue #9495 / #9519) was removed when #9519
+    # regenerated board 09's output and receipt via the #9469 pinned
+    # Docker toolchain workflow after #9502 moved both producers under
+    # run_on_evidence_toolchain.
 }
 
 BOARDS = sorted(p.parent.parent for p in BOARDS_DIR.glob("*/output/readiness.json"))

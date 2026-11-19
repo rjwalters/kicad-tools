@@ -67,7 +67,7 @@ from kicad_tools.geometry.package_body import footprint_side, package_body_polyg
 
 from ..violations import DRCResults, DRCViolation
 from .base import DRCRule
-from .silkscreen import _silk_side, _text_bbox_geometry
+from .silkscreen import _footprint_text_drawn_angle, _silk_side, _text_bbox_geometry
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers import DesignRules
@@ -540,7 +540,12 @@ class Pin1MarkerRule(DRCRule):
             if _silk_side(text.layer) != side:
                 continue
             geom = _text_bbox_geometry(
-                text.text, text.font_size, text.font_thickness, transform(text.position)
+                text.text,
+                text.font_size,
+                text.font_thickness,
+                transform(text.position),
+                _footprint_text_drawn_angle(text.rotation, text.keep_upright),
+                text.justify,
             )
             if geom is not None:
                 yield geom

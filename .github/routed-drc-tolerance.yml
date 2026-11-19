@@ -17,6 +17,10 @@
 # old counts (board 06: 18, ratcheted by #4019; board 07: 8, by #4007) let a
 # different finding hide behind a known one (#7270 Q3 ruling); never
 # re-add a count here for them.
+# Issue #8858: the release boards' residual mask_to_copper population is
+# allowed by IDENTITY in the identity_allowances: block at the bottom of
+# this file (see load_identity_allowances in scripts/ci/check_routed_drc.py),
+# not by any count here.
 # Issue #6390 declared the router's own net classes (Power, Clock,
 # HighCurrentSignal, ...) in the routed sidecars, so `kct check` holds
 # the committed copper to them.  Releases that sat below their own
@@ -34,3 +38,106 @@ manufacturers:
   boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb: jlcpcb-tier1
   boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb: jlcpcb-tier1
   boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb: jlcpcb-tier1
+
+# Issue #8858: identity-keyed allowances for the release boards' residual
+# mask_to_copper population (schema: load_identity_allowances in
+# scripts/ci/check_routed_drc.py; model: identity_allowance.py, the #7270 Q3
+# ruling).  mask_to_copper became default-on under --mfr in #8849 and the
+# gate stopped skipping it; the rule was corrected on pinned-image fab-parity
+# evidence twice (#9108 same-net clean entries -> within_own_pad info; #9292
+# thermal-spoke own pour -> own_pour_thermal info), and what remains on these
+# boards is same-net copper within the 0.09 mm error band beside its own pad's
+# opening (the #8914 fab-parity danger shape), pass-throughs and via rings on
+# their pad.  Signatures measured 2026-11-18 on origin/main @ ea0c5e2a1,
+# pinned toolchain (KCT_KICAD_DOCKER=1, kicad-cli 10.0.6), keyed with
+# identity_allowance.violation_identity:
+#   01: 2 errors / 1 signature   02: 29 / 8    03: 78 / 23
+#   05: 83 / 21                  06: 48 / 14   07: 67 / 16
+# Board 00 measures 0 mask_to_copper errors and board 04's native path
+# dispatches to the reviewed paid-drill validator whose rule selection does
+# not include mask_to_copper, so neither carries an entry.  The per-board
+# repair trackers (#8900 board 03, PR #9053 board 02, PR #9277 board 01,
+# #9068 board 05) drain these entries; the gate's staleness arm forces each
+# one out when its net stops carrying the finding, and a net that starts
+# carrying a NEW mask error still fails the gate.  Verify with:
+#   KCT_KICAD_DOCKER=1 uv run python scripts/ci/check_routed_drc.py <pcb>
+identity_allowances:
+  boards/01-voltage-divider/output/voltage_divider_routed.kicad_pcb:
+    mask_to_copper:
+      VOUT: 8858
+  boards/02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb:
+    mask_to_copper:
+      GND: 8858
+      LINE_A: 8858
+      NODE_A: 8858
+      NODE_B: 8858
+      NODE_C: 8858
+      NODE_D: 8858
+      RESET: 8858
+      VCC: 8858
+  boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb:
+    mask_to_copper:
+      AREF: 8858
+      BTN1: 8858
+      BTN2: 8858
+      BTN3: 8858
+      BTN4: 8858
+      GND: 8858
+      HWB: 8858
+      ISP_MISO: 8858
+      ISP_MOSI: 8858
+      ISP_SCK: 8858
+      JOY_BTN: 8858
+      JOY_X: 8858
+      JOY_Y: 8858
+      JOY_Y_RAW: 8858
+      RESET: 8858
+      USB_CC2: 8858
+      USB_D+: 8858
+      USB_D-: 8858
+      USB_MCU_D+: 8858
+      USB_MCU_D-: 8858
+      VBUS: 8858
+      VCC: 8858
+      XTAL1: 8858
+  boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb:
+    mask_to_copper:
+      +5V: 8858
+      AREF: 8858
+      CPH: 8858
+      CPL: 8858
+      DRIVER_SLEEP: 8858
+      GND: 8858
+      GND_SENSE: 8858
+      HALL_A: 8858
+      HALL_B: 8858
+      HALL_C: 8858
+      IREF: 8858
+      LED_A: 8858
+      MOSI: 8858
+      PG_DELAY: 8858
+      RESET: 8858
+      RUN: 8858
+      SPEED: 8858
+      STATUS_LED: 8858
+      V3P3: 8858
+      VCP: 8858
+      VM: 8858
+  boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb:
+    mask_to_copper:
+      +3V3: 8858
+      +5V: 8858
+      BOOT0: 8858
+      DQ13: 8858
+      DQ7: 8858
+      GND: 8858
+      LDQM: 8858
+      LED_FAIL_A: 8858
+      LED_PASS_A: 8858
+      NRST: 8858
+      SWDIO: 8858
+      SWO: 8858
+      UART_RX: 8858
+      UART_TX: 8858
+      UDQM: 8858
+      VCAP1: 8858

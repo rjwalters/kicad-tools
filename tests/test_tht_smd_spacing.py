@@ -1,6 +1,7 @@
 """THT / via to SMD-pad spacing (Issue #8843): error / warning / clean bands."""
 
 import math
+import re
 
 import pytest
 
@@ -70,7 +71,25 @@ def via(*, drill, size=1.9, layers='"F.Cu" "B.Cu"', kind=""):
     )
 
 
-@pytest.mark.parametrize(("gap", "severity"), [(1.5, "error"), (2.3, "warning"), (3.0, None)])
+@pytest.mark.parametrize(
+    ("gap", "severity"),
+    [
+        (1.5, "error"),
+        # Issue #9421: the fab rated a 2.025 mm pair danger; the old 2.0 mm floor passed it.
+        (2.025, "error"),
+        # Band edges: error is strictly < 2.032, warning strictly < 3.05 (no tolerance).
+        (2.031, "error"),
+        (2.0319, "error"),
+        (2.032, "warning"),
+        (2.3, "warning"),
+        (2.5, "warning"),
+        (3.0, "warning"),
+        (3.049, "warning"),
+        (3.0499, "warning"),
+        (3.05, None),
+        (3.06, None),
+    ],
+)
 def test_bands(gap, severity):
     found = check_tht_smd_spacing(board(tht(), smd(gap))).violations
     if severity is None:
@@ -79,6 +98,29 @@ def test_bands(gap, severity):
         assert [v.severity for v in found] == [severity]
         assert found[0].actual_value == pytest.approx(gap, abs=0.002)
         assert set(found[0].items) == {"tht", "smd"}
+
+
+@pytest.mark.parametrize(
+    ("gap", "limit_text"),
+    [(2.025, "< 2.032mm"), (1.5, "< 2.032mm"), (2.9, "< 3.050mm"), (3.0, "< 3.050mm")],
+)
+def test_message_states_the_exact_limit(gap, limit_text):
+    """Issue #9421: the printed limit must be the threshold the code applies."""
+    (v,) = check_tht_smd_spacing(board(tht(), smd(gap))).violations
+    assert limit_text in v.message
+
+
+@pytest.mark.parametrize(
+    ("gap", "severity"),
+    [(2.0315, "error"), (2.0319, "error"), (3.0495, "warning"), (3.0499, "warning")],
+)
+def test_message_distance_is_strictly_below_printed_limit_at_band_edge(gap, severity):
+    """Issue #9483: a gap within 0.5 um of an edge must not print ``x < x``."""
+    (v,) = check_tht_smd_spacing(board(tht(), smd(gap))).violations
+    assert v.severity == severity
+    match = re.search(r"spacing ([\d.]+)mm < ([\d.]+)mm", v.message)
+    assert match is not None, v.message
+    assert float(match.group(1)) < float(match.group(2)), v.message
 
 
 def test_back_side_smd_pad_is_measured():
@@ -139,12 +181,18 @@ def test_via_copper_touching_an_smd_pad_stays_via_in_pad_territory():
 
 def test_unmeasurable_pad_shape_is_reported_not_cleared():
     """Issue #8914: a shape the rule cannot measure must not look like a cleared pad."""
+    # Issue #9498: a custom pad is measurable through the shared outline
+    # builder, so the refused shape here is one carrying an unsupported
+    # primitive (``gr_circle``) -- the builder names it in the finding.
     custom = """(footprint "T" (layer "F.Cu") (at 0 0) (property "Reference" "J2")
       (pad "1" thru_hole custom (at 0 0) (size 1.6 1.6) (drill 0.9)
-        (layers "*.Cu" "*.Mask") (net 1 "A") (uuid "odd")))"""
+        (layers "*.Cu" "*.Mask") (net 1 "A") (uuid "odd")
+        (options (anchor circle))
+        (primitives (gr_circle (center 0 0) (width 0.2) (fill yes)))))"""
     found = check_tht_smd_spacing(board(custom, smd(1.5))).violations
     assert [(v.rule_id, v.severity) for v in found] == [("tht_smd_spacing_incomplete", "info")]
     assert "custom" in found[0].message
+    assert "gr_circle" in found[0].message
     assert "odd" in found[0].message
     # A measurable pad on the same board is still judged.
     both = check_tht_smd_spacing(board(custom, tht(), smd(1.5))).violations
@@ -198,11 +246,11 @@ UNTENTED = "(tenting (front no) (back no))"
 TENTED = "(tenting (front yes) (back yes))"
 
 
-def ring(x, *, uuid, drill=0.4, size=0.8, tenting=UNTENTED):
+def ring(x, *, uuid, drill=0.4, size=0.8, tenting=UNTENTED, net=1):
     """A via at ``(x, 0)``; ``tenting=""`` omits the node (absent-token path)."""
     return (
         f'(via (at {x} 0) (size {size}) (drill {drill}) (layers "F.Cu" "B.Cu") '
-        f'(net 1) {tenting} (uuid "{uuid}"))'
+        f'(net {net}) {tenting} (uuid "{uuid}"))'
     )
 
 
@@ -258,17 +306,59 @@ def test_tht_component_pad_is_never_paired_with_a_via_annulus():
     assert not check_tht_smd_spacing(board(pad, exposed)).violations
 
 
-def test_two_exposed_anchor_vias_report_the_pair_once():
-    """AC7: each anchor via is on both sides of the comparison; one finding, not two."""
-    a = ring(0, uuid="a", drill=1.3, size=1.9)
-    b = ring(0.95 + 1.5 + 0.95, uuid="b", drill=1.3, size=1.9)
+def test_two_exposed_anchor_vias_on_different_nets_report_the_pair_once():
+    """Each anchor via is on both sides of the comparison; one finding, not two.
+
+    The nets differ (Issue #9325): a same-net anchor↔anchor pair is exempt
+    (the fab's DFM counted none), so the dedup guard needs different nets.
+    """
+    a = ring(0, uuid="a", drill=1.3, size=1.9, net=1)
+    b = ring(0.95 + 1.5 + 0.95, uuid="b", drill=1.3, size=1.9, net=2)
     found = check_tht_smd_spacing(board(a, b)).violations
     assert [v.severity for v in found] == ["error"]
     # Front-only exposure: still one finding, never one per ordering.
-    a = ring(0, uuid="a", drill=1.3, size=1.9, tenting="(tenting (front no) (back yes))")
-    b = ring(3.4, uuid="b", drill=1.3, size=1.9, tenting="(tenting (front no) (back yes))")
+    a = ring(0, uuid="a", drill=1.3, size=1.9, net=1, tenting="(tenting (front no) (back yes))")
+    b = ring(3.4, uuid="b", drill=1.3, size=1.9, net=2, tenting="(tenting (front no) (back yes))")
     found = check_tht_smd_spacing(board(a, b)).violations
     assert [v.layer for v in found] == ["F.Cu"]
+
+
+def test_same_net_exposed_anchor_vias_produce_no_finding():
+    """Issue #9325: consecutive `kct pcb reinforce` wire legs are same-net by design.
+
+    Both vias are anchor-sized and both annuli are exposed within the warning
+    band; the fab's DFM counted none of these pairs, so the rule must not
+    either. (One-board evidence only -- see the module docstring.)
+    """
+    a = ring(0, uuid="a", drill=1.3, size=1.9)
+    b = ring(0.95 + 1.5 + 0.95, uuid="b", drill=1.3, size=1.9)
+    assert not check_tht_smd_spacing(board(a, b)).violations
+    # Same-net anchor pair exposed on the front face only: exempt all the same.
+    a = ring(0, uuid="a", drill=1.3, size=1.9, tenting="(tenting (front no) (back yes))")
+    b = ring(3.4, uuid="b", drill=1.3, size=1.9, tenting="(tenting (front no) (back yes))")
+    assert not check_tht_smd_spacing(board(a, b)).violations
+
+
+def test_two_netless_anchor_vias_still_reported():
+    """Net 0 is the no-net sentinel, not a shared net (#4127): no exemption.
+
+    Two *unconnected* anchor-sized mask-open holes 1.5 mm apart are exactly the
+    bridging hazard the annulus pass models -- colliding on ``net 0`` is not
+    same-net, so the exemption must not swallow the pair.
+    """
+    a = ring(0, uuid="a", drill=1.3, size=1.9, net=0)
+    b = ring(0.95 + 1.5 + 0.95, uuid="b", drill=1.3, size=1.9, net=0)
+    found = check_tht_smd_spacing(board(a, b)).violations
+    assert [v.severity for v in found] == ["error"]
+    assert [v.nets for v in found] == [("0",)]
+
+
+def test_anchor_against_different_net_fanout_annulus_is_still_reported():
+    """Issue #9325: the same-net anchor↔anchor exemption does not cross nets."""
+    anchor = ring(0, uuid="anchor", drill=1.3, size=1.9, net=1)
+    small = ring(0.95 + 1.5 + 0.4, uuid="small", net=2)
+    found = check_tht_smd_spacing(board(anchor, small)).violations
+    assert [v.severity for v in found] == ["error"]
 
 
 @pytest.mark.parametrize(

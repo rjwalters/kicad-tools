@@ -761,6 +761,58 @@ def _parse_region_arg(
     return (x1, y1, x2, y2), None
 
 
+def _print_waiver_invalidation_report(
+    project: Path,
+    before_board: Any,
+    after_board: Any,
+    accepted_plans: list,
+    *,
+    output_format: str,
+) -> None:
+    """Report waiver sidecar keys this prune edit invalidated (Issue #9331).
+
+    Diffs which sidecar entries waive something before vs. after the edit
+    (``check_cmd.waiver_invalidation_report_lines``).  Silent when no waivers
+    sidecar is discoverable, when nothing was edited, or when no entry was
+    invalidated.  Board output and the exit code are unchanged: the report
+    goes to stdout (text format) or stderr (``--format json``, so stdout
+    stays a single JSON document).
+    """
+    if not accepted_plans or before_board is None:
+        return
+    if after_board is None:
+        # Dry run: rebuild the would-be board in memory from the plans
+        # prune accepted (nothing was written to disk).
+        from kicad_tools.pcb_prune import apply_plans
+        from kicad_tools.schema.pcb import PCB
+
+        after_board = PCB.load(project)
+        apply_plans(after_board, accepted_plans)
+    from kicad_tools.cli.check_cmd import waiver_invalidation_report_lines
+
+    out = sys.stderr if output_format == "json" else sys.stdout
+    for line in waiver_invalidation_report_lines(project, before_board, after_board):
+        print(line, file=out)
+
+
+def _waiver_report_before_board(pcb_path: Path):
+    """Pre-edit geometry for the waiver-invalidation report, or ``None``.
+
+    Prune overwrites its input when ``--output`` is not given, so the board
+    must be captured before the edit.  ``None`` (no sidecar next to the
+    board) skips the report entirely -- and the extra load.
+    """
+    try:
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.rules.waivers import discover_waivers_sidecar
+
+        if discover_waivers_sidecar(pcb_path) is None:
+            return None
+        return PCB.load(pcb_path)
+    except Exception:  # noqa: BLE001 - the report must never fail the command
+        return None
+
+
 def _run_prune_command(args, pcb_path: Path) -> int:
     """Handle the 'pcb prune' command (issue #8216).
 
@@ -830,6 +882,9 @@ def _run_prune_command(args, pcb_path: Path) -> int:
     unverified = getattr(args, "unverified", False)
     src_path = pcb_path
     res = None
+    # Issue #9331: pre-edit geometry for the invalidated-waiver report;
+    # prune overwrites the input when --output is not given.
+    waiver_before_board = _waiver_report_before_board(pcb_path)
     try:
         # Issue #8730: one invocation iterates to a fixed point -- a pass can
         # expose more redundant copper (a split container's piece is frozen
@@ -1003,6 +1058,18 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         except Exception as e:
             print(f"Error saving PCB: {e}", file=sys.stderr)
             return 1
+
+    if changed:
+        # Issue #9331: a collinear merge or snap moves copper that waiver keys
+        # embed, so entries that waived a finding before the edit may match
+        # nothing now.  Report-only; the edit itself is already written.
+        _print_waiver_invalidation_report(
+            pcb_path,
+            waiver_before_board,
+            pcb if not dry_run else None,
+            res.accepted,
+            output_format=output_format,
+        )
     return 0
 
 
@@ -1303,6 +1370,81 @@ def _run_reinforce_list_wires(args, pcb_path: Path, net_name: str | None) -> int
     return 0
 
 
+def _run_reinforce_adopt(args, pcb_path: Path, net_name: str | None) -> int:
+    """``pcb reinforce --adopt``: record wires already on the board (#9419).
+
+    Reads each solder-mask strip chain and its anchor holes back into
+    ``<board>.reinforcement.json``. Nothing on the board moves and the board is
+    not written; wires the sidecar already records are kept as they are, so a
+    re-run is a no-op.
+    """
+    from kicad_tools.pcb.reinforcement_sidecar import (
+        adopt_wire_records,
+        already_recorded,
+        load_wires,
+        sidecar_path,
+        write_sidecar,
+    )
+    from kicad_tools.schema.pcb import PCB
+
+    try:
+        pcb = PCB.load(str(pcb_path))
+    except Exception as e:  # noqa: BLE001 - surfaced to the user, exit 1
+        print(f"Error loading {pcb_path}: {e}", file=sys.stderr)
+        return 1
+    if net_name and pcb.get_net_by_name(net_name) is None:
+        print(f"Error: net {net_name!r} not found on {pcb_path}", file=sys.stderr)
+        return 1
+    path = sidecar_path(pcb_path)
+    try:
+        existing = load_wires(path) if path.is_file() else []
+    except (OSError, ValueError) as e:
+        print(f"Error reading {path}: {e}", file=sys.stderr)
+        return 1
+    adopted = adopt_wire_records(pcb, net_name)
+    fresh = [r for r in adopted.records if not already_recorded(existing, r)]
+    kept = len(adopted.records) - len(fresh)
+    dry_run = getattr(args, "dry_run", False)
+    written = None
+    if fresh and not dry_run:
+        try:
+            written = str(write_sidecar(pcb_path, fresh))
+        except (OSError, ValueError) as e:
+            print(f"Error writing reinforcement sidecar: {e}", file=sys.stderr)
+            return 1
+    if getattr(args, "format", "text") == "json":
+        print(
+            json.dumps(
+                {
+                    "sidecar": written,
+                    "adopted": fresh,
+                    "already_recorded": kept,
+                    "unresolved": [
+                        {"net": n, "layer": layer, "at": {"x": at[0], "y": at[1]}, "reason": why}
+                        for n, layer, at, why in adopted.unresolved
+                    ],
+                },
+                indent=2,
+            )
+        )
+        return 0
+    verb = "Would adopt" if dry_run else "Adopted"
+    print(
+        f"{verb} {len(fresh)} wire(s) from {pcb_path.name}" + (f" -> {written}" if written else "")
+    )
+    if kept:
+        print(f"  {kept} wire(s) already in the sidecar were kept")
+    for record in fresh:
+        a = ", ".join(f"({p['x']:.2f}, {p['y']:.2f})" for p in record["anchors"])
+        print(
+            f"  {record['net']} {record['layer']} {record['length_mm']:.1f} mm "
+            f"{record['wire_gauge_awg']} AWG anchors: {a}"
+        )
+    for n, layer, at, why in adopted.unresolved:
+        print(f"  Not adopted: {n or '?'} {layer} strip at ({at[0]:.2f}, {at[1]:.2f}): {why}")
+    return 0
+
+
 def _run_reinforce_command(args, pcb_path: Path) -> int:
     """Handle the 'pcb reinforce' command (Unit A of #4218; issues #4220, #8742).
 
@@ -1325,6 +1467,8 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
     net_name = getattr(args, "net", None)
     if getattr(args, "list_wires", False):
         return _run_reinforce_list_wires(args, pcb_path, net_name)
+    if getattr(args, "adopt", False):
+        return _run_reinforce_adopt(args, pcb_path, net_name)
     if not net_name:
         print("Error: --net is required", file=sys.stderr)
         return 1
@@ -1933,12 +2077,13 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                         "from_layer": c.from_layer,
                         "to_layer": c.to_layer,
                         "via_count": c.count,
+                        "tie_via_count": len(c.tie_vias),
                         "drill_mm": c.drill,
                         "pad_diameter_mm": c.pad_diameter,
                         "capacity_a": round(c.current_capacity_a(), 4),
                         "vias": [
                             {"position": _sheet(v[0]), "drill_mm": v[1], "pad_diameter_mm": v[2]}
-                            for v in c.vias
+                            for v in (*c.vias, *c.tie_vias)
                         ],
                     }
                     for c in r.layer_changes
@@ -1998,9 +2143,14 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                 narrowest = r.min_width
                 if narrowest is not None:
                     nx, ny = _sheet(narrowest.position)
-                    # Say when the figure is a group's summed width, so
-                    # 2.0 mm is not misread as one trace's width (#8917).
-                    doubled = " (summed parallel group)" if narrowest.parallel_group else ""
+                    # Say when the figure is a group's effective width, so
+                    # 2.0 mm is not misread as one trace's width (#8917) --
+                    # naming the shape: merged same-layer copper, a sum
+                    # across layers, or both at once (#9557, #9560).
+                    if narrowest.parallel_group:
+                        doubled = f" ({narrowest.shape} parallel group)"
+                    else:
+                        doubled = ""
                     print(
                         f"      min width {narrowest.width_mm:.3f} mm on "
                         f"{narrowest.layer} at ({nx:.3f}, {ny:.3f}){doubled}"

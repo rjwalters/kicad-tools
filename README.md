@@ -609,7 +609,7 @@ full list (every command and subcommand) lives in
 
 | Command | Description |
 |---------|-------------|
-| `kct fix-drc <pcb>` | Automated DRC violation repair (clearance + drill) |
+| `kct fix-drc <pcb>` | Automated DRC violation repair (clearance + drill + mask-copper) |
 | `kct fix-erc <schematic>` | Automated ERC violation repair (PWR_FLAG + no-connect) |
 | `kct fix-vias <pcb>` | Fix vias to meet manufacturer specifications (incl. off-pad relocation) |
 | `kct pipeline <input>` | End-to-end repair pipeline for existing PCBs |

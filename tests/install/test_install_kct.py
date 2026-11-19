@@ -31,11 +31,12 @@ INSTALLER = REPO_ROOT / "scripts" / "install-kct.sh"
 SKILLS_SRC = REPO_ROOT / ".claude" / "commands" / "kct"
 CI_GATES_SRC = REPO_ROOT / "scripts" / "ci"
 
-# The three portable CI gates vendored into the consumer's .kct/ci/ (#4056).
+# The four portable CI gates vendored into the consumer's .kct/ci/ (#4056).
 # Must stay in sync with CI_GATE_FILES in scripts/install-kct.sh.
 VENDORED_CI_GATES = (
     "check_copper_lvs.py",
     "check_routed_drc.py",
+    "identity_allowance.py",
     "net_class_map_resolver.py",
 )
 
@@ -436,7 +437,7 @@ def test_git_mode_writes_git_source(target_repo: Path, fake_uv_env: dict[str, st
 def test_ci_gates_vendored_byte_identical_and_executable(
     target_repo: Path, fake_uv_env: dict[str, str]
 ) -> None:
-    """The 3 portable gates land in .kct/ci/, byte-identical + executable."""
+    """The 4 portable gates land in .kct/ci/, byte-identical + executable."""
     result = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
     assert result.returncode == 0, result.stderr
 
@@ -499,7 +500,7 @@ def test_ci_gates_rerun_idempotent(target_repo: Path, fake_uv_env: dict[str, str
     assert second.returncode == 0, second.stderr
 
     ci_dir = target_repo / ".kct" / "ci"
-    # Still exactly the expected set (3 gates + README), all byte-identical.
+    # Still exactly the expected set (4 gates + README), all byte-identical.
     vendored = sorted(p.name for p in ci_dir.iterdir())
     assert vendored == sorted([*VENDORED_CI_GATES, "README.md"])
     for name in VENDORED_CI_GATES:

@@ -170,6 +170,43 @@ def test_same_net_conductor_inside_the_opening_is_flagged_without_overlapping(
 
 
 @pytest.mark.parametrize(
+    "owner_net,conductor_net,expected_nets",
+    [
+        ("N", "N", ("N",)),
+        ("P", "C", ("C", "P")),
+        ("N", None, ("N",)),
+    ],
+)
+def test_violation_names_its_nets_for_identity_baselines(owner_net, conductor_net, expected_nets):
+    """Issue #8858: each mask_to_copper record names the owner pad's and the
+    exposed conductor's nets, so the synthetic-fixture CI gates can baseline
+    findings by the regeneration-stable net signature -- their ``items``
+    are opening/conductor UUIDs the native pass re-mints every run."""
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    geometry, _, _ = toy_geometry(
+        conductor_x=1.05,
+        overlap_owner=False,
+        owner_net=owner_net,
+        conductor_net=conductor_net,
+    )
+    result = assess_attributed_geometry(
+        geometry,
+        MaskCopperPolicy(
+            clearance_mm=0.09,
+            source="order",
+            process="process",
+            revision="rev",
+            warning_clearance_mm=0.15,
+        ),
+    )
+    violations = [v for v in assessment_results(result).violations if v.rule_id == "mask_to_copper"]
+    assert len(violations) == 1
+    assert violations[0].severity == "error"
+    assert violations[0].nets == expected_nets
+
+
+@pytest.mark.parametrize(
     "conductor_kind,mode",
     [
         (kind, mode)
@@ -1344,6 +1381,126 @@ def test_v1_payload_without_new_fields_loads_and_round_trips():
     assert reloaded.measurements[0].to_dict() == measurement.to_dict()
 
 
+def _wkt_bearing_provenance():
+    """Synthetic ``geometry_provenance`` carrying raw WKT in all three maps (#9575)."""
+    return {
+        "export": {
+            "source_sha256": "a" * 64,
+            "features": [{"feature": "routed"}],
+            "gerber_sha256": {"F.Mask": "b" * 64},
+            "layers_wkt": {
+                "F.Mask": "POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))",
+                "F.Cu": "POLYGON ((0 0, 0 2, 2 2, 2 0, 0 0))",
+            },
+            "source_geometries": {
+                "00000000-0000-0000-0000-000000000001": {
+                    "kind": "pad:rect",
+                    "layers_wkt": {"F.Cu": "POLYGON ((5 5, 5 6, 6 6, 6 5, 5 5))"},
+                },
+            },
+        },
+        "objects": {"objects_sha256": "c" * 64},
+        "source_objects": {
+            "00000000-0000-0000-0000-000000000002": {
+                "kind": "segment",
+                "net": "N",
+                "margin_mm": {"F.Cu": 0.0},
+                "layers_wkt": {"F.Cu": "POLYGON ((0 0, 0 2, 2 2, 2 0, 0 0))"},
+            },
+        },
+    }
+
+
+def test_committed_provenance_ships_wkt_digests_not_raw_strings():
+    """``to_dict`` replaces every raw WKT string with a hash+length record (#9575)."""
+    import hashlib
+
+    provenance = _wkt_bearing_provenance()
+    assessment = MaskCopperAssessment(
+        coverage="complete", policy=_POLICY, geometry_provenance=provenance
+    )
+    committed = assessment.to_dict()["geometry_provenance"]
+
+    wkt_maps = [
+        committed["export"]["layers_wkt"],
+        committed["export"]["source_geometries"]["00000000-0000-0000-0000-000000000001"][
+            "layers_wkt"
+        ],
+        committed["source_objects"]["00000000-0000-0000-0000-000000000002"]["layers_wkt"],
+    ]
+    raw = [
+        {
+            "F.Mask": "POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))",
+            "F.Cu": "POLYGON ((0 0, 0 2, 2 2, 2 0, 0 0))",
+        },
+        {"F.Cu": "POLYGON ((5 5, 5 6, 6 6, 6 5, 5 5))"},
+        {"F.Cu": "POLYGON ((0 0, 0 2, 2 2, 2 0, 0 0))"},
+    ]
+    for wkt_map, expected_raw in zip(wkt_maps, raw, strict=True):
+        assert set(wkt_map) == set(expected_raw)
+        for layer, text in expected_raw.items():
+            assert wkt_map[layer] == {
+                "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "bytes": len(text.encode("utf-8")),
+            }
+    assert committed["export"]["features"] == [{"feature": "routed"}]
+    assert committed["export"]["gerber_sha256"] == {"F.Mask": "b" * 64}
+    assert committed["objects"] == {"objects_sha256": "c" * 64}
+    assert committed["source_objects"]["00000000-0000-0000-0000-000000000002"]["kind"] == "segment"
+
+    assert assessment.geometry_provenance["export"]["layers_wkt"]["F.Cu"] == raw[0]["F.Cu"]
+    assert (
+        assessment.geometry_provenance["export"]["source_geometries"][
+            "00000000-0000-0000-0000-000000000001"
+        ]["layers_wkt"]["F.Cu"]
+        == raw[1]["F.Cu"]
+    )
+    assert (
+        assessment.geometry_provenance["source_objects"]["00000000-0000-0000-0000-000000000002"][
+            "layers_wkt"
+        ]["F.Cu"]
+        == raw[2]["F.Cu"]
+    )
+
+
+def test_committed_assessment_round_trips_and_stays_put_after_reload():
+    """Digesting is lossy for the payload only: verdict fields survive, and a
+    reloaded assessment serializes to identical bytes (no double digest)."""
+    import hashlib
+
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry
+
+    geometry, _, _ = toy_geometry()
+    assessment = assess_attributed_geometry(geometry, _POLICY)
+    committed = assessment.to_dict()
+
+    reloaded = MaskCopperAssessment.from_dict(committed)
+    assert reloaded.passed == assessment.passed
+    assert reloaded.coverage == assessment.coverage
+    assert reloaded.binding == assessment.binding
+    assert [m.to_dict() for m in reloaded.measurements] == [
+        m.to_dict() for m in assessment.measurements
+    ]
+    assert reloaded.geometry_provenance["export"]["layers_wkt"]["F.Cu"] == {
+        "sha256": hashlib.sha256(
+            assessment.geometry_provenance["export"]["layers_wkt"]["F.Cu"].encode()
+        ).hexdigest(),
+        "bytes": len(assessment.geometry_provenance["export"]["layers_wkt"]["F.Cu"]),
+    }
+    assert reloaded.to_dict() == committed
+
+
+def test_committed_provenance_passthrough_for_empty_and_foreign_shapes():
+    """Coverage-incomplete and WKT-free provenance serialize unchanged (#9575)."""
+    empty = MaskCopperAssessment(reasons=["native unavailable"])
+    assert empty.to_dict()["geometry_provenance"] == {}
+
+    foreign = {"export": {"layers_wkt": "not-a-map"}, "source_objects": {"x": "not-a-dict"}}
+    keeps = MaskCopperAssessment(coverage="incomplete", reasons=["x"], geometry_provenance=foreign)
+    assert keeps.to_dict()["geometry_provenance"] == foreign
+    assert keeps.geometry_provenance == foreign
+
+
 def _merged_region_geometry(trace_kind):
     """Two pads on nets N/M whose mask openings are bridged by one native region.
 
@@ -1419,3 +1576,37 @@ def test_same_net_conductor_over_merged_region_prints_bare_same_net(trace_kind):
     ]
     assert len(labels) == 1
     assert labels[0].endswith("; same-net")
+
+
+@pytest.mark.parametrize(
+    "pad_b_net,expected_nets",
+    [
+        ("M", ("M", "N")),  # owners on N and M, conductor on N: M must survive
+        ("", ("N",)),  # unnamed owner pad mixed with a named one
+        ("N", ("N",)),  # same net on every owner stays single-net
+    ],
+)
+def test_merged_region_nets_carry_every_owner_net(pad_b_net, expected_nets):
+    """Issue #9374: a merged region owned by pads on 2+ nets has no scalar
+    ``owner_net``; its finding's ``nets`` must still name every owner net, so
+    a ``("mask_to_copper", "N")`` allowance entry cannot also cover it."""
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    geometry = _merged_region_geometry("segment")
+    geometry.objects["00000000-0000-0000-0000-000000000002"]["net"] = pad_b_net
+    assessment = assess_attributed_geometry(geometry, _POLICY)
+    merged = [m for m in assessment.measurements if m.opening_kind == "merged_region"]
+    assert len(merged) == 1
+    assert merged[0].owner_nets == tuple(sorted({n for n in ("N", pad_b_net) if n}))
+    findings = [
+        v
+        for v in assessment_results(assessment).violations
+        if v.rule_id == "mask_to_copper" and "opening merged_region" in v.message
+    ]
+    assert len(findings) == 1
+    assert findings[0].nets == expected_nets
+    # Round trip keeps the field.
+    reloaded = MaskCopperAssessment.from_dict(assessment.to_dict())
+    assert [m.owner_nets for m in reloaded.measurements] == [
+        m.owner_nets for m in assessment.measurements
+    ]

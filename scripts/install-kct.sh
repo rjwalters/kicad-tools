@@ -25,12 +25,14 @@
 #      valid artifacts (install-metadata.json accumulates client/file/skill
 #      history across runs rather than being overwritten).
 #   3. Vendors the portable CI gate scripts (scripts/ci/check_copper_lvs.py,
-#      check_routed_drc.py, net_class_map_resolver.py) into the target's
-#      .kct/ci/ (Epic #4054 Child 2, #4056). These are stdlib+yaml only, take
-#      the board path as a CLI argument, and gate copper-LVS / routed-DRC in
-#      the consumer's own CI. Copied verbatim as a sibling triple so
-#      check_routed_drc.py's local `from net_class_map_resolver import ...`
-#      (a sys.path insert relative to the script's own dir) still resolves.
+#      check_routed_drc.py, identity_allowance.py, net_class_map_resolver.py)
+#      into the target's .kct/ci/ (Epic #4054 Child 2, #4056). These are
+#      stdlib+yaml only, take the board path as a CLI argument, and gate
+#      copper-LVS / routed-DRC in the consumer's own CI. Copied verbatim as a
+#      sibling set so check_routed_drc.py's local
+#      `from net_class_map_resolver import ...` and
+#      `from identity_allowance import ...` (sys.path inserts relative to the
+#      script's own dir) still resolve.
 #      Shared across both clients, installed regardless of --client.
 #   4. Vendors the load-bearing conventions (native backend build, cross-gate
 #      DRC, artifact-first, per-rule warning baselines) verbatim into
@@ -210,16 +212,18 @@ CI_GATES_SRC="$KCT_ROOT/scripts/ci"
 ok "KCT_ROOT=$KCT_ROOT"
 
 # The portable CI gate scripts vendored into the consumer's .kct/ci/ (#4056).
-# This list is DELIBERATELY explicit, not a glob: only these three gates are
+# This list is DELIBERATELY explicit, not a glob: only these four gates are
 # consumer-generic (stdlib+yaml, CLI-arg-driven, no boards/ assumption). The
 # board-specific / repo-internal gates in scripts/ci/ (check_board_00_e2e.py,
 # check_board_05_blocking.py, check_diffpair_coverage.py, etc.) are NOT vendored.
-# They are copied verbatim as a sibling triple: check_routed_drc.py imports
-# net_class_map_resolver via a sys.path insert relative to its OWN directory,
-# so the three must land together in one dir for that import to resolve.
+# They are copied verbatim as a sibling set: check_routed_drc.py imports
+# net_class_map_resolver and identity_allowance via sys.path inserts relative
+# to its OWN directory, so the four must land together in one dir for those
+# imports to resolve.
 CI_GATE_FILES=(
   "check_copper_lvs.py"
   "check_routed_drc.py"
+  "identity_allowance.py"
   "net_class_map_resolver.py"
 )
 
@@ -643,8 +647,9 @@ Exit `0` = within tolerance, `2` = exceeded (job fails), `1` = tool error.
 Passing zero files is a no-op that exits `0` (a first CI run with no changed
 `*_routed.kicad_pcb` files passes).
 
-`net_class_map_resolver.py` is a dependency of `check_routed_drc.py`; keep
-all three files together in this directory so its sibling import resolves.
+`net_class_map_resolver.py` and `identity_allowance.py` are dependencies of
+`check_routed_drc.py`; keep all four files together in this directory so its
+sibling imports resolve.
 CI_README_EOF
 }
 do_action "write .kct/ci/README.md" write_ci_readme
