@@ -232,7 +232,7 @@ design_rules:
 # A stackup with NO entry here fails closed: ``kct check`` reports verdict
 # ``incomplete`` instead of falling back to another copper weight.
 dfm_thresholds:
-  version: 1
+  version: 2
   entries:
     2layer_1oz:
       layers: 2

@@ -41,6 +41,15 @@ EXPECTED_STALE: dict[str, str] = {
         "Issue #9455: board 04's recipe moved in #9097 (PR #9131) ahead of the "
         "archived design-source copy; the regen + re-pin is owned by #9455."
     ),
+    # Same board, same #9455 regen: PR #9317's owner-slug rewrite touched the
+    # live recipe, but the archived copy is hash-bound into manifest.json /
+    # readiness.json and must keep the pre-transfer slug until the regen
+    # re-emits it (the output/ tree is excluded from the slug guard).
+    # Remove when #9455 lands.
+    "04-stm32-devboard/check_manufacturing.py": (
+        "Issue #9455: PR #9317 rewrote the live recipe's repository URLs to "
+        "2AMLogic; the archived copy is hash-bound and regenerates via #9455."
+    ),
 }
 
 # Live recipes deliberately left out of the archive, keyed by
