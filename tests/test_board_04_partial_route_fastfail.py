@@ -134,7 +134,9 @@ class TestBoard04PartialRouteFastFail:
         monkeypatch.setattr(module, "repair_sharp_corners", lambda *a, **k: True)
         # Issue #9097: and the fragment merge / silk clip that follow it.
         monkeypatch.setattr(module, "merge_fragment_runs", lambda *a, **k: True)
-        monkeypatch.setattr(module, "clip_silk_to_holes", lambda *a, **k: True)
+        # Issue #9455: the via slide / silk-vs-hole gate replace the #9097 clip.
+        monkeypatch.setattr(module, "slide_vias_off_silk", lambda *a, **k: True)
+        monkeypatch.setattr(module, "check_silk_clear_of_holes", lambda *a, **k: True)
         monkeypatch.setattr(module, "fill_zones", lambda *a, **k: True)
         monkeypatch.setattr(module, "run_drc", lambda *a, **k: True)
         monkeypatch.setattr(module, "generate_manufacturing", lambda *a, **k: True)

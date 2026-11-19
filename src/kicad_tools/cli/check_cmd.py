@@ -1446,12 +1446,47 @@ def _resolve_check_scope(args: argparse.Namespace, parser: argparse.ArgumentPars
     return scope
 
 
+def _inactive_rules_from_coverage(coverage: dict[str, Any]) -> frozenset[str]:
+    """Categories that could not produce findings this run, from the coverage map.
+
+    ``run_selected_checks`` records one
+    :class:`~kicad_tools.validate.coverage.Coverage` per category, and a
+    ``skipped`` state there means the category's inputs were absent (or the
+    category is opt-in and was not opted in), so its rule could not produce
+    findings.  Deriving the inactive set from those recorded states -- instead
+    of re-deriving :func:`kicad_tools.validate.coverage.precheck`'s conditions
+    by hand -- covers every skip reason (issue #9529): the two the previous
+    hand-mirrored helper knew (``ampacity``, ``path_ampacity``) and the nine
+    more ``precheck`` carries, with no drift when ``precheck`` grows another.
+
+    An ``unknown`` state counts as inactive exactly when its reason is
+    ``needs_input:<X>`` (:func:`kicad_tools.validate.coverage.rule_never_ran`,
+    issue #9552): the absent input is a prerequisite for any finding of that
+    category, so the rule was a no-op -- ``ampacity`` with declared-but-
+    unmapped currents is the reported case, and the rule's empty specs map
+    makes the pre-#9534 ``[rule not evaluated in this run]`` wording the
+    accurate one.  The other ``unknown`` reasons (``zone_fills_absent``,
+    ``no_courtyard_geometry``, ...) evaluated the board partially and may
+    still have found something, so an orphan naming one keeps the generic
+    wording.
+
+    ``--migrate-waivers`` uses this so an orphan whose rule never ran is
+    reported as such instead of implying the key changed (issue #9504).
+    ``--only``/``--skip`` cannot combine with ``--migrate-waivers``, so the
+    ``deselected:*`` skip reasons never reach this path.
+    """
+    from kicad_tools.validate.coverage import rule_never_ran
+
+    return frozenset(name for name, cov in coverage.items() if rule_never_ran(cov))
+
+
 def _run_waiver_migration(
     results: Any,
     pcb: Any,
     waivers_path: Path | None,
     *,
     write: bool,
+    inactive_rules: frozenset[str] = frozenset(),
 ) -> int:
     """Run ``--migrate-waivers`` (Issue #9454) and print its report."""
     from kicad_tools import __version__
@@ -1469,6 +1504,7 @@ def _run_waiver_migration(
             EvidenceContext(pcb, recipe=PRIOR_EVIDENCE_HASH_VERSION),
             write=write,
             tool_version=__version__,
+            inactive_rules=inactive_rules,
         )
     except (OSError, ValueError) as e:
         print(f"Error: cannot migrate waivers in {waivers_path}: {e}", file=sys.stderr)
@@ -2835,7 +2871,13 @@ def main(argv: list[str] | None = None) -> int:
     # Issue #9454: ``--migrate-waivers`` re-binds ev3 waivers to ev4 (previewing
     # unless ``--write``) and stops; a normal check never rewrites a waiver.
     if args.migrate_waivers:
-        return _run_waiver_migration(results, pcb, gw_path, write=args.migrate_write)
+        return _run_waiver_migration(
+            results,
+            pcb,
+            gw_path,
+            write=args.migrate_write,
+            inactive_rules=_inactive_rules_from_coverage(coverage),
+        )
 
     # Issue #5946: ``--waive KEY`` records reviewed, evidence-bound waivers for
     # the current findings with that key, then applies them below.

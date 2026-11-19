@@ -9,6 +9,7 @@ equals the recorded one is provably unchanged and can be re-bound.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from kicad_tools.validate.evidence import (
 from kicad_tools.validate.rules.waivers import (
     WAIVER_STALE_RULE_ID,
     apply_waivers,
+    format_waiver_migration,
     migrate_evidence_waivers,
     waivers_from_dict,
 )
@@ -148,6 +150,17 @@ class TestPriorRecipe:
         (f,) = [x for x in findings if x.key == COURTYARD_R1]
         ev3 = compute_evidence_hash(f, EvidenceContext(pcb, recipe="ev3"))
         assert ev3.split(":")[1] == f.evidence_hash.split(":")[1]
+
+    def test_ev3_digests_match_the_frozen_pre_9437_tool(self, tmp_path):
+        # Pinned literals (issue #9482): byte-identical to what the genuine
+        # pre-#9437 kct recorded for this board, so the ev3 recipe is checked
+        # independently of the helper that implements it.
+        board = _write_board(tmp_path)
+        assert {k: _ev3_hash(board, k) for k in (COURTYARD_R1, COURTYARD_R2, PAD_PAD)} == {
+            COURTYARD_R1: "ev3:50a30c56e1a439d6",
+            COURTYARD_R2: "ev3:61dfb3608161d65f",
+            PAD_PAD: "ev3:9116bd87e75d1889",
+        }
 
     def test_only_ev3_is_available(self):
         with pytest.raises(ValueError, match="ev2"):
@@ -280,6 +293,51 @@ class TestMigration:
         report = migrate_evidence_waivers(waivers, findings, EvidenceContext(pcb, recipe="ev3"))
 
         assert [o.key for o in report.orphan] == [legacy_key]
+
+    def test_orphan_path_ampacity_waiver_names_per_layer_candidates(self, tmp_path):
+        board = _write_board(tmp_path)
+        findings, pcb = _findings(board)
+
+        # #8797/#8798: path_ampacity is now keyed per layer, so a waiver
+        # written against the old empty-layer key matches nothing.
+        def amp(layer: str) -> DRCViolation:
+            return DRCViolation(
+                rule_id="path_ampacity",
+                severity="error",
+                message="too much current",
+                layer=layer,
+                items=("Path1",),
+                nets=("VBUS",),
+            )
+
+        current = [*findings, amp("F.Cu"), amp("B.Cu")]
+        waivers = _write_waivers(
+            tmp_path, [_entry("path_ampacity|Path1|VBUS|", "ev3:0123456789abcdef")]
+        )
+
+        report = migrate_evidence_waivers(waivers, current, EvidenceContext(pcb, recipe="ev3"))
+
+        assert [o.key for o in report.orphan] == ["path_ampacity|Path1|VBUS|"]
+        (orphan,) = report.orphan
+        assert orphan.candidates == (
+            "path_ampacity|Path1|VBUS|B.Cu",
+            "path_ampacity|Path1|VBUS|F.Cu",
+        )
+
+    def test_legacy_version_entries_are_listed_by_key_not_counted(self, tmp_path, capsys):
+        board = _write_board(tmp_path)
+        waivers = _write_waivers(
+            tmp_path, [_entry("courtyard_missing|U9||F.Cu", "ev2:0123456789abcdef")]
+        )
+        before = waivers.read_text()
+
+        code, out = _migrate(capsys, board, waivers, "--write")
+
+        assert code == 0
+        assert "legacy (left alone): 1" in out
+        assert "untouched: 0" in out
+        assert "legacy (left alone): courtyard_missing|U9||F.Cu  (ev2:0123456789abcdef)" in out
+        assert waivers.read_text() == before
 
     def test_dry_run_changes_no_file_and_prints_the_same_report(self, tmp_path, capsys):
         board = _write_board(tmp_path)
@@ -430,3 +488,431 @@ def test_outer_kct_check_parser_accepts_and_forwards_migrate_flags(monkeypatch):
     assert validation.run_check_command(args) == 0
     assert "--migrate-waivers" in seen
     assert "--write" in seen
+
+
+# ---------------------------------------------------------------------------
+# Issue #9504 follow-ups: literal digests, atomic write, symlinks,
+# inactive-rule orphans, untouched-by-key listing
+# ---------------------------------------------------------------------------
+
+# Digests recorded by the pre-#9437 tree (footprint ``at`` hashed in board
+# coordinates, i.e. the original ``ev3`` recipe) on this exact fixture board.
+# Literal on purpose: if the ``ev3`` recompute ever drifts from what those
+# trees wrote, migration would silently stop re-binding real waivers.
+_PRE_9437_DIGESTS = {
+    COURTYARD_R1: "ev3:50a30c56e1a439d6",
+    COURTYARD_R2: "ev3:61dfb3608161d65f",
+    PAD_PAD: "ev3:9116bd87e75d1889",
+}
+
+
+class TestLiteralPre9437Digests:
+    def test_current_recompute_reproduces_the_recorded_digests(self, tmp_path):
+        board = _write_board(tmp_path)
+        for key, digest in _PRE_9437_DIGESTS.items():
+            assert _ev3_hash(board, key) == digest
+
+    def test_waivers_recorded_by_the_pre_9437_tree_migrate(self, tmp_path):
+        board = _write_board(tmp_path)
+        waivers = _write_waivers(tmp_path, [_entry(k, d) for k, d in _PRE_9437_DIGESTS.items()])
+        findings, pcb = _findings(board)
+
+        report = migrate_evidence_waivers(
+            waivers, findings, EvidenceContext(pcb, recipe="ev3"), write=True
+        )
+
+        assert sorted(m.key for m in report.migrated) == sorted(_PRE_9437_DIGESTS)
+        for m in report.migrated:
+            assert m.new_hash.startswith("ev4:")
+        loaded = waivers_from_dict(json.loads(waivers.read_text())).entries
+        assert len(loaded) == 3
+
+
+class TestAtomicWrite:
+    def test_failed_replace_leaves_original_bytes_and_no_tmp(self, tmp_path, monkeypatch):
+        import kicad_tools.validate.rules.waivers as waivers_mod
+
+        board = _write_board(tmp_path)
+        waivers = _write_waivers(tmp_path, [_entry(COURTYARD_R1, _ev3_hash(board, COURTYARD_R1))])
+        before = waivers.read_text()
+        findings, pcb = _findings(board)
+
+        def boom(src: object, dst: object) -> None:
+            raise OSError("simulated crash between write and replace")
+
+        monkeypatch.setattr(waivers_mod.os, "replace", boom)
+
+        with pytest.raises(OSError, match="simulated crash"):
+            migrate_evidence_waivers(
+                waivers, findings, EvidenceContext(pcb, recipe="ev3"), write=True
+            )
+
+        assert waivers.read_text() == before
+        assert not list(tmp_path.glob(".*.tmp"))
+
+
+class TestSymlinkedWaiversFile:
+    def test_write_updates_the_target_and_keeps_the_link(self, tmp_path, capsys):
+        board = _write_board(tmp_path)
+        old = _ev3_hash(board, COURTYARD_R1)
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        waivers = real_dir / "w.json"
+        waivers.write_text(
+            json.dumps({"version": 3, "waivers": [_entry(COURTYARD_R1, old)]}, indent=2) + "\n"
+        )
+        link = tmp_path / "board.kct-waivers.json"
+        link.symlink_to(Path("real") / "w.json")  # relative symlink
+        assert link.is_symlink()
+
+        # Issue #9504: the unfixed code only mishandled the *auto-discovered*
+        # sidecar path — an explicit --waivers argument is resolved by the CLI
+        # (check_cmd .resolve()) before the write, so passing it here would
+        # exercise a path that was never broken. Discovery hands migrate the
+        # unresolved link path, so invoke the CLI without --waivers.
+        code = check_cmd.main([str(board), "--migrate-waivers", "--write"])
+        out = capsys.readouterr().out
+
+        assert code == 0 and "migrated: 1" in out
+        assert link.is_symlink()
+        (entry,) = json.loads(waivers.read_text())["waivers"]
+        assert entry["evidence_hash"].startswith("ev4:")
+        assert entry["rebound_from"] == old
+        assert not list(tmp_path.glob(".*.tmp")) and not list(real_dir.glob(".*.tmp"))
+
+    def test_dangling_symlink_is_an_error_and_untouched(self, tmp_path, capsys):
+        board = _write_board(tmp_path)
+        link = tmp_path / "board.kct-waivers.json"
+        link.symlink_to(Path("real") / "missing.json")
+
+        code = check_cmd.main([str(board), "--waivers", str(link), "--migrate-waivers", "--write"])
+
+        assert code == 1
+        assert "Error" in capsys.readouterr().err
+        assert link.is_symlink()
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="chmod is not enforced for root")
+    def test_read_only_target_dir_leaves_the_original_untouched(self, tmp_path):
+        import kicad_tools.validate.rules.waivers as waivers_mod
+
+        board = _write_board(tmp_path)
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        waivers = real_dir / "w.json"
+        waivers.write_text(
+            json.dumps(
+                {"version": 3, "waivers": [_entry(COURTYARD_R1, _ev3_hash(board, COURTYARD_R1))]},
+                indent=2,
+            )
+            + "\n"
+        )
+        before = waivers.read_text()
+        link = tmp_path / "board.kct-waivers.json"
+        link.symlink_to(Path("real") / "w.json")
+        findings, pcb = _findings(board)
+        real_dir.chmod(0o555)  # temp creation beside the target fails
+        try:
+            with pytest.raises(OSError):
+                migrate_evidence_waivers(
+                    waivers, findings, EvidenceContext(pcb, recipe="ev3"), write=True
+                )
+        finally:
+            real_dir.chmod(0o755)
+        assert waivers.read_text() == before
+        assert not list(real_dir.glob(".*.tmp"))
+        assert waivers_mod.os.path.realpath(link) == str(waivers.resolve())
+
+
+class TestInactiveRuleOrphans:
+    def test_ampacity_without_net_class_map_sidecar_says_not_evaluated(self, tmp_path, capsys):
+        """The fixture board has no net-class-map sidecar: ampacity never ran."""
+        board = _write_board(tmp_path)
+        key = "ampacity|GND||F.Cu"
+        waivers = _write_waivers(tmp_path, [_entry(key, "ev3:0123456789abcdef")])
+        before = waivers.read_text()
+
+        code, out = _migrate(capsys, board, waivers, "--write")
+
+        assert code == 0
+        assert f"orphan (no current finding): {key}" in out
+        assert "[rule not evaluated in this run]" in out
+        assert waivers.read_text() == before
+
+    def test_path_ampacity_without_current_paths_says_not_evaluated(self, tmp_path, capsys):
+        board = _write_board(tmp_path)
+        key = "path_ampacity|U1-A|GND|"
+        waivers = _write_waivers(tmp_path, [_entry(key, "ev3:0123456789abcdef")])
+
+        code, out = _migrate(capsys, board, waivers, "--write")
+
+        assert code == 0
+        assert f"orphan (no current finding): {key}" in out
+        assert "[rule not evaluated in this run]" in out
+
+    def test_rule_skipped_for_a_beyond_the_old_two_reason_says_not_evaluated(
+        self, tmp_path, capsys
+    ):
+        """Issue #9529: the inactive set derives from the recorded ``skipped``
+        coverage states, so it generalises past the two rules the hand-mirrored
+        helper knew.  The fixture board has no net-class-map sidecar, so
+        ``match_group_length_skew`` is skipped ``no_net_class_map`` -- a skip
+        reason the old helper had no condition for."""
+        from kicad_tools.validate.coverage import skipped as cov_skipped
+
+        board = _write_board(tmp_path)
+        assert check_cmd._inactive_rules_from_coverage(
+            {"match_group_length_skew": cov_skipped("match_group_length_skew", "no_net_class_map")}
+        ) == frozenset({"match_group_length_skew"})
+        key = "match_group_length_skew|GND||"
+        waivers = _write_waivers(tmp_path, [_entry(key, "ev3:0123456789abcdef")])
+
+        code, out = _migrate(capsys, board, waivers, "--write")
+
+        assert code == 0
+        assert f"orphan (no current finding): {key}" in out
+        assert "[rule not evaluated in this run]" in out
+
+    def test_ampacity_orphan_with_declared_but_unmapped_currents_says_not_evaluated(
+        self, tmp_path, capsys
+    ):
+        """Issue #9552: ``project.kct`` declares currents but no net class
+        carries ``target_ampacity``, so coverage is ``unknown
+        needs_input:target_ampacity``, not ``skipped``.  The rule still
+        cannot have produced the waived finding (empty specs), so the orphan
+        keeps saying "not evaluated" instead of implying the key changed."""
+        board = _write_board(tmp_path)
+        (tmp_path / "project.kct").write_text(
+            "requirements:\n  electrical:\n    input:\n      current: 2.0\n"
+        )
+        key = "ampacity|GND||F.Cu"
+        waivers = _write_waivers(tmp_path, [_entry(key, "ev3:0123456789abcdef")])
+        before = waivers.read_text()
+
+        code, out = _migrate(capsys, board, waivers, "--write")
+
+        assert code == 0
+        assert f"orphan (no current finding): {key}" in out
+        assert "[rule not evaluated in this run]" in out
+        assert waivers.read_text() == before
+
+    def test_inactive_rules_parameter_marks_only_the_named_rules(self, tmp_path):
+        board = _write_board(tmp_path)
+        findings, pcb = _findings(board)
+        waivers = _write_waivers(
+            tmp_path,
+            [
+                _entry("ampacity|GND||F.Cu", "ev3:0123456789abcdef"),
+                _entry("courtyard_missing|U9||F.Cu", "ev3:0123456789abcdef"),
+            ],
+        )
+
+        report = migrate_evidence_waivers(
+            waivers, findings, EvidenceContext(pcb, recipe="ev3"), inactive_rules={"ampacity"}
+        )
+
+        by_key = {o.key: o for o in report.orphan}
+        assert by_key["ampacity|GND||F.Cu"].rule_inactive is True
+        assert "not evaluated" in by_key["ampacity|GND||F.Cu"].reason
+        assert by_key["courtyard_missing|U9||F.Cu"].rule_inactive is False
+        lines = format_waiver_migration(report, waivers, write=False)
+        assert sum("[rule not evaluated in this run]" in ln for ln in lines) == 1
+
+    def test_per_layer_path_ampacity_orphan_names_per_layer_candidates(self, tmp_path):
+        board = _write_board(tmp_path)
+        findings, pcb = _findings(board)
+        base = findings[0]
+        per_layer = DRCViolation(
+            **{
+                **base.__dict__,
+                "rule_id": "path_ampacity",
+                "items": ("U1-A",),
+                "nets": ("GND",),
+                "layer": "F.Cu",
+                "evidence_hash": "ev4:0000000000000000",
+            }
+        )
+        assert per_layer.key == "path_ampacity|U1-A|GND|F.Cu"
+        waivers = _write_waivers(
+            tmp_path, [_entry("path_ampacity|U1-A|GND|", "ev3:0123456789abcdef")]
+        )
+
+        report = migrate_evidence_waivers(
+            waivers, [per_layer, *findings], EvidenceContext(pcb, recipe="ev3")
+        )
+
+        (orphan,) = report.orphan
+        assert orphan.candidates == ("path_ampacity|U1-A|GND|F.Cu",)
+
+
+class TestInactiveRulesFromCoverage:
+    """``check_cmd._inactive_rules_from_coverage`` semantics (issue #9529)."""
+
+    @staticmethod
+    def _coverage() -> dict:
+        from kicad_tools.validate.coverage import checked, skipped, unknown
+
+        return {
+            "ampacity": skipped("ampacity", "no_declared_targets"),
+            "path_ampacity": skipped("path_ampacity", "no_declared_current_paths"),
+            "reinforcement_incomplete": skipped(
+                "reinforcement_incomplete", "no_reinforcement_eligible_paths"
+            ),
+            "physical_copper_gap": skipped("physical_copper_gap", "opt_in:--physical-copper-gap"),
+            "tht_smd_spacing": skipped("tht_smd_spacing", "opt_in:--mfr jlcpcb"),
+            "routing_policy": skipped("routing_policy", "no_declared_policies"),
+            "match_group_length_skew": skipped("match_group_length_skew", "no_net_class_map"),
+            "diffpair_length_skew": skipped("diffpair_length_skew", "no_diff_pairs_detected"),
+            "width_consistency": skipped("width_consistency", "opt_in:--only"),
+            "clearance": checked("clearance"),
+            "silkscreen": checked("silkscreen"),
+            "segment_zone": unknown("segment_zone", "zone_fills_absent (2 unfilled zone(s))"),
+            "impedance": unknown("impedance", "diff_pair_unmeasurable (P/N)"),
+        }
+
+    def test_every_skipped_state_is_inactive_whatever_the_reason(self):
+        skipped_names = {name for name, cov in self._coverage().items() if cov.state == "skipped"}
+        assert check_cmd._inactive_rules_from_coverage(self._coverage()) == skipped_names
+
+    def test_needs_input_unknown_states_are_inactive_the_rule_never_ran(self):
+        """Issue #9552: an ``unknown`` whose reason is ``needs_input:<X>``
+        means the rule never evaluated the board at all -- the absent input
+        is a prerequisite for *any* finding of that category -- so an orphan
+        naming it says "not evaluated" like a skip does."""
+        from kicad_tools.validate.coverage import unknown
+
+        coverage = {
+            "ampacity": unknown(
+                "ampacity",
+                "needs_input:target_ampacity (project.kct declares 1 current requirement(s))",
+            ),
+            "sch_fields": unknown("sch_fields", "needs_input:schematic"),
+            "diffpair_length_skew": unknown(
+                "diffpair_length_skew", "needs_input:net_class_map (2 diff-pair net(s))"
+            ),
+            "doc_drift": unknown("doc_drift", "needs_input:pcb_path"),
+        }
+        assert check_cmd._inactive_rules_from_coverage(coverage) == frozenset(coverage)
+
+    def test_partial_unknown_states_are_not_inactive_the_rule_ran_and_may_find(self):
+        """The other ``unknown`` reasons: the rule evaluated the board
+        partially, so an orphan naming it keeps the generic wording."""
+        from kicad_tools.validate.coverage import unknown
+
+        coverage = {
+            "segment_zone": unknown("segment_zone", "zone_fills_absent (2 unfilled zone(s))"),
+            "impedance": unknown("impedance", "diff_pair_unmeasurable (P/N)"),
+            "netclass_floor": unknown("netclass_floor", "unreadable_kicad_pro"),
+        }
+        assert check_cmd._inactive_rules_from_coverage(coverage) == frozenset()
+
+    def test_checked_states_are_not_inactive(self):
+        from kicad_tools.validate.coverage import checked
+
+        assert (
+            check_cmd._inactive_rules_from_coverage({"clearance": checked("clearance")})
+            == frozenset()
+        )
+
+
+class TestUntouchedListedByKey:
+    def test_ev5_and_keyless_legacy_entries_are_listed_not_only_counted(self, tmp_path):
+        board = _write_board(tmp_path)
+        findings, pcb = _findings(board)
+        legacy = {
+            "rule": "courtyard_missing",
+            "items": ["R9"],
+            "reason": "legacy",
+            "issue": "p#1",
+        }
+        waivers = _write_waivers(
+            tmp_path,
+            [
+                _entry(COURTYARD_R2, "ev2:0123456789abcdef"),
+                _entry(COURTYARD_R1, "ev5:0123456789abcdef"),
+                legacy,
+            ],
+        )
+
+        report = migrate_evidence_waivers(waivers, findings, EvidenceContext(pcb, recipe="ev3"))
+
+        assert report.untouched == 2
+        assert [it.key for it in report.legacy] == [COURTYARD_R2]
+        assert report.untouched_keys == [
+            COURTYARD_R1,
+            "courtyard_missing (legacy rule/items entry)",
+        ]
+        text = "\n".join(format_waiver_migration(report, waivers, write=False))
+        assert f"legacy (left alone): {COURTYARD_R2}" in text
+        assert f"untouched (no migration needed): {COURTYARD_R1}" in text
+        assert (
+            "untouched (no migration needed): courtyard_missing (legacy rule/items entry)" in text
+        )
+
+
+class TestVersionPrefixClassification:
+    """Per-shape classification of non-``ev3`` evidence-hash versions (#9527).
+
+    ``legacy`` means strictly "predates ``ev3``": ``ev1``/``ev2`` land there
+    with the pre-recipe reason. A forward version (``ev5``) or a non-``evN``
+    prefix (``sha256``) is untouched, and a ``mistake.*`` rule is untouched
+    whatever its version -- none of them may get the "delete the entry" hint.
+    """
+
+    def test_ev1_entry_is_listed_in_legacy_with_predates_reason(self, tmp_path):
+        board = _write_board(tmp_path)
+        findings, pcb = _findings(board)
+        waivers = _write_waivers(tmp_path, [_entry(COURTYARD_R1, "ev1:0123456789abcdef")])
+
+        report = migrate_evidence_waivers(waivers, findings, EvidenceContext(pcb, recipe="ev3"))
+
+        assert report.untouched == 0
+        assert report.untouched_keys == []
+        (item,) = report.legacy
+        assert item.key == COURTYARD_R1
+        assert item.old_hash == "ev1:0123456789abcdef"
+        assert "predates ev3" in item.reason
+
+    def test_sha256_entry_is_untouched_not_legacy_and_gets_no_delete_advice(self, tmp_path):
+        board = _write_board(tmp_path)
+        findings, pcb = _findings(board)
+        waivers = _write_waivers(tmp_path, [_entry(COURTYARD_R1, "sha256:deadbeefdeadbeef")])
+
+        report = migrate_evidence_waivers(waivers, findings, EvidenceContext(pcb, recipe="ev3"))
+
+        assert report.legacy == []
+        assert report.untouched == 1
+        assert report.untouched_keys == [COURTYARD_R1]
+        text = "\n".join(format_waiver_migration(report, waivers, write=False))
+        assert f"untouched (no migration needed): {COURTYARD_R1}" in text
+        assert "delete" not in text
+
+    def test_mistake_rule_with_pre_recipe_hash_is_untouched_not_legacy(self, tmp_path):
+        board = _write_board(tmp_path)
+        findings, pcb = _findings(board)
+        key = "mistake.thermal_pad_connection|U9||"
+        waivers = _write_waivers(tmp_path, [_entry(key, "ev2:0123456789abcdef")])
+
+        report = migrate_evidence_waivers(waivers, findings, EvidenceContext(pcb, recipe="ev3"))
+
+        assert report.legacy == []
+        assert report.untouched == 1
+        assert report.untouched_keys == [key]
+
+    def test_dry_run_over_all_shapes_leaves_the_file_byte_identical(self, tmp_path):
+        board = _write_board(tmp_path)
+        findings, pcb = _findings(board)
+        mistake_key = "mistake.thermal_pad_connection|U9||"
+        entries = [
+            _entry(COURTYARD_R1, "ev1:0123456789abcdef"),
+            _entry(COURTYARD_R2, "sha256:deadbeefdeadbeef"),
+            _entry(mistake_key, "ev2:0123456789abcdef"),
+        ]
+        waivers = _write_waivers(tmp_path, entries)
+        before = waivers.read_bytes()
+
+        report = migrate_evidence_waivers(waivers, findings, EvidenceContext(pcb, recipe="ev3"))
+
+        assert [it.key for it in report.legacy] == [COURTYARD_R1]
+        assert report.untouched == 2
+        assert report.untouched_keys == [COURTYARD_R2, mistake_key]
+        assert waivers.read_bytes() == before

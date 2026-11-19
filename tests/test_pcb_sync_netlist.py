@@ -2574,11 +2574,14 @@ class TestNetAssignmentErrorSurfacing:
             mock_export_netlist,
         )
 
-        actions, errors = _assign_nets_from_schematic(board, tmp_path / "nonexistent.kicad_sch")
+        actions, errors, warnings = _assign_nets_from_schematic(
+            board, tmp_path / "nonexistent.kicad_sch"
+        )
 
         assert len(errors) > 0
         assert "Failed to export netlist" in errors[0]
         assert not actions
+        assert not warnings
 
 
 class TestRemoveOrphanNets:
@@ -2673,16 +2676,15 @@ class TestRemoveOrphanNets:
         assert rc == 0
 
 
-class TestNormalizeKicadCliNetNames:
-    """Tests for the ``/``-prefix normalisation of kicad-cli net names.
+class TestResolveNetNamesForBoard:
+    """Tests for board-aware ``/``-prefix resolution of kicad-cli net names.
 
-    Issue #3370: ``kicad-cli sch export netlist`` writes hierarchical
-    local labels with a leading sheet-path slash (``/BST_A``) while
-    power-symbol globals (``+3V3``, ``GND``) come through unprefixed.
-    PCB net tables conventionally store bare names; mixing the two
-    conventions causes the ``/``-prefixed adds to land in the PCB as
-    ghost nets that get dropped by orphan cleanup, leaving the intended
-    pads on stale net values.
+    Issue #9562: KiCad-native boards store root-sheet label nets as
+    ``/NAME`` (net table, pads, tracks, vias and zones), while
+    kct-generated boards store bare names (#3370).  The old blanket
+    strip renamed every pad of a KiCad-native board away from the
+    copper that still carried the ``/`` name; resolution is now
+    per-net against the board's own net table.
     """
 
     def _make_net(self, code: int, name: str):
@@ -2702,105 +2704,398 @@ class TestNormalizeKicadCliNetNames:
             nets=list(nets),
         )
 
-    def test_single_slash_stripped(self):
-        """A single leading ``/`` is stripped from hierarchical labels."""
-        from kicad_tools.cli.pcb_sync_netlist import _normalize_kicad_cli_net_names
+    def _load_board(self, tmp_path, net_names):
+        """Load a minimal board whose net table lists *net_names* in order."""
+        from kicad_tools.schema.pcb import PCB
 
-        netlist = self._make_netlist(
-            [
-                self._make_net(1, "/BST_A"),
-                self._make_net(2, "/DRV_CP1"),
-                self._make_net(3, "/SPI_MISO"),
-            ]
+        decls = "\n".join(f'  (net {i} "{name}")' for i, name in enumerate(net_names, start=1))
+        text = (
+            "(kicad_pcb\n"
+            "  (version 20240108)\n"
+            '  (generator "test")\n'
+            '  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))\n'
+            '  (net 0 "")\n'
+            f"{decls}\n"
+            ")\n"
         )
-        _normalize_kicad_cli_net_names(netlist)
-        names = [n.name for n in netlist.nets]
-        assert names == ["BST_A", "DRV_CP1", "SPI_MISO"]
+        path = tmp_path / "board.kicad_pcb"
+        path.write_text(text)
+        return PCB.load(path)
 
-    def test_power_symbol_names_unchanged(self):
-        """Power-symbol names (``+3V3``, ``GND``, ``+5V``) are untouched."""
-        from kicad_tools.cli.pcb_sync_netlist import _normalize_kicad_cli_net_names
+    def _resolve(self, tmp_path, board_nets, netlist_names):
+        """Resolve *netlist_names* against a board carrying *board_nets*."""
+        from kicad_tools.cli.pcb_sync_netlist import _resolve_net_names_for_board
 
+        board = self._load_board(tmp_path, board_nets)
         netlist = self._make_netlist(
-            [
-                self._make_net(1, "+3V3"),
-                self._make_net(2, "GND"),
-                self._make_net(3, "+5V"),
-                self._make_net(4, "+3.3V"),
-                self._make_net(5, "-12V"),
-            ]
+            [self._make_net(i, name) for i, name in enumerate(netlist_names, start=1)]
         )
-        _normalize_kicad_cli_net_names(netlist)
-        names = [n.name for n in netlist.nets]
+        _resolve_net_names_for_board(netlist, board)
+        return [net.name for net in netlist.nets]
+
+    def test_exact_slash_form_kept(self, tmp_path):
+        """A net the board stores as ``/NAME`` keeps its ``/`` (#9562)."""
+        names = self._resolve(tmp_path, ["/N1", "GND"], ["/N1"])
+        assert names == ["/N1"]
+
+    def test_bare_form_used_when_board_is_bare(self, tmp_path):
+        """A net the board stores bare resolves to the bare form (#3370)."""
+        names = self._resolve(tmp_path, ["N1", "GND"], ["/N1"])
+        assert names == ["N1"]
+
+    def test_new_net_follows_slash_dominant_board(self, tmp_path):
+        """A net new to the board gets the board's dominant convention.
+
+        Power rails (``GND``, ``+3V3``) are excluded from the census --
+        counting them would let two power nets outvote a single label
+        net and flip a KiCad-native board to the bare convention.
+        """
+        names = self._resolve(tmp_path, ["/A", "GND", "+3V3"], ["/NEW"])
+        assert names == ["/NEW"]
+
+    def test_new_net_stripped_on_bare_dominant_board(self, tmp_path):
+        """A net new to a kct-style (bare) board is added bare."""
+        names = self._resolve(tmp_path, ["A", "B", "GND"], ["/NEW"])
+        assert names == ["NEW"]
+
+    def test_both_forms_on_board_exact_wins(self, tmp_path):
+        """When the board carries both ``/N1`` and ``N1``, the exact form wins."""
+        names = self._resolve(tmp_path, ["/N1", "N1", "GND"], ["/N1"])
+        assert names == ["/N1"]
+
+    def test_deeper_hierarchical_path(self, tmp_path):
+        """Only one leading ``/`` is stripped; the tail is kept as a token.
+
+        A sub-sheet path ``/sheetA/SIGNAL`` resolves against the bare
+        candidate ``sheetA/SIGNAL``, mirroring the historical
+        normalisation, and is kept verbatim when the board has it.
+        """
+        names = self._resolve(tmp_path, ["sheetA/SIGNAL", "GND"], ["/sheetA/SIGNAL"])
+        assert names == ["sheetA/SIGNAL"]
+        names = self._resolve(tmp_path, ["/sheetA/SIGNAL", "GND"], ["/sheetA/SIGNAL"])
+        assert names == ["/sheetA/SIGNAL"]
+
+    def test_power_symbol_names_unchanged(self, tmp_path):
+        """Power-symbol names (``+3V3``, ``GND``, ...) never carry a prefix."""
+        names = self._resolve(
+            tmp_path,
+            ["GND"],
+            ["+3V3", "GND", "+5V", "+3.3V", "-12V"],
+        )
         assert names == ["+3V3", "GND", "+5V", "+3.3V", "-12V"]
 
-    def test_bare_names_unchanged(self):
+    def test_bare_names_unchanged(self, tmp_path):
         """Already-bare names from the Python fallback are untouched."""
-        from kicad_tools.cli.pcb_sync_netlist import _normalize_kicad_cli_net_names
-
-        netlist = self._make_netlist(
-            [
-                self._make_net(1, "BST_A"),
-                self._make_net(2, "PHASE_A"),
-                self._make_net(3, "Net-(R1-Pad2)"),
-            ]
-        )
-        _normalize_kicad_cli_net_names(netlist)
-        names = [n.name for n in netlist.nets]
+        names = self._resolve(tmp_path, ["GND"], ["BST_A", "PHASE_A", "Net-(R1-Pad2)"])
         assert names == ["BST_A", "PHASE_A", "Net-(R1-Pad2)"]
 
-    def test_empty_name_unchanged(self):
-        """The empty net (code 0) has no name; normalisation is a no-op."""
-        from kicad_tools.cli.pcb_sync_netlist import _normalize_kicad_cli_net_names
+    def test_empty_name_unchanged(self, tmp_path):
+        """The empty net (code 0) has no name; resolution is a no-op."""
+        names = self._resolve(tmp_path, ["GND"], [""])
+        assert names == [""]
 
-        netlist = self._make_netlist([self._make_net(0, "")])
-        _normalize_kicad_cli_net_names(netlist)
-        assert netlist.nets[0].name == ""
+    def test_resolution_is_idempotent(self, tmp_path):
+        """Resolving twice against the same bare board gives the same result."""
+        from kicad_tools.cli.pcb_sync_netlist import _resolve_net_names_for_board
 
-    def test_only_leading_slash_stripped(self):
-        """Only the first ``/`` is stripped; deeper paths keep their tail."""
-        from kicad_tools.cli.pcb_sync_netlist import _normalize_kicad_cli_net_names
+        board = self._load_board(tmp_path, ["N1", "GND"])
+        netlist = self._make_netlist([self._make_net(1, "/N1"), self._make_net(2, "+3V3")])
+        _resolve_net_names_for_board(netlist, board)
+        first = [net.name for net in netlist.nets]
+        _resolve_net_names_for_board(netlist, board)
+        second = [net.name for net in netlist.nets]
+        assert first == second == ["N1", "+3V3"]
 
-        # Defensive: a sub-sheet hierarchical path comes through as
-        # /sheetA/SIGNAL.  We strip ONE leading slash so the surviving
-        # form (sheetA/SIGNAL) is a unique-but-bare name that will
-        # round-trip to the same canonical key on every sync invocation.
-        netlist = self._make_netlist([self._make_net(1, "/sheetA/SIGNAL")])
-        _normalize_kicad_cli_net_names(netlist)
-        assert netlist.nets[0].name == "sheetA/SIGNAL"
 
-    def test_mixed_names_partial_normalisation(self):
-        """Mixed power+hierarchical netlist: only ``/``-prefixed names change."""
-        from kicad_tools.cli.pcb_sync_netlist import _normalize_kicad_cli_net_names
+# ---------------------------------------------------------------------------
+# Board-aware ``/``-prefix conventions end-to-end (issue #9562)
+# ---------------------------------------------------------------------------
 
-        netlist = self._make_netlist(
-            [
-                self._make_net(1, "/BST_A"),
-                self._make_net(2, "+3V3"),
-                self._make_net(3, "/DRV_CP1"),
-                self._make_net(4, "GND"),
-                self._make_net(5, "PWM_AH"),
-            ]
+# Board whose nets follow the KiCad-native convention: root-sheet label
+# nets carry the leading ``/`` on the net table, the pads, and the copper.
+PCB_SLASH_NATIVE = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "/N1")
+  (net 2 "GND")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "/N1"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "GND"))
+  )
+  (footprint "Capacitor_SMD:C_0402"
+    (layer "F.Cu")
+    (uuid "fp-c1")
+    (at 120 100)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "100n" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "/N1"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "GND"))
+  )
+  (segment (start 99.5 100) (end 119.5 100) (width 0.25) (layer "F.Cu") (net 1 "/N1"))
+)
+"""
+
+# Same connectivity under the kct-generated bare-name convention (#3370).
+PCB_BARE_CONVENTION = PCB_SLASH_NATIVE.replace('"/N1"', '"N1"')
+
+# kicad-cli-shaped netlist for the board above: the root-sheet label net
+# comes through as ``/N1``, the power net unprefixed.
+SLASH_EXPORTED_NETLIST = """(export (version "E")
+  (components
+    (comp (ref "R1") (value "10k") (footprint "Resistor_SMD:R_0402"))
+    (comp (ref "C1") (value "100n") (footprint "Capacitor_SMD:C_0402")))
+  (nets
+    (net (code "1") (name "/N1")
+      (node (ref "R1") (pin "1"))
+      (node (ref "C1") (pin "1")))
+    (net (code "2") (name "GND")
+      (node (ref "R1") (pin "2"))
+      (node (ref "C1") (pin "2")))))
+"""
+
+# Variant where the schematic added a new label net on R1.2.
+SLASH_EXPORTED_NETLIST_NEW_NET = """(export (version "E")
+  (components
+    (comp (ref "R1") (value "10k") (footprint "Resistor_SMD:R_0402"))
+    (comp (ref "C1") (value "100n") (footprint "Capacitor_SMD:C_0402")))
+  (nets
+    (net (code "1") (name "/N1")
+      (node (ref "R1") (pin "1"))
+      (node (ref "C1") (pin "1")))
+    (net (code "2") (name "/NEW")
+      (node (ref "R1") (pin "2")))
+    (net (code "3") (name "GND")
+      (node (ref "C1") (pin "2")))))
+"""
+
+
+class TestSyncNetlistSlashPrefixConventions:
+    """Syncing an unchanged schematic must not rewrite pads (#9562).
+
+    Before the board-aware fix, ``_normalize_kicad_cli_net_names``
+    stripped the ``/`` unconditionally, so syncing a KiCad-native board
+    with its own unchanged schematic renamed ~every pad away from the
+    copper still carrying the ``/`` name and silently disconnected a
+    routed board (exit 0).
+    """
+
+    @pytest.fixture
+    def fake_kicad_cli(self, monkeypatch):
+        """Force the kicad-cli export path with a stubbed subprocess.
+
+        The stub writes the exported netlist to whatever ``--output``
+        path it is handed, exactly like kicad-cli does.  Returns a
+        mutable ``netlist_text`` list the test can seed.
+        """
+        import subprocess as _subprocess
+
+        netlist_text = [SLASH_EXPORTED_NETLIST]
+
+        monkeypatch.setattr(
+            "kicad_tools.operations.netlist.find_kicad_cli",
+            lambda: Path("/fake/kicad-cli"),
         )
-        _normalize_kicad_cli_net_names(netlist)
-        names = [n.name for n in netlist.nets]
-        assert names == ["BST_A", "+3V3", "DRV_CP1", "GND", "PWM_AH"]
 
-    def test_normalisation_is_idempotent(self):
-        """Running the normaliser twice produces the same result."""
-        from kicad_tools.cli.pcb_sync_netlist import _normalize_kicad_cli_net_names
+        def fake_run(cmd, *args, **kwargs):
+            out = Path(cmd[cmd.index("--output") + 1])
+            out.write_text(netlist_text[0])
+            return _subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-        netlist = self._make_netlist(
-            [
-                self._make_net(1, "/BST_A"),
-                self._make_net(2, "+3V3"),
-            ]
+        monkeypatch.setattr("kicad_tools.operations.netlist.subprocess.run", fake_run)
+        return netlist_text
+
+    def _project(self, tmp_path, board_text):
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(board_text)
+        return sch, pcb
+
+    def test_slash_native_board_zero_updates_dry_run(self, tmp_path, fake_kicad_cli):
+        """Dry-run on an unchanged KiCad-native board reports zero net updates."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = self._project(tmp_path, PCB_SLASH_NATIVE)
+
+        result = sync_netlist(schematic_path=sch, pcb_path=pcb, dry_run=True)
+
+        assert not result.errors, f"sync_netlist errors: {result.errors}"
+        assert result.net_updated == [], (
+            f"unchanged schematic rewrote pads: {[a.detail for a in result.net_updated]}"
         )
-        _normalize_kicad_cli_net_names(netlist)
-        first = [n.name for n in netlist.nets]
-        _normalize_kicad_cli_net_names(netlist)
-        second = [n.name for n in netlist.nets]
-        assert first == second == ["BST_A", "+3V3"]
+
+    def test_slash_native_board_zero_updates_applied(self, tmp_path, fake_kicad_cli):
+        """Applying the sync to an unchanged KiCad-native board rewrites nothing."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+        from kicad_tools.schema.pcb import PCB
+
+        sch, pcb = self._project(tmp_path, PCB_SLASH_NATIVE)
+
+        result = sync_netlist(schematic_path=sch, pcb_path=pcb, dry_run=False)
+
+        assert not result.errors, f"sync_netlist errors: {result.errors}"
+        assert result.net_updated == []
+        board = PCB.load(pcb)
+        assert board.get_net_by_name("/N1") is not None
+        r1 = board.get_footprint("R1")
+        pad_nets = {p.number: p.net_name for p in r1.pads}
+        assert pad_nets["1"] == "/N1"
+
+    def test_bare_board_zero_updates_no_ghost_nets(self, tmp_path, fake_kicad_cli):
+        """A kct-style bare board (#3370) still syncs with zero updates."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+        from kicad_tools.schema.pcb import PCB
+
+        sch, pcb = self._project(tmp_path, PCB_BARE_CONVENTION)
+
+        result = sync_netlist(schematic_path=sch, pcb_path=pcb, dry_run=False)
+
+        assert not result.errors, f"sync_netlist errors: {result.errors}"
+        assert result.net_updated == []
+        board = PCB.load(pcb)
+        named = {n.name for n in board.nets.values() if n.name}
+        assert "N1" in named
+        prefixed = {n for n in named if n.startswith("/")}
+        assert not prefixed, f"ghost /-prefixed nets created: {sorted(prefixed)}"
+
+    def test_new_net_follows_native_convention(self, tmp_path, fake_kicad_cli):
+        """A net added in the schematic gets the board's dominant convention."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+        from kicad_tools.schema.pcb import PCB
+
+        fake_kicad_cli[0] = SLASH_EXPORTED_NETLIST_NEW_NET
+        sch, pcb = self._project(tmp_path, PCB_SLASH_NATIVE)
+
+        result = sync_netlist(schematic_path=sch, pcb_path=pcb, dry_run=False)
+
+        assert not result.errors, f"sync_netlist errors: {result.errors}"
+        details = [a.detail for a in result.net_updated]
+        assert len(result.net_updated) == 1, details
+        assert '"GND" -> "/NEW"' in details[0]
+        board = PCB.load(pcb)
+        assert board.get_net_by_name("/NEW") is not None
+
+    def test_new_net_follows_bare_convention(self, tmp_path, fake_kicad_cli):
+        """A net added on a bare board stays bare (no ghost ``/NEW``)."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+        from kicad_tools.schema.pcb import PCB
+
+        fake_kicad_cli[0] = SLASH_EXPORTED_NETLIST_NEW_NET
+        sch, pcb = self._project(tmp_path, PCB_BARE_CONVENTION)
+
+        result = sync_netlist(schematic_path=sch, pcb_path=pcb, dry_run=False)
+
+        assert not result.errors, f"sync_netlist errors: {result.errors}"
+        details = [a.detail for a in result.net_updated]
+        assert len(result.net_updated) == 1, details
+        assert '"GND" -> "NEW"' in details[0]
+        board = PCB.load(pcb)
+        assert board.get_net_by_name("NEW") is not None
+        assert board.get_net_by_name("/NEW") is None
+
+
+# ---------------------------------------------------------------------------
+# Split-net warning (issue #9562, AC3)
+# ---------------------------------------------------------------------------
+
+# Routed board whose R1.1 pad sits on ``OLD`` with a track and a via on
+# the same net; the schematic renames the net to ``NEW``.
+PCB_SPLIT_NET = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "OLD")
+  (net 2 "GND")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "OLD"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "GND"))
+  )
+  (segment (start 99.5 100) (end 102 100) (width 0.25) (layer "F.Cu") (net 1 "OLD"))
+  (via (at 101 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1 "OLD"))
+)
+"""
+
+RENAME_EXPORTED_NETLIST = """(export (version "E")
+  (components
+    (comp (ref "R1") (value "10k") (footprint "Resistor_SMD:R_0402")))
+  (nets
+    (net (code "1") (name "/NEW")
+      (node (ref "R1") (pin "1")))
+    (net (code "2") (name "GND")
+      (node (ref "R1") (pin "2")))))
+"""
+
+
+class TestSplitNetWarning:
+    """Pads moving to a copper-less net while the old net keeps copper warn."""
+
+    @pytest.fixture
+    def project(self, tmp_path, monkeypatch):
+        """R1-only schematic + routed ``OLD``-net board + fake kicad-cli."""
+        import subprocess as _subprocess
+
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(SCHEMATIC_R1_ONLY)
+        pcb.write_text(PCB_SPLIT_NET)
+
+        monkeypatch.setattr(
+            "kicad_tools.operations.netlist.find_kicad_cli",
+            lambda: Path("/fake/kicad-cli"),
+        )
+
+        def fake_run(cmd, *args, **kwargs):
+            out = Path(cmd[cmd.index("--output") + 1])
+            out.write_text(RENAME_EXPORTED_NETLIST)
+            return _subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr("kicad_tools.operations.netlist.subprocess.run", fake_run)
+        return sch, pcb
+
+    def test_warning_emitted_on_apply(self, project):
+        """Applying the rename warns that the copper stayed on ``OLD``."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = project
+
+        result = sync_netlist(schematic_path=sch, pcb_path=pcb, dry_run=False)
+
+        assert not result.errors, f"sync_netlist errors: {result.errors}"
+        assert len(result.net_updated) == 1
+        assert '"OLD" -> "NEW"' in result.net_updated[0].detail
+        split_warnings = [w for w in result.warnings if '"OLD"' in w and '"NEW"' in w]
+        assert len(split_warnings) == 1, f"unexpected warnings: {result.warnings}"
+        assert "2 copper" in split_warnings[0]
+
+    def test_warning_emitted_on_dry_run(self, project):
+        """The dry run surfaces the same split-net diagnostic."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = project
+
+        result = sync_netlist(schematic_path=sch, pcb_path=pcb, dry_run=True)
+
+        assert not result.errors, f"sync_netlist errors: {result.errors}"
+        assert any('"OLD"' in w and '"NEW"' in w for w in result.warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -3558,3 +3853,395 @@ class TestNameOnlyDialectPadNets:
         reloaded = PCB.load(out)
         pads = {p.number: p.net_name for p in reloaded.footprints[0].pads}
         assert pads["2"] == name
+
+
+# --- Issue #9563: value and footprint drift on matched references ---
+
+# PCB where R1's value diverges AND C1's footprint diverges on the same
+# board: sync-netlist must save the value fix while still exiting non-zero
+# for the reported (unapplied) footprint change.
+PCB_VALUE_AND_FOOTPRINT_MISMATCH = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "4.7k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+  (footprint "Capacitor_SMD:C_0805"
+    (layer "F.Cu")
+    (uuid "fp-c1")
+    (at 120 100)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "100n" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+)
+"""
+
+# PCB whose R1 footprint carries no library nickname (legacy board): the
+# package matches the schematic's Resistor_SMD:R_0402, so it is the same
+# part -- a warning, not a footprint change.
+PCB_NICKNAME_MISSING = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+  (footprint "Capacitor_SMD:C_0402"
+    (layer "F.Cu")
+    (uuid "fp-c1")
+    (at 120 100)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "100n" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+)
+"""
+
+# PCB where C1's value is KiCad's "no value" placeholder (~): nothing to
+# compare against the schematic's "100n", so no value update is flagged.
+PCB_VALUE_TILDE = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+  (footprint "Capacitor_SMD:C_0402"
+    (layer "F.Cu")
+    (uuid "fp-c1")
+    (at 120 100)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "~" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+)
+"""
+
+# PCB where R1's value differs only by case (10K vs 10k): equivalent.
+PCB_VALUE_CASE_ONLY = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10K" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+  (footprint "Capacitor_SMD:C_0402"
+    (layer "F.Cu")
+    (uuid "fp-c1")
+    (at 120 100)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "100n" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+)
+"""
+
+
+class TestValueAndFootprintDrift:
+    """sync_netlist detects value/footprint drift on matched refs (#9563)."""
+
+    def _write_pair(self, tmp_path, pcb_text):
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(pcb_text)
+        return sch, pcb
+
+    def test_value_mismatch_detected_dry_run(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_VALUE_MISMATCH)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        assert len(result.value_updated) == 1
+        update = result.value_updated[0]
+        assert update.reference == "R1"
+        assert update.old_value == "4.7k"
+        assert update.new_value == "10k"
+        assert not result.footprint_changed
+        assert not result.errors
+        assert result.has_changes
+
+    def test_value_mismatch_applied_on_real_run(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_VALUE_MISMATCH)
+
+        result = sync_netlist(sch, pcb, dry_run=False)
+
+        assert len(result.value_updated) == 1
+        assert not result.errors
+        assert '(property "Value" "10k"' in pcb.read_text()
+
+    def test_value_mismatch_second_run_reports_no_value_updates(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_VALUE_MISMATCH)
+        sync_netlist(sch, pcb, dry_run=False)
+
+        second = sync_netlist(sch, pcb, dry_run=False)
+
+        assert second.value_updated == []
+        assert not second.errors
+
+    def test_value_mismatch_dry_run_does_not_modify(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_VALUE_MISMATCH)
+        original = pcb.read_text()
+
+        sync_netlist(sch, pcb, dry_run=True)
+
+        assert pcb.read_text() == original
+
+    def test_footprint_mismatch_detected_dry_run(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_FOOTPRINT_MISMATCH)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        assert len(result.footprint_changed) == 1
+        change = result.footprint_changed[0]
+        assert change.reference == "C1"
+        assert change.old_footprint == "Capacitor_SMD:C_0805"
+        assert change.new_footprint == "Capacitor_SMD:C_0402"
+        assert not result.value_updated
+        assert not result.errors
+        assert result.has_changes
+
+    def test_footprint_mismatch_not_applied_to_board(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_FOOTPRINT_MISMATCH)
+
+        sync_netlist(sch, pcb, dry_run=False)
+
+        # The swap is owned by `kct sync --apply`; sync-netlist only reports.
+        assert '(footprint "Capacitor_SMD:C_0805"' in pcb.read_text()
+
+    def test_footprint_only_change_not_reported_in_sync(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import format_text, sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_FOOTPRINT_MISMATCH)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+        text = format_text(result, dry_run=True, pcb_path=pcb)
+
+        assert "PCB is in sync" not in text
+        assert "Footprint changes (1)" in text
+
+    def test_suffix_only_value_not_flagged(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist, sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_VALUE_SUFFIX_ONLY)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+        assert result.value_updated == []
+        assert result.footprint_changed == []
+        assert run_sync_netlist(sch, pcb, dry_run=True) == 0
+
+    def test_case_only_value_not_flagged(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_VALUE_CASE_ONLY)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        assert result.value_updated == []
+        assert not result.errors
+
+    def test_tilde_value_not_flagged(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_VALUE_TILDE)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        assert result.value_updated == []
+        assert not result.errors
+
+    def test_nickname_missing_is_warning_not_change(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist, sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_NICKNAME_MISSING)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        assert result.footprint_changed == []
+        assert any("nickname missing" in w for w in result.warnings)
+        assert run_sync_netlist(sch, pcb, dry_run=True) == 0
+
+    def test_in_sync_reports_no_drift(self, tmp_path):
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, MINIMAL_PCB_MATCHING)
+
+        result = sync_netlist(sch, pcb, dry_run=True)
+
+        assert result.value_updated == []
+        assert result.footprint_changed == []
+
+    def test_validate_sync_flags_same_refs_as_sync_netlist(self, tmp_path):
+        """Parity: kct validate --sync flags the same refs sync-netlist does."""
+        from kicad_tools.cli.pcb_sync_netlist import sync_netlist
+        from kicad_tools.validate.netlist import NetlistValidator
+
+        for pcb_text in (PCB_VALUE_MISMATCH, PCB_FOOTPRINT_MISMATCH):
+            sch, pcb = self._write_pair(tmp_path, pcb_text)
+
+            result = sync_netlist(sch, pcb, dry_run=True)
+            validation = NetlistValidator(sch, pcb).validate()
+
+            sync_value_refs = {u.reference for u in result.value_updated}
+            validate_value_refs = {i.reference for i in validation.value_mismatches}
+            assert sync_value_refs == validate_value_refs, pcb_text
+
+            sync_fp_refs = {c.reference for c in result.footprint_changed}
+            validate_fp_refs = {
+                i.reference for i in validation.footprint_mismatches if i.severity == "error"
+            }
+            assert sync_fp_refs == validate_fp_refs, pcb_text
+
+
+class TestDriftExitCodeAndJson:
+    """Exit status and JSON report for value/footprint drift (#9563)."""
+
+    def _write_pair(self, tmp_path, pcb_text):
+        sch = tmp_path / "test.kicad_sch"
+        pcb = tmp_path / "test.kicad_pcb"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        pcb.write_text(pcb_text)
+        return sch, pcb
+
+    def test_footprint_change_exits_nonzero_dry_run(self, tmp_path, capsys):
+        from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_FOOTPRINT_MISMATCH)
+
+        rc = run_sync_netlist(sch, pcb, dry_run=True)
+
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "Footprint changes (1)" in out
+        assert "kct sync --apply" in out
+
+    def test_footprint_change_exits_nonzero_real_run(self, tmp_path, capsys):
+        from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_FOOTPRINT_MISMATCH)
+
+        rc = run_sync_netlist(sch, pcb, dry_run=False)
+
+        assert rc == 1
+        assert "kct sync --apply" in capsys.readouterr().out
+
+    def test_value_only_exit_zero_after_apply(self, tmp_path, capsys):
+        from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_VALUE_MISMATCH)
+
+        rc = run_sync_netlist(sch, pcb, dry_run=False)
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Value updates (1)" in out
+        assert "R1" in out
+        assert "4.7k" in out and "10k" in out
+
+    def test_combined_mismatch_saves_values_and_exits_nonzero(self, tmp_path):
+        """Non-transactional: the value fix is saved despite the exit 1."""
+        from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_VALUE_AND_FOOTPRINT_MISMATCH)
+
+        rc = run_sync_netlist(sch, pcb, dry_run=False)
+
+        assert rc == 1
+        text = pcb.read_text()
+        assert '(property "Value" "10k"' in text  # R1 value saved
+        assert '(footprint "Capacitor_SMD:C_0805"' in text  # C1 swap not done
+
+    def test_combined_mismatch_transactional_rolls_back(self, tmp_path):
+        """Transactional: a non-zero exit rolls the whole file back (#4541)."""
+        from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_VALUE_AND_FOOTPRINT_MISMATCH)
+        original = pcb.read_text()
+
+        rc = run_sync_netlist(sch, pcb, dry_run=False, transactional=True)
+
+        assert rc == 1
+        assert pcb.read_text() == original
+
+    def test_json_payload_contents(self, tmp_path, capsys):
+        from kicad_tools.cli.pcb_sync_netlist import run_sync_netlist
+
+        sch, pcb = self._write_pair(tmp_path, PCB_VALUE_AND_FOOTPRINT_MISMATCH)
+
+        rc = run_sync_netlist(sch, pcb, dry_run=True, output_format="json")
+
+        assert rc == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["value_updated"] == [
+            {"reference": "R1", "old_value": "4.7k", "new_value": "10k"}
+        ]
+        assert payload["footprint_changed"] == [
+            {
+                "reference": "C1",
+                "old_footprint": "Capacitor_SMD:C_0805",
+                "new_footprint": "Capacitor_SMD:C_0402",
+            }
+        ]
+        assert "kct sync --apply" in payload["remediation"]

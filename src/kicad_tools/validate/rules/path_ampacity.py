@@ -278,39 +278,38 @@ class PathAmpacityRule(DRCRule):
         design_rules: DesignRules,
         required_cache: dict[bool, float],
     ) -> DRCViolation | None:
-        """Judge a doubled-copper group on its summed cross-section (issue #8790).
+        """Judge doubled copper on its effective cross-section (issues #8790, #9542).
 
-        Each branch contributes ``width / required_width`` for its layer class
-        (its narrowest segment, so a pinch point limits the branch), which
-        weights outer vs inner copper correctly; the group passes when the
-        contributions sum to at least 1.  Current is not split by resistance.
+        Each copper layer contributes its :meth:`ParallelGroup.layer_widths`
+        share over that layer class's requirement: distinct-layer branches
+        each contribute their narrowest width (so a pinch point limits its
+        branch), while branches sharing a layer count once at their merged
+        union extent -- two overlapping 1.0 mm F.Cu tracks offset 0.6 mm are
+        1.6 mm of copper, not 2.0 mm. The group passes when the
+        contributions sum to at least 1. Current is not split by resistance.
         """
         capacity = 0.0
-        widths = []
-        for branch in group.branches:
-            ratios = []
-            for segment in branch:
-                external = self._is_external_layer(segment.layer)
-                required = required_cache.get(external)
-                if required is None:
-                    required = self._required_width_mm(
-                        thermal.current_a, design_rules, external=external
-                    )
-                    required_cache[external] = required
-                ratios.append(segment.width / required if required > 0 else float("inf"))
-            capacity += min(ratios)
-            widths.append(min(seg.width for seg in branch))
+        for layer, width in group.layer_widths().items():
+            external = self._is_external_layer(layer)
+            required = required_cache.get(external)
+            if required is None:
+                required = self._required_width_mm(
+                    thermal.current_a, design_rules, external=external
+                )
+                required_cache[external] = required
+            capacity += width / required if required > 0 else float("inf")
         if capacity >= 1.0:
             return None
         first = group.branches[0][0]
         loc_x, loc_y = self._segment_midpoint(first)
+        noun = f"{group.shape} width"
         return DRCViolation(
             rule_id=self.rule_id,
             severity="error",
             message=(
                 f"Current path {spec.name!r} ({spec.source.label()} -> "
                 f"{spec.sink.label()}) {group.describe()} too narrow for "
-                f"{thermal.description}: summed width {sum(widths):.3f}mm provides "
+                f"{thermal.description}: {noun} {group.width_mm:.3f}mm provides "
                 f"{capacity:.0%} of the IPC-2221 requirement"
             ),
             location=(loc_x, loc_y),
@@ -331,19 +330,33 @@ class PathAmpacityRule(DRCRule):
 
         Error when the path is ``reinforcement_eligible`` (a force path),
         warning otherwise. Waivable via ``.kct_waivers.json`` like any other
-        ``path_ampacity`` finding.
+        ``path_ampacity`` finding. The count is broken down into centreline
+        and tie vias when the change grew through the #9561 pass, and nearby
+        same-net vias it rejected are named with a reason so the reader can
+        see why their stitching did not clear the finding.
         """
+        via_clause = f"{change.count} via(s)"
+        if change.tie_vias:
+            via_clause += (
+                f" ({change.centreline_count} on the centreline, "
+                f"{len(change.tie_vias)} tie vias in the bar)"
+            )
+        excluded_clause = ""
+        if change.excluded_tie_vias:
+            detail = ", ".join(f"{n} {reason}" for reason, n in change.excluded_tie_vias)
+            total = sum(n for _, n in change.excluded_tie_vias)
+            excluded_clause = f"; {total} same-net via(s) not counted: {detail}"
         return DRCViolation(
             rule_id=self.rule_id,
             severity="error" if spec.reinforcement_eligible else "warning",
             message=(
                 f"Current path {spec.name!r} ({spec.source.label()} -> "
                 f"{spec.sink.label()}) changes layer {change.from_layer} -> "
-                f"{change.to_layer} through {change.count} via(s) "
+                f"{change.to_layer} through {via_clause} "
                 f"(drill {change.drill:.3f}mm, pad {change.pad_diameter:.3f}mm) with "
                 f"combined capacity {capacity_a:.2f}A, below {thermal.description} "
                 f"(barrel model: {VIA_PLATING_THICKNESS_MM * 1000:.0f}um plating, "
-                "IPC-2221 external, 10C rise)"
+                f"IPC-2221 external, 10C rise){excluded_clause}"
             ),
             location=change.position,
             layer=change.from_layer,
