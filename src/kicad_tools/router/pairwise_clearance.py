@@ -339,12 +339,14 @@ def load_signed_voltage_map(path: str | Path) -> dict[str, float]:
     Range support (#4411): each net is parsed as a closed ``[lo, hi]`` interval
     and collapsed to the endpoint of largest magnitude *with its sign* --
     exactly the authored value for a scalar entry (the degenerate interval), and
-    the worst-case excursion for a swinging node.  The router's table is
-    scalar-per-net, so a genuinely swinging pair can still be differenced less
-    conservatively than the census' full
-    ``dv = max(|a.hi - b.lo|, |b.hi - a.lo|)``; consuming intervals end-to-end
-    is #4411 follow-up work, out of scope here.  For an all-non-negative map
-    this returns exactly what ``load_voltage_map`` does.
+    the worst-case excursion for a swinging node.  The collapse is kept only for
+    the scalar return contract (provenance/diagnostics); route-time consumers
+    now difference the full intervals end-to-end via
+    :func:`load_voltage_intervals` + ``net_intervals=`` (#9602) so a
+    range-bearing map matches the census' ``dv = max(|a.hi - b.lo|,
+    |b.hi - a.lo|)`` -- collapsing first can score a sign-flipping pair's
+    opposite bank at 0 V and drop it from the matrix entirely.  For an
+    all-non-negative map this returns exactly what ``load_voltage_map`` does.
 
     Raises:
         ValueError: If the file is not a JSON object, or any net voltage
@@ -359,6 +361,34 @@ def load_signed_voltage_map(path: str | Path) -> dict[str, float]:
         raise ValueError(f"voltage map must be a JSON object, got {type(raw).__name__}")
     intervals = voltage_map_from_dict(raw)[0]
     return {name: (iv.hi if abs(iv.hi) >= abs(iv.lo) else iv.lo) for name, iv in intervals.items()}
+
+
+def load_voltage_intervals(path: str | Path) -> dict[str, tuple[float, float]]:
+    """Load a ``--voltage-map`` sidecar as per-net closed ``[lo, hi]`` intervals (#9602).
+
+    Counterpart to :func:`load_signed_voltage_map` reading the same file, with
+    the same parse contract (:func:`kicad_tools.creepage.engine.voltage_map_from_dict`
+    -- reserved ``_``-prefixed metadata keys skipped identically).  Where the
+    scalar loader collapses each range to its dominant endpoint, this loader
+    keeps the full interval so the pairwise builders can difference nets
+    end-to-end the way the creepage census does
+    (``dv = max(|a.hi - b.lo|, |b.hi - a.lo|)``).  A scalar entry is the
+    degenerate interval ``(v, v)``; ``/``-stripping of keys is left to the
+    consumer, mirroring :func:`load_signed_voltage_map`.
+
+    Raises:
+        ValueError: If the file is not a JSON object, or any net voltage
+            endpoint is not a finite real number.
+    """
+    from kicad_tools.creepage.engine import voltage_map_from_dict
+
+    raw = json.loads(Path(path).read_text())
+    if not isinstance(raw, dict):
+        # ``voltage_map_from_dict`` raises ``TypeError`` for a non-dict; keep the
+        # ``ValueError`` contract the CLI loaders already catch.
+        raise ValueError(f"voltage map must be a JSON object, got {type(raw).__name__}")
+    intervals = voltage_map_from_dict(raw)[0]
+    return {name: (iv.lo, iv.hi) for name, iv in intervals.items()}
 
 
 def load_pair_bounds(path: str | Path) -> dict[frozenset[str], tuple[float, str]]:
@@ -387,6 +417,7 @@ def build_pairwise_clearance_table(
     material_group: str = "IIIa",
     hv_threshold: float = 30.0,
     pair_bounds: Mapping[frozenset[str], tuple[float, str]] | None = None,
+    net_intervals: Mapping[str, tuple[float, float]] | None = None,
 ) -> PairwiseClearanceTable:
     """Build a :class:`PairwiseClearanceTable` from a per-net voltage map.
 
@@ -417,6 +448,15 @@ def build_pairwise_clearance_table(
             creepage widening; pairs below it keep only the ``dru`` floor.
         pair_bounds: Optional device-bounded ``|ΔV|`` caps (#8043), see
             :func:`load_pair_bounds`. Only ever lowers a pair's ``|ΔV|``.
+        net_intervals: Optional per-net closed ``[lo, hi]`` intervals as read by
+            :func:`load_voltage_intervals` (#9602). When supplied, a pair's
+            stress is the census' worst-case endpoint combination
+            ``dv = max(|a.hi - b.lo|, |b.hi - a.lo|)`` (then ``_pair_bounds``
+            lowering, then ``hv_threshold``), matching
+            ``kct creepage`` on range-bearing maps. Nets absent from the mapping
+            stay degenerate ``(v, v)`` intervals, so a scalar-only map produces
+            byte-identical ``required_by_pair``. ``None`` (default) keeps the
+            scalar differencing of earlier releases.
 
     Returns:
         A frozen :class:`PairwiseClearanceTable`.
@@ -436,6 +476,11 @@ def build_pairwise_clearance_table(
     # both search-time avoidance and the post-route audit.  An all-non-negative
     # map is unaffected (``abs`` was the identity on it).
     normalised = {_norm_net_key(name): float(v) for name, v in net_voltages.items()}
+    normalised_intervals: dict[str, tuple[float, float]] | None = None
+    if net_intervals is not None:
+        normalised_intervals = {
+            _norm_net_key(name): (float(lo), float(hi)) for name, (lo, hi) in net_intervals.items()
+        }
     required = build_required_by_domain_pair(
         normalised,
         standard_id=standard_id,
@@ -443,6 +488,7 @@ def build_pairwise_clearance_table(
         material_group=material_group,
         hv_threshold=hv_threshold,
         pair_bounds=pair_bounds,
+        domain_intervals=normalised_intervals,
     )
     return PairwiseClearanceTable(
         dru=float(dru),
@@ -591,11 +637,13 @@ def subthreshold_coverage_gap(
     pollution_degree: int = 2,
     material_group: str = "IIIa",
     hv_threshold: float = 30.0,
+    net_intervals: Mapping[str, tuple[float, float]] | None = None,
 ) -> SubthresholdCoverage:
     """Measure what ``hv_threshold`` hides from the pairwise matrix (#4507).
 
     Mirrors :func:`build_pairwise_clearance_table`'s inputs exactly -- same
-    signed differencing (#4867), same standard lookup -- but reports the pairs
+    signed differencing (#4867), same interval differencing when *net_intervals*
+    is supplied (#9602), same standard lookup -- but reports the pairs
     that fall on the *other* side of the threshold and would still carry a
     requirement above ``dru``.  See :class:`SubthresholdCoverage`.
 
@@ -623,7 +671,16 @@ def subthreshold_coverage_gap(
     for i in range(len(ids)):
         for j in range(i + 1, len(ids)):
             a, b = ids[i], ids[j]
-            dv = abs(normalised[a] - normalised[b])
+            # Issue #9602: interval-aware ΔV, mirroring
+            # build_required_by_domain_pair's worst-case endpoint combination.
+            iv_a = net_intervals.get(a) if net_intervals else None
+            iv_b = net_intervals.get(b) if net_intervals else None
+            if iv_a is not None or iv_b is not None:
+                lo_a, hi_a = iv_a if iv_a is not None else (normalised[a], normalised[a])
+                lo_b, hi_b = iv_b if iv_b is not None else (normalised[b], normalised[b])
+                dv = max(abs(hi_a - lo_b), abs(hi_b - lo_a))
+            else:
+                dv = abs(normalised[a] - normalised[b])
             if dv <= 0.0 or dv >= hv_threshold:
                 continue
             if dv not in lookup_cache:

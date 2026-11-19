@@ -9344,11 +9344,13 @@ def _preload_voltage_map(args) -> int:
     Shared by ``kct route`` and ``kct optimize-traces`` so both accept the same
     inputs and fail with the same messages.  Stashes the result on
     ``args._pairwise_voltages`` / ``args._pairwise_required`` (both ``None``
-    when ``--voltage-map`` was not supplied).  Returns 0, or 1 after printing
-    the error to stderr.
+    when ``--voltage-map`` was not supplied) plus the per-net ``[lo, hi]``
+    intervals on ``args._pairwise_intervals`` (#9602).  Returns 0, or 1 after
+    printing the error to stderr.
     """
     args._pairwise_voltages = None
     args._pairwise_required = None
+    args._pairwise_intervals = None
     if getattr(args, "voltage_map", None) is not None:
         from kicad_tools.creepage.standards import StandardLookupError
         from kicad_tools.placement.hv_domains import build_required_by_domain_pair
@@ -9356,6 +9358,7 @@ def _preload_voltage_map(args) -> int:
             _norm_net_key,
             load_pair_bounds,
             load_signed_voltage_map,
+            load_voltage_intervals,
         )
 
         vm_path = Path(args.voltage_map).resolve()
@@ -9375,10 +9378,18 @@ def _preload_voltage_map(args) -> int:
             _raw_voltages = load_signed_voltage_map(vm_path)
             # Issue #8043: device-bounded pair caps from the same sidecar.
             _pair_bounds = load_pair_bounds(vm_path)
+            # Issue #9602: keep the full [lo, hi] intervals too, so the table
+            # below differences range-bearing nets end-to-end exactly like the
+            # census (the scalar collapse alone can score a sign-flipping
+            # pair's opposite bank at 0 V and drop it from the matrix).
+            _raw_intervals = load_voltage_intervals(vm_path)
         except (ValueError, OSError) as e:
             print(f"Error: invalid voltage-map: {e}", file=sys.stderr)
             return 1
         _voltages = {_norm_net_key(n): float(v) for n, v in _raw_voltages.items()}
+        _intervals = {
+            _norm_net_key(n): (float(lo), float(hi)) for n, (lo, hi) in _raw_intervals.items()
+        }
         from kicad_tools.creepage.engine import pair_bounds_unmapped_nets
 
         for _n in pair_bounds_unmapped_nets(_pair_bounds, _voltages):
@@ -9394,12 +9405,14 @@ def _preload_voltage_map(args) -> int:
                 material_group=getattr(args, "material_group", "IIIa"),
                 hv_threshold=getattr(args, "hv_threshold", 30.0),
                 pair_bounds=_pair_bounds or None,
+                domain_intervals=_intervals,
             )
         except StandardLookupError as e:
             print(f"Error: voltage-map creepage lookup failed: {e}", file=sys.stderr)
             return 1
         args._pairwise_voltages = _voltages
         args._pairwise_required = _required
+        args._pairwise_intervals = _intervals
     return 0
 
 
@@ -9504,6 +9517,7 @@ def _warn_subthreshold_coverage_gap(args, voltages, dru: float) -> None:
         pollution_degree=getattr(args, "pollution_degree", 2),
         material_group=getattr(args, "material_group", "IIIa"),
         hv_threshold=hv_threshold,
+        net_intervals=getattr(args, "_pairwise_intervals", None),
     )
     if gap.pair_count == 0:
         return
