@@ -16,6 +16,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-19
 
+- **PR #9513**: test: correct exact-cap gr_circle docstring and relax strip-side pin
+- **Issue #9511** (closed): test_mask_copper_reinforce_9444: exact-cap docstring names the wrong mechanism, and the pin rests on an 8e-6 overlay margin
+- **PR #9506**: fix: ignore DNP SMD parts when deciding which sides need fiducials
+- **Issue #9480** (closed): _populated_sides ignores dnp, and the fiducials rule docstring still states the pre-#9472 definition
 - **PR #9505**: fix: consider every fragment run in a chain, not just the first
 - **PR #9500**: test: bound pr-only audit-marker check to the job's own ci.yml body
 - **PR #9442**: fix: honour (justify ...) in silk text bounding boxes
