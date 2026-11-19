@@ -205,6 +205,7 @@ def check_silkscreen_line_width(
     min_width = design_rules.min_silkscreen_width_mm
 
     # Check board-level graphics (never suppressed -- no footprint context)
+    to_board = _board_frame_shift(pcb)
     for graphic in pcb.graphics:
         if not is_silkscreen_layer(graphic.layer):
             continue
@@ -217,7 +218,7 @@ def check_silkscreen_line_width(
                         f"Silkscreen line width {graphic.stroke_width:.2f}mm "
                         f"< minimum {min_width:.2f}mm"
                     ),
-                    location=graphic.start,
+                    location=to_board(graphic.start),
                     layer=graphic.layer,
                     actual_value=graphic.stroke_width,
                     required_value=min_width,
@@ -817,6 +818,23 @@ def _arc_geometry(
     return LineString(points).buffer(width / 2.0)
 
 
+def _board_frame_shift(pcb: PCB) -> Callable[[tuple[float, float]], tuple[float, float]]:
+    """Return a function mapping board-level (``gr_*``) file coordinates to the board frame.
+
+    ``PCB.load`` shifts footprints (and so pads) into the board-relative
+    frame and records the shift in ``pcb._board_origin``; board-level
+    graphics keep the file's sheet-absolute coordinates (Issues #8561,
+    #9642).  Rules that compare board-level silk against pads, or report its
+    location, must apply this shift.  Identity on zero-origin boards.
+    """
+    ox, oy = getattr(pcb, "_board_origin", (0.0, 0.0))
+
+    def to_board(p: tuple[float, float]) -> tuple[float, float]:
+        return (p[0] - ox, p[1] - oy)
+
+    return to_board
+
+
 def _stroke_geometry(
     graphic: FootprintGraphic | BoardGraphic,
     transform: _Transform | None,
@@ -1159,6 +1177,7 @@ def iter_unmodeled_silk_graphics(
                 graphic.uuid,
             )
 
+    to_board = _board_frame_shift(pcb)
     for board_graphic in pcb.graphics:
         if _silk_side(board_graphic.layer) is None:
             continue
@@ -1167,7 +1186,7 @@ def iter_unmodeled_silk_graphics(
         yield (
             f"gr_{board_graphic.graphic_type}",
             board_graphic.graphic_type,
-            board_graphic.start,
+            to_board(board_graphic.start),
             board_graphic.layer,
             board_graphic.uuid,
         )
