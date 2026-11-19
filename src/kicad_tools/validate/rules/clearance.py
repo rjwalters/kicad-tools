@@ -1604,6 +1604,9 @@ class ClearanceRule(DRCRule):
             for pad in footprint.pads:
                 if (pad.shape or "").lower() != "custom":
                     continue
+                if _pad_has_no_copper(pad):
+                    # Issue #9528: no copper layer, nothing to leave unjudged.
+                    continue
                 from kicad_tools.geometry.copper import custom_pad_outline_detail
 
                 geometry, refusal = custom_pad_outline_detail(
@@ -2584,3 +2587,28 @@ def _pad_on_layer(pad: Pad, layer: str) -> bool:
     if "*.Cu" in pad_layers:
         return True
     return layer in pad_layers
+
+
+def _pad_has_no_copper(pad: Pad) -> bool:
+    """Return True if a pad declares layers but none of them is copper.
+
+    Issue #9528: a pad whose only layers are e.g. ``F.Paste`` (the stock
+    library's paste-only custom pads) carries no copper, so a copper rule has
+    nothing to measure -- and must not report it as unmeasured coverage.  Any
+    ``*.Cu`` entry counts as copper (``F.Cu``, ``In1.Cu`` and the ``*.Cu``
+    through-hole wildcard), consistent with :func:`_pad_on_layer`.  A pad with
+    no declared layers at all is left to the callers' existing handling rather
+    than assumed copper-free.
+    """
+    pad_layers = pad.layers
+    if not pad_layers:
+        return False
+    return not any(layer.endswith(".Cu") for layer in pad_layers)
+
+
+def _pad_has_no_mask(pad: Pad) -> bool:
+    """Return True if a pad declares layers but none of them is solder mask."""
+    pad_layers = pad.layers
+    if not pad_layers:
+        return False
+    return not any(layer.endswith(".Mask") for layer in pad_layers)
