@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from .match_group_length_skew import MatchGroupLengthSkewRule
     from .missing_plated_hole import MissingPlatedHoleRule
     from .pin1_marker import Pin1MarkerRule
+    from .plane_split import PlaneSplitRule
     from .pour_slot import PourSlotRule
     from .redundant_copper import RedundantCopperRule
     from .schematic_fields import check_schematic_fields
@@ -74,6 +75,7 @@ _EXPORT_MODULES: dict[str, str] = {
     "MissingPlatedHoleRule": ".missing_plated_hole",
     "SharpTraceCornerRule": ".sharp_trace_corner",
     "Pin1MarkerRule": ".pin1_marker",
+    "PlaneSplitRule": ".plane_split",
     "PourSlotRule": ".pour_slot",
     "RedundantCopperRule": ".redundant_copper",
     "check_schematic_fields": ".schematic_fields",
@@ -120,6 +122,7 @@ __all__ = [
     "SharpTraceCornerRule",
     "NetImpedanceSpec",
     "Pin1MarkerRule",
+    "PlaneSplitRule",
     "PourSlotRule",
     "RedundantCopperRule",
     "SinglePadNetRule",

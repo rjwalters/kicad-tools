@@ -291,3 +291,116 @@ def test_helpers_fall_back_when_tmpdir_unset(sandbox: Path, tmp_path: Path) -> N
     assert result.returncode == 0, result.stderr
     assert "RC=0" in result.stdout
     _assert_committed_tree_restored(sandbox, before)
+
+
+# --- Backup-failure regression (#9638) --------------------------------------
+# A failed/partial backup (ENOSPC on the backup filesystem) must abort before
+# staging: rc != 0, inner command never run, committed tree untouched, no
+# leaked backup. The failure is injected with a `cp` shim earlier on PATH that
+# fails (after leaving partial output, like a full disk) only when the
+# destination is a ci-jobs-stage-bak.* backup; every other cp is the real one.
+
+
+def _failing_backup_cp_shim(tmp_path: Path) -> Path:
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    real_cp = subprocess.run(
+        ["bash", "-c", "command -v cp"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    shim = shim_dir / "cp"
+    shim.write_text(
+        f"""\
+#! /usr/bin/env bash
+dest="${{@: -1}}"
+case "$dest" in
+  *ci-jobs-stage-bak.*)
+    # Partial write, then ENOSPC-style failure.
+    if [ -d "$dest" ]; then : > "$dest/partial"; else : > "$dest"; fi
+    echo "cp: error writing '$dest': No space left on device" >&2
+    exit 1
+    ;;
+esac
+exec '{real_cp}' "$@"
+"""
+    )
+    shim.chmod(0o755)
+    return shim_dir
+
+
+def test_stage_over_committed_dir_aborts_when_backup_copy_fails(
+    sandbox: Path, tmp_path: Path
+) -> None:
+    fresh, committed, before = _seed_dir_trees(sandbox, tmp_path)
+    marker = tmp_path / "inner-ran"
+    inner = tmp_path / "inner.sh"
+    inner.write_text(f"#! /usr/bin/env bash\ntouch '{marker}'\n")
+    inner.chmod(0o755)
+    shim_dir = _failing_backup_cp_shim(tmp_path)
+    result = _run_lib(
+        sandbox,
+        tmp_path,
+        f"""
+stage_over_committed_dir '{fresh}' '{committed}' '{inner}'
+rc=$?
+echo "RC=$rc"
+""",
+        PATH=f"{shim_dir}{os.pathsep}{os.environ['PATH']}",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "RC=1" in result.stdout
+    assert "backup" in result.stderr
+    assert not marker.exists(), "inner command ran despite a failed backup"
+    _assert_committed_tree_restored(sandbox, before)
+    _assert_no_backup_left(tmp_path)
+
+
+def test_check_drc_over_committed_path_aborts_when_backup_copy_fails(
+    sandbox: Path, tmp_path: Path
+) -> None:
+    committed = sandbox / "boards" / "probe" / "routed.kicad_pcb"
+    committed.parent.mkdir(parents=True)
+    committed.write_bytes(COMMITTED_PCB)
+    fresh = tmp_path / "routed-fresh.kicad_pcb"
+    fresh.write_bytes(FRESH_PCB)
+    shim_dir = _failing_backup_cp_shim(tmp_path)
+    result = _run_lib(
+        sandbox,
+        tmp_path,
+        f"""
+check_drc_over_committed_path '{fresh}' '{committed}'
+rc=$?
+echo "RC=$rc"
+""",
+        PATH=f"{shim_dir}{os.pathsep}{os.environ['PATH']}",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "RC=1" in result.stdout
+    assert "backup" in result.stderr
+    # The DRC stub logs on every invocation; no log means it never ran.
+    assert not (tmp_path / "drc-stub.log").exists()
+    assert committed.read_bytes() == COMMITTED_PCB
+    _assert_no_backup_left(tmp_path)
+
+
+def test_stage_over_committed_dir_aborts_when_backup_allocation_fails(
+    sandbox: Path, tmp_path: Path
+) -> None:
+    fresh, committed, before = _seed_dir_trees(sandbox, tmp_path)
+    marker = tmp_path / "inner-ran"
+    inner = tmp_path / "inner.sh"
+    inner.write_text(f"#! /usr/bin/env bash\ntouch '{marker}'\n")
+    inner.chmod(0o755)
+    result = _run_lib(
+        sandbox,
+        tmp_path,
+        f"""
+stage_over_committed_dir '{fresh}' '{committed}' '{inner}'
+rc=$?
+echo "RC=$rc"
+""",
+        TMPDIR=str(tmp_path / "does-not-exist"),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "RC=1" in result.stdout
+    assert not marker.exists()
+    _assert_committed_tree_restored(sandbox, before)
