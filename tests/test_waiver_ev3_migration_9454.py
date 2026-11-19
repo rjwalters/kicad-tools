@@ -151,6 +151,17 @@ class TestPriorRecipe:
         ev3 = compute_evidence_hash(f, EvidenceContext(pcb, recipe="ev3"))
         assert ev3.split(":")[1] == f.evidence_hash.split(":")[1]
 
+    def test_ev3_digests_match_the_frozen_pre_9437_tool(self, tmp_path):
+        # Pinned literals (issue #9482): byte-identical to what the genuine
+        # pre-#9437 kct recorded for this board, so the ev3 recipe is checked
+        # independently of the helper that implements it.
+        board = _write_board(tmp_path)
+        assert {k: _ev3_hash(board, k) for k in (COURTYARD_R1, COURTYARD_R2, PAD_PAD)} == {
+            COURTYARD_R1: "ev3:50a30c56e1a439d6",
+            COURTYARD_R2: "ev3:61dfb3608161d65f",
+            PAD_PAD: "ev3:9116bd87e75d1889",
+        }
+
     def test_only_ev3_is_available(self):
         with pytest.raises(ValueError, match="ev2"):
             EvidenceContext(None, recipe="ev2")
@@ -282,6 +293,51 @@ class TestMigration:
         report = migrate_evidence_waivers(waivers, findings, EvidenceContext(pcb, recipe="ev3"))
 
         assert [o.key for o in report.orphan] == [legacy_key]
+
+    def test_orphan_path_ampacity_waiver_names_per_layer_candidates(self, tmp_path):
+        board = _write_board(tmp_path)
+        findings, pcb = _findings(board)
+
+        # #8797/#8798: path_ampacity is now keyed per layer, so a waiver
+        # written against the old empty-layer key matches nothing.
+        def amp(layer: str) -> DRCViolation:
+            return DRCViolation(
+                rule_id="path_ampacity",
+                severity="error",
+                message="too much current",
+                layer=layer,
+                items=("Path1",),
+                nets=("VBUS",),
+            )
+
+        current = [*findings, amp("F.Cu"), amp("B.Cu")]
+        waivers = _write_waivers(
+            tmp_path, [_entry("path_ampacity|Path1|VBUS|", "ev3:0123456789abcdef")]
+        )
+
+        report = migrate_evidence_waivers(waivers, current, EvidenceContext(pcb, recipe="ev3"))
+
+        assert [o.key for o in report.orphan] == ["path_ampacity|Path1|VBUS|"]
+        (orphan,) = report.orphan
+        assert orphan.candidates == (
+            "path_ampacity|Path1|VBUS|B.Cu",
+            "path_ampacity|Path1|VBUS|F.Cu",
+        )
+
+    def test_legacy_version_entries_are_listed_by_key_not_counted(self, tmp_path, capsys):
+        board = _write_board(tmp_path)
+        waivers = _write_waivers(
+            tmp_path, [_entry("courtyard_missing|U9||F.Cu", "ev2:0123456789abcdef")]
+        )
+        before = waivers.read_text()
+
+        code, out = _migrate(capsys, board, waivers, "--write")
+
+        assert code == 0
+        assert "legacy (left alone): 1" in out
+        assert "untouched: 0" in out
+        assert "legacy (left alone): courtyard_missing|U9||F.Cu  (ev2:0123456789abcdef)" in out
+        assert waivers.read_text() == before
 
     def test_dry_run_changes_no_file_and_prints_the_same_report(self, tmp_path, capsys):
         board = _write_board(tmp_path)
@@ -643,7 +699,7 @@ class TestInactiveRuleOrphans:
 
 
 class TestUntouchedListedByKey:
-    def test_ev2_ev5_and_legacy_entries_are_listed_not_only_counted(self, tmp_path):
+    def test_ev5_and_keyless_legacy_entries_are_listed_not_only_counted(self, tmp_path):
         board = _write_board(tmp_path)
         findings, pcb = _findings(board)
         legacy = {
@@ -663,14 +719,14 @@ class TestUntouchedListedByKey:
 
         report = migrate_evidence_waivers(waivers, findings, EvidenceContext(pcb, recipe="ev3"))
 
-        assert report.untouched == 3
+        assert report.untouched == 2
+        assert [it.key for it in report.legacy] == [COURTYARD_R2]
         assert report.untouched_keys == [
-            COURTYARD_R2,
             COURTYARD_R1,
             "courtyard_missing (legacy rule/items entry)",
         ]
         text = "\n".join(format_waiver_migration(report, waivers, write=False))
-        assert f"untouched (no migration needed): {COURTYARD_R2}" in text
+        assert f"legacy (left alone): {COURTYARD_R2}" in text
         assert f"untouched (no migration needed): {COURTYARD_R1}" in text
         assert (
             "untouched (no migration needed): courtyard_missing (legacy rule/items entry)" in text
