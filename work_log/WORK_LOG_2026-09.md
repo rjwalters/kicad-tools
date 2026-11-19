@@ -2,6 +2,29 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-18
+
+- **PR #5568**: fix(router): sum both edge directions in RoutingPlan edge entries
+- **PR #5565**: test(conformance): wrap five clearance consumers as adapters and populate the conformance table
+- **PR #5554**: perf(router): write segment clearance envelopes with slice assignment
+- **PR #5553**: feat(router): apply declared swap groups via a pad-rebind applicator
+- **PR #5549**: fix(zones): reuse an existing same-net barrel for a pour bridge (#5507)
+- **PR #5548**: feat(board-07): netlist write-back for generator-owned boards (Epic #5511 Phase 2b)
+- **PR #5547**: chore(deps): bump soupsieve from 2.8.4 to 2.9
+- **PR #5546**: chore(deps): bump devalue from 5.8.1 to 5.9.2 in /site
+- **Issue #5544** (closed): RoutingPlan.from_global_result() may disagree with get_total_overflow() on reverse-direction-only overflow
+- **PR #5542**: fix: parse kicad-cli 10 hole-to-hole 'min X mm; actual Y mm' wording
+- **PR #5540**: fix: RegionGraph.get_total_overflow() undercounts reverse-direction edge overflow
+- **Issue #5538** (closed): classify-dependency-block.sh's ref extraction treats a parenthetical epic mention as a second open blocker, wedging phase issues in DEFER forever
+- **Issue #5537** (closed): [Epic #5511] Phase 2b: netlist write-back for generator-owned boards
+- **Issue #5536** (closed): [Epic #5511] Phase 2a: pad-rebind applicator for declared swap groups
+- **Issue #5534** (closed): drc/report.py's clearance extractor doesn't parse kicad-cli 10's hole-to-hole wording
+- **Issue #5533** (closed): [Epic #5509] Phase 1a (2/2): five consumer adapters + populated clearance-conformance table
+- **Issue #5529** (closed): RegionGraph.get_total_overflow() can undercount overflow on reverse-direction edge traversals
+- **PR #5524**: ci: bound native KiCad subprocess concurrency from measured attribution
+- **Issue #5523** (closed): loom-fleet-dispatch auto-relabels draft PRs to loom:review-requested
+- **Issue #5501** (closed): CI: bound remaining native subprocess concurrency after confirmed Test cgroup OOM
+
 ### 2026-09-17
 
 - **PR #5543**: fix(judge): exclude draft PRs from fallback-mode evaluation

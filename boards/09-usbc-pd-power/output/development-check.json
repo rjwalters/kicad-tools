@@ -49,11 +49,11 @@
     "manufacturer-check": {
       "returncode": 2,
       "summary": {
-        "errors": 52,
-        "warnings": 170,
-        "infos": 4,
+        "errors": 124,
+        "warnings": 183,
+        "infos": 179,
         "waived": 0,
-        "rules_checked": 84,
+        "rules_checked": 85,
         "rules_checked_by_rule": {
           "connectivity": 1,
           "copper_sliver": 1,
@@ -94,7 +94,7 @@
         "stale_waivers": 0,
         "orphan_waivers": 0,
         "coverage_checked": 47,
-        "coverage_skipped": 5,
+        "coverage_skipped": 6,
         "coverage_unknown": [
           "model_coverage"
         ],
@@ -150,8 +150,8 @@
   ],
   "sha256": {
     "usbc_pd_power.kicad_sch": "025ed270feacb0d33557cdfcbb5e14cb8f6b7c814d76579a7ee170ae65b338a7",
-    "usbc_pd_power.kicad_pcb": "d2687f3070cfa88cdeee522c3be2e136778e988045378951562c10619508e9f5",
-    "circuit.json": "8c5346506cd6bd6796e29cc368fae648df63b1ccaf7c651f61d4422ca8e8c8ef",
+    "usbc_pd_power.kicad_pcb": "aa07b0a4a277ab569cfb66f56225c94c67fe0424457bf097eac63c600acc95e3",
+    "circuit.json": "8a1921cbc4b3ba23a836a2da26cf9d637e9f72e797d05039093098072378816d",
     "net_class_map.json": "080bfbd951526b2171bac077b61cc28330f5371a60f39d1cbfcb748d746d6a54",
     "usbc_pd_power.kicad_pro": "46e70ad622f62a250039b8ed3a792497b33bf6c7a0d18eb689a5f513a4ae2c22",
     "board09.kicad_sym": "36f1e94f721256abb4ab91d033f3d099e7aee1a49c81a25856ddfb67d36b9e52",

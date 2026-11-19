@@ -41,6 +41,9 @@ from ..clearance_shapes import (
 from ..clearance_shapes import (
     pad_shape as _kernel_pad_shape,
 )
+from ..clearance_shapes import (
+    zone_shape as _kernel_zone_shape,
+)
 from ..copper_refs import Origin, board_origin, segment_ref, via_ref
 from ..spatial import candidate_pairs
 from ..violations import DRCResults, DRCViolation
@@ -286,6 +289,19 @@ class CopperElement:
             # copper-only via is the right model.
             return KVia(x=cx, y=cy, diameter=max(width, height), drill=0.0)
         if self.source_pad is not None and self.source_footprint is not None:
+            # A ``custom`` pad whose anchor-plus-primitives outline the builder
+            # produced cannot be a Minkowski ``KPad`` (a tab union is not a
+            # core-plus-radius sum), so it rides as a filled-polygon
+            # ``KZonePoly`` instead -- every one of the kernel's fifteen pair
+            # kinds answers a zone, so the verdict sees the tab (Issue #9498).
+            from kicad_tools.geometry.copper import custom_pad_board_outline
+
+            custom = custom_pad_board_outline(
+                self.source_pad,
+                _transform_pad_position(self.source_pad, self.source_footprint),
+            )
+            if custom is not None:
+                return _custom_pad_zone_shape(custom)
             return _kernel_pad_shape(self.source_pad, self.source_footprint)
         if self.polygon is None:
             # A pad element with neither board-file provenance nor a
@@ -382,6 +398,23 @@ def _transform_pad_dimensions(pad: Pad, footprint: Footprint) -> tuple[float, fl
     return new_width, new_height
 
 
+def _custom_pad_zone_shape(outline) -> KShape:
+    """A custom pad's shapely anchor-plus-primitives outline as kernel copper.
+
+    The outline is the builder's union (a ``Polygon`` or ``MultiPolygon`` in
+    board coordinates); each exterior is one outer ring and each interior a
+    hole, which is exactly :func:`~kicad_tools.validate.clearance_shapes.zone_shape`'s
+    even-odd ring convention.  Used by :meth:`CopperElement._build_kernel_shape`
+    so the clearance verdict measures the pad's primitive copper (Issue #9498).
+    """
+    polygons = list(outline.geoms) if outline.geom_type == "MultiPolygon" else [outline]
+    rings: list[list[tuple[float, float]]] = []
+    for polygon in polygons:
+        rings.append(list(polygon.exterior.coords))
+        rings.extend(list(interior.coords) for interior in polygon.interiors)
+    return _kernel_zone_shape(rings)
+
+
 def _pad_polygon(pad: Pad, footprint: Footprint):
     """Return a shapely polygon of a pad's copper in board coordinates.
 
@@ -416,6 +449,16 @@ def _pad_polygon(pad: Pad, footprint: Footprint):
     from shapely.geometry import Point
 
     cx, cy = _transform_pad_position(pad, footprint)
+    # A ``custom`` pad's copper is its anchor plus filled primitives (issues
+    # #9468, #9498), not the nominal ``size`` box the generic branch below
+    # would build.  When the builder refuses (unsupported primitive kind), the
+    # anchor box below remains the geometry and ``ClearanceRule.check`` emits
+    # the matching ``clearance_incomplete`` finding.
+    from kicad_tools.geometry.copper import custom_pad_board_outline
+
+    custom = custom_pad_board_outline(pad, (cx, cy))
+    if custom is not None:
+        return custom
     w, h = pad.size  # LOCAL size -- the rotation below orients the polygon
     if w <= 0 or h <= 0:
         return None
@@ -918,7 +961,11 @@ def _segment_segment_clearance(
 # ``roundrect_rratio``, and non-square ``oval``/``obround`` pads are a
 # stadium, not a rectangle.  ``rect`` (and any unrecognized shape) keeps
 # the existing analytic AABB path unchanged -- see issue #4985.
-_POLYGON_DIVERGENT_SHAPES = frozenset({"roundrect", "oval", "obround"})
+# ``custom`` diverges by construction whenever the builder produced its
+# anchor-plus-primitives union: primitives routinely reach past the anchor
+# (SOT-89's tab), so the interpenetration refinement must read the union,
+# not the AABB (Issue #9498).
+_POLYGON_DIVERGENT_SHAPES = frozenset({"roundrect", "oval", "obround", "custom"})
 
 
 def _segment_circle_clearance(
@@ -1494,6 +1541,12 @@ class ClearanceRule(DRCRule):
         """
         results = DRCResults()
 
+        # A custom pad whose copper the builder refuses is measured by its
+        # anchor only -- that must be a named finding, never a silent
+        # under-measurement (Issue #9498).
+        for v in self._custom_pad_coverage_findings(pcb):
+            results.add(v)
+
         # Build the diff-pair set once for the whole board (suffix
         # inference is cheap; we scan the net table once).  Used to
         # skip same-pair segment-segment edges that the new
@@ -1533,6 +1586,46 @@ class ClearanceRule(DRCRule):
         results.rules_checked += len(pcb.copper_layers)
 
         return results
+
+    def _custom_pad_coverage_findings(self, pcb: PCB) -> list[DRCViolation]:
+        """``clearance_incomplete`` findings for custom pads measured anchor-only.
+
+        Issue #9498: when the outline builder refuses a custom pad (unsupported
+        primitive kind, stroked ``gr_poly``, layer-specific padstack), this
+        rule's geometry silently degrades to the anchor box, and copper in the
+        pad's primitives is invisible -- a real short against that copper would
+        read as clean.  Report the degradation at info (it is a coverage gap of
+        the tool, not a defect of the board -- the same convention as
+        ``tht_smd_spacing_incomplete``), naming the pad and the refusing
+        primitive kind.
+        """
+        findings: list[DRCViolation] = []
+        for footprint in pcb.footprints:
+            for pad in footprint.pads:
+                if (pad.shape or "").lower() != "custom":
+                    continue
+                if _pad_has_no_copper(pad):
+                    # Issue #9528: no copper layer, nothing to leave unjudged.
+                    continue
+                from kicad_tools.geometry.copper import custom_pad_outline_detail
+
+                geometry, refusal = custom_pad_outline_detail(
+                    pad, _transform_pad_position(pad, footprint)
+                )
+                if geometry is not None:
+                    continue
+                detail = refusal or "source pad node unavailable"
+                findings.append(
+                    DRCViolation(
+                        "clearance_incomplete",
+                        "info",
+                        f"Clearance coverage incomplete: custom pad "
+                        f"{footprint.reference}:{pad.number} was measured by its "
+                        f"anchor only ({detail}); copper in its primitives is "
+                        f"unjudged, not cleared",
+                    )
+                )
+        return findings
 
     def _check_layer(
         self,
@@ -2494,3 +2587,28 @@ def _pad_on_layer(pad: Pad, layer: str) -> bool:
     if "*.Cu" in pad_layers:
         return True
     return layer in pad_layers
+
+
+def _pad_has_no_copper(pad: Pad) -> bool:
+    """Return True if a pad declares layers but none of them is copper.
+
+    Issue #9528: a pad whose only layers are e.g. ``F.Paste`` (the stock
+    library's paste-only custom pads) carries no copper, so a copper rule has
+    nothing to measure -- and must not report it as unmeasured coverage.  Any
+    ``*.Cu`` entry counts as copper (``F.Cu``, ``In1.Cu`` and the ``*.Cu``
+    through-hole wildcard), consistent with :func:`_pad_on_layer`.  A pad with
+    no declared layers at all is left to the callers' existing handling rather
+    than assumed copper-free.
+    """
+    pad_layers = pad.layers
+    if not pad_layers:
+        return False
+    return not any(layer.endswith(".Cu") for layer in pad_layers)
+
+
+def _pad_has_no_mask(pad: Pad) -> bool:
+    """Return True if a pad declares layers but none of them is solder mask."""
+    pad_layers = pad.layers
+    if not pad_layers:
+        return False
+    return not any(layer.endswith(".Mask") for layer in pad_layers)

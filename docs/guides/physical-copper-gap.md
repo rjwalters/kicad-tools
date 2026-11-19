@@ -13,8 +13,8 @@ limits, and live in one table at the top of `validate/rules/physical_gap.py`:
 |---|---|---|
 | Copper gap (tracks, pads, vias, fills; same-net included) | < 0.10 mm | `error` |
 | Copper gap | 0.10 to < 0.15 mm | `warning` |
-| Pad-to-pad mask bridge on **2 oz** copper | < 0.20 mm | `error` |
-| THT pad (any drill) or via drilled >= 1.0 mm, to SMD pad; via drilled >= 1.0 mm, to exposed via annulus except a same-net anchor↔anchor pair (`tht_smd_spacing`) | < 2.0 mm / < 2.7 mm | `error` / `warning` |
+| Pad-to-pad mask bridge on **2 oz** copper (exception below) | < 0.20 mm | `error` |
+| THT pad (any drill) or via drilled >= 1.0 mm, to SMD pad; via drilled >= 1.0 mm, to exposed via annulus except a same-net anchor↔anchor pair (`tht_smd_spacing`) | < 2.032 mm / < 3.05 mm | `error` / `warning` |
 
 Same-net near-parallel copper (e.g. 0.08 mm) is always listed; it uses the same
 tiers. The mask-bridge check needs a known copper weight (stackup or `--copper`);
@@ -25,7 +25,14 @@ layers (`F.Cu` / `B.Cu`) only (Issue #8913): solder mask exists only as
 `F.Mask` / `B.Mask`, so there is no inner-layer mask to bridge, and a
 through-hole pad pair yields at most one finding per outer side rather than one
 per copper layer. No inner-layer mask-bridge findings on a 4-layer board is the
-intended scope, not a missed case. `tht_smd_spacing` measures **copper edge to copper
+intended scope, not a missed case. A same-footprint, same-net pad pair is
+exempt (Issue #9420): two pads of **one footprint** on **one identical
+non-empty net** are the land pattern of a stock module (its ground pad array),
+which a consumer cannot edit, so that finding reads `info`, still listed with
+distance and items intact; different footprints, different nets and no-net
+(net 0) pairs keep the `error` -- [mask-to-copper](mask-to-copper.md) documents
+the located fab evidence and the `mask_to_copper` twin exemption.
+`tht_smd_spacing` measures **copper edge to copper
 edge**; the epic does not say whether JLCDFM measures hole centre, hole edge or
 copper edge, so this is a documented choice.
 
@@ -38,9 +45,11 @@ is judged once its drill reaches `ANCHOR_DRILL_MM` (1.0 mm, just under 18 AWG
 wire). Judging *every* via is still wrong -- it produced 176 to 1,068 findings
 per board on this repo's routed boards, against 0 to 6 at the 1.0 mm default,
 where every via drills 0.15-0.3 mm. A THT or SMD pad whose `shape` the rule
-cannot reproduce exactly (`custom`, `trapezoid`) reports
-`tht_smd_spacing_incomplete` at *info* rather than being dropped silently, so
-missing coverage never looks like a cleared pad.
+cannot reproduce exactly (`trapezoid`; a `custom` pad whose primitives the
+outline builder refuses) reports `tht_smd_spacing_incomplete` at *info* rather
+than being dropped silently, so missing coverage never looks like a cleared
+pad. A `custom` pad the builder *can* reproduce is measured by its
+anchor-plus-primitives copper (Issue #9498).
 
 An **exposed via annulus** also counts as the "SMD" side (Issue #8925): JLCDFM
 flagged a 1.9 mm / 1.3 mm-drill anchor via 1.5 mm from an ordinary 0.8 mm /
@@ -96,11 +105,13 @@ layer; a filled-zone UUID can represent multiple boundary regions.
 The checker uses stroked track widths, modern start/mid/end copper arcs, rotated
 circle/oval/rect/roundrect pads, via copper, footprint copper polygons and stored
 filled-zone polygons. It retains source identities separately from the union. Zone
-outlines are not copper: refill zones first. Unfilled zones, custom/unsupported pad
-shapes, unsupported copper graphics and malformed arcs emit blocking
-`physical_copper_gap_incomplete` findings rather than silently claiming full
-coverage. Keepout areas do not add copper. Footprint-library metadata and unplated
-drill holes are not copper.
+outlines are not copper: refill zones first. Unfilled zones, custom pads whose
+primitives the outline builder refuses (named, with the primitive kind --
+Issue #9498; a reproducible custom pad contributes its anchor-plus-primitives
+copper), other unsupported pad shapes, unsupported copper graphics and malformed
+arcs emit blocking `physical_copper_gap_incomplete` findings rather than
+silently claiming full coverage. Keepout areas do not add copper.
+Footprint-library metadata and unplated drill holes are not copper.
 
 A footprint copper polygon (`fp_poly` on a `.Cu` layer) is modeled on the layer the
 polygon itself declares, with the footprint's placement applied: a filled polygon

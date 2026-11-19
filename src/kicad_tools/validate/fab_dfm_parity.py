@@ -163,7 +163,14 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "pair per layer (closest measurement wins -- measured on the #9034 "
         "fixture), so it cannot come from per-edge inflation within a pair. "
         "No fab-sourced edge justifies a threshold change, so the stricter "
-        "same-net error stays (#8938). Zone-fill (pour) gaps are "
+        "same-net error stays (#8938). One narrow exception (#9420): two pads of "
+        "the SAME footprint on one identical non-empty net in the 2 oz pad "
+        "mask-bridge check report at info (still listed). Located fab evidence "
+        "on the consumer board: the fab measured the two 0.19 mm pad pairs "
+        "(round 0.81 mm pads of RF_Module:ESP32-C3-WROOM-02's ground array) "
+        "and rated them Good under pad spacing, and its Soldermask bridge row "
+        "was empty for the whole board (2026-11-18). Different footprints, "
+        "different nets and every other pair keep the error. Zone-fill (pour) gaps are "
         "kct's own advisory only and report at info, not tiered: JLCDFM does "
         "not judge pour clearance -- 1,516 pour-to-pad gaps at 0.10-0.13 mm "
         "went unflagged on the #8938 board -- so kct's warning count for this "
@@ -200,10 +207,17 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "verdict. Since #9420 a third shape is `within_own_footprint` at info: a "
         "single plain-pad opening (not a merged region) overlapping only the "
         "same-net pad(s) of its own footprint, every owner and the exposed pad "
-        "on one identical non-empty net. No fab row locates the fab's verdict "
-        "on these pads: the 0.19 mm soldermask-bridge items on the #9420 board "
-        "were not located by position, so this is a presentation-only downgrade "
-        "(finding kept, distance intact), not a fab-confirmed pass. Different-net "
+        "on one identical non-empty net. JLCDFM located by position at that pad "
+        "array (#9420, 2026-11-18, one board, one export setting): the two 0.19 mm "
+        "pad pairs are Good under Pad spacing (Danger 0.1 mm, Warning 0.15 mm); "
+        "Soldermask bridge is empty board-wide (0 danger / 0 warning / 0 good); "
+        "none of the 6 Solder mask opening exposing trace warnings is at the pads "
+        "(nearest about 35 mm away); and the 19 Soldermask opening with multiple "
+        "segments warnings are reinforce-wire objects (8 of the 15 top-side items "
+        "located by position, 40 mm or more away; the other 11 by object type "
+        "only). So the fab lists no soldermask item at those pads, but it cannot "
+        "see footprints or nets: this is a presentation-only downgrade (finding "
+        "kept, distance intact), not a fab-confirmed pass. Different-net "
         "pour on that board agrees with the fab: R2.1 at "
         "0.1275 mm is a kct warning (fab: warning, 0.13 mm); R1.1 and R1.2 at "
         "0.2 mm get no finding (fab: good). "
@@ -233,7 +247,19 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "sub-1.0 mm fan-out vias as the hole side. A pad shape the rule "
         "cannot measure now reports `tht_smd_spacing_incomplete` at info instead of "
         "vanishing. Fab-view gated -- runs only when the effective --mfr is exactly "
-        "`jlcpcb`. Observed 5 danger.",
+        "`jlcpcb`. Observed 5 danger. Thresholds are 2.032 mm error / 3.05 mm "
+        "warning since #9421 (were 2.0 / 2.7): the fab rated two pairs at 2.00 and "
+        "2.025 mm danger that the 2.0 mm floor passed. 2.032 mm (80 mil) is the "
+        'likely real limit; the fab\'s "2.03" display fits either, so this is '
+        "one-board evidence, not confirmed. Source: jlcdfm.com Alert value panel, "
+        "read 2026-11-17/18, 4-layer, 2 oz outer copper. Same-panel values kct "
+        "does not gate: via-to-pad 0.1 / 0.15 mm (danger / warning) is "
+        "**not gated, observed** -- a single-board observation, and the "
+        "`via_at_pad_edge` advisory already warns on that geometry, so no new rule "
+        "or flag was added; pad-to-line 0.1 / 0.15 mm and mask-opening-exposing-"
+        "trace 0.08 / 0.15 mm are recorded here only. Gerber export: toggling "
+        "aperture macros changes how the fab reads pads; `kct export` writes "
+        "macros off (detail in the #8858 comment 6970004546).",
     ),
     ParityRow(
         "silkscreen_to_pad",
@@ -256,7 +282,12 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "Threshold is 0 mm, so a silk-to-hole gap narrower than JLCDFM's clearance "
         "but not touching is still unchecked, and text is tested as its bounding box "
         "rather than glyph outlines. Observed 75 danger, not reproduced against the "
-        "live tool.",
+        "live tool. Fab thresholds read 2026-11-17/18 (jlcdfm.com Alert value "
+        "panel, 4-layer, 2 oz outer copper): danger 0.13 mm / warning 0.18 mm "
+        "silk-to-hole, against kct's overlap-only threshold of 0 -- 27 kct "
+        "warnings vs 50 fab danger on that board. `SILK_HOLE_CLEARANCE_MM` is "
+        "shared with the silkscreen repair tool, so it is deliberately unchanged "
+        "(#9421).",
     ),
     ParityRow(
         "annular_ring",
@@ -342,7 +373,13 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "`silkscreen_text_thickness` (text) enforce JLCPCB's published >= 0.15 mm. "
         "Not covered: JLCDFM flags silk that meets that floor (#8844: 63 "
         "warnings on gerbers with no silk stroke below 0.150 mm). How JLCDFM "
-        "selects the items it flags is unknown (#8943).",
+        "selects the items it flags is unknown (#8943). Text height is a separate "
+        "floor: JLCPCB publishes 1.0 mm (40 mil) minimum character height "
+        "(pcb-capabilities, verified 2026-11-18) and `silkscreen_text_height` "
+        "enforces it; a project may declare a smaller reference-designator height "
+        "(`silkscreen_min_reference_height_mm`, >= 0.8 mm, #9448) which relaxes "
+        "that floor for designators only and is reported by `kct readiness` as a "
+        "declared deviation -- the fab's own limit is unchanged.",
     ),
     ParityRow(
         "fiducial",

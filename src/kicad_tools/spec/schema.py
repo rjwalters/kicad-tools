@@ -630,6 +630,18 @@ class ManufacturingRequirements(SpecModel):
     finish: str | None = Field(default=None, description="Surface finish (HASL, ENIG, etc.)")
     solder_mask: str | None = Field(default=None, description="Solder mask color")
     silkscreen: str | None = Field(default=None, description="Silkscreen color")
+    silkscreen_min_reference_height_mm: float | None = Field(
+        default=None,
+        description=(
+            "Issue #9448: declared minimum character height (mm) for reference "
+            "designators only.  Unset (the default) holds designators to the "
+            "target fab's silkscreen text-height floor like every other silk "
+            "text.  When set below that floor it relaxes the designator floor "
+            "in the generated .kicad_dru and in `kct check`; labels and board "
+            "text keep the fab floor.  Must be >= 0.8 mm.  The declaration is "
+            "reported by `kct readiness` as an accepted deviation."
+        ),
+    )
     escalation: EscalationPolicy | None = Field(
         default=None,
         description=(
@@ -648,6 +660,26 @@ class ManufacturingRequirements(SpecModel):
         if v is None:
             return None
         return _parse_copper_weight_oz(v)
+
+    @field_validator("silkscreen_min_reference_height_mm", mode="before")
+    @classmethod
+    def validate_reference_height(cls, v: Any) -> Any:
+        """Reject a non-finite, non-numeric or too-small designator height (#9448).
+
+        Runs before coercion so a quoted ``'0.8'`` or ``true`` is rejected,
+        matching ``resolve_declared_reference_height_for_pcb``.
+        """
+        from kicad_tools.manufacturers.base import (
+            MIN_DECLARED_REFERENCE_HEIGHT_MM,
+            is_valid_declared_reference_height,
+        )
+
+        if v is not None and not is_valid_declared_reference_height(v):
+            raise ValueError(
+                f"silkscreen_min_reference_height_mm must be a finite number >= "
+                f"{MIN_DECLARED_REFERENCE_HEIGHT_MM} mm, got {v!r}"
+            )
+        return v
 
     @model_validator(mode="before")
     @classmethod

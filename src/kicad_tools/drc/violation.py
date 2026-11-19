@@ -159,6 +159,10 @@ class ViolationType(Enum):
     # Covers both hard shorts (overlap, negative actual_value) and
     # sub-minimum gaps to committed filled_polygon geometry.
     CLEARANCE_SEGMENT_ZONE = "clearance_segment_zone"
+    # A custom pad the outline builder refused, measured anchor-only at info
+    # (Issue #9498) -- missing coverage, never misrouted to CLEARANCE by the
+    # fuzzy ``"clearance" in s`` fallback.
+    CLEARANCE_INCOMPLETE = "clearance_incomplete"
     CLEARANCE_VIA_VIA = "clearance_via_via"
     # Net-0 stray-copper bridge: a piece of unassigned (net 0) copper that
     # electrically shorts two distinct assigned nets (Issue #3816).  The
@@ -267,6 +271,10 @@ class ViolationType(Enum):
 
     # Silkscreen
     SILK_OVER_COPPER = "silk_over_copper"
+    # A custom pad whose mask aperture was measured anchor-only at info
+    # (Issue #9498) -- explicit so the fuzzy ``"silk"+"copper"`` fallback
+    # does not misroute it to SILK_OVER_COPPER.
+    SILK_OVER_COPPER_INCOMPLETE = "silk_over_copper_incomplete"
     SILK_EDGE_CLEARANCE = "silk_edge_clearance"
     SILK_OVERLAP = "silk_overlap"
     SILKSCREEN_LINE_WIDTH = "silkscreen_line_width"
@@ -493,6 +501,12 @@ class ViolationType(Enum):
             # would drop to UNKNOWN and corrupt the downstream ``type`` field.
             "tht_smd_spacing_incomplete": cls.THT_SMD_SPACING_INCOMPLETE,
             "mask_to_copper_incomplete": cls.MASK_TO_COPPER_INCOMPLETE,
+            # Issue #9498 incomplete-coverage ids.  Explicit for the same
+            # reason as the three above: the fuzzy fallback would misroute
+            # ``clearance_incomplete`` to CLEARANCE and
+            # ``silk_over_copper_incomplete`` to SILK_OVER_COPPER.
+            "clearance_incomplete": cls.CLEARANCE_INCOMPLETE,
+            "silk_over_copper_incomplete": cls.SILK_OVER_COPPER_INCOMPLETE,
             # kicad-cli 10 DRC type strings that ``kct drc --mfr`` judges
             # against fab floors (Issue #7170).  Explicit, because the fuzzy
             # fallback mis-routes every one of them: ``annular_width``,
