@@ -1319,6 +1319,11 @@ class RoutingGrid:
         # ``add_pad`` so late pad additions re-measure.
         self._component_pitch_cache: dict[str, float] | None = None
 
+        # Issue #9622: lazy cache for the under-body surcharge regions
+        # (``under_body_surcharges``).  Same invalidation contract as the
+        # pitch cache: ``add_pad`` drops it so late pad additions re-derive.
+        self._under_body_cache: list | None = None
+
         # Issue #3371 (P_FP2): Fine-pitch escape regions detected on this
         # board.  Populated by the autorouter (or test fixture) once after
         # all pads are added via :meth:`set_fine_pitch_regions`.  Consumed
@@ -2536,6 +2541,25 @@ class RoutingGrid:
         """
         return tuple(self._pads)
 
+    @property
+    def under_body_surcharges(self) -> list:
+        """Per-component under-body surcharge regions (Issue #9622).
+
+        Computed once from the registered pads via
+        :func:`kicad_tools.router.body_surcharge.compute_under_body_regions`
+        and cached until ``add_pad`` invalidates it.  Empty when the board
+        has no qualifying fine-pitch component, so both engines' hot paths
+        stay dormant.
+
+        Consumers: the pure-Python A* mirror in ``pathfinder.Router`` and
+        the per-net budget adapter in ``cpp_backend.CppPathfinder``.
+        """
+        if self._under_body_cache is None:
+            from .body_surcharge import compute_under_body_regions
+
+            self._under_body_cache = compute_under_body_regions(self)
+        return self._under_body_cache
+
     def _add_pad_unsafe(self, pad: Pad, pin_pitch: float | None = None) -> None:
         """Internal pad addition without locking."""
         # Store pad geometry for geometric clearance validation (Issue #750)
@@ -2567,6 +2591,9 @@ class RoutingGrid:
             self._component_pads.setdefault(pad.component_key, []).append(pad)
             # Issue #3545: pitch cache is stale once a new pad lands.
             self._component_pitch_cache = None
+            # Issue #9622: the under-body regions derive from the same
+            # pad registry, so they go stale with it.
+            self._under_body_cache = None
 
         # Issue #2604 follow-up: remember the pin_pitch this pad was added
         # with so ``find_pad_ref_at`` can reproduce the reduced fine-pitch

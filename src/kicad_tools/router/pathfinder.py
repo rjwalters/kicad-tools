@@ -754,6 +754,11 @@ class Router:
             None
         )
 
+        # Issue #9622: cached per-cell region-id array for the under-body
+        # surcharge, identity-checked against the grid's region list (which
+        # expires when the pad registry changes).
+        self._under_body_owner_cache: tuple[list, np.ndarray] | None = None
+
         # Issue #2929: Per-A*-call wall-clock instrumentation.  When
         # ``_per_call_timing_enabled`` is True, every ``route()`` invocation
         # appends a dict to ``_per_call_timings`` recording the elapsed wall
@@ -3720,6 +3725,61 @@ class Router:
         self._pairwise_band_kernel_cache = ((hard_r, band), dist_sq, band_mask)
         return dist_sq, band_mask
 
+    # ------------------------------------------------------------------
+    # Under-body surcharge (Issue #9622, audit row 9)
+    # ------------------------------------------------------------------
+    #
+    # Python mirror of the C++ engine's under-body cost: CppPathfinder
+    # installs the same regions as per-net-filtered ``PadChannelBudget``
+    # entries, so both engines price the identical additive term through
+    # their per-cell cost lookups.  Regions come from the grid's cached
+    # ``under_body_surcharges`` (see ``body_surcharge.py``); a net with a
+    # pad on the component ("local") is exempt.  Dormant (``None`` owner
+    # array) on boards without a qualifying fine-pitch component or with
+    # ``rules.cost_under_body <= 0`` -- the hot loop then adds nothing and
+    # stays byte-identical to pre-#9622 behaviour.
+
+    def _under_body_regions(self) -> list:
+        """The board's under-body surcharge regions ([] when none)."""
+        return getattr(self.grid, "under_body_surcharges", None) or []
+
+    def _under_body_owner_array(self) -> np.ndarray | None:
+        """Per-cell region-id array (1-based; 0 = no body), or ``None``.
+
+        Cached until the grid's region list is replaced (pad registry
+        change), mirroring the grid's own invalidation contract.
+        """
+        regions = self._under_body_regions()
+        if not regions or self.rules.cost_under_body <= 0.0:
+            return None
+        cached = self._under_body_owner_cache
+        if cached is not None and cached[0] is regions:
+            return cached[1]
+        owner = np.zeros((self.grid.num_layers, self.grid.rows, self.grid.cols), dtype=np.int32)
+        cols = self.grid.cols
+        rows = self.grid.rows
+        for i, region in enumerate(regions, start=1):
+            gx1 = max(0, region.gx1)
+            gy1 = max(0, region.gy1)
+            gx2 = min(cols - 1, region.gx2)
+            gy2 = min(rows - 1, region.gy2)
+            if gx1 > gx2 or gy1 > gy2:
+                continue
+            for layer in region.layers:
+                if 0 <= layer < self.grid.num_layers:
+                    owner[layer, gy1 : gy2 + 1, gx1 : gx2 + 1] = i
+        self._under_body_owner_cache = (regions, owner)
+        return owner
+
+    def _under_body_net_state(self, net: int) -> tuple[frozenset[int], float]:
+        """``(region ids local to ``net``, per-cell surcharge)`` for one route."""
+        regions = self._under_body_regions()
+        local = frozenset(
+            i for i, region in enumerate(regions, start=1) if net in region.local_nets
+        )
+        penalty = self.rules.cost_under_body * self.rules.cost_straight
+        return local, penalty
+
     def _pairwise_gradient_band(self, net: int, deadline: float | None = None) -> np.ndarray | None:
         """Cells where :meth:`_pairwise_avoidance_cost` can be non-zero.
 
@@ -4879,6 +4939,15 @@ class Router:
             ),
         )
 
+        # Issue #9622: soft under-body surcharge state.  ``None`` owner array
+        # (boards without a qualifying fine-pitch component, or the cost
+        # disabled) keeps the hot loop byte-identical to pre-#9622 behaviour.
+        under_body_owner = self._under_body_owner_array()
+        under_body_local: frozenset[int] = frozenset()
+        under_body_penalty = 0.0
+        if under_body_owner is not None:
+            under_body_local, under_body_penalty = self._under_body_net_state(start.net)
+
         # Create heuristic context - for PTH end pads, use closest routable layer
         # for heuristic estimation (the actual goal check will accept any)
         heuristic_goal_layer = end_layers[0] if end_layers else end_layer
@@ -5459,6 +5528,17 @@ class Router:
                         pairwise_cost_cache[cache_key] = cached_cost
                     pairwise_cost = cached_cost
 
+                # Issue #9622: soft under-body surcharge for a non-local net
+                # (the Python mirror of the per-cell cost CppPathfinder
+                # installs through its pad-channel lookup).  Zero unless the
+                # cell sits inside a fine-pitch component's body bbox on an
+                # outer layer AND this net has no pad on that component.
+                under_body_cost = 0.0
+                if under_body_owner is not None:
+                    region_id = int(under_body_owner[nlayer, ny, nx])
+                    if region_id and region_id not in under_body_local:
+                        under_body_cost = under_body_penalty
+
                 positive_step_cost = (
                     neighbor_cost_mult * self.rules.cost_straight * layer_pref_mult
                     + turn_cost
@@ -5469,6 +5549,7 @@ class Router:
                     + layer_util_cost
                     + corridor_cost
                     + pairwise_cost
+                    + under_body_cost
                 )
                 if attractor_bonus > 0.0:
                     positive_step_cost = max(0.0, positive_step_cost - attractor_bonus)
@@ -5644,6 +5725,15 @@ class Router:
                 if self.rules.via_cost_cap_factor > 0.0:
                     via_cap = self.rules.via_cost_cap_factor * self.rules.cost_via
                     via_incremental = min(via_incremental, via_cap)
+
+                # Issue #9622: the same surcharge on the via-drop destination
+                # cell, mirroring the C++ via branch (which charges its
+                # pad-channel lookup on ``new_layer``).  Added after the #2325
+                # cap so the surcharge survives it -- the C++ term is uncapped.
+                if under_body_owner is not None:
+                    region_id = int(under_body_owner[new_layer, current.y, current.x])
+                    if region_id and region_id not in under_body_local:
+                        via_incremental += under_body_penalty
 
                 # Issue #2911: Apply the attractor AFTER the cap so the
                 # bonus is felt even when the via cost is at the ceiling.
