@@ -731,3 +731,72 @@ class TestUntouchedListedByKey:
         assert (
             "untouched (no migration needed): courtyard_missing (legacy rule/items entry)" in text
         )
+
+
+class TestVersionPrefixClassification:
+    """Per-shape classification of non-``ev3`` evidence-hash versions (#9527).
+
+    ``legacy`` means strictly "predates ``ev3``": ``ev1``/``ev2`` land there
+    with the pre-recipe reason. A forward version (``ev5``) or a non-``evN``
+    prefix (``sha256``) is untouched, and a ``mistake.*`` rule is untouched
+    whatever its version -- none of them may get the "delete the entry" hint.
+    """
+
+    def test_ev1_entry_is_listed_in_legacy_with_predates_reason(self, tmp_path):
+        board = _write_board(tmp_path)
+        findings, pcb = _findings(board)
+        waivers = _write_waivers(tmp_path, [_entry(COURTYARD_R1, "ev1:0123456789abcdef")])
+
+        report = migrate_evidence_waivers(waivers, findings, EvidenceContext(pcb, recipe="ev3"))
+
+        assert report.untouched == 0
+        assert report.untouched_keys == []
+        (item,) = report.legacy
+        assert item.key == COURTYARD_R1
+        assert item.old_hash == "ev1:0123456789abcdef"
+        assert "predates ev3" in item.reason
+
+    def test_sha256_entry_is_untouched_not_legacy_and_gets_no_delete_advice(self, tmp_path):
+        board = _write_board(tmp_path)
+        findings, pcb = _findings(board)
+        waivers = _write_waivers(tmp_path, [_entry(COURTYARD_R1, "sha256:deadbeefdeadbeef")])
+
+        report = migrate_evidence_waivers(waivers, findings, EvidenceContext(pcb, recipe="ev3"))
+
+        assert report.legacy == []
+        assert report.untouched == 1
+        assert report.untouched_keys == [COURTYARD_R1]
+        text = "\n".join(format_waiver_migration(report, waivers, write=False))
+        assert f"untouched (no migration needed): {COURTYARD_R1}" in text
+        assert "delete" not in text
+
+    def test_mistake_rule_with_pre_recipe_hash_is_untouched_not_legacy(self, tmp_path):
+        board = _write_board(tmp_path)
+        findings, pcb = _findings(board)
+        key = "mistake.thermal_pad_connection|U9||"
+        waivers = _write_waivers(tmp_path, [_entry(key, "ev2:0123456789abcdef")])
+
+        report = migrate_evidence_waivers(waivers, findings, EvidenceContext(pcb, recipe="ev3"))
+
+        assert report.legacy == []
+        assert report.untouched == 1
+        assert report.untouched_keys == [key]
+
+    def test_dry_run_over_all_shapes_leaves_the_file_byte_identical(self, tmp_path):
+        board = _write_board(tmp_path)
+        findings, pcb = _findings(board)
+        mistake_key = "mistake.thermal_pad_connection|U9||"
+        entries = [
+            _entry(COURTYARD_R1, "ev1:0123456789abcdef"),
+            _entry(COURTYARD_R2, "sha256:deadbeefdeadbeef"),
+            _entry(mistake_key, "ev2:0123456789abcdef"),
+        ]
+        waivers = _write_waivers(tmp_path, entries)
+        before = waivers.read_bytes()
+
+        report = migrate_evidence_waivers(waivers, findings, EvidenceContext(pcb, recipe="ev3"))
+
+        assert [it.key for it in report.legacy] == [COURTYARD_R1]
+        assert report.untouched == 2
+        assert report.untouched_keys == [COURTYARD_R2, mistake_key]
+        assert waivers.read_bytes() == before
