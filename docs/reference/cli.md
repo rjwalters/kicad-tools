@@ -1790,7 +1790,7 @@ coerced to `basic` with a printed notice). It is mutually exclusive with
 |--------|-------------|
 | `--complete` | Route only the unconnected links; all other copper is a fixed obstacle |
 | `--complete-exclude-nets NAMES` | Comma-separated nets `--complete` must not route even when reported unconnected — for pour/plane-carried nets (`GND`, `+3V3`, phase nets) whose connectivity comes from a filled zone. Ignored without `--complete`. |
-| `--complete-report PATH` | Write the structured unroutable-link report (net, link pad endpoints, elapsed vs the per-link deadline, blocking copper) as JSON. Link details are written when links remain unroutable. For boards with placement-invalid nets, also records attempt disposition during ordinary routing and early exits. |
+| `--complete-report PATH` | Write the structured unroutable-link report (net, link pad endpoints, whether each link was attempted before the run deadline (`attempted`) and its own decline reason (`deadline_hit`), blocking copper) as JSON. Link details are written when links remain unroutable. For boards with placement-invalid nets, also records attempt disposition during ordinary routing and early exits. |
 | `--via-in-pad-last-resort` | On the lattice engine, stage a same-net via-in-pad attach as a last resort instead of an opportunistic one: the search first tries an in-layer route or an off-pad via layer change, and only retries with the pad-site via admitted when no such route exists (and only on a fab tier that supports via-in-pad). |
 
 Each link gets a bounded per-link deadline, so a single pathological net cannot

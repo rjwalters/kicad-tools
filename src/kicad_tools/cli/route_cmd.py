@@ -757,6 +757,7 @@ def _set_wall_clock_deadline(args) -> None:
     of ``--timeout``.
     """
     timeout = getattr(args, "timeout", None)
+    typed_timeout = timeout
     now = time.monotonic()
     from .route_deadline import remaining_deadline
 
@@ -789,9 +790,17 @@ def _set_wall_clock_deadline(args) -> None:
         # in the logger.info line above, which never reaches a redirected
         # log.  Exactly the values stamped on ``args`` below this branch.
         if getattr(args, "complete", False) and not getattr(args, "quiet", False):
+            # Issue #9581 (PR #9603 review): under a supervisor-set invocation
+            # deadline the clamp above shrinks the budget by the time the
+            # invocation already consumed.  Lead with the value the user
+            # typed and give the consumed time its own term, so the printed
+            # arithmetic sums to the flag instead of silently relabelling
+            # the clamped remainder as ``--timeout``.
+            setup_consumed = max(0.0, float(typed_timeout) - float(timeout))
             print(
-                f"--timeout {float(timeout):.0f}s - auto-fix reserve "
-                f"{float(reserve):.0f}s - post-route reserve {float(post_route):.0f}s "
+                f"--timeout {float(typed_timeout):.0f}s - setup {setup_consumed:.0f}s "
+                f"- auto-fix reserve {float(reserve):.0f}s - post-route reserve "
+                f"{float(post_route):.0f}s "
                 f"= routing budget {float(timeout) - float(reserve) - float(post_route):.1f}s"
             )
     else:

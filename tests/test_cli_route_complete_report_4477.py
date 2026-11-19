@@ -422,11 +422,55 @@ class TestBudgetDerivationLine:
         text = capsys.readouterr().out
         # --auto-fix absent -> auto-fix reserve 0; the post-route reserve is
         # whatever the helper computes for this timeout (floor/fraction/cap).
+        # No invocation deadline is set here, so nothing has been consumed
+        # before the derivation line and the setup term is 0.
         post_route = route_cmd._post_route_reserve(args, 100.0)
         assert (
-            f"--timeout 100s - auto-fix reserve 0s - post-route reserve {post_route:.0f}s" in text
+            f"--timeout 100s - setup 0s - auto-fix reserve 0s - post-route reserve {post_route:.0f}s"
+            in text
         )
         assert f"= routing budget {100.0 - post_route:.1f}s" in text
+
+    def test_clamped_timeout_leads_with_typed_value(self, monkeypatch, capsys):
+        """PR #9603 review: under a supervisor-set invocation deadline the
+        clamp shrinks the budget before the print.  The line must still lead
+        with the ``--timeout`` the user typed and give the consumed time its
+        own ``setup`` term, so the arithmetic sums to the flag instead of
+        relabelling the clamped remainder as the flag's value."""
+        import re
+        import time
+        from types import SimpleNamespace
+
+        from kicad_tools.cli import route_cmd, route_deadline
+
+        # Simulate a supervisor invocation deadline with ~30 s of the typed
+        # budget already consumed by setup (env-driven in production; the
+        # function imports the helper at call time, so patch the module).
+        now = time.monotonic()
+        monkeypatch.setattr(route_deadline, "remaining_deadline", lambda: now + 70.0)
+
+        args = SimpleNamespace(timeout=100.0, auto_fix=False, complete=True)
+        route_cmd._set_wall_clock_deadline(args)
+        text = capsys.readouterr().out
+
+        match = re.search(
+            r"--timeout (\d+)s - setup (\d+)s - auto-fix reserve (\d+)s"
+            r" - post-route reserve (\d+)s = routing budget ([\d.]+)s",
+            text,
+        )
+        assert match, f"derivation line missing or malformed: {text!r}"
+        typed, setup, auto_fix, post_route, budget = (float(g) for g in match.groups())
+        # First term is the typed value, not the clamped remainder (~70).
+        assert typed == 100.0
+        # The consumed ~30 s is visible as its own term (bounded: the clock
+        # may tick between the test's ``now`` and the function's own read).
+        assert 29 <= setup <= 31
+        # The printed equation sums to the displayed budget (each term is
+        # rounded to whole seconds, the budget to a tenth, so allow rounding).
+        assert typed - setup - auto_fix - post_route == pytest.approx(budget, abs=2.2)
+        # The stamp the rest of the run enforces is the clamped budget.
+        assert args._wall_clock_deadline is not None
+        assert args._wall_clock_deadline - time.monotonic() <= 70.0
 
     def test_line_absent_without_complete_flag(self, capsys):
         from types import SimpleNamespace
