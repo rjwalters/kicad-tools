@@ -696,7 +696,24 @@ class TestCategorization:
 
         assert _categorize_part("Red LED 0603", "0603") == PartCategory.LED
         assert _categorize_part("Green LED SMD", "") == PartCategory.LED
-        # Note: "Light Emitting Diode" matches "diode" first due to check order
+        assert _categorize_part("Light Emitting Diode", "0805") == PartCategory.LED
+
+    def test_categorize_led_indication_not_inductor(self):
+        # C26545/C34499 supplier wording: "Indication" must not substring-match
+        # the inductor abbreviation, and a description naming both a diode and
+        # an LED must land on LED.
+        from kicad_tools.parts.lcsc import _categorize_part
+
+        assert (
+            _categorize_part("Discrete Diode LED Indication - Discrete", "0402") == PartCategory.LED
+        )
+        assert _categorize_part("LED Indication - Discrete", "0603") == PartCategory.LED
+
+    def test_categorize_inductor_and_diode_still_match(self):
+        from kicad_tools.parts.lcsc import _categorize_part
+
+        assert _categorize_part("Power Inductors 10uH", "0805") == PartCategory.INDUCTOR
+        assert _categorize_part("Rectifier Diode", "SMA") == PartCategory.DIODE
 
     def test_categorize_switch(self):
         from kicad_tools.parts.lcsc import _categorize_part

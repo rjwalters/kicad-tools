@@ -228,8 +228,15 @@ def _categorize_part(description: str, package: str) -> PartCategory:
         return PartCategory.RESISTOR
     if any(x in desc_lower for x in ["capacitor", "cap ", " cap", "farad", "mlcc"]):
         return PartCategory.CAPACITOR
-    if any(x in desc_lower for x in ["inductor", "ind ", " ind", "henry", "choke"]):
+    if any(x in desc_lower for x in ["inductor", "henry", "choke"]) or re.search(
+        r"\bind\b", desc_lower
+    ):
         return PartCategory.INDUCTOR
+    # LED before the generic diode branch: some LCSC descriptions name both
+    # ("Discrete Diode LED Indication - Discrete"), and the LED is the part.
+    # "\bled\b" avoids matching "indication"-style substrings in either word.
+    if re.search(r"\bled\b", desc_lower) or "light emitting" in desc_lower:
+        return PartCategory.LED
     if any(x in desc_lower for x in ["diode", "rectifier", "schottky", "zener"]):
         return PartCategory.DIODE
     if any(x in desc_lower for x in ["transistor", "mosfet", "bjt", "jfet"]):
@@ -241,8 +248,6 @@ def _categorize_part(description: str, package: str) -> PartCategory:
         return PartCategory.IC
     if any(x in desc_lower for x in ["connector", "header", "socket", "jack", "plug"]):
         return PartCategory.CONNECTOR
-    if any(x in desc_lower for x in ["led", "light emitting"]):
-        return PartCategory.LED
     if any(x in desc_lower for x in ["switch", "button", "tactile"]):
         return PartCategory.SWITCH
     if any(x in desc_lower for x in ["relay"]):
