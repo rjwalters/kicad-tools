@@ -690,3 +690,72 @@ class TestNetStatusPieces:
 
         main([str(connected_pcb), "--net", "VCC"])
         assert "Pieces" not in capsys.readouterr().out
+
+
+class TestNetStatusWhyPieces:
+    """`--net X --why` shows the piece listing on a POUR_DISCONTINUOUS net (Issue #9612)."""
+
+    @pytest.fixture
+    def split_pcb(self, tmp_path: Path) -> Path:
+        path = tmp_path / "split.kicad_pcb"
+        path.write_text(SPLIT_NET_PCB)
+        return path
+
+    def test_why_text_lists_pieces(self, split_pcb: Path, capsys):
+        result = main([str(split_pcb), "--net", "GND", "--why"])
+        out = capsys.readouterr().out
+
+        assert result == 2
+        assert "[POUR_DISCONTINUOUS] GND" in out
+        assert "Pieces (3 disconnected):" in out
+        assert "piece 1: R1.1, R2.1" in out
+        assert "piece 2: R3.1, via @ 9.50,20.00" in out
+        assert "piece 3: via @ 30.00,30.00 [no pads]" in out
+
+    def test_why_json_carries_pieces(self, split_pcb: Path, capsys):
+        result = main([str(split_pcb), "--net", "GND", "--why", "--format", "json"])
+        net = json.loads(capsys.readouterr().out)["nets"][0]
+
+        assert result == 2
+        assert net["classification"] == "pour_discontinuous"
+        pieces = net["pieces"]
+        assert [p["piece"] for p in pieces] == [1, 2, 3]
+        assert [p["name"] for p in pieces[0]["pads"]] == ["R1.1", "R2.1"]
+        assert [p["name"] for p in pieces[1]["pads"]] == ["R3.1"]
+        assert pieces[1]["vias"] == [[9.5, 20.0]]
+        assert pieces[2]["pads"] == []
+        assert pieces[2]["vias"] == [[30.0, 30.0]]
+        assert pieces[2]["stranded_items"]
+
+    def test_why_without_net_is_byte_identical(self, split_pcb: Path, capsys):
+        """Plain --why (no --net) never gains the listing, text or JSON."""
+        result = main([str(split_pcb), "--why"])
+        out = capsys.readouterr().out
+        assert result == 2
+        assert "POUR_DISCONTINUOUS" in out
+        assert "Pieces" not in out
+
+        main([str(split_pcb), "--why", "--format", "json"])
+        nets = json.loads(capsys.readouterr().out)["nets"]
+        assert all("pieces" not in n for n in nets)
+
+    def test_why_pieces_absent_for_other_class(self, incomplete_pcb: Path, capsys):
+        """A non-pour diagnosis (SIG -> BUDGET_STARVED) never carries pieces."""
+        result = main([str(incomplete_pcb), "--net", "SIG", "--why", "--format", "json"])
+        net = json.loads(capsys.readouterr().out)["nets"][0]
+
+        assert result == 2
+        assert net["classification"] == "budget_starved"
+        assert "pieces" not in net
+
+        main([str(incomplete_pcb), "--net", "SIG", "--why"])
+        assert "Pieces" not in capsys.readouterr().out
+
+    def test_why_complete_net_prints_no_listing(self, incomplete_pcb: Path, capsys):
+        """A selected net that is not stuck has no block to attach a listing to."""
+        result = main([str(incomplete_pcb), "--net", "VCC", "--why"])
+        out = capsys.readouterr().out
+
+        assert result == 0
+        assert "Net 'VCC' is not stuck" in out
+        assert "Pieces" not in out
