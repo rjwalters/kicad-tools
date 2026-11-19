@@ -7,9 +7,12 @@ Two directions, one test each, plus the edge cases the AC names:
   (``A.memberOfFootprint('REF')``) were invisible to the evaluator, so an
   unknown rule's conservative reading (the *largest* value it could resolve
   to) flagged a legal 0.16 mm gap next to a fine-pitch part against the
-  0.20 mm default.  ``ItemProps`` now carries the footprint reference, and a
-  pair whose verdict still hinges on an undecided rule is reported as
-  unknown -- naming the rule -- never as an input defect.
+  0.20 mm default.  ``ItemProps`` now carries the footprint reference and
+  the footprint's library ID (``memberOfFootprint`` is case-sensitive with
+  wildcards and also matches an exact library ID, probed on ``kicad-cli``
+  10.0.6 -- #9588 review), and a pair whose verdict still hinges on an
+  undecided rule is reported as unknown -- naming the rule -- never as an
+  input defect.
 * **Direction 2** -- new copper was committed below a net-class
   ``.kicad_dru`` rule.  ``_read_dru_clearances`` skipped every conditional
   clearance rule, so a ``A.NetClass == 'HV'`` rule requiring 0.4 mm never
@@ -67,7 +70,13 @@ def _kept_trace() -> Route:
     )
 
 
-def _pad(net: int = 2, name: str = "GND", x: float = 12.0, y: float = 10.7) -> Pad:
+def _pad(
+    net: int = 2,
+    name: str = "GND",
+    x: float = 12.0,
+    y: float = 10.7,
+    footprint_name: str = "",
+) -> Pad:
     """A pad whose F.Cu edge sits at y = ``y - 0.5`` (0.075 mm under the trace)."""
     return Pad(
         x=x,
@@ -79,6 +88,7 @@ def _pad(net: int = 2, name: str = "GND", x: float = 12.0, y: float = 10.7) -> P
         layer=Layer.F_CU,
         ref="J3",
         pin="1",
+        footprint_name=footprint_name,
     )
 
 
@@ -117,12 +127,22 @@ class TestFootprintScopedRuleOnPreservedCopper:
 
         assert kept_copper_clearance_violations(self._router_with_gap(), board_rules=rules) == []
 
-    def test_wildcard_and_case_fold_like_other_string_tests(self) -> None:
-        for condition in ("A.memberOfFootprint('j?')", "A.memberOfFootprint('J*')"):
+    def test_wildcards_match_but_case_does_not(self) -> None:
+        """Probed against ``kicad-cli`` 10.0.6 (#9588 review): ``'J*'`` still
+        selects the footprint, but the argument is **case-sensitive** --
+        ``'j?'`` and ``'j3'`` do not match reference ``J3``, so KiCad's
+        0.2 mm default applies and the 0.15 mm gap is reported."""
+        for condition, reported in (
+            ("A.memberOfFootprint('J*')", False),
+            ("A.memberOfFootprint('j?')", True),
+            ("A.memberOfFootprint('j3')", True),
+        ):
             rules = BoardClearanceRules(dru_rules=[_footprint_rule(condition)])
-            assert (
-                kept_copper_clearance_violations(self._router_with_gap(), board_rules=rules) == []
-            ), condition
+            near = kept_copper_clearance_violations(self._router_with_gap(), board_rules=rules)
+            assert (len(near) == 1) == reported, condition
+            if reported:
+                assert near[0].required == pytest.approx(0.2), condition
+                assert near[0].unknown_rules == (), condition
 
     def test_board_copper_is_never_a_footprint_member(self) -> None:
         """``memberOfFootprint`` is decisively false on a kept track/via."""
@@ -242,6 +262,134 @@ class TestUnknownRuleIsNamedNotAnInputDefect:
 
         assert len(errors) == 1
         assert "UNKNOWN" not in capsys.readouterr().out
+
+
+class TestMemberOfFootprintSemanticsMatchKicad:
+    """The argument semantics of ``memberOfFootprint``, probed black-box
+    against the pinned ``kicad-cli`` 10.0.6 image (#9588 review): a
+    case-sensitive reference match with ``*`` / ``?`` wildcards, plus exact
+    library-ID arguments.  Each test names its probe row."""
+
+    J3_PAD = ItemProps("Pad", "GND", footprint_ref="J3", footprint_lib_id="Conn:Hdr")
+    TRACK = ItemProps("Track", "+3V3", footprint_ref="", footprint_lib_id="")
+
+    @staticmethod
+    def _pad_with(lib_id: str | None) -> ItemProps:
+        return ItemProps("Pad", "GND", footprint_ref="J3", footprint_lib_id=lib_id)
+
+    def test_reference_exact_and_wildcard_select_the_pad(self) -> None:
+        for pattern in ("J3", "J*", "J?"):
+            assert (
+                evaluate_condition(f"A.memberOfFootprint('{pattern}')", self.J3_PAD, self.TRACK)
+                is True
+            ), pattern
+
+    def test_reference_match_is_case_sensitive(self) -> None:
+        # 'j3' and 'j?' select nothing: KiCad flags the pair at the default.
+        for pattern in ("j3", "j?"):
+            assert (
+                evaluate_condition(f"A.memberOfFootprint('{pattern}')", self.J3_PAD, self.TRACK)
+                is False
+            ), pattern
+
+    def test_exact_library_id_selects_the_pad(self) -> None:
+        assert (
+            evaluate_condition("A.memberOfFootprint('Conn:Hdr')", self.J3_PAD, self.TRACK) is True
+        )
+
+    def test_library_id_match_is_case_sensitive(self) -> None:
+        assert (
+            evaluate_condition("A.memberOfFootprint('conn:hdr')", self.J3_PAD, self.TRACK) is False
+        )
+
+    def test_wildcard_on_a_library_id_stays_undecided(self) -> None:
+        # 'Conn:*' was not probed against KiCad: not assumed either way, so
+        # the condition stays unknown and the rule keeps its floor.
+        assert evaluate_condition("A.memberOfFootprint('Conn:*')", self.J3_PAD, self.TRACK) is None
+
+    def test_unknown_library_id_stays_undecided(self) -> None:
+        assert (
+            evaluate_condition("A.memberOfFootprint('Conn:Hdr')", self._pad_with(None), self.TRACK)
+            is None
+        )
+
+    def test_a_known_different_library_id_decides_false(self) -> None:
+        assert (
+            evaluate_condition(
+                "A.memberOfFootprint('Conn:Hdr')", self._pad_with("Other:Foo"), self.TRACK
+            )
+            is False
+        )
+
+    def test_footprint_without_library_association_never_matches_an_id(self) -> None:
+        # An embedded footprint has no library ID: an ID argument cannot
+        # select it -- under KiCad's reading or ours.
+        assert (
+            evaluate_condition("A.memberOfFootprint('Conn:Hdr')", self._pad_with(""), self.TRACK)
+            is False
+        )
+
+    def test_either_side_of_the_pair_may_be_the_member(self) -> None:
+        assert (
+            evaluate_condition("B.memberOfFootprint('Conn:Hdr')", self.TRACK, self.J3_PAD) is True
+        )
+
+    def test_board_copper_is_decisive_even_with_an_unknown_id(self) -> None:
+        assert evaluate_condition("A.memberOfFootprint('*')", self.TRACK, self.J3_PAD) is False
+        bare_track = ItemProps("Track", "+3V3", footprint_ref="", footprint_lib_id=None)
+        assert evaluate_condition("A.memberOfFootprint('*')", bare_track, self.J3_PAD) is False
+
+    def test_unknown_reference_stays_undecided(self) -> None:
+        pad = item_props_for_type("pad", "GND")
+        assert evaluate_condition("A.memberOfFootprint('J3')", pad, self.TRACK) is None
+
+
+class TestFootprintRuleArgumentsJudgeTheGapLikeKicad:
+    """The two audit cases the #9588 review measured against KiCad: a
+    case-variant exemption must not shield the gap, and a library-ID rule
+    must select the pad's footprint."""
+
+    @staticmethod
+    def _router_with_gap(gap: float, footprint_name: str = "") -> Autorouter:
+        router = _router()
+        router.pads[("J3", "1")] = _pad(y=10.125 + gap + 0.5, footprint_name=footprint_name)
+        router.existing_routes.append(_kept_trace())
+        return router
+
+    def test_case_variant_exemption_does_not_shield_the_gap(self) -> None:
+        # KiCad: 'j3' selects nothing, the 0.2 mm default flags the 0.15 mm
+        # gap.  The pre-review evaluator case-folded and passed the board.
+        rules = BoardClearanceRules(dru_rules=[_footprint_rule("A.memberOfFootprint('j3')")])
+
+        near = kept_copper_clearance_violations(self._router_with_gap(0.15), board_rules=rules)
+
+        assert len(near) == 1
+        assert near[0].required == pytest.approx(0.2)
+        assert near[0].unknown_rules == ()
+
+    def test_library_id_rule_selects_the_pad(self) -> None:
+        # KiCad: 'Conn:Hdr' selects J3's footprint, so its own 0.5 mm
+        # minimum flags the 0.3 mm gap the 0.2 mm default would pass.
+        rules = BoardClearanceRules(
+            dru_rules=[_footprint_rule("A.memberOfFootprint('Conn:Hdr')", minimum=0.5)]
+        )
+
+        near = kept_copper_clearance_violations(
+            self._router_with_gap(0.3, footprint_name="Conn:Hdr"), board_rules=rules
+        )
+
+        assert len(near) == 1
+        assert near[0].required == pytest.approx(0.5)
+        assert near[0].unknown_rules == ()
+
+    def test_footprint_without_library_association_passes_an_id_rule(self) -> None:
+        # No library ID, no ID match -- KiCad passes this board and so does
+        # the audit (decisively, not via the conservative reading).
+        rules = BoardClearanceRules(
+            dru_rules=[_footprint_rule("A.memberOfFootprint('Conn:Hdr')", minimum=0.5)]
+        )
+
+        assert kept_copper_clearance_violations(self._router_with_gap(0.3), board_rules=rules) == []
 
 
 # ---------------------------------------------------------------- Direction 2
@@ -425,9 +573,9 @@ def _expected_conditional_floor(dru_path: Path) -> float | None:
 class TestBoardWideConditionalFloorScopesToRoutedPairs:
     """#9588 review: the board-wide conditional floor exists for the pairs
     ``kct route`` commits, so a rule whose condition is provably false on
-    every (Track, Track) / (Track, Via) / (Via, Via) pair -- a zone-only or
-    pad-to-pad rule -- floors nothing, and one that might still apply keeps
-    the conservative floor."""
+    every (Track, Track) / (Track, Via) / (Via, Via) pair -- and on those
+    pairs against the board's existing pads -- floors nothing, and one that
+    might still apply keeps the conservative floor."""
 
     @staticmethod
     def _board(tmp_path: Path, dru: str = ZONE_DRU) -> Path:
@@ -486,6 +634,21 @@ class TestBoardWideConditionalFloorScopesToRoutedPairs:
         assert declared.project_requirement() is None
         assert declared.via_requirement() is None
         assert declared.is_empty()
+
+    def test_pad_to_routed_track_rule_keeps_the_floor(self, tmp_path: Path) -> None:
+        """Non-blocking #9588-review gap closed: routed tracks and vias are
+        placed next to the board's pads, so a rule scoped to a pad/track
+        (or via/pad) pair selects a pair the router commits and floors it."""
+        pcb = self._board(
+            tmp_path,
+            """(version 1)
+(rule "pad to routed track"
+  (condition "A.Type == 'Pad' && B.Type == 'Track'")
+  (constraint clearance (min 0.3mm)))
+""",
+        )
+
+        assert read_declared_clearance_rules(pcb).dru_conditional_mm == pytest.approx(0.3)
 
     def test_undecidable_condition_keeps_the_floor(self, tmp_path: Path) -> None:
         """``insideArea`` is not modelled: the probe is undecided, so the

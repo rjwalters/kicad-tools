@@ -4284,8 +4284,12 @@ def _kept_copper_violations(
         # ``memberOfFootprint`` condition is decisively false on it.
         if item.is_trace:
             layer_name = item.layer.kicad_name if item.layer is not None else None
-            return item_props_for_type("track", item.name, layer=layer_name, footprint_ref="")
-        return item_props_for_type("via", item.name, plated=True, footprint_ref="")
+            return item_props_for_type(
+                "track", item.name, layer=layer_name, footprint_ref="", footprint_lib_id=""
+            )
+        return item_props_for_type(
+            "via", item.name, plated=True, footprint_ref="", footprint_lib_id=""
+        )
 
     def required(
         a: ItemProps, b: ItemProps, layer: Layer | None, fallback: float
@@ -4355,7 +4359,10 @@ def _kept_copper_violations(
                     pad_type="thru_hole" if pad_th else "smd",
                     layer=pad_layer.kicad_name,
                     # Issue #9578: the footprint a footprint-scoped rule keys on.
+                    # Issue #9588 review: its library ID too -- an exact
+                    # ``memberOfFootprint('Lib:Name')`` argument selects the pad.
                     footprint_ref=ref,
+                    footprint_lib_id=pad.footprint_name,
                 ),
                 meet_layer,
                 pair_clear if item.is_trace else via_clear,

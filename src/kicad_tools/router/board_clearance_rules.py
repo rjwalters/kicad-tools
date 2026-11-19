@@ -228,6 +228,13 @@ class ItemProps:
             which is a member of no footprint, so such a condition is
             decisively false on it; ``None`` when unknown (the condition
             evaluates to unknown).
+        footprint_lib_id: The item's footprint's **library ID**
+            (``"Conn:Hdr"``) -- the other value ``memberOfFootprint``
+            matches (#9588 review: an exact library-ID argument selects
+            the footprint's pads in ``kicad-cli`` 10.0.6).  ``""`` on
+            board-level copper or a footprint with no library
+            association; ``None`` when unknown (the condition evaluates
+            to unknown).
     """
 
     type: str | None
@@ -236,6 +243,7 @@ class ItemProps:
     pad_type: str | None = None
     layer: str | None = None
     footprint_ref: str | None = None
+    footprint_lib_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -533,6 +541,17 @@ def _truth(value: Any) -> bool | None:
     return None
 
 
+def _footprint_pattern_matches(pattern: str, value: str) -> bool:
+    """``memberOfFootprint``'s argument vs a footprint name/ID.
+
+    Unlike every other KiCad string comparison this is **case-sensitive**
+    while still applying ``*`` / ``?`` wildcards to the argument: probed
+    with ``kicad-cli`` 10.0.6, ``memberOfFootprint('J*')`` selects
+    reference ``J3`` but ``'j3'`` and ``'j?'`` do not (#9588 review).
+    """
+    return value == pattern or fnmatch.fnmatchcase(value, pattern)
+
+
 def _strings_equal(a: str, b: str) -> bool:
     """KiCad string equality: case-insensitive, with ``*`` / ``?`` wildcards.
 
@@ -716,18 +735,32 @@ class _PairContext:
                 return _UNKNOWN
             return any(_strings_equal(c, args[0]) for c in classes)
         if name == "memberoffootprint" and len(args) == 1 and isinstance(args[0], str):
-            # KiCad's ``A.memberOfFootprint('REF')`` (#9578): one argument,
-            # matched like every other string comparison -- case-insensitive
-            # with ``*`` / ``?`` wildcards.  An item with no known footprint
-            # reference cannot be decided; one known to belong to no
-            # footprint (board-level copper, ``""``) decisively matches no
-            # pattern -- a wildcard matches footprint *names*, and this item
-            # has none (#9588 review).
-            if item.footprint_ref is None:
-                return _UNKNOWN
-            if item.footprint_ref == "":
+            # KiCad's ``A.memberOfFootprint('PATTERN')`` (#9578), probed
+            # against ``kicad-cli`` 10.0.6 (#9588 review): unlike every
+            # other string comparison it is **case-sensitive** --
+            # ``'j3'`` and ``'j?'`` do not match reference ``J3`` while
+            # ``'J*'`` does (``*`` / ``?`` wildcards apply) -- and an
+            # exact **library ID** argument matches too (``'Conn:Hdr'``
+            # selects the pads of footprint ``Conn:Hdr``).  Wildcards
+            # against a library ID were not probed and are not assumed:
+            # such a pattern stays undecided.  An item with no known
+            # reference or library id cannot be decided; one known to
+            # belong to no footprint (board-level copper, ``""``)
+            # decisively matches no pattern -- a pattern matches
+            # footprint names/IDs, and this item has none (#9588 review).
+            pattern = args[0]
+            ref, lib = item.footprint_ref, item.footprint_lib_id
+            if ref == "":
                 return False
-            return _strings_equal(item.footprint_ref, args[0])
+            if ref is None or lib is None:
+                return _UNKNOWN
+            if _footprint_pattern_matches(pattern, ref):
+                return True
+            if pattern == lib:
+                return True
+            if _footprint_pattern_matches(pattern, lib):
+                return _UNKNOWN
+            return False
         return _UNKNOWN
 
 
@@ -1096,6 +1129,7 @@ def item_props_for_type(
     pad_type: str | None = None,
     layer: str | None = None,
     footprint_ref: str | None = None,
+    footprint_lib_id: str | None = None,
 ) -> ItemProps:
     """:class:`ItemProps` for a gate item kind (``track``/``arc``/``via``/``pad``).
 
@@ -1104,7 +1138,9 @@ def item_props_for_type(
     footprint's layer -- the pad's ``Layer`` from ``kicad-cli`` 10.0.2,
     #6196 / #6201), never a via.  ``footprint_ref`` is the item's footprint
     reference (a pad's footprint) or ``""`` when the item is known to sit in
-    no footprint (#9578); ``None`` keeps it unknown.
+    no footprint (#9578); ``None`` keeps it unknown.  ``footprint_lib_id``
+    is the footprint's library ID (``"Conn:Hdr"``, #9588 review), with the
+    same ``""`` / ``None`` reading.
     """
     dru_type = {"track": "Track", "arc": "Track", "via": "Via", "pad": "Pad"}.get(kind)
     return ItemProps(
@@ -1114,6 +1150,7 @@ def item_props_for_type(
         PAD_TYPE_NAMES.get(pad_type or "") if kind == "pad" else None,
         layer if dru_type in ("Track", "Pad") else None,
         footprint_ref,
+        footprint_lib_id,
     )
 
 

@@ -992,14 +992,20 @@ def _is_via_scoped_condition(expression: str) -> bool:
 
 
 #: Pair shapes the board-wide conditional floor governs: the track/via pairs
-#: ``kct route`` commits (#9588 review).  Both orders of the mixed shape, since
-#: KiCad decides an ordered pair and the condition may name the types in
-#: either order.
+#: ``kct route`` commits (#9588 review), and those pairs against the board's
+#: existing pads -- new tracks and vias are placed next to pads too (#9588
+#: review, non-blocking).  Both orders of every mixed shape, since KiCad
+#: decides an ordered pair and the condition may name the types in either
+#: order.  No pad/pad pair: nothing routes between two pads as such a pair.
 _PROBE_PAIR_SHAPES: tuple[tuple[str, str], ...] = (
     ("Track", "Track"),
     ("Track", "Via"),
     ("Via", "Track"),
     ("Via", "Via"),
+    ("Track", "Pad"),
+    ("Pad", "Track"),
+    ("Via", "Pad"),
+    ("Pad", "Via"),
 )
 
 
@@ -1007,16 +1013,16 @@ def _condition_may_select_routed_pair(expression: str) -> bool:
     """Whether a conditional rule's condition can still select routed copper.
 
     The board-wide conditional floor governs the track/via pairs ``kct route``
-    commits, so a rule whose condition is provably false on every such pair --
-    a zone-only rule (``A.Type == 'Zone' …``), a pad-to-pad one -- must not
-    raise it (#9588 review).  Each shape is probed with the kept-copper
-    audit's own evaluator: the copper type is known, everything else (net,
-    class, layer, footprint) is unknown, so type-only conditions resolve
-    decisively while net-class and footprint conditions stay undecided.  A
-    condition that is undecided on any shape -- or one the evaluator cannot
-    run at all -- may still select routed copper and keeps its floor, the
-    same conservative reading undecided conditions get everywhere else.
-    Never raises.
+    commits -- and their pairs against the board's existing pads -- so a rule
+    whose condition is provably false on every such pair -- a zone-only rule
+    (``A.Type == 'Zone' …``), a pad-to-pad one -- must not raise it (#9588
+    review).  Each shape is probed with the kept-copper audit's own
+    evaluator: the copper type is known, everything else (net, class, layer,
+    footprint) is unknown, so type-only conditions resolve decisively while
+    net-class and footprint conditions stay undecided.  A condition that is
+    undecided on any shape -- or one the evaluator cannot run at all -- may
+    still select routed copper and keeps its floor, the same conservative
+    reading undecided conditions get everywhere else.  Never raises.
     """
     try:
         from kicad_tools.router.board_clearance_rules import ItemProps, evaluate_condition
@@ -1042,13 +1048,14 @@ def _read_dru_clearances(dru_path: Path) -> tuple[float | None, float | None, fl
     :func:`_read_dru_clearance`), the strictest one whose condition is
     via-scoped (:func:`_is_via_scoped_condition`, #6280), and -- #9578 --
     the strictest remaining conditional one **whose condition can still
-    select a track/via pair** (:func:`_condition_may_select_routed_pair`,
+    select a track/via pair** -- or that pair against one of the board's
+    existing pads -- (:func:`_condition_may_select_routed_pair`,
     #9588 review).  KiCad enforces a conditional rule on every pair its
     condition selects, so the largest of those minima is a floor on what
     the board can require of *some* routed pair; routing below it can fail
     the board's own DRC even when the unconditional rule, the board minimum
     and the netclass all sit lower.  A conditional rule that is provably
-    false on every track/via pair -- zone-only, pad-to-pad -- contributes to
+    false on every such pair -- zone-only, pad-to-pad -- contributes to
     no board-wide floor, and one with ``(severity ignore)`` is skipped
     outright: where it wins, KiCad checks nothing.  Never raises.
     """
@@ -1081,9 +1088,10 @@ def _read_dru_clearances(dru_path: Path) -> tuple[float | None, float | None, fl
                 via_scoped = True
             elif _condition_may_select_routed_pair(str(expression)):
                 conditional = True
-            # else: the condition is provably false on every track/via pair
-            # the router commits (#9588 review) -- a zone-only or pad-to-pad
-            # rule -- so it contributes to no board-wide floor.
+            # else: the condition is provably false on every pair the router
+            # commits, against its own copper or the board's pads (#9588
+            # review) -- a zone-only or pad-to-pad rule -- so it contributes
+            # to no board-wide floor.
         unconditional = condition is None
         severity_node = rule.find_child("severity")
         ignored = (
@@ -1110,7 +1118,7 @@ def _read_dru_clearances(dru_path: Path) -> tuple[float | None, float | None, fl
                 if best is None or value > best:
                     best = value
             # else: a conditional rule the #9588-review probe proved unable to
-            # select any track/via pair -- counted nowhere, by design.
+            # select any routed pair -- counted nowhere, by design.
     return (best, best_via, best_conditional)
 
 
