@@ -16,6 +16,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-18
 
+- **PR #9449**: fix: print sch_field_offset threshold at full precision
+- **Issue #9447** (closed): sch_field_offset message rounds a user-supplied --sch-field-threshold to 1 dp
+- **PR #9445**: test: chain pcb reinforce --adopt records through check_mask_to_copper on a native export
+- **Issue #9443** (closed): No end-to-end test chains `pcb reinforce --adopt` records through `check_mask_to_copper` on a native export
+- **PR #9439**: ci: assert paths-filter steps keep continue-on-error and outcome fallbacks
+- **Issue #9291** (closed): Assert the Detect Changes output fallbacks in verify_changes_filter.mjs
+- **PR #9425**: fix: treat same-net pads of one footprint as info in gap and mask checks
 - **PR #9440**: fix: skip silk_ref_obscured for hidden references replaced by a function label
 - **Issue #9435** (closed): silk_ref_obscured counts designators hidden on purpose and replaced by a function label
 - **PR #9437**: fix: hash footprint positions in sheet coordinates so outline-only edits keep waivers valid
@@ -3585,29 +3592,6 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - **Issue #5555** (closed): router: _reset_for_new_trial drops add_obstacle keepouts, silently reopening the grid
 - **Issue #5552** (closed): chore: resync installed Loom surfaces silently reverted merged fix #5543 (draft-PR fallback exclusion)
 - **Issue #5513** (closed): [Epic #5509] Phase 1a: kicad-cli clearance conformance oracle (report-only) with four adapters and named fixtures
-
-### 2026-09-18
-
-- **PR #5568**: fix(router): sum both edge directions in RoutingPlan edge entries
-- **PR #5565**: test(conformance): wrap five clearance consumers as adapters and populate the conformance table
-- **PR #5554**: perf(router): write segment clearance envelopes with slice assignment
-- **PR #5553**: feat(router): apply declared swap groups via a pad-rebind applicator
-- **PR #5549**: fix(zones): reuse an existing same-net barrel for a pour bridge (#5507)
-- **PR #5548**: feat(board-07): netlist write-back for generator-owned boards (Epic #5511 Phase 2b)
-- **PR #5547**: chore(deps): bump soupsieve from 2.8.4 to 2.9
-- **PR #5546**: chore(deps): bump devalue from 5.8.1 to 5.9.2 in /site
-- **Issue #5544** (closed): RoutingPlan.from_global_result() may disagree with get_total_overflow() on reverse-direction-only overflow
-- **PR #5542**: fix: parse kicad-cli 10 hole-to-hole 'min X mm; actual Y mm' wording
-- **PR #5540**: fix: RegionGraph.get_total_overflow() undercounts reverse-direction edge overflow
-- **Issue #5538** (closed): classify-dependency-block.sh's ref extraction treats a parenthetical epic mention as a second open blocker, wedging phase issues in DEFER forever
-- **Issue #5537** (closed): [Epic #5511] Phase 2b: netlist write-back for generator-owned boards
-- **Issue #5536** (closed): [Epic #5511] Phase 2a: pad-rebind applicator for declared swap groups
-- **Issue #5534** (closed): drc/report.py's clearance extractor doesn't parse kicad-cli 10's hole-to-hole wording
-- **Issue #5533** (closed): [Epic #5509] Phase 1a (2/2): five consumer adapters + populated clearance-conformance table
-- **Issue #5529** (closed): RegionGraph.get_total_overflow() can undercount overflow on reverse-direction edge traversals
-- **PR #5524**: ci: bound native KiCad subprocess concurrency from measured attribution
-- **Issue #5523** (closed): loom-fleet-dispatch auto-relabels draft PRs to loom:review-requested
-- **Issue #5501** (closed): CI: bound remaining native subprocess concurrency after confirmed Test cgroup OOM
 
 ### 2026-07-20 (evening)
 

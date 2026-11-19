@@ -70,7 +70,25 @@ def via(*, drill, size=1.9, layers='"F.Cu" "B.Cu"', kind=""):
     )
 
 
-@pytest.mark.parametrize(("gap", "severity"), [(1.5, "error"), (2.3, "warning"), (3.0, None)])
+@pytest.mark.parametrize(
+    ("gap", "severity"),
+    [
+        (1.5, "error"),
+        # Issue #9421: the fab rated a 2.025 mm pair danger; the old 2.0 mm floor passed it.
+        (2.025, "error"),
+        # Band edges: error is strictly < 2.032, warning strictly < 3.05 (no tolerance).
+        (2.031, "error"),
+        (2.0319, "error"),
+        (2.032, "warning"),
+        (2.3, "warning"),
+        (2.5, "warning"),
+        (3.0, "warning"),
+        (3.049, "warning"),
+        (3.0499, "warning"),
+        (3.05, None),
+        (3.06, None),
+    ],
+)
 def test_bands(gap, severity):
     found = check_tht_smd_spacing(board(tht(), smd(gap))).violations
     if severity is None:
@@ -79,6 +97,16 @@ def test_bands(gap, severity):
         assert [v.severity for v in found] == [severity]
         assert found[0].actual_value == pytest.approx(gap, abs=0.002)
         assert set(found[0].items) == {"tht", "smd"}
+
+
+@pytest.mark.parametrize(
+    ("gap", "limit_text"),
+    [(2.025, "< 2.032mm"), (1.5, "< 2.032mm"), (2.9, "< 3.050mm"), (3.0, "< 3.050mm")],
+)
+def test_message_states_the_exact_limit(gap, limit_text):
+    """Issue #9421: the printed limit must be the threshold the code applies."""
+    (v,) = check_tht_smd_spacing(board(tht(), smd(gap))).violations
+    assert limit_text in v.message
 
 
 def test_back_side_smd_pad_is_measured():
