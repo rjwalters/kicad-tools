@@ -187,7 +187,7 @@ def _parse_one(raw: Any, index: int) -> ProbeItem:
     if not isinstance(raw, dict):
         raise ItemsFileError(f"item {item}: each entry must be an object")
     kind = raw.get("type")
-    if kind not in _ITEM_FIELDS:
+    if not isinstance(kind, str) or kind not in _ITEM_FIELDS:
         raise ItemsFileError(f"item {item}: 'type' must be segment, arc or via")
     unknown = sorted(set(raw) - _COMMON_ITEM_FIELDS - _ITEM_FIELDS[kind])
     if unknown:

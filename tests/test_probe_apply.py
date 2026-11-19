@@ -158,6 +158,13 @@ class TestParseItems:
         with pytest.raises(ItemsFileError):
             parse_items(payload)
 
+    @pytest.mark.parametrize("kind", [["segment"], {"arc": 1}])
+    def test_malformed_type_keeps_type_diagnostic(self, kind):
+        # An unhashable 'type' must not raise TypeError from the dict
+        # lookup; it gets the indexed diagnostic like any unknown type.
+        with pytest.raises(ItemsFileError, match="item 1: 'type' must be segment, arc or via"):
+            parse_items({"items": [{"type": kind, "net": "GND"}]})
+
     def test_load_items_file_missing(self, tmp_path):
         with pytest.raises(ItemsFileError, match="cannot read"):
             load_items_file(tmp_path / "absent.json")
