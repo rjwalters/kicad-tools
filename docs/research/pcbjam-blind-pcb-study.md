@@ -1,0 +1,162 @@
+# PCBJam blind PCB study: what a frontier agent does with a stripped KiCad board (Issue #9596)
+
+**Date**: 2026-11-19. Facts are as of blind-pcb-runs `b5a047f3d8e7963bca46da485b05c6a7041d9cfb`
+(HEAD, committed 2026-11-18) unless stamped otherwise.
+**Upstream**: [PCBJam/blind-pcb-runs](https://github.com/PCBJam/blind-pcb-runs) — the repo's
+scripts, briefs and docs are MIT; every board under `boards/` keeps its own licence
+(see the upstream `boards/README.md`).
+**Registry**: `kct ecosystem show pcbjam-blind-pcb-runs` (the study repo),
+`kct ecosystem show pcbjam` (the sibling GPL-3.0 WASM pcbnew port — not studied here beyond
+what it is and its licence).
+**Downstream issues**: #9590, #9591, #9592, #9593, #9594, #9595.
+
+## What the study is
+
+PCBJam ran a blind-PCB experiment in November 2026: Claude Code running the
+Fable 5.2 model gets a real, human-routed KiCad 10 board with its copper
+stripped (and, in placement runs, the free parts moved off the board), and has
+to place and route it inside a network-isolated Docker sandbox that cannot
+reach the original design. **21 runs over 9 human-routed boards** (as of
+`b5a047f3`, 2026-11-19), from a 2-layer macropad to a 6-layer ECP5 + DDR3
+board, in three tooling conditions: no agent tooling beyond `pcbnew`/`kicad-cli`,
+a KiCad MCP server, and `bt` — a stateless board-geometry CLI that PCBJam
+built while the runs were going, shaped by what earlier agents asked for.
+Everything the agents saw and produced is published: briefs, full transcripts,
+scoring reports and renders. Scoring is KiCad 10 DRC with zones refilled, plus
+open-item counts per net and track/via metrics. Upstream's own caveat, which
+we adopt: one run per setup — anecdotes with receipts, not measurements with
+error bars.
+
+## Method of this note
+
+Read from raw.githubusercontent.com on 2026-11-19, at the commit pinned above:
+the repo README, `boards/README.md`, `runs/INDEX.md`, each run's `SUMMARY.md`,
+`brief.md` and `work/BT-REVIEW.md`. No board file was opened and nothing was
+run — that is #9595's job. Quotations below are from the MIT-licensed repo and
+are attributed to their run. `bt` itself is **not published**; what we know of
+it comes only from its public command description (`sandbox/briefs/tools-bt.md`)
+and the agents' reviews in each run's `work/BT-REVIEW.md` — ideas only.
+Nothing from the GPL-3.0 `PCBJam/pcbjam` repository is copied; that repo
+contributes two facts to us (what it is; its licence), stated in our own words.
+
+## Findings
+
+Per-run scores cited below are from `runs/INDEX.md` and each run's `SUMMARY.md`
+at the pinned commit. "Clean" = 0 DRC errors and 0 open items on the saved board.
+
+### 1. Small and sparse boards finish — 11 of 21 runs, unaided
+
+Every run on the sparse 2-layer boards and on the passive M.2 adapter came back
+clean: both macropads and all three macropad variants, both H4E2 keypad runs,
+the M.2 PCIe adapter (0:22, $6.93 — the cheapest run), and all three ESP32-P4
+RedBoard runs (0 DRC, 0 open, including place+route in 4:44). The 2-layer
+Arduino Mega place+route run reached 0 open items too (4 DRC left, under a
+board whose input already shows clearance errors under KiCad 10 rules). None
+of these needed exotic planning — the agents fanned out, routed short nets
+first, poured, and finished inside 1–3 hours of wall time.
+
+### 2. Dense BGA boards run out of room
+
+The 0.5 mm-pitch BGA + DDR3 OrangeCrab (6 layers) is the study's clearest
+failure: the agent placed all 163 footprints and fully routed DDR3, but ended
+with **70 open items in 26 nets** — including FPGA power-ring balls, USB data
+lines, flash MISO — and said so plainly: "I ran out of working budget in the
+dense areas around the FPGA" (orangecrab run, agent's NOTES.md). Its 86 DRC
+errors are the castellated-edge findings the input board already had, not new
+damage. The Glasgow Interface Explorer (0.8 mm BGA-121, 4 layers) splits the
+finding in an instructive way: **route-only completed** (0 open, 4 DRC), while
+**place+route hit the 4-hour time limit with 73 items in 22 nets still open**
+(glasgow-place run, exit 124). Blind placement before routing, not the BGA
+escape itself, is where the dense boards die. The 4-layer ESP32-PoE-ISO (dense
+but no BGA) also stayed incomplete in both conditions (48 and 43 open items).
+
+### 3. The slow nets get autorouter treatment — and cut the planes
+
+Across runs the agents converge on the same workflow: hand-compute the
+critical geometry (diff pairs, USB, PoE, PHY fan-out, BGA escapes, DDR buses),
+check it with a probe, apply it — then hand the remaining bulk to the router.
+That bulk is where planes die. The ESP32-PoE-ISO route-only agent allowed an
+inner layer as overflow "without shove" and got **~450 mm of GPIO tracks run
+through the +3.3 V and GND zones**; after refill the +3.3 V net was in 11
+pieces and "one track cut the regulator off from the ESP32" (esp32-route run,
+BT-REVIEW, late addition 9). The RedBoard place+route agent's progress log has
+an entry titled "the power layer came back in pieces" (step 007). The Glasgow
+route-only review records shoved nets silently moved onto In1.Cu, the ground
+plane (its review, item on layer drift). The agents' own fix is a loop the
+tools should have had: route one link → apply on a copy → refill → compare the
+net's group counts → keep or drop (esp32-route review) — i.e. a plane-integrity
+guard around every bulk decision.
+
+### 4. The model found impedance control on its own
+
+The RedBoard route-only A brief never mentions impedance (verified: no
+occurrence in that run's `brief.md`), yet its review reports: "About a third
+of the board's copper (all controlled-impedance pairs, the QFN escape, buses,
+regulator areas) is hand-computed and bt-checked" (redboard-route-bt-a run).
+The ESP32-PoE-ISO agent likewise hand-computed Ethernet pairs, USB and RMII
+lanes against isolation rules without being asked to care. Given a board and
+its net classes, the model treats high-speed pairs as controlled-impedance
+problems unprompted — it plans topology, lanes and skew itself and wants the
+tool to check geometry, not to make design decisions.
+
+## What the agents asked `bt` for
+
+`bt` is unpublished, so this section is evidence about *what agents want from
+a board tool*, drawn only from the published briefs and the agents'
+`work/BT-REVIEW.md` files. Recurring asks, attributed to the review that made
+them:
+
+- **Check-then-apply as one atomic step, and probe must check proposed items
+  against each other**, not only against the board: two hand-made stubs passed
+  probe while violating each other and were caught only by KiCad DRC
+  (orangecrab review, item 7). `bt apply --checked` and `bt probe` were the
+  most-trusted commands in the study. → #9590
+- **Plane protection as a routing cost, not an afterthought**: a zone-cost or
+  keep-planes option, a warning when a route crosses another net's zone, and
+  the route-refill-group-count loop built in (esp32-route review, late
+  addition 9). → #9591
+- **Router hygiene**: shove/rip must respect the allowed layer list and report
+  which nets it moved (esp32 review, item 1 — the run was thrown away over
+  this); greedy diagonals wall off neighbouring BGA targets (orangecrab item
+  3); router-chosen vias land in other balls' escape lanes (item 4); batch
+  JSON rejects CLI spellings with misleading errors (item 1); bulk mode stops
+  at the first failed link (esp32 item 10); the default grid is too fine for
+  long nets (esp32 item 2). → #9592
+- **Footprint-local geometry as obstacles**: the router crossed net-less
+  copper logos (KiCad `shorting_items`) and mishandled custom-shaped QFN pads
+  (orangecrab item 6); the RedBoard review asks to "fix the footprint-outline
+  case" first — that board's outline sits inside footprint H1. → #9593
+- **Layout-quality metrics**: per-net/per-layer length reports (the only thing
+  that exposed shove moving nets onto plane layers — esp32 item 1), lane
+  capacity queries, via-near-pad search with rejection reasons, pair skew
+  reporting and a skew-fix primitive. → #9594
+- **A benchmark with published scoring** — which is exactly what this repo
+  is. → #9595
+- Smaller recurring asks, recorded for whoever builds agent-facing tooling:
+  a topology helper ("can these two pad groups be joined planarly; if not,
+  which net crosses" — redboard-route-bt-b), QFN/QFP fan-out helpers, `bt rip`
+  and zone edit/delete as first-class commands, `bt same` matching by UUID
+  instead of reference, `bt near` time limits, incremental output and progress
+  for bulk routing, and zone-refill-aware ratsnest counts.
+
+## Finding-to-issue map
+
+| Study finding | kct issue | What we would build |
+|---|---|---|
+| Probe checks items only against the board; apply is not atomic | #9590 | `kct probe` batches and `kct apply --checked` |
+| Bulk routing cuts planes; no zone-crossing cost or warning | #9591 | Router zone-split cost + `kct check` plane-integrity finding |
+| Shove ignores layers; batch JSON traps; greedy ordering; grid scaling | #9592 | Audit `kct route` against ten reported failure modes |
+| Net-less copper graphics, custom pads, footprint-local outlines ignored | #9593 | Footprint-level Edge.Cuts handled everywhere the outline is used |
+| Agents wanted lengths, lanes, vias-near-pads, skew | #9594 | `kct` layout-quality metrics report |
+| A scored external benchmark on real boards | #9595 | Run `kct` on the study boards with their briefs and scoring |
+
+## Licence hygiene
+
+`blind-pcb-runs` is MIT (`LICENSE`, Copyright 2026 Gergő Törcsvári): quoting
+and paraphrasing with attribution, as above, is fine, and its scoring method
+and sandbox design are reusable with attribution. The **boards** keep their own
+licences (CERN-OHL-P-2.0, CERN-OHL 1.2, 0BSD, WTFPL, MIT, Apache-2.0, and one
+SparkFun board with no LICENSE file at the pinned commit) — fetch by their
+recipe, never vendor. `PCBJam/pcbjam` (the WASM pcbnew port) is GPL-3.0:
+subject to the clean-room policy (#9589), ideas-only in both directions,
+nothing copied.

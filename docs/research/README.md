@@ -23,6 +23,7 @@ licence-compatibility, is the ecosystem registry: `kct ecosystem list`,
 | [KiPI](kipi-evaluation.md) | Power-integrity analyzer (GPL): headless path, one-rail trial, integration shapes |
 | [kipy IPC API](kipy-ipc-api-evaluation.md) | Official KiCad Python API as a parser cross-check |
 | [OmniLayout / OmniRouting](omnilayout-recon.md) | External LLM layout/routing benchmark recon |
+| [PCBJam blind PCB study](pcbjam-blind-pcb-study.md) | What a frontier agent does with a stripped KiCad board: findings, tool asks, issue map (MIT study repo; findings feed #9590-#9595) |
 | [RepoRecon KiCad AI sweep](reporecon-kicad-ai-sweep.md) | Sweep of KiCad AI repositories |
 | [tscircuit](tscircuit-evaluation.md) | tscircuit as an upstream producer and peer autorouter |
 | [WeaveEngine](weaveengine-topology-first-evaluation.md) | Topology-first DSN/SES autorouter (GPL, ideas-only): planning ideas adopted, substrate rejected |
