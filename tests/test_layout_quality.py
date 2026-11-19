@@ -196,9 +196,9 @@ NESTED_ISLAND_PCB = """(kicad_pcb
 )
 """
 
-# A gr_circle hole is not modelled by the segment accessor, so the
-# segment set is incomplete: the documented policy is ``None`` rather
-# than the gross rect area the circle would silently vanish into.
+# A gr_circle hole is measured with the certified circle tessellation
+# (~1e-5 mm chord error), so the published area is the rect minus the
+# true disc, not the gross rect the circle would silently vanish into.
 CIRCLE_CUTOUT_PCB = """(kicad_pcb
   (version 20240108)
   (generator "test")
@@ -211,6 +211,124 @@ CIRCLE_CUTOUT_PCB = """(kicad_pcb
 
   (gr_rect (start 0 0) (end 100 50) (stroke (width 0.1)) (layer "Edge.Cuts"))
   (gr_circle (center 25 15) (end 30 15) (stroke (width 0.1)) (layer "Edge.Cuts"))
+)
+"""
+
+# Footprint-owned Edge.Cuts graphics are part of the outline: a 10x10
+# fp_rect cutout inside a footprint placed at the board centre subtracts
+# exactly like a top-level one (review finding on #9614: the old code
+# only looked at pcb.graphics, so footprint cutouts vanished).
+FP_RECT_CUTOUT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+
+  (gr_rect (start 0 0) (end 100 50) (stroke (width 0.1)) (layer "Edge.Cuts"))
+
+  (footprint "Mech:BoardCutout"
+    (layer "F.Cu")
+    (at 25 15)
+    (property "Reference" "J9")
+    (fp_rect (start -5 -5) (end 5 5) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  )
+)
+"""
+
+# fp_curve on Edge.Cuts is not parsed into the footprint model at all,
+# so the contour cannot be measured: refuse the area rather than report
+# the gross rect (review finding on #9614).
+FP_CURVE_CUTOUT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+
+  (gr_rect (start 0 0) (end 100 50) (stroke (width 0.1)) (layer "Edge.Cuts"))
+
+  (footprint "Mech:BoardCutout"
+    (layer "F.Cu")
+    (at 25 15)
+    (property "Reference" "J9")
+    (fp_curve (pts (xy -5 -5) (xy -2 3) (xy 2 -3) (xy 5 5)) (layer "Edge.Cuts"))
+  )
+)
+"""
+
+# A closed lens cutout built from two gr_curve elements (each the exact
+# degree-elevation of a quadratic Bezier with peak h=3, so the lens
+# encloses exactly 20 mm^2). Curved contours are measured with the
+# certified cubic tessellation, not dropped (review finding on #9614).
+CURVE_LENS_CUTOUT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+
+  (gr_rect (start 0 0) (end 100 50) (stroke (width 0.1)) (layer "Edge.Cuts"))
+
+  (gr_curve
+    (pts (xy 20 10) (xy 23.333333 12) (xy 26.666667 12) (xy 30 10))
+    (stroke (width 0.1)) (layer "Edge.Cuts")
+  )
+  (gr_curve
+    (pts (xy 30 10) (xy 26.666667 8) (xy 23.333333 8) (xy 20 10))
+    (stroke (width 0.1)) (layer "Edge.Cuts")
+  )
+)
+"""
+
+# A radius-5 mm circular cutout authored as two semicircular gr_arc
+# elements: arcs must be tessellated to their certified chord accuracy,
+# not reduced to two chords each (which measured 4950 instead of
+# 4921.460 -- review finding on #9614).
+ARC_PAIR_CUTOUT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+
+  (gr_rect (start 0 0) (end 100 50) (stroke (width 0.1)) (layer "Edge.Cuts"))
+
+  (gr_arc (start 20 15) (mid 25 20) (end 30 15) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_arc (start 30 15) (mid 25 10) (end 20 15) (stroke (width 0.1)) (layer "Edge.Cuts"))
+)
+"""
+
+# Two length-matched nets with a known length difference: with a
+# net-class map declaring the match group, the block reports its skew.
+MATCH_GROUP_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "MA")
+  (net 2 "MB")
+
+  (gr_rect (start 0 0) (end 50 30) (stroke (width 0.1)) (layer "Edge.Cuts"))
+
+  (segment (start 5 5) (end 15 5) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 5 15) (end 5 27.5) (width 0.2) (layer "F.Cu") (net 2))
 )
 """
 
@@ -304,10 +422,51 @@ def test_nested_island_inside_cutout_adds_back():
     assert area == pytest.approx(100 * 50 - 20 * 20 + 5 * 5, abs=1e-6)
 
 
-def test_unmodelled_edge_cuts_shape_returns_none():
-    # gr_circle on Edge.Cuts is missing from the segment accessor: refuse
-    # the area instead of reporting the gross rect (docstring policy).
-    assert analyze_layout_quality(_load_pcb(CIRCLE_CUTOUT_PCB)).outline_area_mm2 is None
+def test_circle_cutout_measured():
+    # The certified circle tessellation (~1e-5 mm sagitta) measures the
+    # hole instead of dropping it or refusing the area.
+    area = analyze_layout_quality(_load_pcb(CIRCLE_CUTOUT_PCB)).outline_area_mm2
+    assert area == pytest.approx(100 * 50 - math.pi * 25, abs=1e-3)
+
+
+def test_footprint_rect_cutout_subtracts():
+    # Footprint-owned Edge.Cuts graphics are part of the outline.
+    area = analyze_layout_quality(_load_pcb(FP_RECT_CUTOUT_PCB)).outline_area_mm2
+    assert area == pytest.approx(100 * 50 - 10 * 10, abs=1e-6)
+
+
+def test_footprint_curve_edge_cuts_returns_none():
+    # fp_curve is absent from the parsed footprint model, so the contour
+    # cannot be measured: refuse rather than report the gross rect.
+    assert analyze_layout_quality(_load_pcb(FP_CURVE_CUTOUT_PCB)).outline_area_mm2 is None
+
+
+def test_gr_curve_cutout_measured():
+    # Two gr_curve elements close a 20 mm^2 lens: measured with the
+    # certified cubic tessellation, not silently dropped.
+    area = analyze_layout_quality(_load_pcb(CURVE_LENS_CUTOUT_PCB)).outline_area_mm2
+    assert area == pytest.approx(100 * 50 - 20.0, abs=0.05)
+
+
+def test_arc_pair_cutout_measured_to_tessellation_accuracy():
+    # Two semicircular gr_arcs form a r=5 disc: the tessellated area sits
+    # within the certified chord bound (perimeter x 1e-4 mm) of pi r^2,
+    # where the old two-chord reduction reported 4950.
+    area = analyze_layout_quality(_load_pcb(ARC_PAIR_CUTOUT_PCB)).outline_area_mm2
+    assert area == pytest.approx(100 * 50 - math.pi * 25, abs=0.01)
+
+
+def test_match_group_skew_reported_with_net_class_map():
+    from kicad_tools.router.rules import NetClassRouting
+
+    nc = NetClassRouting(name="GRP", length_match_group="GRP")
+    pcb = _load_pcb(MATCH_GROUP_PCB)
+
+    without_map = analyze_layout_quality(pcb).to_dict()
+    assert "match_group_skew" not in without_map
+
+    data = analyze_layout_quality(pcb, {"MA": nc, "MB": nc}).to_dict()
+    assert data["match_group_skew"] == {"GRP": 2.5}
 
 
 def test_rerun_stability():
@@ -357,6 +516,25 @@ def test_fingerprint_reports_layout_quality_and_is_stable(tmp_path, bench):
     assert fp1["layout_quality"] == fp2["layout_quality"]
     assert fp1["layout_quality"]["corners"]["right_angle"] == 1
     assert fp1["layout_quality"]["via"] == {"track": 2, "ground": 1, "total": 3}
+
+
+def test_fingerprint_reports_match_group_skew_from_sidecar(tmp_path, bench):
+    import json
+
+    path = _write_pcb(tmp_path, MATCH_GROUP_PCB)
+    sidecar = tmp_path / "net_class_map.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "MA": {"name": "GRP", "length_match_group": "GRP"},
+                "MB": {"name": "GRP", "length_match_group": "GRP"},
+            }
+        )
+    )
+    with_map = bench.fingerprint(path, sidecar)
+    assert with_map["layout_quality"]["match_group_skew"] == {"GRP": 2.5}
+    without_map = bench.fingerprint(path)
+    assert "match_group_skew" not in without_map["layout_quality"]
 
 
 def test_compare_fingerprints_ignores_layout_quality(tmp_path, bench):

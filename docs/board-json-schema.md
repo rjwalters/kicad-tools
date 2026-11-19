@@ -389,6 +389,11 @@ The example is board 05's real block (`per_net` truncated to one net). A
 board with differential pairs additionally carries `diff_pair_skew`, one
 entry per pair:
 `[{"net_positive": "USB_D+", "net_negative": "USB_D-", "skew_mm": 0.42}]`.
+A board whose project declares `artifacts.net_class_map_sidecar`
+additionally carries `match_group_skew`, one entry per declared match
+group with every member routed, e.g. board 07's real
+`{"SDRAM_ADDRESS": 2.452, "SDRAM_BYTE0": 0.104, "SDRAM_BYTE1": 2.842,
+"SDRAM_COMMAND": 0.949}`.
 
 | Field | Meaning |
 |---|---|
@@ -397,8 +402,9 @@ entry per pair:
 | `corners.right_angle` / `.acute` / `.turn_back` | Same-net, same-layer joins of straight segments, counted per interior angle at the shared endpoint: right angle 89–91 deg, acute 10–89 deg (the acid-trap range `sharp_trace_corner` warns on), turn-back under 10 deg (overlaps / dead-end stubs, usually router debris). Obtuse bends and straight pass-throughs are not corners. Vertices under same-net pad/via copper are joints and are skipped; stacked duplicate segments count once. |
 | `corners.per_net` | Per-net breakdown of the same three classes; present only when at least one corner was counted. |
 | `total_track_length_mm` | Summed straight-segment centreline length plus analytic arc length. |
-| `outline_area_mm2` | Edge.Cuts polygon area (cutouts subtract). Omitted when the outline is absent, open, crossing, or otherwise unsupported. |
-| `diff_pair_skew` | One entry per detected differential pair, from the existing `TraceLengthAnalyzer` (`find_differential_pairs` + `analyze_diff_pair`); present only when the board has pairs. Match-group skew needs the router's net-class map, which board-metrics does not select, so it is not part of the block. |
+| `outline_area_mm2` | Edge.Cuts polygon area (cutouts subtract, islands inside cutouts add back). Every contour is measured — footprint-owned `fp_*` graphics included; curved contours are tessellated to a certified chord error (≤1e-4 mm arcs/cubics, ~1e-5 mm circles), so the value is exact on straight-edge boards. Omitted when the outline is absent, open, crossing, or holds geometry the module cannot measure (`fp_curve`). |
+| `diff_pair_skew` | One entry per detected differential pair, from the existing `TraceLengthAnalyzer` (`find_differential_pairs` + `analyze_diff_pair`); present only when the board has pairs. |
+| `match_group_skew` | Per declared match group (in mm), from the existing `validate.match_group_skew.derive_group_skew_data`; present only when the project declares `artifacts.net_class_map_sidecar` and every group member is routed. Groups with an unrouted member are omitted, matching the producer-side tracker's gating. |
 
 Boards whose PCB is not selectable (ambiguous candidates, declared-but-missing
 artifact, invalid project specification) or unparseable omit the whole block,

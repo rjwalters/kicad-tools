@@ -54,15 +54,18 @@ and the ``_GND``/``_VSS``/``_AGND``/``_DGND`` suffixes). Every other via
 or supply to another layer, where a high count means the routing ran out
 of room.
 
-Pair skew
----------
+Pair and match-group skew
+------------------------
 
 Per differential pair, skew comes from the existing
 :class:`~kicad_tools.analysis.trace_length.TraceLengthAnalyzer`
 (``find_differential_pairs`` + ``analyze_diff_pair``); it is exposed
 here, not reimplemented. Match-group skew needs the router's
 net-class map (``validate.match_group_skew.derive_group_skew_data``),
-which neither consumer selects, so it is not part of this block.
+which neither consumer has on its own: callers that know a map (the
+board's declared ``artifacts.net_class_map_sidecar``, the benchmark's
+frozen ``routing_sidecars``) pass it in and the block grows a
+``match_group_skew`` entry; without one the key is simply absent.
 
 Not a check
 -----------
@@ -240,36 +243,41 @@ def _total_track_length_mm(pcb: PCB) -> float:
 def _outline_area_mm2(pcb: PCB) -> float | None:
     """Area enclosed by the Edge.Cuts outline, or ``None`` when unsupported.
 
-    Polygonizes ``PCB.get_board_outline_segments()`` (straight lines,
-    two-chord arc approximations, rects). ``polygonize_full`` returns the
-    faces of the line arrangement: the outer face *with its holes punched
-    out*, each cutout face, and any nested island face, so the material
-    area is the sum of faces at even nesting depth (outer and islands in
-    cutouts), skipping odd-depth cutout faces. Nesting depth is the same
-    probe ``router.mesh.pathfinder.interior_edge_loops`` uses (issue
-    #6822): each face's *exterior* ring (a punched hole would defeat
-    containment on the face itself), largest first, counting how many of
-    the larger exterior rings contain the ring's representative point.
+    Every Edge.Cuts contour is measured -- top-level graphics *and*
+    footprint-owned ones (a board-edge cutout often lives as ``fp_rect``
+    graphics inside a connector footprint). Straight elements (lines,
+    rects, polys) contribute exact segments; curved ones are tessellated
+    to the certified accuracy of :mod:`kicad_tools.core.board_outline` /
+    :mod:`kicad_tools.core.outline_tessellation` (arcs/cubics within
+    ``DEFAULT_MAX_ERROR_MM`` chords, circles within ~1e-5 mm), so the
+    published area is exact on straight-edge boards and bounded by
+    curve length times that error otherwise.
 
-    Outline shapes the segment accessor does not model (``gr_circle``,
-    ``gr_poly``) leave the segment set incomplete, so any Edge.Cuts
-    graphic of those kinds returns ``None`` rather than an inaccurate
-    area -- the same policy as the development board-size metadata.
-    Open, crossing, malformed or absent outlines return ``None`` too.
+    ``polygonize_full`` returns the faces of the line arrangement: the
+    outer face *with its holes punched out*, each cutout face, and any
+    nested island face, so the material area is the sum of faces at even
+    nesting depth (outer and islands in cutouts), skipping odd-depth
+    cutout faces. Nesting depth is the same probe
+    ``router.mesh.pathfinder.interior_edge_loops`` uses (issue #6822):
+    each face's *exterior* ring (a punched hole would defeat containment
+    on the face itself), largest first, counting how many of the larger
+    exterior rings contain the ring's representative point.
+
+    Geometry this module cannot measure returns ``None`` rather than an
+    inaccurate area -- the same policy as the development board-size
+    metadata: ``fp_curve`` Edge.Cuts graphics (not parsed into the
+    footprint model) and anything the certified tessellators refuse
+    (malformed or uncertifiable coordinates). Open, crossing, malformed
+    or absent outlines return ``None`` too.
     """
     from shapely.errors import ShapelyError  # type: ignore[import-untyped]
     from shapely.geometry import MultiLineString, Polygon  # type: ignore[import-untyped]
     from shapely.ops import polygonize_full  # type: ignore[import-untyped]
 
-    # The accessor models gr_line/gr_arc/gr_rect only; any other Edge.Cuts
-    # graphic is missing from the segments (a circular hole would silently
-    # vanish into the gross rect area).
-    if any(
-        g.layer == "Edge.Cuts" and g.graphic_type not in ("line", "arc", "rect")
-        for g in pcb.graphics
-    ):
+    try:
+        segments = _edge_cuts_segments(pcb)
+    except ValueError:
         return None
-    segments = pcb.get_board_outline_segments()
     if not segments:
         return None
     try:
@@ -296,6 +304,83 @@ def _outline_area_mm2(pcb: PCB) -> float | None:
         return None
 
 
+def _edge_cuts_segments(pcb: PCB) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    """Straight-segment chains for every Edge.Cuts contour, board-relative.
+
+    Raises:
+        ValueError: Any Edge.Cuts geometry this module cannot measure
+            (``fp_curve``, malformed or uncertifiable contours).
+    """
+    from kicad_tools.core.board_outline import board_outline_segments
+    from kicad_tools.core.geometry import rotate_pad_offset
+    from kicad_tools.core.outline_tessellation import tessellate_arc
+
+    # Top-level graphics: the certified routing-outline builder measures
+    # every gr_* kind (straight elements exactly, arcs/cubics/circles to
+    # a certified Hausdorff bound) and refuses what it cannot certify.
+    # Coordinates arrive sheet-absolute; footprints below are already
+    # board-relative, so shift by the detected board origin to match.
+    ox, oy = getattr(pcb, "_board_origin", (0.0, 0.0))
+    segments = [
+        ((x1 - ox, y1 - oy), (x2 - ox, y2 - oy))
+        for (x1, y1), (x2, y2) in board_outline_segments(pcb._sexp)
+    ]
+
+    def fp_point(fp: Any, local: tuple[float, float] | None) -> tuple[float, float]:
+        if local is None:
+            raise ValueError("Edge.Cuts footprint graphic: missing coordinates")
+        dx, dy = rotate_pad_offset(local[0], local[1], fp.rotation)
+        return (fp.position[0] + dx, fp.position[1] + dy)
+
+    def add_chain(chain: list[tuple[float, float]]) -> None:
+        segments.extend(zip(chain, chain[1:] + chain[:1], strict=True))
+
+    for fp in pcb.footprints:
+        # fp_curve is not parsed into the footprint model at all, so an
+        # Edge.Cuts one would silently vanish: refuse the whole area.
+        node = getattr(fp, "_sexp_node", None)
+        if node is not None:
+            for child in node.iter_children():
+                layer = child.find_child("layer")
+                if (
+                    child.tag == "fp_curve"
+                    and layer is not None
+                    and layer.get_string(0) == "Edge.Cuts"
+                ):
+                    raise ValueError("Edge.Cuts fp_curve is not modelled")
+        for graphic in fp.graphics:
+            if graphic.layer != "Edge.Cuts":
+                continue
+            kind = graphic.graphic_type
+            if kind == "line":
+                start, end = fp_point(fp, graphic.start), fp_point(fp, graphic.end)
+                segments.append((start, end))
+            elif kind == "rect":
+                a, b = fp_point(fp, graphic.start), fp_point(fp, graphic.end)
+                add_chain([a, (b[0], a[1]), b, (a[0], b[1])])
+            elif kind == "arc":
+                chain = tessellate_arc(
+                    fp_point(fp, graphic.start),
+                    fp_point(fp, graphic.mid),
+                    fp_point(fp, graphic.end),
+                )
+                segments.extend(zip(chain, chain[1:], strict=True))
+            elif kind == "poly":
+                points = [fp_point(fp, point) for point in graphic.points]
+                if len(points) < 3:
+                    raise ValueError("Edge.Cuts fp_poly: missing points")
+                add_chain(points)
+            elif kind == "circle":
+                from kicad_tools.core.board_outline import circle_tessellation_points
+
+                if graphic.center is None or not graphic.radius:
+                    raise ValueError("Edge.Cuts fp_circle: missing centre or radius")
+                add_chain(circle_tessellation_points(fp_point(fp, graphic.center), graphic.radius))
+            else:  # pragma: no cover - the parser only yields the kinds above
+                raise ValueError(f"Edge.Cuts footprint graphic not modelled: {kind}")
+    return segments
+
+
 def _diff_pair_skews(pcb: PCB) -> list[dict[str, Any]]:
     """Per differential pair, the existing trace-length skew analysis."""
     from kicad_tools.analysis.trace_length import TraceLengthAnalyzer
@@ -314,6 +399,20 @@ def _diff_pair_skews(pcb: PCB) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+def _match_group_skews(pcb: PCB, net_class_map: Any) -> dict[str, float]:
+    """Per declared match group, the existing validate-side skew analysis.
+
+    ``derive_group_skew_data`` already degrades to ``{}`` when the map is
+    empty, and reports only groups whose members are all routed.
+    """
+    from kicad_tools.validate.match_group_skew import derive_group_skew_data
+
+    skews, _groups, _thresholds = derive_group_skew_data(
+        pcb, net_class_map, num_copper_layers=len(pcb.copper_layers)
+    )
+    return {name: round(skew, 3) for name, skew in sorted(skews.items())}
 
 
 @dataclass
@@ -335,6 +434,8 @@ class LayoutQualityReport:
         outline_area_mm2: Edge.Cuts polygon area; ``None`` when the
             outline is absent or unsupported.
         diff_pair_skews: One entry per detected differential pair.
+        match_group_skews: Per declared match group (requires the
+            caller-supplied net-class map), the routed skew in mm.
     """
 
     track_vias: int = 0
@@ -346,6 +447,7 @@ class LayoutQualityReport:
     total_track_length_mm: float = 0.0
     outline_area_mm2: float | None = None
     diff_pair_skews: list[dict[str, Any]] = field(default_factory=list)
+    match_group_skews: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Dictionary for JSON serialization (additive-board.json block)."""
@@ -370,10 +472,12 @@ class LayoutQualityReport:
             result["outline_area_mm2"] = round(self.outline_area_mm2, 3)
         if self.diff_pair_skews:
             result["diff_pair_skew"] = self.diff_pair_skews
+        if self.match_group_skews:
+            result["match_group_skew"] = dict(self.match_group_skews)
         return result
 
 
-def analyze_layout_quality(pcb: PCB) -> LayoutQualityReport:
+def analyze_layout_quality(pcb: PCB, net_class_map: Any = None) -> LayoutQualityReport:
     """Compute the layout-quality metric set for one parsed PCB.
 
     Pure over the board: same input, same output (all floats are rounded
@@ -382,6 +486,11 @@ def analyze_layout_quality(pcb: PCB) -> LayoutQualityReport:
 
     Args:
         pcb: A loaded :class:`~kicad_tools.schema.pcb.PCB`.
+        net_class_map: Optional ``{net_name: NetClassRouting}`` map (the
+            router sidecar convention, loaded with
+            :func:`~kicad_tools.router.rules.net_class_map_from_path`).
+            When supplied, declared match groups report their routed
+            skew (``match_group_skew``); without it the key is absent.
 
     Returns:
         The populated :class:`LayoutQualityReport`.
@@ -398,4 +507,5 @@ def analyze_layout_quality(pcb: PCB) -> LayoutQualityReport:
         total_track_length_mm=_total_track_length_mm(pcb),
         outline_area_mm2=_outline_area_mm2(pcb),
         diff_pair_skews=_diff_pair_skews(pcb),
+        match_group_skews=_match_group_skews(pcb, net_class_map),
     )

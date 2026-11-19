@@ -24,6 +24,8 @@ from kicad_tools.cli.board_metrics_cmd import (
     main,
 )
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
 # A trimmed but faithful copy of board 05's report.md structure.
 SAMPLE_REPORT_MD = """---
 title: "bldc_controller_routed"
@@ -944,3 +946,137 @@ def test_layout_quality_emitted_into_written_board_json(tmp_path: Path):
     out = emit_board_json(board)
     data = json.loads(out.read_text())
     assert data["layout_quality"]["corners"]["right_angle"] == 1
+
+
+# Two routed nets with a known length difference (10.0 vs 12.5 mm): a
+# declared net-class-map sidecar turns that into match-group skew.
+SKEW_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "MA")
+  (net 2 "MB")
+
+  (gr_rect (start 0 0) (end 50 30) (stroke (width 0.1)) (layer "Edge.Cuts"))
+
+  (segment (start 5 5) (end 15 5) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 5 15) (end 5 27.5) (width 0.2) (layer "F.Cu") (net 2))
+)
+"""
+
+SKEW_SIDECAR = {
+    "MA": {"name": "GRP", "length_match_group": "GRP"},
+    "MB": {"name": "GRP", "length_match_group": "GRP"},
+}
+
+
+def test_layout_quality_match_group_skew_from_declared_sidecar(tmp_path: Path):
+    import yaml
+
+    board = _make_board(tmp_path, manifest=SAMPLE_MANIFEST)
+    (board / "output" / "quality.kicad_pcb").write_text(SKEW_PCB)
+    (board / "output" / "net_class_map.json").write_text(json.dumps(SKEW_SIDECAR))
+    project = {
+        "project": {
+            "name": "Skew",
+            "artifacts": {
+                "pcb": "output/quality.kicad_pcb",
+                "net_class_map_sidecar": "output/net_class_map.json",
+            },
+        }
+    }
+    (board / "project.kct").write_text(yaml.safe_dump(project))
+
+    lq = extract_board_metrics(board)["layout_quality"]
+    assert lq["match_group_skew"] == {"GRP": 2.5}
+
+
+def test_layout_quality_unusable_sidecar_omits_skew_not_block(tmp_path: Path):
+    import yaml
+
+    board = _make_board(tmp_path, manifest=SAMPLE_MANIFEST)
+    (board / "output" / "quality.kicad_pcb").write_text(SKEW_PCB)
+    (board / "output" / "net_class_map.json").write_text("{not json")
+    project = {
+        "project": {
+            "name": "Skew",
+            "artifacts": {
+                "pcb": "output/quality.kicad_pcb",
+                "net_class_map_sidecar": "output/net_class_map.json",
+            },
+        }
+    }
+    (board / "project.kct").write_text(yaml.safe_dump(project))
+
+    lq = extract_board_metrics(board)["layout_quality"]
+    assert "match_group_skew" not in lq
+    assert lq["corners"]["right_angle"] == 0
+
+
+def test_layout_quality_fallback_symlink_outside_board_omitted(tmp_path: Path):
+    # A single output/*.kicad_pcb that is a symlink to a shared PCB
+    # outside the board directory is held to the declared-artifact
+    # containment check: the block is omitted and extraction continues
+    # instead of dying on the board-relative path.
+    shared = tmp_path / "shared.kicad_pcb"
+    shared.write_text(QUALITY_PCB)
+    board = _make_board(tmp_path, slug="20-symlink-board", manifest=SAMPLE_MANIFEST)
+    (board / "output" / "board.kicad_pcb").symlink_to(shared)
+
+    m = extract_board_metrics(board)
+    assert "layout_quality" not in m
+    assert m["slug"] == "20-symlink-board"
+
+
+def test_layout_quality_hash_binds_the_parsed_snapshot(tmp_path: Path, monkeypatch):
+    # The SHA and the parse must read ONE byte snapshot of the PCB, so an
+    # atomic reroute between two reads cannot publish one file's numbers
+    # under another file's provenance (review finding on #9614).
+    import hashlib
+
+    import yaml
+
+    board = _make_board(tmp_path, manifest=SAMPLE_MANIFEST)
+    (board / "output" / "quality.kicad_pcb").write_text(QUALITY_PCB)
+    project = {"project": {"name": "Q", "artifacts": {"pcb": "output/quality.kicad_pcb"}}}
+    (board / "project.kct").write_text(yaml.safe_dump(project))
+
+    reads: list[Path] = []
+    original = Path.read_bytes
+
+    def counting_read(self: Path) -> bytes:
+        if self.name == "quality.kicad_pcb":
+            reads.append(self)
+        return original(self)
+
+    monkeypatch.setattr(Path, "read_bytes", counting_read)
+    lq = extract_board_metrics(board)["layout_quality"]
+    assert reads, "the PCB was never read"
+    assert len(reads) == 1  # hashed and parsed from the same snapshot
+    assert (
+        lq["pcb_sha256"]
+        == hashlib.sha256((board / "output" / "quality.kicad_pcb").read_bytes()).hexdigest()
+    )
+
+
+def test_layout_quality_match_group_skew_on_committed_board07():
+    # Board 07 declares both a routed artifact and a net-class-map
+    # sidecar: the committed fleet must report its four SDRAM match
+    # groups (values verified against derive_group_skew_data on the
+    # routed PCB in the #9614 review).
+    m = extract_board_metrics(REPO_ROOT / "boards" / "07-matchgroup-test")
+    skew = m["layout_quality"]["match_group_skew"]
+    assert skew == pytest.approx(
+        {
+            "SDRAM_ADDRESS": 2.452,
+            "SDRAM_BYTE0": 0.104,
+            "SDRAM_BYTE1": 2.842,
+            "SDRAM_COMMAND": 0.949,
+        },
+        abs=1e-3,
+    )
