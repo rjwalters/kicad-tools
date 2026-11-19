@@ -33,12 +33,17 @@ gate, not here.
 from __future__ import annotations
 
 import math
+import sys
+from pathlib import Path
 
 from kicad_tools.router.lattice.coupled import CoupledConnection
 from kicad_tools.router.lattice.pathfinder import LatticePathfinder
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules, NetClassRouting
+
+sys.path.insert(0, str(Path(__file__).parent))
+from test_physical_copper_gap import board, gaps  # noqa: E402
 
 EDGE = 0.15  # jlcpcb 4layer pad_spacing detection edge (#9016)
 HALF = 0.1  # 0.2 mm trace, the board default in these fixtures
@@ -261,6 +266,322 @@ def test_body_edge_legal_accepts_edge_beyond_the_band() -> None:
             )[0]
             found += 1
     assert found
+
+
+# ---------------------------------------------------------------------------
+# The #9517 exemption: a leg riding a pad-attached stub is the validator's
+# covered connector, not a slit
+# ---------------------------------------------------------------------------
+
+
+def test_outward_collinear_continuation_of_pad_attached_stub_is_accepted() -> None:
+    # Pad 0.6x0.6 at the origin; its stub tail runs straight down from the
+    # pad centre to (0.0, -0.42) -- 0.12 mm past the bottom edge (y = -0.3).
+    # A continuation leg from there to (0.0, -0.52) parks in the band
+    # (centreline gap 0.02..0.12) yet is exactly the #9517 shape: on the
+    # tail's line, its start riding the tail's swept copper, the tail
+    # unions the pad.  In isolation it is the board 05 deadlock (rejected);
+    # with the stub legs attached the validator's connector-coverage
+    # exemption grades the composite escape clean, and so must the guard.
+    pf = _pf([_pad(0.0, 0.0)])
+    pf.build()
+    leg = ((0.0, -0.42), (0.0, -0.52))
+    tail = ((0.0, 0.0), (0.0, -0.42), HALF)
+    assert _band_blocked(pf, *leg)
+    assert not pf.obstacles.same_net_pad_band_blocked(
+        leg[0], leg[1], 0, 1, HALF, EDGE, attached=(tail,)
+    )
+
+
+def test_parallel_band_leg_stays_rejected_despite_attached_stub() -> None:
+    # The #9011 slit shapes beside the SAME tail: a leg parallel to the pad
+    # edge, a corner off the tail's end, and a collinear leg laterally
+    # offset from the tail's line -- none rides the tail, so none is
+    # exempt.  Board 07's slit count stays at 0.
+    pf = _pf([_pad(0.0, 0.0)])
+    pf.build()
+    tail = ((0.0, 0.0), (0.0, -0.42), HALF)
+    # parallel to the bottom edge, in the band
+    assert _band_blocked(pf, (-0.5, -0.42), (0.5, -0.42))
+    assert pf.obstacles.same_net_pad_band_blocked(
+        (-0.5, -0.42), (0.5, -0.42), 0, 1, HALF, EDGE, attached=(tail,)
+    )
+    # a corner off the tail's end: rides it, not collinear
+    assert pf.obstacles.same_net_pad_band_blocked(
+        (0.0, -0.42), (0.2, -0.42), 0, 1, HALF, EDGE, attached=(tail,)
+    )
+    # collinear with the tail's axis but laterally offset: misses it
+    assert _band_blocked(pf, (0.3, -0.42), (0.3, -0.52))
+    assert pf.obstacles.same_net_pad_band_blocked(
+        (0.3, -0.42), (0.3, -0.52), 0, 1, HALF, EDGE, attached=(tail,)
+    )
+
+
+def test_collinear_leg_back_toward_the_pad_is_accepted_on_the_tail() -> None:
+    # The #9517 plan's back-toward-pad probe.  Direction-free on purpose
+    # (the A* edge memo is unordered, so egress and arrival must agree): a
+    # leg on the tail's line lays no copper off the pad-attached escape
+    # either way, so it is the covered connector too.
+    pf = _pf([_pad(0.0, 0.0)])
+    pf.build()
+    leg = ((0.0, -0.52), (0.0, -0.42))
+    tail = ((0.0, 0.0), (0.0, -0.42), HALF)
+    assert _band_blocked(pf, *leg)
+    assert not pf.obstacles.same_net_pad_band_blocked(
+        leg[0], leg[1], 0, 1, HALF, EDGE, attached=(tail,)
+    )
+
+
+def test_stub_end_point_probe_on_attached_copper_is_accepted() -> None:
+    # The degenerate a == b form at the stub end itself: the node sits on
+    # pad-attached copper, so the point probe -- no direction to collinearity
+    # -- is exempt on ride + attachment alone.
+    pf = _pf([_pad(0.0, 0.0)])
+    pf.build()
+    tail = ((0.0, 0.0), (0.0, -0.42), HALF)
+    assert _band_blocked(pf, (0.0, -0.42), (0.0, -0.42))
+    assert not pf.obstacles.same_net_pad_band_blocked(
+        (0.0, -0.42), (0.0, -0.42), 0, 1, HALF, EDGE, attached=(tail,)
+    )
+
+
+def test_distant_parallel_band_leg_rides_nothing_even_with_attached_stub() -> None:
+    # The ride test's pin (#9517 review): a band leg parallel to the tail's
+    # axis but starting far along it rides NONE of the tail's copper -- both
+    # endpoints are beyond ``half + hw`` of the segment (0.90 / 0.45 mm off,
+    # threshold 0.2).  A ride metric that measures anything but the leg's own
+    # endpoints against the ride segment grades this slit shape an escape --
+    # exactly the #9011 shape the guard exists to reject.
+    pf = _pf([_pad(0.0, 0.0)])
+    pf.build()
+    tail = ((0.0, 0.0), (0.0, -0.42), HALF)
+    assert _band_blocked(pf, (0.45, -1.2), (0.45, -0.4))
+    assert pf.obstacles.same_net_pad_band_blocked(
+        (0.45, -1.2), (0.45, -0.4), 0, 1, HALF, EDGE, attached=(tail,)
+    )
+
+
+def test_continuation_leg_longer_than_the_ride_band_is_exempt_from_either_end() -> None:
+    # Direction-free for a leg LONGER than the ride threshold that extends
+    # past the stub end: its near endpoint rides the tail, its far endpoint
+    # is 0.33 mm beyond it (past ``half + hw`` = 0.2).  Whichever endpoint
+    # the canonical A* edge order presents as the leg's start must give the
+    # same verdict -- copper on the tail's line lays no band copper either
+    # way.  (A start-only ride test grades the far-end-first order a slit.)
+    pf = _pf([_pad(0.0, 0.0)])
+    pf.build()
+    tail = ((0.0, 0.0), (0.0, -0.42), HALF)
+    leg = ((0.0, -0.42), (0.0, -0.75))
+    assert _band_blocked(pf, *leg)
+    assert not pf.obstacles.same_net_pad_band_blocked(
+        leg[0], leg[1], 0, 1, HALF, EDGE, attached=(tail,)
+    )
+    assert not pf.obstacles.same_net_pad_band_blocked(
+        leg[1], leg[0], 0, 1, HALF, EDGE, attached=(tail,)
+    )
+
+
+def test_attached_segment_that_misses_the_pad_exempts_nothing() -> None:
+    # Attachment is what makes the composite escape validator-clean: a
+    # same-net segment whose copper stops short of the outline (centreline
+    # gap 0.15 > half) cannot exempt the leg that rides it.
+    pf = _pf([_pad(0.0, 0.0)])
+    pf.build()
+    orphan = ((0.0, -0.45), (0.0, -0.52), HALF)
+    leg = ((0.0, -0.45), (0.0, -0.52))
+    assert _band_blocked(pf, *leg)
+    assert pf.obstacles.same_net_pad_band_blocked(
+        leg[0], leg[1], 0, 1, HALF, EDGE, attached=(orphan,)
+    )
+
+
+def test_rotated_pad_stub_continuation_measures_the_true_outline() -> None:
+    # A 45-degree-rotated square pad is a diamond; the stub tail runs down
+    # its -y axis through the vertex, and the in-band continuation rides it
+    # out of the band.  Attachment and the band both measure the kernel's
+    # rotated outline (#7503), never the bbox.
+    pf = _pf([_pad(0.0, 0.0, rotation=45.0)])
+    pf.build()
+    leg = ((0.0, -0.55), (0.0, -0.6))
+    tail = ((0.0, 0.0), (0.0, -0.55), HALF)
+    assert _band_blocked(pf, *leg)
+    assert not pf.obstacles.same_net_pad_band_blocked(
+        leg[0], leg[1], 0, 1, HALF, EDGE, attached=(tail,)
+    )
+
+
+def test_body_edge_legal_accepts_continuation_of_attached_stub() -> None:
+    # The A* predicate form: the vertical in-band edge below the pad is
+    # refused without the stub legs (the #9517 deadlock) and accepted with
+    # them, while the in-band parallels beside it stay refused even with
+    # them attached.
+    pad = _pad(5.0, 0.0, width=3.0, height=0.6, ref="U1")
+    pf = _pf([pad], edge=EDGE, fine=0.1)
+    committed = pf._fresh_committed()
+    cont = parallel = None
+    for edge, a, b in _lattice_edges(pf):
+        gap = pf.obstacles.pad_centerline_gap(0, a, b) - HALF
+        if not (1e-9 < gap < EDGE - 1e-9):
+            continue
+        if abs(a[0] - b[0]) < 1e-9 and pad.x - pad.width / 2 < a[0] < pad.x + pad.width / 2:
+            cont = (edge, a, b)
+        elif abs(a[1] - b[1]) < 1e-9:
+            parallel = (edge, a, b)
+    assert cont is not None and parallel is not None, "fixture must offer both shapes"
+    (cx_edge, ca, _cb) = cont
+    (px_edge, pa, _pb) = parallel
+    attached = (((ca[0], 0.0), ca, HALF),)
+    assert not pf._body_edge_legal(
+        cx_edge, 0, 1, HALF, 0.15, committed, extra=0.0, pw=None, ko=None
+    )[0]
+    assert pf._body_edge_legal(
+        cx_edge, 0, 1, HALF, 0.15, committed, extra=0.0, pw=None, ko=None, attached=attached
+    )[0]
+    assert not pf._body_edge_legal(
+        px_edge, 0, 1, HALF, 0.15, committed, extra=0.0, pw=None, ko=None, attached=attached
+    )[0]
+    # The exemption is direction-free -- the ride test takes the NEARER of
+    # the leg's two endpoints to the ride segment -- so the same vertical
+    # edge discovered from its far end (the goal-side arrival order) is the
+    # direction-free memo's answer too.
+    assert pf._body_edge_legal(
+        cx_edge, 0, 1, HALF, 0.15, committed, extra=0.0, pw=None, ko=None, attached=attached
+    ) == pf._body_edge_legal(
+        (cx_edge[1], cx_edge[0]),
+        0,
+        1,
+        HALF,
+        0.15,
+        committed,
+        extra=0.0,
+        pw=None,
+        ko=None,
+        attached=attached,
+    )
+
+
+# ---------------------------------------------------------------------------
+# The #9538 review pins: the ride is the SELECTED escape's own copper, on
+# its own layer, at its emitted width, and collinear means ON the line
+# ---------------------------------------------------------------------------
+
+
+def _pad_footprint(pad: Pad) -> str:
+    layer = "F.Cu" if pad.layer == Layer.F_CU else "B.Cu"
+    return (
+        f'(footprint "R" (layer "{layer}") (at {pad.x} {pad.y}) '
+        f'(property "Reference" "{pad.ref}") (pad "1" smd rect (at 0 0) '
+        f'(size {pad.width} {pad.height}) (layers "{layer}") (net 1 "GND")))'
+    )
+
+
+def _route_sexps(route) -> list[str]:
+    items = [
+        f"(segment (start {s.x1} {s.y1}) (end {s.x2} {s.y2}) (width {s.width}) "
+        f'(layer "{s.layer.kicad_name}") (net 1) (uuid "s{i}"))'
+        for i, s in enumerate(route.segments)
+    ]
+    items.extend(
+        f"(via (at {v.x} {v.y}) (size 0.6) (drill 0.3) "
+        f'(layers "F.Cu" "B.Cu") (net 1) (uuid "v{i}"))'
+        for i, v in enumerate(route.vias)
+    )
+    return items
+
+
+def test_route_emits_no_slit_riding_an_unselected_stub_candidate() -> None:
+    # #9538 review finding 1: pooling EVERY start/goal stub candidate into
+    # one ride set let an unselected candidate's copper legalise the
+    # SELECTED escape's first body leg.  On this two-pad fixture the first
+    # body edge (2.2, 1.0) -> (2.4, 1.2) failed the guard with the stub the
+    # router emits, passed only via a candidate it does not, and the board
+    # carried a 0.1245 mm same-net slit to U1.  The ride set must follow
+    # the selected stub at each end of the path (and the unordered-edge
+    # memo must key on it), so the search takes the collinear continuation
+    # the emitted escape actually covers -- or another legal leg.
+    a = _pad(2.03, 1.015, width=0.12, height=0.6)
+    b = _pad(5.02, 2.05, width=0.3, height=0.6, ref="J2")
+    pf = _pf([a, b], fine=0.4)
+    route = pf.route(a, b)
+    assert route is not None, "the connection must still route (#9517 unlock)"
+    assert not route.vias
+    findings = [
+        (v.actual_value, v.items)
+        for v in gaps(board(*map(_pad_footprint, (a, b)), *_route_sexps(route)), EDGE)
+    ]
+    assert findings == [], findings
+
+
+def test_route_never_rides_a_foreign_layer_stub_out_of_the_band() -> None:
+    # #9538 review finding 1, layer half: the pooled ride set also ignored
+    # the stubs' layers, so a collinear B.Cu escape legalised F.Cu band
+    # legs.  With pad b moved to B.Cu the same two-pad fixture emitted the
+    # same 0.1245 mm F.Cu slit beside U1, graded clean only because a
+    # foreign-layer stub sat on the line.  Rides are keyed on the edge's
+    # own layer now, so the F.Cu exit must stand on F.Cu copper.
+    a = _pad(2.03, 1.015, width=0.12, height=0.6)
+    b = Pad(
+        x=5.02,
+        y=2.05,
+        width=0.3,
+        height=0.6,
+        net=1,
+        net_name="GND",
+        layer=Layer.B_CU,
+        ref="J2",
+        pin="1",
+    )
+    pf = _pf([a, b], fine=0.4)
+    route = pf.route(a, b)
+    assert route is not None, "the connection must still route (#9517 unlock)"
+    findings = [
+        (v.actual_value, v.items)
+        for v in gaps(board(*map(_pad_footprint, (a, b)), *_route_sexps(route)), EDGE)
+    ]
+    assert findings == [], findings
+
+
+def test_parallel_leg_within_combined_half_widths_is_not_collinear() -> None:
+    # #9538 review finding 2: a leg offset 0.15 mm sideways rides the tail
+    # (contact: 0.15 <= half + hw = 0.2) and is parallel to it, yet its
+    # copper sits BESIDE the pad-attached escape -- the validator measures
+    # a 0.02 mm slit between the leg and the pad where the guard accepted.
+    # Collinear means ON the supporting line (perpendicular distance ~ 0),
+    # not merely parallel; the same leg moved onto the tail's centerline
+    # (x = 0) is the accepted continuation.
+    pf = _pf([_pad(0.0, 0.0)])
+    pf.build()
+    tail = ((0.0, 0.0), (0.0, -0.42), HALF)
+    assert _band_blocked(pf, (0.15, -0.42), (0.15, -0.62))
+    assert pf.obstacles.same_net_pad_band_blocked(
+        (0.15, -0.42), (0.15, -0.62), 0, 1, HALF, EDGE, attached=(tail,)
+    )
+    assert not pf.obstacles.same_net_pad_band_blocked(
+        (0.0, -0.42), (0.0, -0.62), 0, 1, HALF, EDGE, attached=(tail,)
+    )
+
+
+def test_stub_egress_rides_attach_at_the_stubs_emitted_width() -> None:
+    # #9538 review finding 1, taper half: a neck escape's rides were graded
+    # at the body radius, accepting rides the emitted neck does not cover.
+    # The stub below lands with every outgoing edge in the band beside the
+    # 1.4 mm pad (corner gaps inside (half, half + edge) at half = 0.1), so
+    # its egress is decided entirely by the straight continuation's ride --
+    # and the ride only covers the pad when the stub's own half-width
+    # reaches it: 0.125 mm standoff attaches at the 0.15 body radius, not
+    # at the 0.05 emitted neck.
+    pf = LatticePathfinder(
+        [(-1.0, -1.0), (7.0, -1.0), (7.0, 1.0), (-1.0, 1.0)],
+        [_pad(5.0, 0.0, width=1.4, height=0.6)],
+        _rules(EDGE),
+        LayerStack.two_layer(),
+        fine=0.025,
+    )
+    lattice = pf.build()
+    stub = (lattice.node_key(5.825, -0.45), 0, [(5.825, 0.0), (5.825, -0.45)], 0.45)
+    committed = pf._fresh_committed()
+    assert not pf._stub_has_egress(stub, 1, committed, HALF, 0.15, allow_vias=False, stub_half=0.05)
+    assert pf._stub_has_egress(stub, 1, committed, HALF, 0.15, allow_vias=False, stub_half=0.15)
 
 
 # ---------------------------------------------------------------------------
