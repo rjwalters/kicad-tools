@@ -80,7 +80,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools.physics.ampacity import width_for_current
-from kicad_tools.router.layers import LayerType
+from kicad_tools.router.layers import Layer, LayerType
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers.base import DesignRules
@@ -296,6 +296,141 @@ def ampacity_inner_layer_conflicts(
 # --- Tier 3: plane-layer signal-reservation guardrail (Issue #5014) -----
 
 
+@dataclass(frozen=True)
+class PlaneZoneOutline:
+    """One copper-pour zone on a declared ``PLANE`` layer (Issue #9597).
+
+    Attributes:
+        net_number: The zone's resolved net number (0 when unresolvable).
+        net_name: The zone's net name ("" when the board carries none).
+        layer_name: The KiCad name of the ``PLANE`` layer the zone pours on.
+        clearance: The zone's own clearance (mm), as ``plane_split`` reads it.
+        polygon: The zone outline vertices, translated into the router's
+            sheet-absolute frame (board coordinates plus the board origin) so
+            grid marking, the crossing report and committed routes all
+            compare in one space.
+        source_uuid: The source zone's uuid (diagnostics / grid zone ids).
+    """
+
+    net_number: int
+    net_name: str
+    layer_name: str
+    clearance: float
+    polygon: tuple[tuple[float, float], ...]
+    source_uuid: str = ""
+
+
+def plane_zone_outlines(
+    pcb: Any, layer_stack: LayerStack, origin: tuple[float, float]
+) -> tuple[PlaneZoneOutline, ...]:
+    """Parse a board's pour zones that sit on declared ``PLANE`` layers.
+
+    Only ``PLANE``-typed layers are considered: signal-layer pours stay
+    invisible to the router exactly as before (out of scope for #9597 --
+    the default flow never marks them, so nothing changes for a board with
+    no plane stack).  Keepout rule areas are skipped; they are already
+    enforced by the rule-area machinery.  Returns one outline per
+    ``(zone, plane layer)`` pair, deterministically ordered.
+
+    Args:
+        pcb: A :class:`kicad_tools.schema.pcb.PCB` (board-relative frame).
+        layer_stack: The resolved stack this route runs against.
+        origin: The board origin added to translate into sheet coordinates.
+    """
+    plane_names = {name: idx for idx, name in enumerate(plane_layer_names(layer_stack))}
+    if not plane_names:
+        return ()
+
+    name_to_number: dict[str, int] = {
+        n.name: n.number for n in pcb.nets.values() if n.name
+    }
+
+    def resolve(number: int, name: str) -> int:
+        if number == 0 and name:
+            return name_to_number.get(name, 0)
+        return number
+
+    outlines: list[PlaneZoneOutline] = []
+    seen: set[tuple[str, str]] = set()
+    for zone in pcb.zones:
+        if getattr(zone, "keepout", None) is not None or len(zone.polygon) < 3:
+            continue
+        net = resolve(zone.net_number, zone.net_name)
+        if net == 0:
+            continue
+        for layer in _zone_layer_names(zone):
+            if layer not in plane_names or (layer, zone.uuid or "") in seen:
+                continue
+            seen.add((layer, zone.uuid or ""))
+            outlines.append(
+                PlaneZoneOutline(
+                    net_number=net,
+                    net_name=zone.net_name or f"net {net}",
+                    layer_name=layer,
+                    clearance=max(float(zone.clearance), 0.0),
+                    polygon=tuple((x + origin[0], y + origin[1]) for x, y in zone.polygon),
+                    source_uuid=zone.uuid or "",
+                )
+            )
+    outlines.sort(key=lambda o: (o.layer_name, o.net_name, o.polygon[:1]))
+    return tuple(outlines)
+
+
+def _zone_layer_names(zone: Any) -> list[str]:
+    """Concrete layer names a zone occupies (wildcards skipped)."""
+    names = [zone.layer, *getattr(zone, "layers", [])]
+    out: list[str] = []
+    for name in names:
+        if name and "*" not in name and "&" not in name and name not in out:
+            out.append(name)
+    return out
+
+
+def mark_plane_zones_on_grid(grid: Any, outlines: tuple[PlaneZoneOutline, ...]) -> int:
+    """Rasterize plane-zone outlines onto the routing grid as zone cells.
+
+    Marks each outline's interior cells (cell centre inside the polygon) as
+    zone copper of the zone's net via :meth:`RoutingGrid.add_zone_cells`,
+    skipping cells already blocked or carrying an obstacle so foreign pad /
+    route copper keeps its authoritative net.  ``add_zone_cells`` mirrors the
+    marks onto the paired C++ grid, so both A* backends see them.  A pure
+    Python point-in-polygon test is used (no Shapely dependency here).
+
+    Returns the number of grid cells marked.
+    """
+    from types import SimpleNamespace
+
+    from kicad_tools.core.geometry import point_in_polygon
+
+    marked = 0
+    for outline in outlines:
+        try:
+            layer_index = grid.layer_to_index(Layer.from_kicad_name(outline.layer_name).value)
+        except (KeyError, ValueError):
+            continue
+        xs = [p[0] for p in outline.polygon]
+        ys = [p[1] for p in outline.polygon]
+        gx_min, gy_min = grid.world_to_grid(min(xs), min(ys))
+        gx_max, gy_max = grid.world_to_grid(max(xs), max(ys))
+        cells: set[tuple[int, int]] = set()
+        for gy in range(max(0, gy_min), min(grid.rows, gy_max + 1)):
+            for gx in range(max(0, gx_min), min(grid.cols, gx_max + 1)):
+                if grid._blocked[layer_index, gy, gx] or grid._is_obstacle[layer_index, gy, gx]:
+                    continue
+                wx, wy = grid.grid_to_world(gx, gy)
+                if point_in_polygon(wx, wy, outline.polygon, boundary_inside=True):
+                    cells.add((gx, gy))
+        if not cells:
+            continue
+        grid.add_zone_cells(
+            SimpleNamespace(uuid=outline.source_uuid, net_number=outline.net_number),
+            cells,
+            layer_index,
+        )
+        marked += len(cells)
+    return marked
+
+
 def plane_layer_names(layer_stack: LayerStack) -> list[str]:
     """Return the KiCad names of the stack's ``LayerType.PLANE`` layers.
 
@@ -464,4 +599,104 @@ def plane_layer_signal_violations(
         PlaneLayerSignalViolation(net_name=net_name, layer_name=layer_name, segment_count=count)
         for (net_name, layer_name), count in sorted(counts.items())
         if not _opted_in(net_name, layer_name)
+    ]
+
+
+# --- Tier 4: plane-zone crossing cost & report (Issue #9597) ------------
+
+
+@dataclass(frozen=True)
+class PlaneZoneCrossing:
+    """One net's committed copper crossing a foreign zone on a plane layer.
+
+    Attributes:
+        net_name: The routed net whose segments cross the zone.
+        zone_net_name: The crossed zone's net (e.g. ``+3V3``).
+        layer_name: The KiCad name of the ``PLANE`` layer the zone pours on.
+        segment_count: How many of the net's segments cross the zone outline.
+    """
+
+    net_name: str
+    zone_net_name: str
+    layer_name: str
+    segment_count: int
+
+    @property
+    def message(self) -> str:
+        """The per-(net, zone, layer) crossing report line."""
+        plural = "s" if self.segment_count != 1 else ""
+        return (
+            f"WARNING: net '{self.net_name}' crosses zone {self.zone_net_name} "
+            f"on {self.layer_name} ({self.segment_count} segment{plural}) -- "
+            "this slices the pour's copper and can strand pads on the far "
+            "side; the router charged it a routing cost. Re-route with "
+            "--protect-plane-zones to refuse such routes outright."
+        )
+
+
+def plane_zone_crossings(
+    routes: list[Route],
+    outlines: tuple[PlaneZoneOutline, ...] | list[PlaneZoneOutline],
+) -> list[PlaneZoneCrossing]:
+    """Report committed segments that cross a foreign zone on a plane layer.
+
+    Issue #9597.  The post-route companion of the route-time zone cost: the
+    A* search charges :attr:`DesignRules.cost_zone_foreign_plane` per cell
+    inside a foreign plane-layer zone (see
+    :func:`mark_plane_zones_on_grid`), and this scan reports every crossing
+    that still happened -- a route that crossed despite the cost, copper on
+    an opted-in plane from before, or a router without the cost active.
+
+    A segment *crosses* when its centreline intersects the zone outline
+    polygon (Shapely; without Shapely the scan is a no-op).  Only segments
+    on the zone's own layer count, and only when the routing net differs
+    from the zone's net.
+
+    Returns one :class:`PlaneZoneCrossing` per ``(net, zone, layer)`` with
+    at least one crossing segment, sorted deterministically; empty when the
+    board carries no plane-zone outlines.
+    """
+    if not outlines or not routes:
+        return []
+    try:
+        from shapely.geometry import LineString, Polygon  # type: ignore[import-untyped]
+        from shapely.validation import make_valid  # type: ignore[import-untyped]
+    except ImportError:
+        return []
+
+    by_layer: dict[str, list[tuple[PlaneZoneOutline, Any]]] = {}
+    for outline in outlines:
+        if len(outline.polygon) < 3:
+            continue
+        poly = Polygon(outline.polygon)
+        if not poly.is_valid:
+            poly = make_valid(poly)
+        if not poly.is_empty:
+            by_layer.setdefault(outline.layer_name, []).append((outline, poly))
+    if not by_layer:
+        return []
+
+    counts: dict[tuple[str, str, str], int] = {}
+    for route in routes:
+        for segment in route.segments:
+            polys = by_layer.get(segment.layer.kicad_name)
+            if not polys:
+                continue
+            line = LineString([(segment.x1, segment.y1), (segment.x2, segment.y2)])
+            for outline, poly in polys:
+                if outline.net_number == route.net:
+                    continue
+                if line.intersects(poly):
+                    key = (
+                        route.net_name or f"net {route.net}",
+                        outline.net_name,
+                        outline.layer_name,
+                    )
+                    counts[key] = counts.get(key, 0) + 1
+
+    return [
+        PlaneZoneCrossing(
+            net_name=net_name, zone_net_name=zone_net, layer_name=layer, segment_count=count
+        )
+        for (net_name, zone_net, layer), count in sorted(counts.items())
     ]

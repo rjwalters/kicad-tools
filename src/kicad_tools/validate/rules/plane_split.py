@@ -33,6 +33,11 @@ This is a geometric advisory, not a native-DRC oracle.  It does not model the
 zone ``min_thickness`` (a thin neck narrower than that is dropped by KiCad's
 filler, so a real fill can split slightly more than reported), other zones on
 the same layer, or netclass clearances above the zone's own clearance.
+
+Issue #9597 reuses this rule's machinery from the router: the module-level
+:func:`collect_copper_items`, :func:`keepout_geometry` and :func:`zone_pieces`
+are the shared implementation (the rule's private methods delegate to them),
+so the route-time hard refusal and this check count pieces identically.
 """
 
 from __future__ import annotations
@@ -94,6 +99,160 @@ def _keepout_covers(zone: Zone, layer: str) -> bool:
     return False
 
 
+def collect_copper_items(
+    pcb: PCB, copper_layers: list[str], resolve: Any
+) -> dict[str, list[_Item]]:
+    """Collect the board's copper features per layer, net-resolved.
+
+    Shared by the ``plane_split`` check rule (Issue #9591) and the router's
+    hard plane-zone-split refusal (Issue #9597) so both judge the same
+    geometry.  Coordinates stay in the schema PCB's board-relative frame;
+    callers working in the router's sheet-absolute frame translate their
+    own geometry instead.
+    """
+    from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
+
+    from .clearance import _pad_on_layer, _pad_polygon
+    from .dangling_copper import _collect_track_arcs, _segment_copper
+
+    items: dict[str, list[_Item]] = {}
+
+    def add(layer: str, item: _Item) -> None:
+        items.setdefault(layer, []).append(item)
+
+    for seg in pcb.segments:
+        geom = _segment_copper(seg)
+        if geom is None or not seg.layer:
+            continue
+        add(
+            seg.layer,
+            _Item("track", geom, resolve(seg.net_number, seg.net_name), seg.net_name),
+        )
+
+    for arc in _collect_track_arcs(pcb):
+        if arc.width <= 0 or len(arc.points) < 2:
+            continue
+        add(
+            arc.layer,
+            _Item(
+                "track",
+                LineString(arc.points).buffer(arc.width / 2.0),
+                resolve(arc.net_number, arc.net_name),
+                arc.net_name,
+            ),
+        )
+
+    ox, oy = getattr(pcb, "board_origin", (0.0, 0.0))
+    for via in pcb.vias:
+        if via.size <= 0:
+            continue
+        disc = Point(via.position).buffer(via.size / 2.0)
+        label = f"via@({via.position[0] + ox:.2f}, {via.position[1] + oy:.2f})"
+        for layer in copper_layers:
+            if via_spans_layer(via.layers, layer):
+                add(
+                    layer,
+                    _Item("via", disc, resolve(via.net_number, via.net_name), via.net_name, label),
+                )
+
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            poly = _pad_polygon(pad, fp)
+            if poly is None:
+                continue
+            label = f"{fp.reference or '?'}.{pad.number}"
+            pad_net = resolve(pad.net_number, pad.net_name)
+            for layer in copper_layers:
+                if _pad_on_layer(pad, layer):
+                    add(layer, _Item("pad", poly, pad_net, pad.net_name, label))
+    return items
+
+
+def keepout_geometry(zone: Zone) -> Any | None:
+    """A rule-area zone's polygon, or ``None`` when it pours copper anyway."""
+    keepout = getattr(zone, "keepout", None)
+    if keepout is None or keepout.copperpour_allowed or len(zone.polygon) < 3:
+        return None
+    from shapely.geometry import Polygon
+    from shapely.validation import make_valid  # type: ignore[import-untyped]
+
+    poly = Polygon(zone.polygon)
+    return poly if poly.is_valid else make_valid(poly)
+
+
+def zone_pieces(
+    outline: Any,
+    net: int,
+    layer_items: list[_Item],
+    keepout_geoms: list[Any],
+    clearance: float,
+) -> list[_Group]:
+    """Pad-bearing pieces of a zone outline under ``layer_items`` copper.
+
+    Issue #9591's piece-counting core, shared with the router's hard
+    plane-zone-split refusal (Issue #9597): ``outline`` minus every foreign
+    item grown by ``clearance`` (plus ``keepout_geoms`` verbatim), split
+    into connected pieces merged through same-net copper; only pieces a
+    pad or via of the zone's net touches are returned.  The caller decides
+    which tracks are present -- the check rule passes the layer's items
+    with and without the foreign tracks, the router passes them with and
+    without the candidate route -- so "would this copper split the zone?"
+    is one diff of two calls, never a second implementation.
+    """
+    from shapely.ops import unary_union  # type: ignore[import-untyped]
+
+    near = [it for it in layer_items if it.geom.intersects(outline)]
+    own = [it for it in near if it.net_number == net]
+    foreign = [it for it in near if it.net_number != net]
+    anchors = [it for it in own if it.kind in ("pad", "via")]
+    fixed = [it for it in foreign if it.kind != "track"]
+    tracks = [it for it in foreign if it.kind == "track"]
+
+    fixed_geom = unary_union([*(it.geom.buffer(clearance) for it in fixed), *keepout_geoms])
+    track_geom = unary_union([it.geom.buffer(clearance) for it in tracks])
+    bridges = [it for it in own if it.kind == "track"]
+
+    groups = _piece_groups(outline, unary_union([fixed_geom, track_geom]), anchors, bridges)
+    return [g for g in groups if g.anchors]
+
+
+def _piece_groups(
+    outline: Any, obstacles: Any, anchors: list[_Item], bridges: list[_Item]
+) -> list[_Group]:
+    """Pieces of ``outline - obstacles`` merged through same-net copper."""
+    from shapely.ops import unary_union
+
+    remaining = outline.difference(obstacles)
+    pieces = [g for g in getattr(remaining, "geoms", [remaining]) if g.geom_type == "Polygon"]
+    pieces = [p for p in pieces if not p.is_empty]
+    parent = list(range(len(pieces)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def touching(item: _Item) -> list[int]:
+        probe = item.geom.buffer(_TOUCH_TOL)
+        return [i for i, p in enumerate(pieces) if p.intersects(probe)]
+
+    for item in [*anchors, *bridges]:
+        hit = touching(item)
+        for i in hit[1:]:
+            parent[find(i)] = find(hit[0])
+
+    members: dict[int, list[int]] = {}
+    for i in range(len(pieces)):
+        members.setdefault(find(i), []).append(i)
+    groups = {root: _Group(unary_union([pieces[i] for i in idx])) for root, idx in members.items()}
+    for item in anchors:
+        hit = touching(item)
+        if hit:
+            groups[find(hit[0])].anchors.append(item.label)
+    return list(groups.values())
+
+
 class PlaneSplitRule(DRCRule):
     """Report zones cut into extra pad-bearing pieces by foreign tracks."""
 
@@ -146,8 +305,8 @@ class PlaneSplitRule(DRCRule):
 
     @staticmethod
     def _outline(zone: Zone) -> Any | None:
-        from shapely.geometry import Polygon  # type: ignore[import-untyped]
-        from shapely.validation import make_valid  # type: ignore[import-untyped]
+        from shapely.geometry import Polygon
+        from shapely.validation import make_valid
 
         if len(zone.polygon) < 3:
             return None
@@ -158,64 +317,8 @@ class PlaneSplitRule(DRCRule):
 
     @staticmethod
     def _collect_items(pcb: PCB, copper_layers: list[str], resolve: Any) -> dict[str, list[_Item]]:
-        from shapely.geometry import LineString, Point
-
-        from .clearance import _pad_on_layer, _pad_polygon
-        from .dangling_copper import _collect_track_arcs, _segment_copper
-
-        items: dict[str, list[_Item]] = {}
-
-        def add(layer: str, item: _Item) -> None:
-            items.setdefault(layer, []).append(item)
-
-        for seg in pcb.segments:
-            geom = _segment_copper(seg)
-            if geom is None or not seg.layer:
-                continue
-            add(
-                seg.layer,
-                _Item("track", geom, resolve(seg.net_number, seg.net_name), seg.net_name),
-            )
-
-        for arc in _collect_track_arcs(pcb):
-            if arc.width <= 0 or len(arc.points) < 2:
-                continue
-            add(
-                arc.layer,
-                _Item(
-                    "track",
-                    LineString(arc.points).buffer(arc.width / 2.0),
-                    resolve(arc.net_number, arc.net_name),
-                    arc.net_name,
-                ),
-            )
-
-        ox, oy = getattr(pcb, "board_origin", (0.0, 0.0))
-        for via in pcb.vias:
-            if via.size <= 0:
-                continue
-            disc = Point(via.position).buffer(via.size / 2.0)
-            label = f"via@({via.position[0] + ox:.2f}, {via.position[1] + oy:.2f})"
-            for layer in copper_layers:
-                if via_spans_layer(via.layers, layer):
-                    add(
-                        layer,
-                        _Item(
-                            "via", disc, resolve(via.net_number, via.net_name), via.net_name, label
-                        ),
-                    )
-
-        for fp in pcb.footprints:
-            for pad in fp.pads:
-                poly = _pad_polygon(pad, fp)
-                if poly is None:
-                    continue
-                label = f"{fp.reference or '?'}.{pad.number}"
-                pad_net = resolve(pad.net_number, pad.net_name)
-                for layer in copper_layers:
-                    if _pad_on_layer(pad, layer):
-                        add(layer, _Item("pad", poly, pad_net, pad.net_name, label))
-        return items
+        """Shared copper collection (Issue #9597 lifted it to module level)."""
+        return collect_copper_items(pcb, copper_layers, resolve)
 
     # ------------------------------------------------------------------
 
@@ -230,7 +333,7 @@ class PlaneSplitRule(DRCRule):
         resolve: Any,
         origin: tuple[float, float],
     ) -> DRCViolation | None:
-        from shapely.ops import unary_union  # type: ignore[import-untyped]
+        from shapely.ops import unary_union
 
         near = [it for it in layer_items if it.geom.intersects(outline)]
         own = [it for it in near if it.net_number == net]
@@ -240,19 +343,22 @@ class PlaneSplitRule(DRCRule):
             return None
 
         clearance = max(float(zone.clearance), 0.0)
-        obstacles = [self._keepout_geom(k) for k in keepouts if _keepout_covers(k, layer)]
+        obstacles = [keepout_geometry(k) for k in keepouts if _keepout_covers(k, layer)]
         obstacles = [g for g in obstacles if g is not None]
-        fixed = [it for it in foreign if it.kind != "track"]
         tracks = [it for it in foreign if it.kind == "track"]
 
-        fixed_geom = unary_union([*(it.geom.buffer(clearance) for it in fixed), *obstacles])
-        track_geom = unary_union([it.geom.buffer(clearance) for it in tracks])
-        bridges = [it for it in own if it.kind == "track"]
-
-        base = self._groups(outline, fixed_geom, anchors, bridges)
-        cut = self._groups(outline, unary_union([fixed_geom, track_geom]), anchors, bridges)
-        base_n = sum(1 for g in base if g.anchors)
-        pieces = [g for g in cut if g.anchors]
+        # Issue #9597: the piece counting itself is the shared ``zone_pieces``
+        # helper -- ``base`` drops every foreign track, ``cut`` keeps them all.
+        base = zone_pieces(
+            outline,
+            net,
+            [it for it in layer_items if it.kind != "track" or it.net_number == net],
+            obstacles,
+            clearance,
+        )
+        cut = zone_pieces(outline, net, layer_items, obstacles, clearance)
+        base_n = len(base)
+        pieces = cut
         if len(pieces) <= base_n:
             return None
 
@@ -285,14 +391,8 @@ class PlaneSplitRule(DRCRule):
 
     @staticmethod
     def _keepout_geom(zone: Zone) -> Any | None:
-        keepout = getattr(zone, "keepout", None)
-        if keepout is None or keepout.copperpour_allowed or len(zone.polygon) < 3:
-            return None
-        from shapely.geometry import Polygon
-        from shapely.validation import make_valid
-
-        poly = Polygon(zone.polygon)
-        return poly if poly.is_valid else make_valid(poly)
+        """Shared keepout geometry (Issue #9597 lifted it to module level)."""
+        return keepout_geometry(zone)
 
     @staticmethod
     def _fmt(labels: list[str]) -> str:
@@ -305,40 +405,8 @@ class PlaneSplitRule(DRCRule):
     def _groups(
         outline: Any, obstacles: Any, anchors: list[_Item], bridges: list[_Item]
     ) -> list[_Group]:
-        """Pieces of ``outline - obstacles`` merged through same-net copper."""
-        from shapely.ops import unary_union
-
-        remaining = outline.difference(obstacles)
-        pieces = [g for g in getattr(remaining, "geoms", [remaining]) if g.geom_type == "Polygon"]
-        pieces = [p for p in pieces if not p.is_empty]
-        parent = list(range(len(pieces)))
-
-        def find(i: int) -> int:
-            while parent[i] != i:
-                parent[i] = parent[parent[i]]
-                i = parent[i]
-            return i
-
-        def touching(item: _Item) -> list[int]:
-            probe = item.geom.buffer(_TOUCH_TOL)
-            return [i for i, p in enumerate(pieces) if p.intersects(probe)]
-
-        for item in [*anchors, *bridges]:
-            hit = touching(item)
-            for i in hit[1:]:
-                parent[find(i)] = find(hit[0])
-
-        members: dict[int, list[int]] = {}
-        for i in range(len(pieces)):
-            members.setdefault(find(i), []).append(i)
-        groups = {
-            root: _Group(unary_union([pieces[i] for i in idx])) for root, idx in members.items()
-        }
-        for item in anchors:
-            hit = touching(item)
-            if hit:
-                groups[find(hit[0])].anchors.append(item.label)
-        return list(groups.values())
+        """Shared piece grouping (Issue #9597 lifted it to module level)."""
+        return _piece_groups(outline, obstacles, anchors, bridges)
 
     @staticmethod
     def _culprits(tracks: list[_Item], pieces: list[_Group], clearance: float) -> list[_Item]:

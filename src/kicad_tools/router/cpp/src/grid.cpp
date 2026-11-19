@@ -537,6 +537,29 @@ void Grid3D::clear_avoidance_costs() {
     }
 }
 
+// Issue #9597: zone (copper pour) marking verbs.  ``mark_zone_cells`` bulk-
+// writes the ``is_zone`` bit plus the zone's net for cells the Python side
+// already filtered (unblocked cells of a plane-layer pour outline); the
+// A* step-cost loops charge ``cost_zone_foreign_plane`` on foreign ones.
+// ``clear_zone_cells`` is the full-clear twin ``RoutingGrid.clear_zones``
+// mirrors.  Both mirror the #8999 airwire verbs' shape.
+void Grid3D::mark_zone_cells(const std::vector<int>& xs, const std::vector<int>& ys,
+                             const std::vector<int>& layers, const std::vector<int>& nets) {
+    const size_t n = std::min({xs.size(), ys.size(), layers.size(), nets.size()});
+    for (size_t i = 0; i < n; ++i) {
+        if (!is_valid(xs[i], ys[i], layers[i])) continue;
+        auto& cell = at(xs[i], ys[i], layers[i]);
+        cell.is_zone = true;
+        cell.net = nets[i];
+    }
+}
+
+void Grid3D::clear_zone_cells() {
+    for (auto& cell : cells_) {
+        cell.is_zone = false;
+    }
+}
+
 // Issue #8999: airwire-separation plane verbs.  See the declarations in
 // grid.hpp for the refresh contract (full clear + sparse rewrite, all
 // layers per column).

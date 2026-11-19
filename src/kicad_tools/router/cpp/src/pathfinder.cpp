@@ -2223,6 +2223,18 @@ RouteResult Pathfinder::route(
 
             float avoidance = grid_.at(nx, ny, nlayer).avoidance_cost;
 
+            // Issue #9597: soft foreign plane-zone crossing cost.  Zone
+            // cells are never blocked in the native search (the Python grid
+            // marks only plane-layer pour outlines); a foreign one costs
+            // ``cost_zone_foreign_plane`` per cell so the search prefers an
+            // around-path but may still cross when nothing else exists --
+            // exactly the Python ``zone_cost_arr`` term.
+            const GridCell& step_cell = grid_.at(nx, ny, nlayer);
+            const float zone_cost =
+                (step_cell.is_zone && step_cell.net != 0 && step_cell.net != net)
+                    ? rules_.cost_zone_foreign_plane
+                    : 0.0f;
+
             // Issue #3143: per-pad channel budget cost.  Returns 0.0 when
             // the budget list is empty (the default) or when the candidate
             // cell does not sit inside a configured budget bbox.  When
@@ -2248,7 +2260,7 @@ RouteResult Pathfinder::route(
             float positive_step_cost =
                 cost_mult * rules_.cost_straight +
                 turn_cost + congestion_cost + negotiated_cost +
-                avoidance + pad_channel_cost + pairwise_cost;
+                avoidance + zone_cost + pad_channel_cost + pairwise_cost;
             if (attractor_bonus > 0.0f) {
                 positive_step_cost =
                     std::max(0.0f, positive_step_cost - attractor_bonus);
@@ -3016,6 +3028,14 @@ RouteResult Pathfinder::run_astar_loop() {
 
             float avoidance = grid_.at(nx, ny, nlayer).avoidance_cost;
 
+            // Issue #9597: soft foreign plane-zone crossing cost (mirrors
+            // the one-shot loop and the Python ``zone_cost_arr`` term).
+            const GridCell& step_cell = grid_.at(nx, ny, nlayer);
+            const float zone_cost =
+                (step_cell.is_zone && step_cell.net != 0 && step_cell.net != search_net_)
+                    ? rules_.cost_zone_foreign_plane
+                    : 0.0f;
+
             // Issue #3143: per-pad channel budget cost.  Mirrors the
             // one-shot ``route()`` cost contribution above; consults the
             // lookup populated at ``route_resumable()`` entry.  Empty
@@ -3041,7 +3061,7 @@ RouteResult Pathfinder::run_astar_loop() {
             float positive_step_cost =
                 cost_mult * rules_.cost_straight +
                 turn_cost + congestion_cost + negotiated_cost +
-                avoidance + pad_channel_cost + pairwise_cost;
+                avoidance + zone_cost + pad_channel_cost + pairwise_cost;
             if (attractor_bonus > 0.0f) {
                 positive_step_cost =
                     std::max(0.0f, positive_step_cost - attractor_bonus);
