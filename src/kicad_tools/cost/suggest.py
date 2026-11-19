@@ -175,21 +175,33 @@ def _resistor_core(value: str) -> tuple[str, str]:
     return value, ""
 
 
-def _candidate_resistances(part: Part) -> list[float]:
+def resistances_in_text(text: str) -> list[float]:
+    """Return every unit-bearing resistance nominal found in free text.
+
+    Recognises ``8.2Ω``, ``2.2 ohm``, ``10kΩ`` and the short forms ``4R7`` /
+    ``4k7`` / ``10k``. Bare numbers (packages such as ``2512``, voltages, digits
+    inside a manufacturer part number) are never read as a resistance.
+    """
+    values: list[float] = []
+    multipliers = {"": 1.0, "m": 1e-3, "k": 1e3, "K": 1e3, "M": 1e6, "G": 1e9}
+    for match in _RESISTANCE_DESCRIPTION.finditer(text):
+        values.append(float(match["number"]) * multipliers[match["scale"]])
+    # Short tokens such as 4R7 or 16k are also common in catalog descriptions.
+    for match in _RESISTANCE_SHORT_TOKEN.finditer(text):
+        parsed = parse_component_value(match.group(), "R")
+        if parsed.numeric_value is not None:
+            values.append(parsed.numeric_value)
+    return values
+
+
+def candidate_resistances(part: Part) -> list[float]:
     """Read nominal resistance without substring or MPN-number matching."""
     values = []
     if part.value:
         parsed = parse_component_value(part.value, "R")
         if parsed.numeric_value is not None:
             values.append(parsed.numeric_value)
-    multipliers = {"": 1.0, "m": 1e-3, "k": 1e3, "K": 1e3, "M": 1e6, "G": 1e9}
-    for match in _RESISTANCE_DESCRIPTION.finditer(part.description):
-        values.append(float(match["number"]) * multipliers[match["scale"]])
-    # Short tokens such as 4R7 or 16k are also common in catalog descriptions.
-    for match in _RESISTANCE_SHORT_TOKEN.finditer(part.description):
-        parsed = parse_component_value(match.group(), "R")
-        if parsed.numeric_value is not None:
-            values.append(parsed.numeric_value)
+    values.extend(resistances_in_text(part.description))
     return values
 
 
@@ -623,7 +635,7 @@ class PartSuggester:
                     continue
 
                 if parsed.component_type == ComponentType.RESISTOR:
-                    resistances = _candidate_resistances(part)
+                    resistances = candidate_resistances(part)
                     if parsed.numeric_value is None:
                         continue
                     if not resistances or not all(
