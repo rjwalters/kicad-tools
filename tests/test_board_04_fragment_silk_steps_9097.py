@@ -158,8 +158,10 @@ def test_merge_fragment_runs_names_the_reason_for_a_boundary_run(
     assert "no neighbour on both sides" not in out
 
 
-def test_main_wires_fragment_merge_and_silk_clip_before_the_refill() -> None:
-    """Source-pin: both steps run after the staircase pass and before ``fill_zones``."""
+def test_main_wires_fragment_merge_and_silk_gate_before_the_refill() -> None:
+    """Source-pin: the merge and the silk-vs-hole gate run after the staircase pass
+    and before ``fill_zones``; the via slide runs ahead of every copper-tidy pass
+    (Issue #9455), and no step edits footprint silk (#5744)."""
     source = RECIPE.read_text()
     main_body = source[source.index("def main()") :]
     order = [
@@ -167,8 +169,12 @@ def test_main_wires_fragment_merge_and_silk_clip_before_the_refill() -> None:
         for call in (
             "compress_staircases(routed_path)",
             "merge_fragment_runs(routed_path)",
-            "clip_silk_to_holes(routed_path)",
+            "check_silk_clear_of_holes(routed_path)",
             "fill_zones(routed_path)",
         )
     ]
     assert order == sorted(order)
+    assert main_body.index("slide_vias_off_silk(routed_path)") < main_body.index(
+        "quantize_escapes(routed_path)"
+    )
+    assert "repair_silkscreen import" not in source  # nothing edits footprint silk
