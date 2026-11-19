@@ -68,7 +68,9 @@ class TestManifestParsing:
         boards = fetch_boards.load_manifest(MANIFEST_PATH)
         # #4934's JSON report schema references these slugs -- keep them
         # stable (curator enhancement on #4933).
-        deep_pcb = {k for k in boards if not k.startswith("srj18_")}
+        # The srj18_ prefixed boards are the dataset-srj18 set (#5848); the
+        # pcbjam_ prefixed boards are the PCBJam blind-PCB study (#9595).
+        deep_pcb = {k for k in boards if not k.startswith("srj18_") and not k.startswith("pcbjam_")}
         assert deep_pcb == {"strf", "pocketbeagle", "beagleconnect_freedom"}
 
     def test_srj18_boards_are_license_checked_and_pinned(self, fetch_boards):
@@ -87,6 +89,19 @@ class TestManifestParsing:
             "pocketbeagle",
             "beagleconnect_freedom",
         }
+
+    def test_pcbjam_boards_are_license_checked_and_pinned(self, fetch_boards):
+        """Issue #9595: the PCBJam blind-PCB study boards, permissive only."""
+        boards = fetch_boards.load_manifest(MANIFEST_PATH)
+        pcbjam = {k: v for k, v in boards.items() if k.startswith("pcbjam_")}
+        assert len(pcbjam) >= 1
+        for spec in pcbjam.values():
+            assert spec.license in {"MIT", "Apache-2.0", "WTFPL", "CC-BY-4.0"}
+            assert len(spec.commit) == 40
+            assert spec.vcs == "github"
+            assert spec.board_path.startswith("boards/")
+            assert spec.opt_in
+        assert "pcbjam_m2_pcie_adapter" in pcbjam
 
     def test_strf_fields(self, fetch_boards):
         boards = fetch_boards.load_manifest(MANIFEST_PATH)

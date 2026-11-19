@@ -48,7 +48,9 @@ symlink), and the pinned CI image
    command, and the 128-bit `checksum` is undocumented**: it is not MD5,
    SHA-256/16, BLAKE2b-128, XXH128 or MurmurHash3. A wrong checksum
    silently drops the body (one file) or fails the board load (two or more
-   files). Embedding is therefore blocked on a clean-room spike.
+   files). Embedding was therefore blocked on a clean-room spike; the
+   question re-opened on 2026-11-19 under the two-party clean-room protocol
+   ([../clean-room.md](../clean-room.md)), pending a reader task.
 7. **DRC is unaffected.** Black-box probes on both 10.0.7 and the pinned
    10.0.6 show that removing or re-pathing a `(model …)` node does **not**
    raise `lib_footprint_mismatch`, while a pad change does. Model work cannot
@@ -674,8 +676,9 @@ The checksum is not MD5, SHA-256/16, BLAKE2b-128, XXH128 or MurmurHash3
 compressed bytes. Its definition is undocumented in the
 [s-expression format docs](https://dev-docs.kicad.org/en/file-formats/sexpr-intro/index.html).
 
-Under the clean-room rule (black-box only, never KiCad source), the options
-are:
+Under the clean-room rule in force at the time (black-box only, never KiCad
+source; superseded on 2026-11-19 by the two-party protocol in
+[clean-room.md](../clean-room.md)), the options were:
 1. ask upstream to document the field or to add a `kicad-cli pcb embed-models`;
 2. find a documented, non-source spec;
 3. a black-box differential probe that varies inputs and checks KiCad's
@@ -785,6 +788,37 @@ The license position is clear, though:
 - **Self-generated bodies** may be embedded.
 - **EasyEDA bodies must not be embedded in anything we publish.**
 
+### Addendum (2026-11-19): the checksum question re-opens under the two-party clean-room protocol
+
+The operator ruling of 2026-11-19
+([clean-room.md](../clean-room.md)) replaces the blanket "never KiCad source"
+rule with standard two-party clean-room reimplementation. The embedded-model
+checksum therefore gains a fourth route it did not have when the spike was
+blocked:
+
+4. a **reader** studies the KiCad source that computes and validates the
+   `(checksum …)` field and writes a behaviour spec (the algorithm stated as
+   rules, units and test vectors only — no code, no structure-following
+   pseudo-code, no internal identifiers); a reviewer checks the spec for
+   leaked expression; a **writer** who has never seen the source implements
+   from it. The existing accept/reject probes
+   ([embedded_checksum_probe.py](../../scripts/research/embedded_checksum_probe.py),
+   `verify` subcommand) remain the acceptance oracle, under the acceptance
+   rule in [clean-room.md](../clean-room.md): acceptance needs a successful
+   run of the **pinned** CLI, passed explicitly via `--kicad-cli`, with a
+   positive control (a deliberately corrupted checksum must be reported as
+   rejected by the same CLI) and the recorded probe output. A standalone
+   `verify` exit of 0 defaults to the host CLI and only reports absent
+   reject lines — a CLI that never ran produces the same output — so it
+   establishes nothing on its own.
+
+This addendum is not that spec, and this document does not read KiCad source:
+the reader task is a separate issue, to be filed before any implementation
+work. Until a reviewed spec exists under `docs/clean-room/` and an
+implementation passes the probes, embedding stays deferred as concluded
+above, and upstream answers (a documented checksum or a `kicad-cli pcb
+embed-models`) remain preferable because they need no protocol at all.
+
 ## 5. Recommendations
 
 The issues are drafted in the session scratchpad, not filed.
@@ -829,6 +863,9 @@ The issues are drafted in the session scratchpad, not filed.
    covers the raw bytes, but no clean-room route produces it (see
    "Checksum spike outcome"). Embedding waits on an upstream answer, and
    filing that request is operator decision D4.
+   *Update (2026-11-19):* re-opened under the two-party clean-room protocol
+   (addendum in section 4); a reader task is to be filed before any
+   implementation.
 9. **Registry hygiene.** Add entries for easyeda2kicad (AGPL, ideas only),
    JLC2KiCadLib (MIT), kicad-library-tools (GPL, run only), kicadStepUpMod
    (AGPL) and cq-electronics (MIT), with this note as "our notes".
