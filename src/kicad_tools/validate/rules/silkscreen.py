@@ -895,6 +895,20 @@ def _pad_aperture_geometry(
     from shapely.affinity import rotate
     from shapely.geometry import box
 
+    # A custom pad's aperture follows its real copper -- the anchor plus
+    # filled primitives (Issue #9498) -- not the nominal anchor ``size`` box;
+    # KiCad masks the whole custom shape.  When the builder refuses, the
+    # anchor box below remains the aperture and ``check_silk_over_copper``
+    # emits the matching ``silk_over_copper_incomplete`` finding.
+    from kicad_tools.geometry.copper import custom_pad_board_outline
+
+    custom = custom_pad_board_outline(pad, pad_pos)
+    if custom is not None:
+        margin = (
+            pad.solder_mask_margin if pad.solder_mask_margin is not None else min_mask_clearance
+        )
+        return custom.buffer(margin) if margin else custom
+
     margin = pad.solder_mask_margin if pad.solder_mask_margin is not None else min_mask_clearance
     w = pad.size[0] + 2.0 * margin
     h = pad.size[1] + 2.0 * margin
@@ -1295,6 +1309,35 @@ def check_silk_over_copper(
     from shapely import STRtree  # type: ignore[import-untyped]
 
     results = DRCResults(rules_checked=1)
+
+    # A custom pad whose aperture degrades to the anchor box (the outline
+    # builder refused its primitives) must be a named finding, never a silent
+    # under-measurement (Issue #9498): silk over that pad's primitive copper
+    # would read as clean.
+    from kicad_tools.geometry.copper import custom_pad_outline_detail
+
+    for footprint in pcb.footprints:
+        for pad in footprint.pads:
+            if (pad.shape or "").lower() != "custom":
+                continue
+            if pad.type not in {"smd", "thru_hole"}:
+                continue
+            geometry, refusal = custom_pad_outline_detail(
+                pad, _fp_transform(footprint)(pad.position)
+            )
+            if geometry is not None:
+                continue
+            detail = refusal or "source pad node unavailable"
+            results.add(
+                DRCViolation(
+                    "silk_over_copper_incomplete",
+                    "info",
+                    f"Silk-over-copper coverage incomplete: custom pad "
+                    f"{footprint.reference} pad {pad.number} aperture was measured "
+                    f"by its anchor only ({detail}); silk over its primitive copper "
+                    f"is unjudged, not cleared",
+                )
+            )
 
     min_mask = design_rules.min_solder_mask_clearance_mm
 
