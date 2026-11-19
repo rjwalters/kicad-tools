@@ -2713,7 +2713,9 @@ def rekey_name_only_copper(
     )
 
 
-def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
+def load_pads_for_analysis(
+    pcb_path_or_text: str | Path, *, placement_only: bool = False
+) -> list[Pad]:
     """Extract pad objects with ref/pin info for grid analysis.
 
     Unlike extract_pad_positions which only returns (x, y), this returns full
@@ -2722,6 +2724,15 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
 
     Args:
         pcb_path_or_text: Path to .kicad_pcb file or PCB file contents
+        placement_only: When ``False`` (default) a pad whose copper the router
+            cannot represent (``custom``, ``trapezoid`` with a delta, a
+            layer-specific padstack) raises :class:`ValueError`, because every
+            routing consumer would under-estimate its copper.  When ``True`` the
+            caller only needs each pad's placement (centre, footprint identity,
+            net) -- the pad-grid preflight -- so such a pad is returned with
+            its nominal ``(size ...)`` box as a rectangle placeholder and its
+            true copper is never consulted.  Do not use the placeholder shape
+            for clearance or routing.
 
     Returns:
         List of Pad objects with x, y, ref, pin, net, and layer info.
@@ -2782,7 +2793,7 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
             # Extract pad number/pin
             pin_match = re.search(r'\(pad\s+"?([^"\s)]+)"?', pad_block)
             pin = pin_match.group(1) if pin_match else ""
-            pad_shape = _pad_shape_from_block(pad_block, ref, pin)
+            pad_shape = _pad_shape_from_block(pad_block, ref, pin, placement_only=placement_only)
 
             # Extract pad type for through_hole detection
             is_thru = "thru_hole" in pad_block
@@ -4999,12 +5010,24 @@ def _is_rectangular_trapezoid(pad_block: str) -> bool:
         return False
 
 
-def _pad_shape_from_block(pad_block: str, ref: str, pin: str) -> str:
-    """Read the physical shape token, including empty or unquoted pad numbers."""
+def _pad_shape_from_block(
+    pad_block: str, ref: str, pin: str, *, placement_only: bool = False
+) -> str:
+    """Read the physical shape token, including empty or unquoted pad numbers.
+
+    ``placement_only`` (issue #9468) returns ``"rect"`` for copper the router
+    cannot represent instead of raising: the caller reads the pad's position,
+    never its outline.
+    """
     match = re.match(r'\(pad\s+(?:"[^\"]*"|[^\s()]+)\s+\w+\s+([^\s()]+)', pad_block)
     shape = match.group(1) if match else ""
     if shape == "trapezoid" and _is_rectangular_trapezoid(pad_block):
         shape = "rect"
+    if placement_only and (
+        shape not in {"circle", "rect", "oval", "roundrect"}
+        or re.search(r"\(padstack(?:\s|\))", pad_block) is not None
+    ):
+        return "rect"
     return _routing_pad_shape(
         shape,
         ref=ref,
