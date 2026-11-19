@@ -195,6 +195,31 @@ is actually on `main`, never a pre-merge `release/vX.Y.Z` branch commit —
 `main` squash-merges, so the commit that lands has a different SHA than the
 one on the release branch).
 
+## Clean-room reimplementation of GPL KiCad behaviour
+
+kicad-tools is MIT, KiCad is GPL: never port KiCad code, and never write or
+review an implementation after reading GPL source. Behaviour may be
+reimplemented through the **two-party clean-room protocol**
+([`docs/clean-room.md`](docs/clean-room.md)): a **reader** studies the source
+and writes a behaviour spec only (inputs, outputs, rules, units, edge/error
+cases, test vectors — no code, no structure-following pseudo-code, no internal
+identifiers) and is then **tainted for that topic**; a separate reviewer
+checks the spec for leaked expression; a **writer** who has never seen the
+source implements from the reviewed spec, public docs and black-box probes,
+and acceptance stays black-box on the pinned kicad-cli image. Specs are
+committed under `docs/clean-room/` with full provenance (from
+`docs/clean-room/TEMPLATE.md`) and the implementing PR links the spec.
+Review gate on such PRs: the spec's recorded reader and writer agent ids
+differ, and the recorded writer is tied to the implementing PR — forge
+author/committer identities are shared across agent sessions, so they
+corroborate but cannot carry this check, and missing or ambiguous
+attribution fails the PR before approval — plus the structural-port check
+(same function breakdown, identifiers, step order — as
+in #6661/#6779) runs against the committed spec, not KiCad source. Scope:
+KiCad, GPL derivatives and AGPL registry neighbours; **unlicensed** ecosystem
+neighbours stay ideas-only — the protocol does not apply to them
+(`docs/ecosystem.md`).
+
 <!-- END KCT CONTRIBUTOR GUIDANCE -->
 
 <!-- BEGIN REPO-SKILLS -->
