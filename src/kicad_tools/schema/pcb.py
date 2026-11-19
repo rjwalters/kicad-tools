@@ -29,6 +29,7 @@ from ..footprints.library_path import (
     detect_kicad_library_path,
     guess_standard_library,
     parse_library_id,
+    recorded_footprint_bytes,
 )
 
 if TYPE_CHECKING:
@@ -6495,6 +6496,7 @@ class PCB:
         layer: str = "F.Cu",
         value: str = "",
         library_id: str | None = None,
+        _recorded_bytes: bytes | None = None,
     ) -> Footprint:
         """
         Add a footprint from a .kicad_mod file to the PCB.
@@ -6538,8 +6540,19 @@ class PCB:
             ...     value="LM317"
             ... )
         """
-        # Load the footprint from file
-        fp_sexp = load_footprint(kicad_mod_path)
+        # Load the footprint from file.  An explicit-path load (a direct
+        # call, or the project fp-lib-table branch of add_footprint) reads
+        # the file as it stands; only the standard-library funnel passes the
+        # bytes it recorded (_recorded_bytes), so a library edit between a
+        # standard placement and an explicit load is not silently served the
+        # stale snapshot (Issue #9526 review).
+        if _recorded_bytes is not None:
+            # Repeated standard placements parse the exact bytes the record
+            # digested, so the placed geometry is always the recorded
+            # identity, even across a mid-run library edit.
+            fp_sexp = load_footprint(kicad_mod_path, text=_recorded_bytes.decode("utf-8"))
+        else:
+            fp_sexp = load_footprint(kicad_mod_path)
 
         # Keep the Library:Footprint lib ID so kicad-cli's schematic-parity
         # check can match it against the symbol's Footprint field (#7213).
@@ -6867,6 +6880,9 @@ class PCB:
                         continue
                     candidate = entry.resolved_path / fp_filename
                     if candidate.is_file():
+                        # A project-table load is an explicit-path load: the
+                        # file is read as it stands, never a recorded
+                        # standard-library snapshot (Issue #9526 review).
                         return self.add_footprint_from_file(
                             kicad_mod_path=candidate,
                             reference=reference,
@@ -6896,7 +6912,11 @@ class PCB:
                 f"(also searched all available libraries as fallback)"
             )
 
-        # Delegate to add_footprint_from_file
+        # Delegate to add_footprint_from_file, handing it the bytes this
+        # funnel just recorded (repeated placements reuse them; a mid-run
+        # library edit cannot desync placed geometry from the recorded
+        # digest).  Outside an evidence scope there is no recording and the
+        # load is an ordinary read.
         return self.add_footprint_from_file(
             kicad_mod_path=fp_path,
             reference=reference,
@@ -6906,6 +6926,7 @@ class PCB:
             layer=layer,
             value=value,
             library_id=f"{library_name}:{footprint_name.removesuffix('.kicad_mod')}",
+            _recorded_bytes=recorded_footprint_bytes(fp_path),
         )
 
     def add_net(self, net_name: str) -> Net:
