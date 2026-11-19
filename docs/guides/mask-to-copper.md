@@ -169,7 +169,11 @@ So these stay errors:
 Same-net copper *beside* a pad without touching it is still measured at the
 policy clearance. Each measurement records `exposed_beyond_owner_mm2` (copper
 exposed beyond the pad) and `beside_owner_excess_mm2` (copper beside it in excess
-of one clean entry), so a verdict can be audited. The trailing `same-net own-pad
+of one clean entry), so a verdict can be audited. It also records
+`within_own_pad_failed_condition` (issue #9305): the condition number (1-5, as
+listed above) that kept a same-net, single-pad-owner finding at its measured
+verdict — None when the class qualified or was not attempted, e.g. for
+different-net copper or a merged opening. The trailing `same-net own-pad
 entry` / `same-net pass-through` label is triage text from the copper outline
 and can differ from the class for very wide or very short tracks. The class uses
 the track's authored ends. Evidence and per-board counts:

@@ -68,9 +68,12 @@ through the pad, a shallower entry, an arc, a via or pour touching the pad
 ``u``, solder-mask-defined, custom and padstack pads, pads with no net, and
 any different-net copper all keep their measured verdict.
 ``exposed_beyond_owner_mm2`` and ``beside_owner_excess_mm2`` record the two
-measured quantities. "Same net" is the net pcbnew loads, which assigns a
-floating stub touching one pad to that pad's net. Evidence:
-``docs/research/mask-to-copper-own-pad-8858.md``.
+measured quantities, and ``within_own_pad_failed_condition`` names the
+``_within_own_pad`` docstring condition (1-5) that kept a same-net,
+single-pad-owner measurement at its measured verdict -- None when the class
+qualified or was not attempted (issue #9305). "Same net" is the net pcbnew
+loads, which assigns a floating stub touching one pad to that pad's net.
+Evidence: ``docs/research/mask-to-copper-own-pad-8858.md``.
 
 Copper a reinforce wire run exposes on purpose (issue #9315)
 ============================================================
@@ -270,6 +273,12 @@ class MaskCopperMeasurement:
     # different-net exposure behind a same-net allowance entry. Empty means
     # "not recorded" (a payload written before this field loads unchanged).
     owner_nets: tuple[str, ...] = ()
+    # Issue #9305: for a same-net conductor measured against a single pad
+    # owner, the docstring condition (1-5) of ``_within_own_pad`` that kept
+    # the measurement from downgrading to ``within_own_pad``; None when the
+    # conductor qualified or the downgrade path was not attempted. Optional,
+    # like the other triage fields, so a v1 payload without it loads unchanged.
+    within_own_pad_failed_condition: int | None = None
 
     def __post_init__(self):
         if self.disposition not in (
@@ -310,6 +319,12 @@ class MaskCopperMeasurement:
         for flag in (self.same_net, self.own_pad_entry):
             if flag is not None and not isinstance(flag, bool):
                 raise ValueError("Invalid mask measurement triage metadata")
+        if self.within_own_pad_failed_condition is not None and (
+            isinstance(self.within_own_pad_failed_condition, bool)
+            or not isinstance(self.within_own_pad_failed_condition, int)
+            or not 1 <= self.within_own_pad_failed_condition <= 5
+        ):
+            raise ValueError("Invalid mask measurement triage metadata")
         for extra in (self.exposed_beyond_owner_mm2, self.beside_owner_excess_mm2):
             if extra is not None and (
                 isinstance(extra, bool)
@@ -481,7 +496,7 @@ _AREA_EPSILON_MM2 = 1e-9
 
 
 def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearance, uncertainty):
-    """``(qualifies, beside_excess_mm2)`` for the within-own-pad class (issue #8858).
+    """``(qualifies, beside_excess_mm2, failed_condition)`` for the within-own-pad class.
 
     A same-net conductor qualifies only when **what it does** is a clean entry
     into its own pad. Every condition is required:
@@ -505,18 +520,20 @@ def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearanc
        through the pad, an entry shallower than about 45 degrees, a via or
        pour with ring copper beside the pad, and arcs all keep their verdict.
     5. For a via, its authored drill lies wholly outside the opening.
+
+    ``failed_condition`` is the docstring number (1-5) of the first condition
+    that failed, or ``None`` when the conductor qualifies (issue #9305: the
+    measurement records it so a report names the test that kept the verdict).
     """
-    if (
-        owner["kind"] not in _WITHIN_OWN_PAD_OWNER_KINDS
-        or margin < 0
-        or owner_copper.buffer(-uncertainty).intersection(copper.buffer(-uncertainty)).area <= 0
-    ):
-        return False, None
+    if owner["kind"] not in _WITHIN_OWN_PAD_OWNER_KINDS or margin < 0:
+        return False, None, 1
+    if owner_copper.buffer(-uncertainty).intersection(copper.buffer(-uncertainty)).area <= 0:
+        return False, None, 2
     if (
         opening.intersection(copper).difference(owner_copper.buffer(uncertainty)).area
         > _AREA_EPSILON_MM2
     ):
-        return False, None
+        return False, None, 3
     band = (
         copper.difference(opening.buffer(uncertainty))
         .intersection(opening.buffer(clearance + uncertainty))
@@ -529,11 +546,11 @@ def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearanc
         width = item.get("width_mm")
         ends = item.get("endpoints_mm")
         if not width or not ends:
-            return False, None
+            return False, None, 4
         core = owner_copper.buffer(-uncertainty)
         if not any(core.contains(Point(p)) for p in ends):
             # Pass-through, straddle or along-edge copper: not an entry.
-            return False, max(0.0, band)
+            return False, max(0.0, band), 4
         # At least one authored end is strictly inside the pad. The budget is
         # one entry crossing whether the other end exits, lies on the edge or
         # is also inside, so an end cap poking a hair past the edge never
@@ -542,14 +559,14 @@ def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearanc
         allowance = _ENTRY_CROSSING_FACTOR * width * clearance
     excess = max(0.0, band - allowance)
     if excess > _AREA_EPSILON_MM2:
-        return False, excess
+        return False, excess, 4
     if item["kind"] == "via":
         drill = item.get("drill_mm")
         if drill is None or drill <= 0:
-            return False, excess
+            return False, excess, 5
         if opening.distance(copper.centroid) < drill / 2 + uncertainty:
-            return False, excess
-    return True, excess
+            return False, excess, 5
+    return True, excess, None
 
 
 def _same_footprint_pads(owner_items, item) -> bool:
@@ -1321,13 +1338,14 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                 if area > 0 and owner_copper is not None and not owner_copper.is_empty:
                     beyond_owner = intersection.difference(owner_copper).area
                 beside_excess = None
+                within_own_pad_failed_condition = None
                 if (
                     disposition in ("violation", "uncertain")
                     and same_net
                     and owner_copper is not None
                     and not owner_copper.is_empty
                 ):
-                    qualifies, beside_excess = _within_own_pad(
+                    qualifies, beside_excess, failed_condition = _within_own_pad(
                         opening,
                         copper,
                         owner_copper,
@@ -1339,6 +1357,8 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                     )
                     if qualifies:
                         disposition = "within_own_pad"
+                    else:
+                        within_own_pad_failed_condition = failed_condition
                 if (
                     disposition in ("violation", "uncertain")
                     and same_net
@@ -1467,6 +1487,7 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                         owner_ref=owner_ref,
                         exposed_beyond_owner_mm2=beyond_owner,
                         beside_owner_excess_mm2=beside_excess,
+                        within_own_pad_failed_condition=within_own_pad_failed_condition,
                         owner_run=owner_run,
                         pour_spokes=pour_spokes,
                         pour_relief_gap_mm=pour_gap,
