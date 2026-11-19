@@ -364,7 +364,14 @@ def test_router_class_rules_do_not_change_the_unconditional_dru_floor(tmp_path):
         router_net_classes=_router_map(),
         preserve_board_rules="0",
     )
-    assert _read_dru_clearances(pcb.with_suffix(".kicad_dru")) == (RULES.min_clearance_mm, None)
+    assert _read_dru_clearances(pcb.with_suffix(".kicad_dru")) == (
+        RULES.min_clearance_mm,
+        None,
+        # Issue #9578: the strictest CONDITIONAL clearance rule is reported
+        # separately now (here the 0.20mm router net-class rules of #6390's
+        # managed block); the unconditional floor this test pins is untouched.
+        0.2,
+    )
 
 
 # --------------------------------------------------------------------- AC5

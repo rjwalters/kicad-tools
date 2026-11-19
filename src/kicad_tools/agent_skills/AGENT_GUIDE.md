@@ -15,6 +15,11 @@ Work board by board, and keep each step's output as a file you can re-check:
    then apply with `kct sync <pro> --apply --confirm`.
 3. **Place**: `kct placement check <pcb>`, then `kct optimize-placement <pcb>`.
 4. **Route**: `kct route <pcb>`. Check what is left with `kct net-status <pcb>`.
+   For copper you compute yourself (fingers, fan-outs, buses), write an items
+   file and check the whole batch read-only with `kct probe <pcb> <items>`;
+   then `kct apply <pcb> <items> --checked` writes it only if every item
+   passes, keeps a backup, and refuses if the board changed underneath.
+   `route-link --probe` remains the single-link form.
 5. **Fill zones**: `kct zones fill <pcb>`.
 6. **Check, engine 1**: `kct check <pcb> --mfr <fab>`.
 7. **Check, engine 2**: `kicad-cli pcb drc --refill-zones <pcb>`.
