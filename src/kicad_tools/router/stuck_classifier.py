@@ -443,6 +443,14 @@ class StuckNetDiagnosis:
     # of :meth:`to_dict` in that case so a board without a sidecar emits
     # byte-identical JSON.
     search_failure: str | None = None
+    # Issue #9612: the per-piece listing of a split net (``NetStatus.pieces``,
+    # Issue #9598), carried onto the diagnosis at the point the classifier
+    # already holds the ``NetStatus``.  Populated only for a POUR_DISCONTINUOUS
+    # net that is actually in several pieces; ``None`` otherwise -- and kept
+    # OUT of :meth:`to_dict` (the ``--net X --why`` CLI path injects it into
+    # that net's JSON payload instead, exactly like ``overflow_edge``) so other
+    # JSON consumers and the no-``--net`` output stay byte-identical.
+    pieces: list[dict] | None = None
 
     @property
     def classification_value(self) -> str:
@@ -1620,6 +1628,10 @@ def classify_stuck_nets_from_pcb(
                 classification=StuckClass.POUR_DISCONTINUOUS,
                 unconnected_pads=pad_names,
                 evidence=evidence,
+                # Issue #9612: carry the per-piece listing (Issue #9598) so
+                # ``--net X --why`` can render it without a second analyzer
+                # run; ``or None`` keeps single-piece nets field-free.
+                pieces=net.pieces or None,
             )
         )
 
