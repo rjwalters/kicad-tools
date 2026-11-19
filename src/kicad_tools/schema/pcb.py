@@ -1165,6 +1165,22 @@ class Pad:
         return pad
 
 
+_JUSTIFY_TOKENS = frozenset({"left", "right", "top", "bottom", "mirror"})
+
+
+def _read_justify(effects: SExp) -> tuple[str, ...]:
+    """Return the ``(justify ...)`` tokens of a text ``effects`` node (Issue #9433).
+
+    Only the tokens KiCad defines are kept (``left``/``right``/``top``/
+    ``bottom``/``mirror``), in file order.  An absent ``justify`` node means
+    centred, which is the empty tuple.
+    """
+    node = effects.find("justify")
+    if node is None:
+        return ()
+    return tuple(str(a) for a in node.get_atoms() if str(a) in _JUSTIFY_TOKENS)
+
+
 @dataclass
 class FootprintText:
     """Text element within a footprint (fp_text).
@@ -1186,6 +1202,9 @@ class FootprintText:
     # KiCad's "keep upright" flag (absent ``(unlocked yes)``): an interactive
     # rotate or a left/right flip turns such a text back upright (Issue #6126).
     keep_upright: bool = field(default=True, compare=False)
+    # ``(justify ...)`` tokens (``left``/``right``/``top``/``bottom``/``mirror``);
+    # empty means centred on the anchor (Issue #9433).
+    justify: tuple[str, ...] = ()
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> FootprintText:
@@ -1222,6 +1241,7 @@ class FootprintText:
         if effects := sexp.find("effects"):
             if effects.find("hide"):
                 fp_text.hidden = True
+            fp_text.justify = _read_justify(effects)
             if font := effects.find("font"):
                 if size := font.find("size"):
                     w = size.get_float(0) or 1.0
@@ -1275,6 +1295,7 @@ class FootprintText:
         if effects := sexp.find("effects"):
             if effects.find("hide"):
                 fp_text.hidden = True
+            fp_text.justify = _read_justify(effects)
             if font := effects.find("font"):
                 if size := font.find("size"):
                     w = size.get_float(0) or 1.0
@@ -1410,6 +1431,8 @@ class GraphicText:
     hidden: bool = False
     # Board text position and serialized angle are both board-frame.
     rotation: float = 0.0
+    # ``(justify ...)`` tokens; empty means centred on the anchor (Issue #9433).
+    justify: tuple[str, ...] = ()
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> GraphicText:
@@ -1441,6 +1464,7 @@ class GraphicText:
         if effects := sexp.find("effects"):
             if effects.find("hide"):
                 gr_text.hidden = True
+            gr_text.justify = _read_justify(effects)
             if font := effects.find("font"):
                 if size := font.find("size"):
                     w = size.get_float(0) or 1.0
