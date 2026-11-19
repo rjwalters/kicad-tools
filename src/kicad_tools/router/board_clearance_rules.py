@@ -61,7 +61,9 @@ these item properties:
 * ``A.Pad_Type`` of a pad (``'SMD'``, ``'Through-hole'``,
   ``'NPTH, mechanical'``) -- the fleet's JLCPCB ``.kicad_dru`` keys its hole
   rules on it;
-* ``A.hasNetclass('X')``, ``A.isPlated()``;
+* ``A.hasNetclass('X')``, ``A.isPlated()``, ``A.memberOfFootprint('REF')``
+  (one string argument, matched like every other string comparison --
+  case-insensitive with ``*`` / ``?`` wildcards; #9578).
 * ``A.Layer`` of a track: its layer, compared **case-sensitively** with
   ``*`` / ``?`` wildcards (``'F.*'`` and ``'*.Cu'`` match ``F.Cu``,
   ``'f.cu'`` does not).  A via's ``Layer`` is KiCad's null.  A pad's
@@ -83,6 +85,12 @@ treated as possibly applying, so the requirement is the *largest* of the
 values it could resolve to (the unknown rule's own value and whatever a
 lower-priority rule or the default would give).  The gate can therefore
 refuse copper KiCad would accept on such a board, but never the reverse.
+The kept-copper audit (#6237) needs the other reading -- "what does this
+pair *at best* require" -- so :meth:`BoardClearanceRules.explain_required`
+also returns the lower bound (the *smallest* value any resolution of the
+undecided conditions could produce, so an undecided exemption lowers it)
+and the names of the undecided rules, and the audit reports those pairs
+as unknown, named, never as input defects (#9578).
 A ``(layer ...)`` clause is evaluated against the layer the new copper is on
 (a via is on every layer, so its layer clause is unknown).
 
@@ -215,6 +223,19 @@ class ItemProps:
             ``kicad-cli`` 10.0.2+ reports as the pad's ``Layer`` whatever
             copper the pad is on (#6201) -- ``None``: unknown, any copper
             layer.  Ignored for a via, whose ``Layer`` is KiCad's null.
+        footprint_ref: The item's footprint reference -- what
+            ``A.memberOfFootprint('REF')`` asks about (#9578).  A string on a
+            pad (its footprint's reference); ``""`` on board-level copper,
+            which is a member of no footprint, so such a condition is
+            decisively false on it; ``None`` when unknown (the condition
+            evaluates to unknown).
+        footprint_lib_id: The item's footprint's **library ID**
+            (``"Conn:Hdr"``) -- the other value ``memberOfFootprint``
+            matches (#9588 review: an exact library-ID argument selects
+            the footprint's pads in ``kicad-cli`` 10.0.6).  ``""`` on
+            board-level copper or a footprint with no library
+            association; ``None`` when unknown (the condition evaluates
+            to unknown).
     """
 
     type: str | None
@@ -222,6 +243,8 @@ class ItemProps:
     plated: bool | None = None
     pad_type: str | None = None
     layer: str | None = None
+    footprint_ref: str | None = None
+    footprint_lib_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +272,34 @@ class DruRule:
             if kind == constraint:
                 return value
         return None
+
+
+@dataclass(frozen=True)
+class RuleResolution:
+    """How one requirement resolves, including what stayed undecided (#9578).
+
+    Attributes:
+        requirement: The conservative value -- the largest the requirement
+            could be, with undecided conditions treated as possibly
+            applying.  What :meth:`BoardClearanceRules.required` returns and
+            what new-copper gating is judged against.
+        lower_bound: The smallest the requirement could be under any
+            resolution of the undecided conditions -- the minimum across
+            every value that could win, decided or not.  The floor the
+            kept-copper audit compares against before calling a pair an
+            input defect: a gap between ``lower_bound`` and
+            ``requirement`` is an undecided pair, not a decided violation,
+            and only a gap below ``lower_bound`` violates the rule in
+            *every* resolution (#9588 review: an undecided *exemption*
+            must lower this bound, or a gap it legalizes is misread as a
+            definite defect).
+        unknown_rules: Names of the rules that could have won but could not
+            be decided.  Empty when the resolution is KiCad-exact.
+    """
+
+    requirement: float
+    lower_bound: float
+    unknown_rules: tuple[str, ...] = ()
 
 
 def _parse_length_mm(raw: object) -> float | None:
@@ -495,6 +546,17 @@ def _truth(value: Any) -> bool | None:
     return None
 
 
+def _footprint_pattern_matches(pattern: str, value: str) -> bool:
+    """``memberOfFootprint``'s argument vs a footprint name/ID.
+
+    Unlike every other KiCad string comparison this is **case-sensitive**
+    while still applying ``*`` / ``?`` wildcards to the argument: probed
+    with ``kicad-cli`` 10.0.6, ``memberOfFootprint('J*')`` selects
+    reference ``J3`` but ``'j3'`` and ``'j?'`` do not (#9588 review).
+    """
+    return value == pattern or fnmatch.fnmatchcase(value, pattern)
+
+
 def _strings_equal(a: str, b: str) -> bool:
     """KiCad string equality: case-insensitive, with ``*`` / ``?`` wildcards.
 
@@ -677,6 +739,33 @@ class _PairContext:
             if classes is None:
                 return _UNKNOWN
             return any(_strings_equal(c, args[0]) for c in classes)
+        if name == "memberoffootprint" and len(args) == 1 and isinstance(args[0], str):
+            # KiCad's ``A.memberOfFootprint('PATTERN')`` (#9578), probed
+            # against ``kicad-cli`` 10.0.6 (#9588 review): unlike every
+            # other string comparison it is **case-sensitive** --
+            # ``'j3'`` and ``'j?'`` do not match reference ``J3`` while
+            # ``'J*'`` does (``*`` / ``?`` wildcards apply) -- and an
+            # exact **library ID** argument matches too (``'Conn:Hdr'``
+            # selects the pads of footprint ``Conn:Hdr``).  Wildcards
+            # against a library ID were not probed and are not assumed:
+            # such a pattern stays undecided.  An item with no known
+            # reference or library id cannot be decided; one known to
+            # belong to no footprint (board-level copper, ``""``)
+            # decisively matches no pattern -- a pattern matches
+            # footprint names/IDs, and this item has none (#9588 review).
+            pattern = args[0]
+            ref, lib = item.footprint_ref, item.footprint_lib_id
+            if ref == "":
+                return False
+            if ref is None or lib is None:
+                return _UNKNOWN
+            if _footprint_pattern_matches(pattern, ref):
+                return True
+            if pattern == lib:
+                return True
+            if _footprint_pattern_matches(pattern, lib):
+                return _UNKNOWN
+            return False
         return _UNKNOWN
 
 
@@ -739,7 +828,7 @@ class BoardClearanceRules:
     dru_rules: list[DruRule] = field(default_factory=list)
     #: Why the ``.kicad_dru`` was discarded (see :func:`parse_dru`), else ``None``.
     dru_error: str | None = None
-    _cache: dict[tuple[Any, ...], float] = field(default_factory=dict, repr=False)
+    _cache: dict[tuple[Any, ...], RuleResolution] = field(default_factory=dict, repr=False)
     #: The raw ``.kicad_pro`` object, for the shared netclass resolver (#6254).
     _project: dict[str, Any] | None = field(default=None, repr=False)
     _resolved_class: dict[str, float | None] = field(default_factory=dict, repr=False)
@@ -896,19 +985,26 @@ class BoardClearanceRules:
             return self.min_hole_to_hole
         return 0.0  # physical_clearance / physical_hole_clearance: rules only
 
-    def required(
+    def explain_required(
         self, constraint: str, a: ItemProps, b: ItemProps, layer: str | None = None
-    ) -> float:
-        """The ``constraint`` minimum KiCad applies between ``a`` and ``b`` on ``layer``.
+    ) -> RuleResolution:
+        """:meth:`required` plus what stayed undecided (Issue #9578).
 
-        The largest value it could be when a rule's condition is unknown
-        (see the module docstring).  0 where an ``ignore`` rule wins.
+        The conservative :attr:`RuleResolution.requirement` is the value
+        :meth:`required` has always returned.  :attr:`RuleResolution.lower_bound`
+        is the smallest the requirement could be under any resolution of
+        the undecided conditions -- the minimum across every value that
+        could win, so an undecided exemption lowers it and an undecided
+        tightening raises nothing.  :attr:`RuleResolution.unknown_rules`
+        names the rules that could have won but could not be decided, so a
+        caller can say so instead of implying a KiCad-exact verdict.
         """
         key = (constraint, a, b, layer)
         cached = self._cache.get(key)
         if cached is not None:
             return cached
-        candidates: list[float] = []
+        conservative: list[float] = []
+        unknown_rules: list[str] = []
         settled = False
         for rule in reversed(self.dru_rules):
             value = rule.value(constraint)
@@ -925,15 +1021,35 @@ class BoardClearanceRules:
                 )
             if applies is False:
                 continue
-            candidates.append(0.0 if rule.ignored else value)
+            decided = 0.0 if rule.ignored else value
+            conservative.append(decided)
             if applies is True:
                 settled = True
                 break
+            unknown_rules.append(rule.name)
         if not settled:
-            candidates.append(self._default(constraint, a, b))
-        result = max(candidates)
-        self._cache[key] = result
-        return result
+            default = self._default(constraint, a, b)
+            conservative.append(default)
+        # Every candidate still in ``conservative`` is a value some
+        # resolution of the undecided conditions can make the winner (an
+        # undecided rule when its condition holds, the decided winner or
+        # the default otherwise), so the requirement is the largest of
+        # them and the lower bound the smallest (#9588 review: an
+        # undecided exemption must pull the bound down, never be dropped
+        # from it as the old decided-only ``provable`` maximum did).
+        resolution = RuleResolution(max(conservative), min(conservative), tuple(unknown_rules))
+        self._cache[key] = resolution
+        return resolution
+
+    def required(
+        self, constraint: str, a: ItemProps, b: ItemProps, layer: str | None = None
+    ) -> float:
+        """The ``constraint`` minimum KiCad applies between ``a`` and ``b`` on ``layer``.
+
+        The largest value it could be when a rule's condition is unknown
+        (see the module docstring).  0 where an ``ignore`` rule wins.
+        """
+        return self.explain_required(constraint, a, b, layer).requirement
 
     def clearance(self, a: ItemProps, b: ItemProps, layer: str | None = None) -> float:
         return self.required(CLEARANCE, a, b, layer)
@@ -1021,13 +1137,19 @@ def item_props_for_type(
     plated: bool | None = None,
     pad_type: str | None = None,
     layer: str | None = None,
+    footprint_ref: str | None = None,
+    footprint_lib_id: str | None = None,
 ) -> ItemProps:
     """:class:`ItemProps` for a gate item kind (``track``/``arc``/``via``/``pad``).
 
     KiCad reports an arc's ``Type`` as ``'Track'`` (verified with ``kicad-cli``
     10.0.1).  ``layer`` is kept for a track, arc or pad (for a pad, its
     footprint's layer -- the pad's ``Layer`` from ``kicad-cli`` 10.0.2,
-    #6196 / #6201), never a via.
+    #6196 / #6201), never a via.  ``footprint_ref`` is the item's footprint
+    reference (a pad's footprint) or ``""`` when the item is known to sit in
+    no footprint (#9578); ``None`` keeps it unknown.  ``footprint_lib_id``
+    is the footprint's library ID (``"Conn:Hdr"``, #9588 review), with the
+    same ``""`` / ``None`` reading.
     """
     dru_type = {"track": "Track", "arc": "Track", "via": "Via", "pad": "Pad"}.get(kind)
     return ItemProps(
@@ -1036,6 +1158,8 @@ def item_props_for_type(
         plated,
         PAD_TYPE_NAMES.get(pad_type or "") if kind == "pad" else None,
         layer if dru_type in ("Track", "Pad") else None,
+        footprint_ref,
+        footprint_lib_id,
     )
 
 
@@ -1056,6 +1180,7 @@ __all__: Sequence[str] = [
     "BoardClearanceRules",
     "DruRule",
     "ItemProps",
+    "RuleResolution",
     "dru_error_message",
     "evaluate_condition",
     "item_props_for_type",

@@ -10747,7 +10747,11 @@ def _audit_kept_copper_clearance(
     path copies beside the output -- else KiCad's defaults.  At ``error``
     severity (KiCad's default) the near-misses are printed as errors and
     returned so they fail the run; at ``warning`` they are printed and not
-    returned; at ``ignore`` nothing is reported.  Never raises.
+    returned; at ``ignore`` nothing is reported.  Issue #9578: a pair whose
+    verdict hinges on a rule the evaluator cannot decide is printed as
+    UNKNOWN -- naming the rule -- and is never returned as an input defect,
+    under every severity but ``ignore``, which returns before anything is
+    computed or printed.  Never raises.
     """
     from kicad_tools.router.board_clearance_rules import BoardClearanceRules
     from kicad_tools.router.io import kept_copper_clearance_violations, kicad_rule_severity
@@ -10778,9 +10782,38 @@ def _audit_kept_copper_clearance(
                 "input clearance was NOT checked"
             )
         return []
-    if near and not quiet:
-        _print_input_clearance_findings(near, severity)
-    return near if severity == "error" else []
+    # Issue #9578: pairs whose verdict hinges on a rule this tool cannot
+    # decide are named and counted as unknown -- never as input defects, so
+    # they neither fail the run nor imply a KiCad-exact verdict.  kicad-cli
+    # pcb drc remains the authority for them.
+    unknown = [v for v in near if v.unknown_rules]
+    definite = [v for v in near if not v.unknown_rules]
+    if unknown and not quiet:
+        _print_unknown_rule_clearance(unknown)
+    if definite and not quiet:
+        _print_input_clearance_findings(definite, severity)
+    return definite if severity == "error" else []
+
+
+def _print_unknown_rule_clearance(violations: "Sequence[ClearanceViolation]") -> None:
+    """Report kept-copper near-misses an undecided rule keeps in doubt (#9578)."""
+    from kicad_tools.router.io import describe_input_clearance
+
+    rule_names = sorted({name for v in violations for name in v.unknown_rules})
+    print("\n--- Kept Input Copper: unresolved clearance rules ---")
+    print(
+        f"  UNKNOWN: {len(violations)} kept-copper pair(s) could not be judged because "
+        f"these .kicad_dru rule(s) use conditions this tool cannot resolve: "
+        f"{', '.join(repr(name) for name in rule_names)}"
+    )
+    print(
+        "  Counted as unknown, not as input defects (Issue #9578); run "
+        "`kicad-cli pcb drc` for the authoritative verdict on these pairs."
+    )
+    for v in violations[:20]:
+        print(f"    UNKNOWN {describe_input_clearance(v)} (rule(s): {', '.join(v.unknown_rules)})")
+    if len(violations) > 20:
+        print(f"    ... and {len(violations) - 20} more")
 
 
 def _print_input_clearance_findings(
@@ -11680,6 +11713,7 @@ _CLEARANCE_SOURCE_TOKENS: dict[str, str] = {
     "project-min-clearance": "project-min-clearance",
     "project-net-class": "project-net-class",
     "project-dru": "project-dru",
+    "project-dru-conditional": "project-dru-conditional",
 }
 
 
@@ -11751,12 +11785,24 @@ def _decide_route_clearance(
             return "project board minimum clearance"
         if rule_source is RuleSource.PROJECT_NET_CLASS:
             return f'project netclass "{class_name}"' if class_name else "project netclass"
+        if rule_source is RuleSource.PROJECT_DRU_CONDITIONAL:
+            return "board .kicad_dru conditional clearance rule"
         if rule_source is RuleSource.BOARD_NET_CLASS:
             return f'board net_class "{class_name}"'
         return str(rule_source.value)
 
-    if explicit_clearance:
+    if explicit_clearance and resolved.source is RuleSource.EXPLICIT_TARGET:
         banner = f"Clearance: {value:.4g}mm (rules: explicit --clearance flag)"
+    elif explicit_clearance:
+        # The #9578 conditional floor raised the operator's explicit value
+        # (#9588 review): say so instead of crediting the flag with a value
+        # it did not choose.
+        banner = (
+            f"Clearance: {value:.4g}mm (rules: explicit --clearance "
+            f"{clearance:.4g}mm, floored by the "
+            f"{_label(resolved.source, resolved.source_label)} {value:.4g}mm)"
+        )
+        source = "board-clamped"
     elif resolved.source is RuleSource.TARGET_DEFAULT:
         # Nothing the board or the fab declared moved the target: byte-identical
         # to the pre-#4875 silent path.
@@ -11974,6 +12020,8 @@ def _resolve_route_via_clearance(
             return "project board minimum clearance"
         if rule_source is RuleSource.PROJECT_NET_CLASS:
             return f'project netclass "{class_name}"' if class_name else "project netclass"
+        if rule_source is RuleSource.PROJECT_DRU_CONDITIONAL:
+            return "board .kicad_dru conditional clearance rule"
         if rule_source is RuleSource.BOARD_NET_CLASS:
             return f'board net_class "{class_name}"'
         if rule_source is RuleSource.TRACE_BASE:
