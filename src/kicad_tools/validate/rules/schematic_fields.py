@@ -328,7 +328,7 @@ def _lint_sheet(
             if offset > threshold_mm:
                 message = (
                     f"{reference}.{field_name} {offset:.1f}mm from body "
-                    f"(threshold {threshold_mm:.1f}mm) [{sheet_name}]"
+                    f"(threshold {threshold_mm}mm) [{sheet_name}]"
                 )
                 findings.append(
                     (

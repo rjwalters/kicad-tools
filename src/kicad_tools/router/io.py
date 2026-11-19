@@ -373,6 +373,13 @@ class ClearanceViolation:
     #: Issue #6693: "REF.PIN" of the own-net pad that overlaps ``obstacle_pad``
     #: in the input board (set only when ``origin == "input_pad_overlap"``).
     overlapping_pad: str = ""
+    #: Issue #9578: names of the ``.kicad_dru`` rules that could have decided
+    #: this pair but whose conditions the evaluator cannot resolve.  Non-empty
+    #: only in the kept-copper audit, and only for a pair whose gap is below
+    #: the conservative requirement but at or above the provable one: the pair
+    #: is *unknown*, never an input defect, and the CLI reports it as such
+    #: (naming these rules) instead of failing the run.
+    unknown_rules: tuple[str, ...] = ()
 
     @property
     def is_input_defect(self) -> bool:
@@ -2713,7 +2720,9 @@ def rekey_name_only_copper(
     )
 
 
-def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
+def load_pads_for_analysis(
+    pcb_path_or_text: str | Path, *, placement_only: bool = False
+) -> list[Pad]:
     """Extract pad objects with ref/pin info for grid analysis.
 
     Unlike extract_pad_positions which only returns (x, y), this returns full
@@ -2722,6 +2731,15 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
 
     Args:
         pcb_path_or_text: Path to .kicad_pcb file or PCB file contents
+        placement_only: When ``False`` (default) a pad whose copper the router
+            cannot represent (``custom``, ``trapezoid`` with a delta, a
+            layer-specific padstack) raises :class:`ValueError`, because every
+            routing consumer would under-estimate its copper.  When ``True`` the
+            caller only needs each pad's placement (centre, footprint identity,
+            net) -- the pad-grid preflight -- so such a pad is returned with
+            its nominal ``(size ...)`` box as a rectangle placeholder and its
+            true copper is never consulted.  Do not use the placeholder shape
+            for clearance or routing.
 
     Returns:
         List of Pad objects with x, y, ref, pin, net, and layer info.
@@ -2782,7 +2800,7 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
             # Extract pad number/pin
             pin_match = re.search(r'\(pad\s+"?([^"\s)]+)"?', pad_block)
             pin = pin_match.group(1) if pin_match else ""
-            pad_shape = _pad_shape_from_block(pad_block, ref, pin)
+            pad_shape = _pad_shape_from_block(pad_block, ref, pin, placement_only=placement_only)
 
             # Extract pad type for through_hole detection
             is_thru = "thru_hole" in pad_block
@@ -2834,6 +2852,7 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
                     through_hole=is_thru,
                     side=fp_side,
                     footprint_name=footprint_name,
+                    footprint_origin=(fp_x, fp_y),
                     rotation=pad_rotation,
                     shape=pad_shape,
                     roundrect_rratio=_pad_rratio_from_block(pad_block, pad_shape),
@@ -4197,8 +4216,21 @@ def _kept_copper_violations(
     pair when ``board_rules`` is given, else the requirement
     :func:`validate_routes` applies to routed copper of the same kind
     (``pair_clear`` vs a pad or between traces, ``via_clear`` for a via).
+
+    Issue #9578: pads carry their footprint reference, so
+    ``A.memberOfFootprint('REF')`` rules resolve exactly; a positive gap
+    that clears the *provable* requirement but not the conservative one
+    hinges on rules the evaluator cannot decide and is returned tagged with
+    their names (:attr:`ClearanceViolation.unknown_rules`) -- an unknown
+    pair for the caller to report as such, never an input defect.
     """
-    from .board_clearance_rules import ItemProps, item_props_for_type
+    from .board_clearance_rules import (
+        CLEARANCE,
+        PHYSICAL_CLEARANCE,
+        ItemProps,
+        RuleResolution,
+        item_props_for_type,
+    )
     from .clearance_shapes import (
         CLEARANCE_EPSILON_MM,
         NO_INTERACTION,
@@ -4248,19 +4280,37 @@ def _kept_copper_violations(
             )
 
     def item_props(item: _KeptItem) -> ItemProps:
+        # Board-level copper is a member of no footprint (#9578): a
+        # ``memberOfFootprint`` condition is decisively false on it.
         if item.is_trace:
             layer_name = item.layer.kicad_name if item.layer is not None else None
-            return item_props_for_type("track", item.name, layer=layer_name)
-        return item_props_for_type("via", item.name, plated=True)
+            return item_props_for_type(
+                "track", item.name, layer=layer_name, footprint_ref="", footprint_lib_id=""
+            )
+        return item_props_for_type(
+            "via", item.name, plated=True, footprint_ref="", footprint_lib_id=""
+        )
 
-    def required(a: ItemProps, b: ItemProps, layer: Layer | None, fallback: float) -> float:
-        """KiCad's clearance for the pair when the board's rules are known."""
+    def required(
+        a: ItemProps, b: ItemProps, layer: Layer | None, fallback: float
+    ) -> RuleResolution:
+        """KiCad's clearance for the pair when the board's rules are known.
+
+        The conservative :attr:`RuleResolution.requirement` is what this
+        audit has always judged with; :attr:`RuleResolution.lower_bound` and
+        :attr:`RuleResolution.unknown_rules` let a pair whose verdict hinges
+        on an undecided rule be reported as unknown instead of an input
+        defect (#9578).
+        """
         if board_rules is None:
-            return fallback
+            return RuleResolution(fallback, fallback, ())
         layer_name = layer.kicad_name if layer is not None else None
-        return max(
-            board_rules.clearance(a, b, layer_name),
-            board_rules.physical_clearance(a, b, layer_name),
+        copper = board_rules.explain_required(CLEARANCE, a, b, layer_name)
+        physical = board_rules.explain_required(PHYSICAL_CLEARANCE, a, b, layer_name)
+        return RuleResolution(
+            max(copper.requirement, physical.requirement),
+            max(copper.lower_bound, physical.lower_bound),
+            tuple(dict.fromkeys(copper.unknown_rules + physical.unknown_rules)),
         )
 
     # Widest requirement any pair can have: the circle / grid rejections
@@ -4300,7 +4350,7 @@ def _kept_copper_violations(
             # pad's; a via on a through-hole pad meets it on every layer.
             meet_layer = item.layer if item.is_trace else (None if pad_th else pad_layer)
             obstacle_name = pad.net_name or resolve_net_name(pad.net)
-            req = required(
+            res = required(
                 a_props,
                 item_props_for_type(
                     "pad",
@@ -4308,12 +4358,27 @@ def _kept_copper_violations(
                     plated=pad_th,
                     pad_type="thru_hole" if pad_th else "smd",
                     layer=pad_layer.kicad_name,
+                    # Issue #9578: the footprint a footprint-scoped rule keys on.
+                    # Issue #9588 review: its library ID too -- an exact
+                    # ``memberOfFootprint('Lib:Name')`` argument selects the pad.
+                    footprint_ref=ref,
+                    footprint_lib_id=pad.footprint_name,
                 ),
                 meet_layer,
                 pair_clear if item.is_trace else via_clear,
             )
-            if gap > 0.0 and gap >= req - CLEARANCE_EPSILON_MM:
+            if gap > 0.0 and gap >= res.requirement - CLEARANCE_EPSILON_MM:
                 continue
+            # Issue #9578: a positive gap at or above the provable floor but
+            # below the conservative requirement hinges on rules the
+            # evaluator cannot decide -- report it as unknown, named, never
+            # as an input defect.  (With no undecided rules the provable and
+            # conservative floors coincide, so this branch is unreachable.)
+            unknown = (
+                res.unknown_rules
+                if gap > 0.0 and gap >= res.lower_bound - CLEARANCE_EPSILON_MM
+                else ()
+            )
             out.append(
                 ClearanceViolation(
                     segment_index=item.seg_index,
@@ -4325,13 +4390,14 @@ def _kept_copper_violations(
                     obstacle_type="pad",
                     obstacle_net=pad.net,
                     distance=gap,
-                    required=req,
+                    required=res.requirement,
                     net_name=item.name,
                     obstacle_net_name=obstacle_name,
                     location=(pad.x, pad.y),
                     layer=meet_layer,
                     origin="input",
                     obstacle_pad=f"{ref}.{pad.pin}",
+                    unknown_rules=unknown,
                 )
             )
 
@@ -4378,14 +4444,19 @@ def _kept_copper_violations(
                 if gap <= 0.0 and not shorts:
                     continue
                 both_traces = a.is_trace and b.is_trace
-                req = required(
+                res = required(
                     item_props(a),
                     item_props(b),
                     a.layer,
                     pair_clearance(a.net, b.net) if both_traces else via_clear,
                 )
-                if gap > 0.0 and gap >= req - CLEARANCE_EPSILON_MM:
+                if gap > 0.0 and gap >= res.requirement - CLEARANCE_EPSILON_MM:
                     continue
+                unknown = (
+                    res.unknown_rules
+                    if gap > 0.0 and gap >= res.lower_bound - CLEARANCE_EPSILON_MM
+                    else ()
+                )
                 if both_traces:
                     location = ((a.x1 + a.x2 + b.x1 + b.x2) / 4, (a.y1 + a.y2 + b.y1 + b.y2) / 4)
                 elif a.is_trace:
@@ -4403,12 +4474,13 @@ def _kept_copper_violations(
                         obstacle_type="segment" if b.is_trace else "via",
                         obstacle_net=b.net,
                         distance=gap,
-                        required=req,
+                        required=res.requirement,
                         net_name=a.name,
                         obstacle_net_name=b.name,
                         location=location,
                         layer=a.layer,
                         origin="input",
+                        unknown_rules=unknown,
                     )
                 )
     return out
@@ -4435,6 +4507,10 @@ def kept_copper_clearance_violations(
     (:meth:`BoardClearanceRules.from_board` on the OUTPUT board, whose
     sibling ``.kicad_pro`` / ``.kicad_dru`` kicad-cli loads); without it the
     requirement is the one :func:`validate_routes` applies to routed copper.
+    Pairs whose verdict hinges on an undecided rule carry
+    :attr:`ClearanceViolation.unknown_rules` (#9578): the CLI gate reports
+    them as unknown -- naming the rules -- and does not count them as input
+    defects.
     """
     kept_routes = audited_kept_routes(router)
     if not kept_routes:
@@ -4998,12 +5074,24 @@ def _is_rectangular_trapezoid(pad_block: str) -> bool:
         return False
 
 
-def _pad_shape_from_block(pad_block: str, ref: str, pin: str) -> str:
-    """Read the physical shape token, including empty or unquoted pad numbers."""
+def _pad_shape_from_block(
+    pad_block: str, ref: str, pin: str, *, placement_only: bool = False
+) -> str:
+    """Read the physical shape token, including empty or unquoted pad numbers.
+
+    ``placement_only`` (issue #9468) returns ``"rect"`` for copper the router
+    cannot represent instead of raising: the caller reads the pad's position,
+    never its outline.
+    """
     match = re.match(r'\(pad\s+(?:"[^\"]*"|[^\s()]+)\s+\w+\s+([^\s()]+)', pad_block)
     shape = match.group(1) if match else ""
     if shape == "trapezoid" and _is_rectangular_trapezoid(pad_block):
         shape = "rect"
+    if placement_only and (
+        shape not in {"circle", "rect", "oval", "roundrect"}
+        or re.search(r"\(padstack(?:\s|\))", pad_block) is not None
+    ):
+        return "rect"
     return _routing_pad_shape(
         shape,
         ref=ref,

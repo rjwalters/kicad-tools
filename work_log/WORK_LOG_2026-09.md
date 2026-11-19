@@ -2,6 +2,52 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-19
+
+- **PR #5588**: docs(routing-plan): fix understated elapsed_s claim in Cost section
+- **PR #5585**: fix(ci): compare whole copper nodes, not header lines, in the route-determinism gate
+- **PR #5583**: test(ci): size the partial-placement route budget against the native-permit queue (#5579)
+- **Issue #5582** (closed): docs(routing-plan): "Cost" section understates the measured plan-stage elapsed_s by ~60x
+- **PR #5581**: feat(router): run the report-only routing plan stage on every default route (+ --no-routing-plan)
+- **Issue #5580** (closed): ci: board_route_determinism_smoke.sh normalize_copper() compares copper element COUNTS, not geometry
+- **Issue #5579** (closed): flake: test_route_partial_placement_cli deadline-exceeded failures redden the Test job on main
+- **PR #5577**: perf(board06): spatially prune the pour-repair obstacle clearance scans
+- **PR #5576**: fix(ci): credit native-slot wait back to the waiting test's pytest-timeout budget
+- **PR #5574**: fix(judge): restore draft-PR fallback exclusion reverted by installed-surface resync
+- **PR #5573**: test(ci): add evidence-sized pytest-timeout overrides to the three 60s-reaped test groups
+- **Issue #5572** (closed): CI: native-slot wait from KCT_NATIVE_MAX_CONCURRENCY=1 is charged to the waiting test's pytest-timeout budget
+- **PR #5571**: perf(router): hoist loop-invariant clearance lookups in validate_routes
+- **PR #5570**: fix(router): persist add_obstacle keepouts across grid resets
+- **Issue #5567** (closed): Flaky >60s pytest-timeout in tests/router/lattice/test_post_pass_gating.py CLI tests
+- **Issue #5557** (closed): judge-fallback-guard.sh: exclude draft PRs from fallback evaluation
+- **Issue #5556** (closed): CI: Test job flakes on a fixed 60s pytest-timeout hitting an arbitrary test (seen on main and PRs)
+- **Issue #5555** (closed): router: _reset_for_new_trial drops add_obstacle keepouts, silently reopening the grid
+- **Issue #5552** (closed): chore: resync installed Loom surfaces silently reverted merged fix #5543 (draft-PR fallback exclusion)
+- **Issue #5513** (closed): [Epic #5509] Phase 1a: kicad-cli clearance conformance oracle (report-only) with four adapters and named fixtures
+
+### 2026-09-18
+
+- **PR #5568**: fix(router): sum both edge directions in RoutingPlan edge entries
+- **PR #5565**: test(conformance): wrap five clearance consumers as adapters and populate the conformance table
+- **PR #5554**: perf(router): write segment clearance envelopes with slice assignment
+- **PR #5553**: feat(router): apply declared swap groups via a pad-rebind applicator
+- **PR #5549**: fix(zones): reuse an existing same-net barrel for a pour bridge (#5507)
+- **PR #5548**: feat(board-07): netlist write-back for generator-owned boards (Epic #5511 Phase 2b)
+- **PR #5547**: chore(deps): bump soupsieve from 2.8.4 to 2.9
+- **PR #5546**: chore(deps): bump devalue from 5.8.1 to 5.9.2 in /site
+- **Issue #5544** (closed): RoutingPlan.from_global_result() may disagree with get_total_overflow() on reverse-direction-only overflow
+- **PR #5542**: fix: parse kicad-cli 10 hole-to-hole 'min X mm; actual Y mm' wording
+- **PR #5540**: fix: RegionGraph.get_total_overflow() undercounts reverse-direction edge overflow
+- **Issue #5538** (closed): classify-dependency-block.sh's ref extraction treats a parenthetical epic mention as a second open blocker, wedging phase issues in DEFER forever
+- **Issue #5537** (closed): [Epic #5511] Phase 2b: netlist write-back for generator-owned boards
+- **Issue #5536** (closed): [Epic #5511] Phase 2a: pad-rebind applicator for declared swap groups
+- **Issue #5534** (closed): drc/report.py's clearance extractor doesn't parse kicad-cli 10's hole-to-hole wording
+- **Issue #5533** (closed): [Epic #5509] Phase 1a (2/2): five consumer adapters + populated clearance-conformance table
+- **Issue #5529** (closed): RegionGraph.get_total_overflow() can undercount overflow on reverse-direction edge traversals
+- **PR #5524**: ci: bound native KiCad subprocess concurrency from measured attribution
+- **Issue #5523** (closed): loom-fleet-dispatch auto-relabels draft PRs to loom:review-requested
+- **Issue #5501** (closed): CI: bound remaining native subprocess concurrency after confirmed Test cgroup OOM
+
 ### 2026-09-17
 
 - **PR #5543**: fix(judge): exclude draft PRs from fallback-mode evaluation

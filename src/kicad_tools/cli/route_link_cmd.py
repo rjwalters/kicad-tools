@@ -398,6 +398,7 @@ def _rules_for_link(args: argparse.Namespace, pcb: Any, base: Any, spec: LinkSpe
                         pollution_degree=getattr(args, "pollution_degree", 2),
                         material_group=getattr(args, "material_group", "IIIa"),
                         hv_threshold=threshold,
+                        domain_intervals=getattr(args, "_pairwise_intervals", None),
                     ).get(pair)
                 except StandardLookupError as exc:
                     raise LinkSpecError(

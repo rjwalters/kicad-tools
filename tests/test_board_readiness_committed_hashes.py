@@ -75,11 +75,28 @@ EXPECTED_STALE: dict[str, str] = {
         "(wedge fix + #8532 fiducials/board-ID) is ahead of the committed "
         "copper too; the gate-pass rebuild owns the re-pin."
     ),
+    # Issue #9097 (PR #9131) adds recipe passes to board 04's
+    # ``generate_design.py`` (fragment merge, silk-over-drill clip,
+    # staircase compression), which changes the file ``readiness.json``
+    # pins.  Regenerating + re-pinning the committed artifact in the same PR
+    # turned 22 tests red (pinned reviewed-escape geometry, the #5744 "routing
+    # never touches footprint silk" invariant, remap identity, strict XPASS on
+    # the DRU), each needing an owner decision, so the regen was backed out.
+    # Issue #9455 owns the regen + re-pin; remove the entry when it lands.
+    "04-stm32-devboard": (
+        "Issue #9455: board 04's recipe moved in #9097 (PR #9131) ahead of the "
+        "committed copper and readiness evidence; the regen + re-pin (and the "
+        "#5744 silk-invariant decision) is owned by #9455."
+    ),
     "07-matchgroup-test": (
         "Issue #8399: the #8602 copper prune changed board 07's authored/reviewed "
         "sources; `refresh_readiness.py` refuses to re-pin while redundant_copper_* "
         "warnings remain (kct check allowance is 0). The last child of #8399 owns the re-pin."
     ),
+    # Board 09's entry (issue #9495 / #9519) was removed when #9519
+    # regenerated board 09's output and receipt via the #9469 pinned
+    # Docker toolchain workflow after #9502 moved both producers under
+    # run_on_evidence_toolchain.
 }
 
 BOARDS = sorted(p.parent.parent for p in BOARDS_DIR.glob("*/output/readiness.json"))
