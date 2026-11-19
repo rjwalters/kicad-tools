@@ -12,8 +12,10 @@ Two artifacts are emitted from the same ``--voltage-map`` + creepage-standard
 inputs the router/placement/census already consume:
 
 1. **Net -> netclass assignments** -- every mapped net is grouped into a
-   voltage-*domain* netclass (one class per distinct working-voltage magnitude),
-   written into the project's ``net_settings`` (``.kicad_pro``).
+   voltage-*domain* netclass (one class per distinct signed working-voltage
+   interval, #9659 -- a positive scalar map keeps the historical
+   one-class-per-magnitude names), written into the project's ``net_settings``
+   (``.kicad_pro``).
 
 2. **Custom ``(rule ...)`` clauses** -- one KiCad netclass-pair clause per domain
    pair whose required creepage exceeds the board's DRU clearance floor, written
@@ -54,7 +56,10 @@ from dataclasses import dataclass, field
 from itertools import combinations
 from typing import Iterable, Mapping, Sequence
 
-from kicad_tools.placement.hv_domains import build_required_by_domain_pair
+from kicad_tools.placement.hv_domains import (
+    as_domain_interval,
+    build_required_by_domain_pair,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -90,15 +95,55 @@ def _norm_net_key(name: str) -> str:
     return name[1:] if name.startswith("/") else name
 
 
-def domain_name(volts: float) -> str:
-    """Deterministic netclass name for a working-voltage *magnitude*.
+def _volt_token(volts: float) -> str:
+    """Render one endpoint as a bare safe token (``150``/``3p3``/``m150``)."""
+    return f"{float(volts):g}".replace(".", "p").replace("-", "m")
 
-    ``150`` -> ``kct_150V``; ``3.3`` -> ``kct_3p3V``; ``0`` -> ``kct_0V``.  The
-    decimal point is rendered ``p`` so the name is a safe bare token in a KiCad
-    rule condition (``A.NetClass == 'kct_3p3V'``) and a valid netclass name.
+
+def domain_name(volts: float) -> str:
+    """Deterministic netclass name for a signed scalar potential.
+
+    ``150`` -> ``kct_150V``; ``3.3`` -> ``kct_3p3V``; ``0`` -> ``kct_0V``; a
+    negative scalar keeps its sign as ``m`` (``-170`` -> ``kct_m170V``) so
+    opposite-polarity nets land in distinct domains (#9659).  The decimal point
+    is rendered ``p`` so the name is a safe bare token in a KiCad rule
+    condition (``A.NetClass == 'kct_3p3V'``) and a valid netclass name.
     """
-    token = f"{abs(float(volts)):g}".replace(".", "p").replace("-", "m")
-    return f"{NETCLASS_PREFIX}{token}V"
+    return f"{NETCLASS_PREFIX}{_volt_token(volts)}V"
+
+
+def interval_domain_name(lo: float, hi: float) -> str:
+    """Deterministic netclass name for a closed ``[lo, hi]`` interval (#9659).
+
+    A degenerate interval (``lo == hi``) keeps the scalar :func:`domain_name`
+    form, so an all-positive scalar map yields byte-identical names to the
+    pre-interval export.  A genuine range renders both endpoints sign-aware:
+    ``(-150, 150)`` -> ``kct_m150Vto150V``; ``(5, 150)`` -> ``kct_5Vto150V``.
+    """
+    if lo == hi:
+        return domain_name(hi)
+    return f"{NETCLASS_PREFIX}{_volt_token(lo)}Vto{_volt_token(hi)}V"
+
+
+def interval_json(lo: float, hi: float) -> float | dict[str, float]:
+    """Echo an interval the way the shared voltage-map parser does (#4411).
+
+    Degenerate -> bare scalar; genuine range -> ``{"min": lo, "max": hi}`` --
+    the same backward-compat convention ``voltage_map_from_dict`` uses when
+    echoing a parsed map, so a scalar-only board's JSON output is unchanged.
+    """
+    return lo if lo == hi else {"min": lo, "max": hi}
+
+
+def interval_label(lo: float, hi: float) -> str:
+    """Human-readable domain voltage for the DRU/prose headers.
+
+    Degenerate -> ``150V`` (byte-identical to the pre-interval headers for a
+    scalar map); range -> ``[-150..150]V``.
+    """
+    if lo == hi:
+        return f"{hi:g}V"
+    return f"[{lo:g}..{hi:g}]V"
 
 
 # ---------------------------------------------------------------------------
@@ -128,14 +173,15 @@ class ExportPlan:
     """The full set of derived artifacts for one board.
 
     ``net_domains`` maps each *actual* net name to its domain netclass;
-    ``domain_voltages`` maps each domain netclass to its representative voltage
-    magnitude; ``rules`` are the pairwise clearance clauses; and
+    ``domain_voltages`` maps each domain netclass to its signed
+    ``(lo, hi)`` working-voltage interval (#9659); ``rules`` are the pairwise
+    clearance clauses; and
     ``bridging_by_pair`` records, per domain pair, the reference designators of
     domain-bridging footprints excluded from that pair's elevated bound.
     """
 
     net_domains: dict[str, str] = field(default_factory=dict)
-    domain_voltages: dict[str, float] = field(default_factory=dict)
+    domain_voltages: dict[str, tuple[float, float]] = field(default_factory=dict)
     rules: list[RuleClause] = field(default_factory=list)
     bridging_by_pair: dict[tuple[str, str], list[str]] = field(default_factory=dict)
     dru_floor_mm: float = 0.0
@@ -152,38 +198,43 @@ class ExportPlan:
 
 
 def build_domains(
-    voltage_map: Mapping[str, float],
+    voltage_map: Mapping[str, float | tuple[float, float]],
     net_names: Iterable[str],
-) -> tuple[dict[str, str], dict[str, float]]:
-    """Group nets into voltage-domain netclasses.
+) -> tuple[dict[str, str], dict[str, tuple[float, float]]]:
+    """Group nets into voltage-domain netclasses keyed by **signed interval**.
 
-    A net's domain is determined by the magnitude of its mapped potential; nets
-    sharing a magnitude share a domain.  ``net_names`` supplies the *authoritative*
-    net names (from the PCB) so the emitted netclass patterns match exactly what
-    KiCad sees, regardless of whether the voltage-map author wrote the leading
-    hierarchical ``/``.
+    A net's domain is determined by its mapped closed interval ``[lo, hi]``
+    (#9659): nets with identical intervals share a domain, and opposite-polarity
+    scalars (``+150`` vs ``-150``) or swinging ranges land in distinct,
+    sign-aware domains instead of collapsing onto one magnitude class.  A
+    positive scalar map is unaffected -- its domains keep the exact
+    ``kct_<mag>V`` names of the pre-interval export.  ``net_names`` supplies
+    the *authoritative* net names (from the PCB) so the emitted netclass
+    patterns match exactly what KiCad sees, regardless of whether the
+    voltage-map author wrote the leading hierarchical ``/``.
 
     Args:
-        voltage_map: ``{net_name: volts}`` (magnitudes taken with ``abs``).
+        voltage_map: ``{net_name: volts}`` where a value is a **signed** scalar
+            or a closed ``(lo, hi)`` interval pair.
         net_names: All net names present on the board.
 
     Returns:
-        ``(net_domains, domain_voltages)`` where *net_domains* maps each matched
-        actual net name to its domain netclass and *domain_voltages* maps each
-        domain netclass to its voltage magnitude.
+        ``(net_domains, domain_intervals)`` where *net_domains* maps each
+        matched actual net name to its domain netclass and *domain_intervals*
+        maps each domain netclass to its ``(lo, hi)`` interval.
     """
-    norm_map = {_norm_net_key(k): abs(float(v)) for k, v in voltage_map.items()}
+    norm_map = {_norm_net_key(k): as_domain_interval(v) for k, v in voltage_map.items()}
 
     net_domains: dict[str, str] = {}
-    domain_voltages: dict[str, float] = {}
+    domain_intervals: dict[str, tuple[float, float]] = {}
     for name in net_names:
-        mag = norm_map.get(_norm_net_key(name))
-        if mag is None:
+        iv = norm_map.get(_norm_net_key(name))
+        if iv is None:
             continue
-        dname = domain_name(mag)
+        dname = interval_domain_name(*iv)
         net_domains[name] = dname
-        domain_voltages[dname] = mag
-    return net_domains, domain_voltages
+        domain_intervals[dname] = iv
+    return net_domains, domain_intervals
 
 
 def detect_bridging_footprints(
@@ -207,6 +258,11 @@ def detect_bridging_footprints(
         if not ref:
             continue
         domains: set[str] = set()
+        # Nets seen per domain, so a package straddling two nets of the SAME
+        # swinging domain (LINE and F1, both [-150, +150], #9659) is recorded
+        # as a self-pair bridger -- its pins sit at pin pitch exactly like a
+        # cross-domain bridger and needs the same courtyard exemption.
+        nets_by_domain: dict[str, set[str]] = {}
         for pad in getattr(fp, "pads", []):
             net_name = getattr(pad, "net_name", "") or ""
             if not net_name:
@@ -214,6 +270,10 @@ def detect_bridging_footprints(
             dom = net_domains.get(net_name) or net_domains.get(_norm_net_key(net_name))
             if dom is not None:
                 domains.add(dom)
+                nets_by_domain.setdefault(dom, set()).add(_norm_net_key(net_name))
+        for dom, nets in nets_by_domain.items():
+            if len(nets) >= 2:
+                out.setdefault((dom, dom), set()).add(ref)
         for a, b in combinations(sorted(domains), 2):
             out.setdefault((a, b), set()).add(ref)
     return {pair: sorted(refs) for pair, refs in out.items()}
@@ -225,7 +285,7 @@ def detect_bridging_footprints(
 
 
 def build_rule_clauses(
-    domain_voltages: Mapping[str, float],
+    domain_voltages: Mapping[str, float | tuple[float, float]],
     bridging_by_pair: Mapping[tuple[str, str], Sequence[str]],
     *,
     standard_id: str = "iec60664",
@@ -238,18 +298,22 @@ def build_rule_clauses(
 
     Reuses :func:`kicad_tools.placement.hv_domains.build_required_by_domain_pair`
     verbatim for the ``{(a, b): required_mm}`` matrix (same table lookup, same
-    ``hv_threshold`` gate, same fail-loud out-of-table contract).  Only pairs
-    whose required creepage is strictly above ``dru_floor_mm`` get a rule -- at
-    or below the floor the board-wide DRU clearance already covers them.
+    ``hv_threshold`` gate, same fail-loud out-of-table contract), differencing
+    domain intervals end-to-end (#9659) and including each domain against
+    *itself* -- a swinging ``[-150, +150]`` domain holds 300 V across its own
+    members, so a same-class rule is emitted for it (a scalar domain spans 0 V
+    and never gets one).  Only pairs whose required creepage is strictly above
+    ``dru_floor_mm`` get a rule -- at or below the floor the board-wide DRU
+    clearance already covers them.
 
     The referee constraint is ``clearance`` (through-air).  Because creepage is
     always >= clearance, requiring ``clearance >= required_creepage`` is a
     conservative (never-under-strict) enforcement of the creepage requirement.
 
     Raises:
-        StandardLookupError: If any cross-domain ``|dV|`` exceeds the highest
-            tabulated row (propagated from ``build_required_by_domain_pair`` --
-            never silently extrapolated).
+        StandardLookupError: If any pair's end-to-end ``|dV|`` (cross- or
+            intra-domain) exceeds the highest tabulated row (propagated from
+            ``build_required_by_domain_pair`` -- never silently extrapolated).
     """
     required = build_required_by_domain_pair(
         domain_voltages,
@@ -257,6 +321,7 @@ def build_rule_clauses(
         pollution_degree=pollution_degree,
         material_group=material_group,
         hv_threshold=hv_threshold,
+        include_intra_domain=True,
     )
 
     clauses: list[RuleClause] = []
@@ -278,7 +343,7 @@ def build_rule_clauses(
 
 
 def build_export(
-    voltage_map: Mapping[str, float] | None,
+    voltage_map: Mapping[str, float | tuple[float, float]] | None,
     net_names: Iterable[str],
     footprints: Iterable,
     *,
@@ -384,7 +449,8 @@ def render_dru_block_body(plan: ExportPlan) -> str:
     ]
     if plan.domain_voltages:
         domains = ", ".join(
-            f"{d}={plan.domain_voltages[d]:g}V" for d in sorted(plan.domain_voltages)
+            f"{d}={interval_label(*plan.domain_voltages[d])}"
+            for d in sorted(plan.domain_voltages)
         )
         lines.append(f"# Voltage domains: {domains}")
     if plan.bridging_by_pair:
