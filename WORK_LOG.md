@@ -16,6 +16,15 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-19
 
+- **PR #9486**: test: compare design-source parity by sha256 so drift names the file
+- **PR #9479**: fix: treat only SMD-bearing faces as populated for add-fiducials
+- **PR #9458**: fix: probe concrete copper layers in the DRU loosening gate for split-floor profiles
+- **PR #9456**: feat: add kct check --migrate-waivers to re-bind ev3 waivers to ev4
+- **PR #9451**: feat: let projects declare a smaller reference-designator silk height
+- **Issue #9481** (closed): Design-source parity tests fail as an opaque 60s pytest-timeout instead of naming the drifted file
+- **Issue #9472** (closed): add-fiducials --sides populated adds back-side fiducials when the back carries only through-hole parts
+- **Issue #9448** (closed): Silkscreen: default to smaller reference designators (0.8 mm) with larger functional labels, and let a project declare it
+- **Issue #9422** (closed): kct export refuses a 2 oz board: merge_dru_floors wants to write the 1 oz clearance floor (0.1016 mm) over a project at 0.15 mm
 - **PR #9478**: test: pin ci.yml merge_group gates and concurrency invariants
 - **Issue #9307** (closed): Declare merge_group in select_routed_pcbs.py and pin the merge-group CI invariants with a test
 - **PR #9496**: docs: note the same-footprint same-net mask-bridge info exemption
