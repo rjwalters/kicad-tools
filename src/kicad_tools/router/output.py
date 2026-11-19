@@ -16,6 +16,34 @@ if TYPE_CHECKING:
     from .primitives import Route
 
 
+def _budget_search_failure_labels(router: Autorouter, unrouted_ids: set[int]) -> dict[int, str]:
+    """Budget-labelled give-ups (timeout / iteration cap), keyed by net id.
+
+    Reads the grid pathfinder's ``search_failures_by_net`` store (C++
+    ``FAILURE_*`` codes recorded per net by the negotiated loop, #6369) the
+    same way ``route_cmd._write_search_failures_sidecar`` does, and keeps only
+    the codes :func:`stuck_classifier.is_budget_search_failure` classifies as
+    budget failures (``timeout``, ``iteration_limit``, ``deadline``, ...).
+    Empty when the router recorded nothing budget-labelled -- or when the
+    object has no store at all (a non-grid engine, a test mock), so callers
+    never see a fabricated label.
+    """
+    from .stuck_classifier import is_budget_search_failure, normalize_search_failure
+
+    pathfinder = getattr(router, "router", None)
+    by_id = getattr(pathfinder, "search_failures_by_net", None)
+    if not isinstance(by_id, dict) or not by_id:
+        return {}
+    out: dict[int, str] = {}
+    for nid, code in by_id.items():
+        if nid not in unrouted_ids:
+            continue
+        label = normalize_search_failure(code)
+        if label and is_budget_search_failure(label):
+            out[int(nid)] = label
+    return out
+
+
 def show_routing_summary(
     router: Autorouter,
     net_map: dict[str, int],
@@ -218,6 +246,15 @@ def show_routing_summary(
     if unrouted_ids:
         print("\nUnrouted nets:")
 
+    # Issue #9601 (audit row 5): a net whose search was cut off by its
+    # wall-clock/iteration budget must not be reported as a bare
+    # "No path found" -- the remedy (raise the budget / coarser grid) is
+    # entirely different from a geometric blocker.  The negotiated loop
+    # records each net's last C++ FAILURE_* code on the pathfinder
+    # (``search_failures_by_net``, #6369); budget-labelled codes are
+    # surfaced here.
+    budget_search_labels = _budget_search_failure_labels(router, unrouted_ids)
+
     # Show failed routes first with detailed diagnostics
     shown_nets_first: set[int] = set()
     for net_id in sorted(unrouted_ids):
@@ -242,7 +279,14 @@ def show_routing_summary(
                 )
                 print(f"  {net_name}: {cause_name} - {failure.reason}")
         else:
-            print(f"  {net_name}: No path found")
+            budget_label = budget_search_labels.get(net_id)
+            if budget_label:
+                print(
+                    f"  {net_name}: {budget_label} (search budget spent -- "
+                    "the A* was cut off before it could finish, not geometrically blocked)"
+                )
+            else:
+                print(f"  {net_name}: No path found")
 
     # Show successful routes (brief, only in verbose mode)
     if verbose and routed_net_ids:
@@ -376,6 +420,32 @@ def show_routing_summary(
         print("\nBased on failure analysis:\n")
 
         suggestions_shown = 0
+
+        # Check for SEARCH BUDGET give-ups (timeout / iteration cap, #9601).
+        # Row 5 of the PCBJam audit: a net cut off by its search budget has a
+        # budget remedy (raise it / shrink the search space), not a geometry
+        # remedy -- without this block the summary's only advice was
+        # monte-carlo / more layers, and the net read as unroutable.
+        budget_nets = {nid for nid in unrouted_ids if nid in budget_search_labels}
+        if budget_nets:
+            count = len(budget_nets)
+            suggestions_shown += 1
+            print(
+                f"{suggestions_shown}. SEARCH BUDGET ({count} net{'s' if count != 1 else ''} affected)"
+            )
+            print("   These nets stopped at their search budget (wall-clock deadline")
+            print("   or iteration cap), not at a geometric blocker.")
+            grid_res_hint = getattr(router.grid, "resolution", None)
+            if isinstance(grid_res_hint, (int, float)) and grid_res_hint > 0:
+                print(
+                    f"   Try: a coarser grid, e.g. --grid {grid_res_hint * 2:g}, to shrink"
+                    " the per-net A* space; and/or"
+                )
+            print(
+                "   Try: raise the budgets --per-net-timeout <seconds> (default 30)"
+                " / --max-search-iterations <n>"
+            )
+            print("   Per-net diagnosis: kct net-status --why <board>\n")
 
         # Check for PAD_INACCESSIBLE issues
         all_pin_failures = failures_by_cause.get("pin_access", [])
