@@ -1597,7 +1597,9 @@ class ClearanceRule(DRCRule):
         read as clean.  Report the degradation at info (it is a coverage gap of
         the tool, not a defect of the board -- the same convention as
         ``tht_smd_spacing_incomplete``), naming the pad and the refusing
-        primitive kind.
+        primitive kind.  The severity choice and its measured kicad-cli
+        parity are documented in ``docs/guides/physical-copper-gap.md``
+        (Issue #9539).
         """
         findings: list[DRCViolation] = []
         for footprint in pcb.footprints:
