@@ -50,7 +50,6 @@ from kicad_tools.drc.cpp_backend import (
 from kicad_tools.drc.cpp_backend import (
     is_cpp_available as _is_drc_cpp_available,
 )
-from kicad_tools.router.clearance_kernel import CLEARANCE_EPSILON_MM
 
 # Try to import rtree, gracefully handle missing dependency
 try:
@@ -63,14 +62,17 @@ except ImportError:
 
 
 # Floating-point tolerance for pad-pad clearance comparisons.
-# Set to the largest shortfall pinned KiCad 10.0.6 accepts on a
-# track-to-track probe (500 nm accepted, 600 nm flagged -- Issue #9619), so a
-# marginal pad-pad gap kct flags is one kicad-cli DRC also flags.  Before
-# #9619 this was 1e-4 (0.1 um), a purely float-noise band introduced for
-# IEEE-754 rounding in radius and trig math (e.g. 0.14999999... vs 0.15
-# exactly).  Imported from the clearance kernel so the copies cannot drift
-# apart.
-_CLEARANCE_EPSILON_MM = CLEARANCE_EPSILON_MM
+# Set to the largest shortfall pinned KiCad 10.0.6 accepts (500 nm, Issue
+# #9619 -- the black-box probe in
+# tests/test_clearance_slack_kicad_band_9619.py), so a marginal pad-pad gap
+# kct flags is one kicad-cli DRC also flags.  Checker-side twin of
+# ``validate/rules/base.py``'s ``DRC_TOLERANCE``: deliberately wider than
+# the router's 1e-4 slack (the router keeps a margin inside KiCad's band;
+# see the #9619 ruling note next to the router's ``CLEARANCE_EPSILON_MM``).
+# Before #9619 this was 1e-4 (0.1 um), a purely float-noise band introduced
+# for IEEE-754 rounding in radius and trig math (e.g. 0.14999999... vs 0.15
+# exactly).
+_CLEARANCE_EPSILON_MM = 5e-4
 
 
 @dataclass

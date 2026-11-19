@@ -34,13 +34,16 @@ class TestEpsilonConstant:
         """Epsilon must be much smaller than any real clearance."""
         assert _CLEARANCE_EPSILON_MM < 0.001  # less than 1 micron
 
-    def test_epsilon_is_the_kernel_kicad_band(self):
-        """The pad-pad epsilon is the kernel's shared KiCad acceptance band
+    def test_epsilon_is_the_checker_kicad_band(self):
+        """The pad-pad epsilon is the checker's KiCad acceptance band
         (#9619): 500 nm -- the largest shortfall pinned KiCad 10.0.6
-        accepts on the track-to-track probe."""
-        from kicad_tools.router.clearance_kernel import CLEARANCE_EPSILON_MM
+        accepts on the probe.  Twin of ``validate/rules/base.py``'s
+        ``DRC_TOLERANCE`` (duplicated as a literal, like the pre-#9619
+        copies were); deliberately NOT the router kernel's 1e-4, which the
+        #9619 ruling keeps as the generator's own margin."""
+        from kicad_tools.validate.rules.base import DRC_TOLERANCE
 
-        assert _CLEARANCE_EPSILON_MM == CLEARANCE_EPSILON_MM == 5e-4
+        assert _CLEARANCE_EPSILON_MM == DRC_TOLERANCE == 5e-4
 
     def test_edge_clearance_epsilon_diverges_deliberately(self):
         """``validate/rules/edge.py`` keeps its own narrower 1e-4 epsilon.

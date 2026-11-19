@@ -18,9 +18,21 @@ if TYPE_CHECKING:
 
 # Numerical guard band for DRC clearance comparisons (in mm).
 #
-# Set to the largest shortfall pinned KiCad 10.0.6 accepts on a
-# track-to-track probe -- 500 nm accepted, 600 nm flagged (Issue #9619) --
-# so a finding at kct's verdict boundary is one kicad-cli DRC agrees on.
+# Issue #9619: set to the largest shortfall pinned KiCad 10.0.6 accepts --
+# 500 nm on the black-box probe (tests/test_clearance_slack_kicad_band_9619.py
+# re-runs it against the pinned image), so a finding at kct's verdict
+# boundary is one kicad-cli DRC agrees on.  Probe detail: parallel 0.2 mm
+# tracks under a 0.127 mm rule -- a 500 nm shortfall is accepted, 501 nm is
+# flagged; a 45-degree pair and a pad-to-track pair flip at the same edge
+# within the 1 nm constructibility of diagonal coordinates.
+#
+# Deliberately wider than the router's slack (the router package's own
+# ``CLEARANCE_EPSILON_MM``, still 1e-4): the checker matches KiCad
+# verdict-for-verdict, while copper the router *writes* keeps a margin
+# inside KiCad's tolerance so rounding on save cannot tip it into a
+# kicad-cli violation (#9619 ruling: a deliberate split, not a parity bug
+# -- the generator stays 100 nm inside the band).
+#
 # The band still sits far above the IEEE-754 noise floor it was originally
 # introduced for (#3913): float64 coordinates in the ~0-300 mm board range
 # accumulate at most ~1e-9 mm of rounding through a few chained
@@ -36,13 +48,14 @@ if TYPE_CHECKING:
 # between 100 nm and 500 nm now passes where #3913 reported it -- that is
 # the KiCad-parity trade-off this issue accepts.
 #
-# The single shared value lives in ``router.clearance_kernel`` (the Python
-# kernel constant, mirrored by the C++ kernel); the router commits gates and
-# the validate rules share this number.  It is duplicated as a literal here
-# rather than imported because importing anything under ``kicad_tools.router``
-# from the validate package would break the lazy-import contract
-# (``tests/test_validate_lazy_imports.py`` forbids ``kicad_tools.validate.*``
-# from loading the router); keep the two in sync.
+# Duplicated as a literal (like ``manufacturers/fabrication_process.py``'s
+# twin) rather than imported because the router's copy deliberately stays
+# at 1e-4 (see above), and importing anything under
+# ``kicad_tools.router`` from the validate package would break the
+# lazy-import contract (``tests/test_validate_lazy_imports.py`` forbids
+# ``kicad_tools.validate.*`` from loading the router).  Keep the
+# checker-side copies (this, ``drc/incremental.py``,
+# ``creepage/engine.py``) in sync.
 DRC_TOLERANCE: float = 5e-4
 
 # Band-edge float guard (mm).  KiCad compares in integer nanometres, so its

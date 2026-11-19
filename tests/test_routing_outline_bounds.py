@@ -407,18 +407,11 @@ def test_circular_cutout_violation_is_not_hidden_by_chord_offset():
 
     Copper outside a 5 mm circular cutout, aimed at the first chord's
     midpoint (where the chord is farthest from the true hole edge), with a
-    true clearance a hair below the effective threshold of
-    ``0.3 - _CLEARANCE_EPSILON_MM``.  Measured against the raw chords the
-    trace looks like it clears the threshold and the violation vanished;
-    charging the certified sagitta restores it.
-
-    The scenario distance is derived from the io-side epsilon rather than
-    hard-coded: #9619 widened that slack from 1e-4 to 5e-4 mm (KiCad's
-    probed band), which moves the acceptance threshold the chord error
-    must climb.
+    true clearance of 0.299895001298 mm -- below the effective threshold of
+    ``0.3 - _CLEARANCE_EPSILON_MM == 0.2999``.  Measured against the raw
+    chords the trace looks like it clears 0.299905 mm and the violation
+    vanished; charging the certified sagitta restores it.
     """
-    from kicad_tools.router.io import _CLEARANCE_EPSILON_MM
-
     edges = _cutout_edges()
     n = circle_segment_count(_CUTOUT_RADIUS)
     sagitta = circle_sagitta(_CUTOUT_RADIUS, n)
@@ -427,14 +420,10 @@ def test_circular_cutout_violation_is_not_hidden_by_chord_offset():
     assert edges.max_error_mm == pytest.approx(sagitta, rel=1e-12)
     assert 0 < sagitta <= _CIRCLE_TESSELLATION_MAX_ERROR_MM
 
-    threshold = _EDGE_CLEARANCE - _CLEARANCE_EPSILON_MM
-    # Half a sagitta below the threshold: a real violation, but the raw
-    # chord reading (true + sagitta) climbs back above it -- the hiding
-    # effect under review.
-    true_clearance = threshold - sagitta / 2
-    assert true_clearance < threshold, "scenario must be a real violation"
+    true_clearance = 0.299895001298
+    assert true_clearance < _EDGE_CLEARANCE - 1e-4, "scenario must be a real violation"
     # Raw chord distance would read *above* the threshold -- the hiding effect.
-    assert true_clearance + sagitta > threshold
+    assert true_clearance + sagitta > _EDGE_CLEARANCE - 1e-4
 
     trace = _radial_trace(
         _CUTOUT_CENTER,
@@ -443,9 +432,8 @@ def test_circular_cutout_violation_is_not_hidden_by_chord_offset():
     )
     violations = _edge_violations(edges, trace)
     assert violations, (
-        "a trace just below the effective edge threshold from a circular "
-        "cutout must report an edge violation; the inscribed chords must "
-        "not hide it"
+        "a trace 0.2999 mm from a circular cutout must report an edge "
+        "violation; the inscribed chords must not hide it"
     )
     # The reported distance is the true clearance, not the chord's.
     assert violations[0].distance == pytest.approx(true_clearance, abs=1e-9)

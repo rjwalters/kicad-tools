@@ -229,10 +229,9 @@ def _disc_dilate_exact(mask: np.ndarray, disc: np.ndarray) -> np.ndarray:
 
 
 # Issue #6117: tolerance for the post-route via-vs-foreign-pad check in
-# ``Router._validate_route_clearance``.  Set to the kernel's shared slack
-# (the KiCad-probed 500 nm acceptance band, Issue #9619) so both backends
-# reject the same vias and match kicad-cli DRC on marginal gaps.
-_VIA_PAD_CLEARANCE_EPSILON_MM = CLEARANCE_EPSILON_MM
+# ``Router._validate_route_clearance``.  Matches the C++ validator's
+# ``CLEARANCE_EPSILON_MM`` (grid.cpp) so both backends reject the same vias.
+_VIA_PAD_CLEARANCE_EPSILON_MM = 1e-4
 
 
 @dataclass(frozen=True)

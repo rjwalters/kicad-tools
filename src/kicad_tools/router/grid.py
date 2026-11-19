@@ -179,10 +179,10 @@ def halo_offsets(radius_cells: int) -> tuple[tuple[int, int], ...]:
     r = max(0, radius_cells)
     centre = _KVia(x=0.0, y=0.0, diameter=0.0, drill=0.0)
     # Units: ``copper_gap`` is queried in *cells* here, and the tolerance is the
-    # kernel's mm-domain ``CLEARANCE_EPSILON_MM`` (5e-4) reused as a cell-unit
+    # kernel's mm-domain ``CLEARANCE_EPSILON_MM`` (1e-4) reused as a cell-unit
     # slack.  Harmless at any realistic radius: squared integer distances are
     # integers, so a false inclusion needs ``sqrt(r**2 + 1) - r ~= 1/(2r)`` below
-    # 5e-4, i.e. ``r`` above roughly 1000 cells.
+    # 1e-4, i.e. ``r`` above roughly 5000 cells.
     # ``test_the_read_side_dilation_set_is_unchanged`` pins the resulting cell
     # set to the plain ``dx**2 + dy**2 <= r**2`` form.
     offsets = tuple(
@@ -5001,9 +5001,8 @@ class RoutingGrid:
                 min_actual = clearance
 
             # Issue #1016: Check violation against component-specific clearance
-            # Issue #6509: same kernel slack as native segment_pad_clear
+            # Issue #6509: same 1e-4 mm slack as native segment_pad_clear
             # (grid.cpp), so float noise at exactly the rule is accepted.
-            # Issue #9619: the slack is KiCad's probed 500 nm band.
             if clearance < required_clearance - _KERNEL_EPSILON_MM:
                 violation_loc = (pad.x, pad.y)
         return min_actual, violation_loc

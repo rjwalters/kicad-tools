@@ -64,7 +64,6 @@ from .class_clearance_floors import (
     merge_named_floors,
     remember_authored_floors,
 )
-from .clearance_shapes import CLEARANCE_EPSILON_MM as _CLEARANCE_EPSILON_MM
 from .clearance_shapes import NO_INTERACTION as _NO_INTERACTION
 from .clearance_shapes import copper_gap as _copper_gap
 from .clearance_shapes import pad_shape as _kernel_pad_shape
@@ -83,11 +82,14 @@ from .layers import Layer, LayerDefinition, LayerStack, LayerType
 from .pad_geometry import pad_point_distance, pad_segment_distance
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
 
-# ``_CLEARANCE_EPSILON_MM`` (imported above from the clearance kernel) is the
-# floating-point tolerance for clearance comparisons in validate_routes: the
-# largest shortfall pinned KiCad 10.0.6 accepts on a track-to-track probe
-# (500 nm accepted, 600 nm flagged -- Issue #9619), so a marginal gap kct
-# accepts is one kicad-cli DRC also accepts.
+# Floating-point tolerance for clearance comparisons in validate_routes
+# (Issue #2465).  IEEE-754 rounding in radius/distance math can leave
+# computed clearances at values like 0.14999999... when the design intent
+# is exactly 0.150mm, producing spurious sub-micron false-positive
+# violations.  0.1 micron is well below any manufacturing precision and
+# matches the epsilon used in #2428 (validate/rules/edge.py) and the
+# pad-pad DRC check in drc/incremental.py.
+_CLEARANCE_EPSILON_MM = 1e-4
 
 # =============================================================================
 # DRC COMPLIANCE TYPES AND FUNCTIONS

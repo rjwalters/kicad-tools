@@ -41,8 +41,10 @@ from dataclasses import dataclass
 #: validate-side ``via_in_pad`` DRC rule uses for the identical checks) --
 #: duplicated as a literal here rather than imported to avoid a
 #: ``manufacturers`` -> ``validate`` package dependency; keep the two
-#: values in sync if either changes.  Both are the kernel's KiCad-probed
-#: slack (500 nm acceptance band, Issue #9619).
+#: values in sync if either changes.  Both are the checker-side KiCad
+#: acceptance band (500 nm, Issue #9619 -- twin of
+#: ``validate/rules/base.py``'s ``DRC_TOLERANCE``, deliberately wider than
+#: the router's 1e-4 slack).
 _ELIGIBILITY_TOLERANCE_MM = 5e-4
 
 

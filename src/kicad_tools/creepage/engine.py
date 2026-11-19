@@ -46,7 +46,6 @@ from kicad_tools.creepage.standards import (
     DEFAULT_INSULATION,
     dimension_x_mm,
 )
-from kicad_tools.router.clearance_kernel import CLEARANCE_EPSILON_MM
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from kicad_tools.creepage.standards import CreepageStandard
@@ -62,10 +61,13 @@ BOARD_EDGE_LABEL = "<board edge>"
 _EPS = 1e-9
 _INTERIOR_SHRINK = 1e-6  # shrink a slot before the "crosses interior" test
 _BRIDGE_QUAD_SEGS = 16  # arc resolution of the dimension-X opening (round joins)
-# A pair is a PASS when creepage >= min within this tolerance (mm).  Set to
-# the kernel's KiCad-probed slack (500 nm acceptance band, Issue #9619) --
-# mirrors the spirit of DRC_TOLERANCE and shares its value via the kernel.
-_PASS_TOLERANCE = CLEARANCE_EPSILON_MM
+# A pair is a PASS when creepage >= min within this tolerance (mm).
+# Checker-side reporting twin of ``validate/rules/base.py``'s
+# ``DRC_TOLERANCE``: the largest shortfall pinned KiCad 10.0.6 accepts
+# (500 nm, Issue #9619).  A literal, not an import -- the router's
+# ``CLEARANCE_EPSILON_MM`` deliberately stays 1e-4 (#9619 ruling) and
+# creepage must not load the router for its reporting value.
+_PASS_TOLERANCE = 5e-4
 
 # Per-net voltage model (#4371): two conductors whose mapped potentials differ
 # by less than this (volts) are treated as the SAME node -> required creepage

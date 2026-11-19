@@ -387,7 +387,7 @@ bool Pathfinder::own_path_vias_clear(const std::vector<AStarNode>& closed, int v
         if (node.x != x || node.y != y) {
             const auto [vx, vy] = grid_.grid_to_world(node.x, node.y);
             const float gap = std::hypot(wx - vx, wy - vy) - drill;
-            if (gap < floor_mm - 5e-4f) return false;  // grid.cpp CLEARANCE_EPSILON_MM
+            if (gap < floor_mm - 1e-4f) return false;  // grid.cpp CLEARANCE_EPSILON_MM
         }
         const int parent = node.parent_idx;
         if (parent < 0 || parent >= n) break;

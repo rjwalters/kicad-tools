@@ -8,8 +8,6 @@ from collections.abc import Iterator
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from .clearance_kernel import CLEARANCE_EPSILON_MM
-
 if TYPE_CHECKING:
     from .primitives import Pad
 
@@ -140,7 +138,7 @@ class ComponentHoleIndex:
                 t = max(0, min(1, ((x - x1) * dx + (y - y1) * dy) / length2)) if length2 else 0
                 if (
                     math.hypot(x - x1 - t * dx, y - y1 - t * dy) - radius - drill / 2
-                    < clearance - CLEARANCE_EPSILON_MM
+                    < clearance - 1e-4
                 ):
                     return False
         return True

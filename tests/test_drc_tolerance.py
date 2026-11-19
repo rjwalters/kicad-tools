@@ -7,8 +7,10 @@ violations up to 5 um below the floor (e.g. a 0.0999 mm clearance vs a
 0.1016 mm / 4 mil JLCPCB floor is only 1.7 um short).
 
 Issue #9619 widened it to 5e-4 mm (0.5 um): the black-box probe on pinned
-KiCad 10.0.6 accepts shortfalls up to 500 nm and flags 600 nm, so a guard
-of 1e-4 reported "failing" 100-500 nm gaps that kicad-cli DRC accepts.
+KiCad 10.0.6 (10 nm steps refined at 1 nm, parallel tracks / a 45-degree
+pair / a pad-to-track pair) accepts shortfalls up to 500 nm and flags
+501 nm, so a guard of 1e-4 reported "failing" 100-500 nm gaps that
+kicad-cli DRC accepts.
 The band still sits below the ~1.6 um marginal-violation class, so those
 correctly fail, and float64 rounding noise (~1e-9 mm at board
 coordinates) is still five orders of magnitude below the band.

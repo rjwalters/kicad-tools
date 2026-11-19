@@ -388,12 +388,12 @@ def test_escape_boundary_matches_the_pre_kernel_arithmetic() -> None:
 def test_adapter_keeps_the_lattice_epsilon_not_the_kernels() -> None:
     """The migration swapped geometry, not the verdict tolerance.
 
-    The kernel's ``CLEARANCE_EPSILON_MM`` is 5e-4 mm -- half a million times
-    the lattice's own 1e-9 slack.  Adopting it here would be a behaviour
-    change wearing a refactor's clothes: candidates 0.5 um inside the
-    requirement would start being accepted.  Collapsing the two is Phase 4's
-    job, once every consumer is on the kernel, so until then the difference
-    is an invariant rather than an oversight.
+    The kernel's ``CLEARANCE_EPSILON_MM`` is 1e-4 mm -- a thousand times the
+    lattice's own 1e-9 slack.  Adopting it here would be a behaviour change
+    wearing a refactor's clothes: candidates 0.1 um inside the requirement
+    would start being accepted.  Collapsing the two is Phase 4's job, once
+    every consumer is on the kernel, so until then the difference is an
+    invariant rather than an oversight.
     """
     assert ka.LATTICE_CLEARANCE_EPSILON_MM == 1e-9
     assert ka.LATTICE_CLEARANCE_EPSILON_MM < CLEARANCE_EPSILON_MM

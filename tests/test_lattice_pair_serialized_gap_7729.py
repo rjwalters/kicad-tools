@@ -17,7 +17,7 @@ from kicad_tools.router.lattice.pathfinder import _PAIR_SERIALIZATION_MARGIN_MM
 
 TRACE_W = 0.275
 GAP = 0.1016  # 4 mil: the floor ``DesignRules.pair_gap`` hands the checker
-DRC_TOLERANCE = 5e-4  # validate/rules/base.py, the kernel's KiCad-probed slack (#9619)
+DRC_TOLERANCE = 5e-4  # validate/rules/base.py, the checker's KiCad-probed band (#9619)
 
 
 def _octilinear_centerline(rng: random.Random) -> list[tuple[float, float]]:

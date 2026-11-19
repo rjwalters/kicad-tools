@@ -181,7 +181,14 @@ def check_netclass_clearance_copper(
     }
     fab_floor = design_rules.min_clearance_mm
     # Only classes stricter than the fab floor add a requirement to ``clearance``.
-    if not any(value > fab_floor + DRC_TOLERANCE for value in floors.values()):
+    # Compare the two rule *floors* directly (#9619 review): ``DRC_TOLERANCE``
+    # is an acceptance band for a *measured gap* (applied once, to
+    # ``clearance`` against ``required_class`` below).  Spending it here too
+    # suppressed any authored class within 500 nm of the fab floor -- with a
+    # 0.1270 fab floor and an authored 0.1273 class, copper 600 nm below the
+    # class requirement sailed through unflagged.  Both floors are parsed
+    # from the same 4-decimal mm text, so a strict ``>`` is float-exact.
+    if not any(value > fab_floor for value in floors.values()):
         return results
 
     from kicad_tools.manufacturers.project_generator import (
@@ -237,7 +244,10 @@ def check_netclass_clearance_copper(
             coupled = is_router_coupled_pair(a.net_name, b.net_name, recorded_pairs)
             governing = package_floors if same_package or coupled else floors
             required_class = pair_floor(governing, a.net_number, b.net_number)
-            if required_class <= fab_floor + DRC_TOLERANCE:
+            # Direct floor-vs-floor comparison (#9619 review): the acceptance
+            # band applies once, to the measured gap at the ``drc_clear`` call
+            # below -- not to whether the authored class governs at all.
+            if required_class <= fab_floor:
                 continue
             if a.element_type != "segment" and b.element_type != "segment":
                 if any(

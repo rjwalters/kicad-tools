@@ -57,8 +57,6 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, NamedTuple, 
 
 from kicad_tools.core.geometry import segment_to_segment_distance
 
-from .clearance_kernel import CLEARANCE_EPSILON_MM
-
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from kicad_tools.router.layers import Layer
     from kicad_tools.router.primitives import Route, Segment, Via
@@ -66,9 +64,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 # A pairwise conflict is only reported when the edge-to-edge gap falls short of
 # the requirement by more than this tolerance (mm).  Mirrors the census'
-# ``_PASS_TOLERANCE`` -- the slack is the KiCad-probed 500 nm acceptance band
-# (Issue #9619), so a shortfall kct passes is one kicad-cli DRC passes too.
-_PASS_TOLERANCE = CLEARANCE_EPSILON_MM
+# ``_PASS_TOLERANCE`` -- a sub-micron shortfall is FP noise, not a real defect.
+_PASS_TOLERANCE = 1e-4
 
 # Extra necking distance beyond the footprint courtyard (or pad-bounds
 # fallback).  Kept as data rather than CLI policy so the same flat regions can

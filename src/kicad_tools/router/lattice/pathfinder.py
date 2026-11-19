@@ -53,7 +53,6 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..clearance_kernel import CLEARANCE_EPSILON_MM
 from ..layers import LayerStack
 from ..pairplan.gateway import Gateway, GatewaySite, fans_couple_off_pitch
 from ..pairplan.gateway import gateway_anchor_point as _gateway_anchor
@@ -4198,10 +4197,9 @@ class LatticePathfinder:
                         return None, "pair-leg-blocked"
             # Issue #7729: the board file stores 4 decimals, so a vertex can
             # move ~0.07 um and a leg pair ~0.14 um closer than the pitch
-            # checked below (whose slop already spends the 5e-4 mm that
-            # ``kct check`` allows, Issue #9619).  Emit the legs a hair
-            # wider so the shipped gap still meets ``pair_gap`` after
-            # serialization.
+            # checked below (whose slop already spends the 1e-4 mm that
+            # ``kct check`` allows).  Emit the legs a hair wider so the
+            # shipped gap still meets ``pair_gap`` after serialization.
             emit_half = half_pitch + _PAIR_SERIALIZATION_MARGIN_MM / 2.0
             plus = offset_polyline(center, +emit_half)
             minus = offset_polyline(center, -emit_half)
@@ -4302,14 +4300,13 @@ class LatticePathfinder:
             # Intra-pair floor: leg-to-leg centreline separation must never
             # dip below the pitch (== trace_width + intra-pair clearance).
             # The offset body is at exactly the pitch by construction; this
-            # guards the attach doglegs and miter joints.  The same kernel
-            # slack ``kct check`` allows (Issue #9619).
+            # guards the attach doglegs and miter joints.  1e-4 mm slop.
             full_p, full_n = legs[0][2], legs[1][2]
             segs_p = [(a, b) for a, b in zip(full_p, full_p[1:], strict=False) if dist(a, b) > 1e-9]
             segs_n = [(a, b) for a, b in zip(full_n, full_n[1:], strict=False) if dist(a, b) > 1e-9]
             for a, b in segs_p:
                 for c, d in segs_n:
-                    if seg_seg_dist(a, b, c, d) < pc.pitch - CLEARANCE_EPSILON_MM:
+                    if seg_seg_dist(a, b, c, d) < pc.pitch - 1e-4:
                         return None, "pair-intra-clearance"
 
             # Partner-pad floor: each leg must keep the intra-pair clearance

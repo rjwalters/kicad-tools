@@ -53,7 +53,7 @@ Why the gaps are edge-to-edge now
 question directly, so the comparison is now against the clearance alone.  The
 two forms are algebraically identical -- ``d - half >= clr`` is
 ``d >= half + clr`` -- so no verdict moves except by floating-point noise far
-below the ``5e-4`` slack both forms carry.
+below the ``1e-4`` slack both forms carry.
 """
 
 from __future__ import annotations
@@ -85,7 +85,7 @@ verbatim; its Python twin expressed the same intent as shapely's ``intersects``
 short-circuit.  For any realistic clearance the ordinary
 :data:`~kicad_tools.router.clearance_kernel.CLEARANCE_EPSILON_MM` comparison is
 stricter and this rule never decides anything -- it only matters when the
-requirement itself is at or below 5e-4 mm.
+requirement itself is at or below 1e-4 mm.
 """
 
 _Edge = tuple[float, float, float, float]
