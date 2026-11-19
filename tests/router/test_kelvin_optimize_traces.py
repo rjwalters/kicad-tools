@@ -23,6 +23,9 @@ SHUNT_METAL = box(1.6, 9.6, 2.4, 10.4)
 FORCE = [(2, 10), (8, 10), (8, 14)]
 # Clear of the force corner at (8, 10), inside the 0.5 mm chamfer that replaces it.
 SENSE = [(2, 10), (2, 12.6), (7.55, 12.6), (7.55, 10.3)]
+# U1's pad centre sits left of and above the chamfer's sweep, close enough
+# that a grown mask opening (``mask_clearance`` below) reaches into it.
+SENSE_SWEEP = [(2, 10), (2, 12.6), (7.5, 12.6), (7.5, 10.7)]
 
 
 def _footprint(ref: str, lib: str, x: float, y: float, size: float, net: str) -> str:
@@ -46,7 +49,9 @@ def _segments(points, net: int, tag: str) -> str:
     )
 
 
-def star_pcb(net_name: str, sense=SENSE, sense_pad: float = 0.4) -> str:
+def star_pcb(
+    net_name: str, sense=SENSE, sense_pad: float = 0.4, mask_clearance: float = 0.0
+) -> str:
     """A routed two-branch star: shunt R1, force terminal Q1, sense terminal U1."""
     return (
         "(kicad_pcb\n"
@@ -56,7 +61,7 @@ def star_pcb(net_name: str, sense=SENSE, sense_pad: float = 0.4) -> str:
         '\t(paper "A4")\n'
         '\t(layers\n\t\t(0 "F.Cu" signal)\n\t\t(31 "B.Cu" signal)\n'
         '\t\t(44 "Edge.Cuts" user)\n\t)\n'
-        "\t(setup\n\t\t(pad_to_mask_clearance 0)\n\t)\n"
+        f"\t(setup\n\t\t(pad_to_mask_clearance {mask_clearance:g})\n\t)\n"
         '\t(net 0 "")\n'
         f'\t(net 1 "{net_name}")\n'
         "\t(gr_rect (start 0 0) (end 20 20) (stroke (width 0.1) (type default)) "
@@ -123,3 +128,45 @@ def test_non_kelvin_board_no_kelvin_gate(tmp_path, capsys):
     out = _optimize(tmp_path, text)
     assert branch_count(out, "PWM_TEST") == 2
     assert "Kelvin branch isolation" not in capsys.readouterr().err
+
+
+def test_kelvin_accept_still_refused_by_pad_guard(tmp_path, capsys):
+    """The pad guard re-applied after a Kelvin *accept* is pinned (#9524).
+
+    With a grown mask opening (``pad_to_mask_clearance 0.25``), the force
+    corner's chamfer sweeps through U1's opening without touching U1's
+    copper or the sense branch's copper -- so the Kelvin gate has no new
+    contact to veto and *accepts* the proposal.  The chamfer is still new
+    same-net copper entering an opening it does not terminate on: the pad
+    guard's re-application (``kelvin_gate.py`` ``optimize_net``) must
+    refuse it, keeping the branch's original geometry and the guard-zone
+    exposure count at zero.  Removing that re-application lets the chamfer
+    through and grows the count to one.
+    """
+    from kicad_tools.router.optimizer.kelvin_gate import KelvinBoardGate
+    from tests.test_readiness_cleanup_pad_aware import _exposure_count
+
+    text = star_pcb("ISENSE_TEST", sense=SENSE_SWEEP, mask_clearance=0.25)
+
+    # Precondition: the board classifies the net as Kelvin, so the run goes
+    # through the branch gate (the pad-guard re-application's only path).
+    gate = KelvinBoardGate.from_pcb_text(text)
+    assert gate is not None
+    kelvin_names = {name for name, net in gate.net_ids.items() if net in gate.gate.kelvin}
+    assert "ISENSE_TEST" in kelvin_names
+
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text(text)
+    before = _exposure_count(board)
+    assert before == 0
+
+    out = tmp_path / "out.kicad_pcb"
+    assert cli_main(["optimize-traces", str(board), "-o", str(out), "--quiet"]) == 0
+
+    # The Kelvin gate accepted (no advisory): the refusal below can only be
+    # the pad guard re-applied to what the gate accepted.
+    assert "Kelvin branch isolation" not in capsys.readouterr().err
+
+    kept = {(s.start, s.end) for s in parse_segments(out.read_text())["ISENSE_TEST"]}
+    assert set(zip(FORCE, FORCE[1:], strict=False)) <= kept  # corner not chamfered
+    assert _exposure_count(out) <= before

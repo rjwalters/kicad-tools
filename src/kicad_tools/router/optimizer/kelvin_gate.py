@@ -320,7 +320,10 @@ class KelvinBoardGate:
         refuses, reports -- rewrites that would also break a pad escape.
         The guard is then re-applied to every rewrite the gate accepts: a
         branch the pad guard refuses keeps its original geometry too.  The
-        guard is re-ordered around this gate, never skipped.
+        guard is re-ordered around this gate, never skipped.  Because it
+        judges each branch's whole multi-pass proposal at once, one
+        escape-breaking pass discards that branch's entire optimization --
+        more conservative than the per-pass guard on an ordinary net.
         """
         net = self.net_ids.get(net_name)
         if net is None or net not in self.gate.kelvin:
