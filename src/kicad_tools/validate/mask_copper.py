@@ -87,7 +87,9 @@ lies within the strip tolerance of a recorded anchor point or of a piece
 already in the run's chain, seeded at anchors a same-net hole really
 stands on -- anchor flashes and end-hole rings sit within the strip
 tolerance of a recorded anchor point -- and the measurement's owner net
-becomes the run's net instead of ``null``. The run's own track (wholly
+becomes the run's net instead of ``null``. A same-net via or a
+gauge-sized ``gr_circle`` hole whose centre stands on the strip mid-run (and
+its mask circle on the far side) is attributed (#9444). The run's own track (wholly
 under its strip, or entering one of its anchors), its anchor vias, and a
 same-net pad standing on the run (the strip passes over its copper, or
 the pad is itself an anchor) measure as disposition
@@ -595,6 +597,7 @@ class _ReinforceRun:
     mask_side: str
     anchors: tuple[tuple[float, float], ...]
     confirmed_anchors: tuple[tuple[float, float], ...]
+    wire_gauge_awg: int | None = None
 
 
 def _reinforce_run_label(record: dict[str, Any]) -> str:
@@ -676,9 +679,39 @@ def _reinforce_runs(objects: dict[str, Any], wires: Any) -> list[_ReinforceRun]:
                 mask_side=mask_side,
                 anchors=tuple(anchors),
                 confirmed_anchors=confirmed,
+                wire_gauge_awg=_record_awg(record),
             )
         )
     return runs
+
+
+# Largest mid-run ``gr_circle`` a run may attribute: the anchor drill for the
+# record's gauge plus this much flash on each side (#9444). A bigger circle is
+# a board feature, not a wire-end hole, and would excuse unbounded copper.
+# The 0.5 mm is a chosen envelope, not a derived size: ``pcb reinforce`` emits
+# no circular flash (only ``gr_line`` openings), so there is no producer value
+# to match; mid-run circles are hand-drawn board graphics.
+_MID_RUN_CIRCLE_FLASH_MM = 0.5
+_CENTRE_EPS_MM = 1e-6
+
+
+def _record_awg(record):
+    awg = record.get("wire_gauge_awg")
+    if isinstance(awg, bool) or not isinstance(awg, (int, float)):
+        return None
+    return int(awg)
+
+
+def _mid_run_circle_limit_mm(awg):
+    """Max diameter of a ``gr_circle`` hole attributable mid-run; ``None`` = never."""
+    if awg is None:
+        return None
+    from kicad_tools.physics.wire_gauge import anchor_drill_for_awg
+
+    try:
+        return anchor_drill_for_awg(awg) + 2 * _MID_RUN_CIRCLE_FLASH_MM
+    except ValueError:
+        return None
 
 
 def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs=()):
@@ -704,7 +737,10 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs
     already in the chain, seeded by the pieces standing on the confirmed
     anchors. An opening that is merely over the same net's copper elsewhere
     on the board is not continuous with any anchor flash and attributes to
-    nothing (#9315). An anchor-flash ``via`` or ``pad`` must also carry the
+    nothing (#9315). A same-net ``via`` (a layer change) or a ``gr_circle``
+    (a hole no wider than the record's anchor drill plus flash) joins the run
+    when its centre lies on an admitted strip piece (#9444), on either mask
+    side; a hole merely beside the strip does not. An anchor-flash ``via`` or ``pad`` must also carry the
     run's net (#9348); board graphics have none to check. Ties between records of one net go
     to the run with the nearest anchor, first recorded winning a tie, so
     attribution is deterministic. ``merged_region`` openings attribute
@@ -720,6 +756,9 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs
     claimants = [(run, False) for run in runs] + [(run, True) for run in far_runs]
     candidates: dict[str, list[tuple[_ReinforceRun, float]]] = {}
     strip_materials: dict[str, Any] = {}
+    # Mid-run candidates (#9444): same-net vias and board-graphic circles whose
+    # claim rests on continuity with the run's strip, not on an anchor.
+    mid_run: list[tuple[str, Any, str, str]] = []
     for owners, material, kind, *_ in openings:
         if kind == "merged_region" or material is None or material.is_empty:
             continue
@@ -734,6 +773,8 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs
         if kind == "via" or kind.startswith("pad"):
             owner = objects.get(uuid) if len(owners) == 1 else None
             owner_net = (owner.get("net") if owner else "") or ""
+        if kind == "gr_circle" or (kind == "via" and len(owners) == 1):
+            mid_run.append((uuid, hull, kind, owner_net or ""))
         for run, far in claimants:
             if not run.confirmed_anchors:
                 continue
@@ -747,13 +788,26 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs
 
     # Grow each run's strip chain to a fixpoint: a piece whose hull lies
     # within the strip tolerance of a confirmed anchor -- or of an already
-    # admitted piece -- joins the chain and reaches further pieces.
-    for run in runs:
+    # admitted piece -- joins the chain and reaches further pieces. A far-side
+    # run's strip lives on the opposite mask layer, so its chain is grown from
+    # the source ``gr_line`` objects there (#9444); it claims no strip piece
+    # on this side, only the mid-run holes standing on it below.
+    chain_hulls: dict[int, list[Any]] = {}
+    for run, far in claimants:
         if not run.confirmed_anchors:
             continue
         anchor_points = [Point(a) for a in run.confirmed_anchors]
+        if far:
+            pending = [
+                (uuid, item["layers_geometry"][run.mask_side])
+                for uuid, item in objects.items()
+                if item.get("kind") == "gr_line"
+                and run.mask_side in item.get("layers_geometry", {})
+                and not item["layers_geometry"][run.mask_side].is_empty
+            ]
+        else:
+            pending = list(strip_materials.items())
         admitted_hulls: list[Any] = []
-        pending = list(strip_materials.items())
         while pending:
             remaining = []
             progressed = False
@@ -765,13 +819,40 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs
                 if not near:
                     remaining.append((uuid, material))
                     continue
-                if not any(r is run for r, _ in candidates.get(uuid, ())):
+                if not far and not any(r is run for r, _ in candidates.get(uuid, ())):
                     candidates.setdefault(uuid, []).append((run, float("inf")))
                 admitted_hulls.append(hull)
                 progressed = True
             pending = remaining
             if not progressed:
                 break
+        chain_hulls[id(run)] = admitted_hulls
+
+    # Mid-run holes (#9444): a same-net layer-change via, or an anchor-size
+    # board circle, standing on the run's strip is soldered with the rest of
+    # the run. Mask continuity with the admitted strip attributes it, exactly
+    # as a strip piece is attributed; an opening elsewhere on the board is
+    # continuous with nothing and stays unattributed (#9315).
+    for uuid, hull, kind, owner_net in mid_run:
+        for run, _far in claimants:
+            hulls = chain_hulls.get(id(run))
+            if not hulls:
+                continue
+            if kind == "via" and owner_net != run.net:
+                continue
+            if kind == "gr_circle":
+                limit = _mid_run_circle_limit_mm(run.wire_gauge_awg)
+                minx, miny, maxx, maxy = hull.bounds
+                if limit is None or max(maxx - minx, maxy - miny) > limit + 2 * _CENTRE_EPS_MM:
+                    continue
+            if any(r is run for r, _ in candidates.get(uuid, ())):
+                continue
+            # The hole must stand ON the run: its centre lies in the admitted
+            # strip, not merely within tolerance of its edge.
+            centre = hull.centroid
+            distance = min(other.distance(centre) for other in hulls)
+            if distance <= _CENTRE_EPS_MM:
+                candidates.setdefault(uuid, []).append((run, distance))
 
     run_by_uuid: dict[str, _ReinforceRun] = {}
     pieces: dict[int, list[Any]] = {}
