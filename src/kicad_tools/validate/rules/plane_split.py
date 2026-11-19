@@ -158,7 +158,7 @@ class PlaneSplitRule(DRCRule):
 
     @staticmethod
     def _collect_items(pcb: PCB, copper_layers: list[str], resolve: Any) -> dict[str, list[_Item]]:
-        from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
+        from shapely.geometry import LineString, Point
 
         from .clearance import _pad_on_layer, _pad_polygon
         from .dangling_copper import _collect_track_arcs, _segment_copper
@@ -288,8 +288,8 @@ class PlaneSplitRule(DRCRule):
         keepout = getattr(zone, "keepout", None)
         if keepout is None or keepout.copperpour_allowed or len(zone.polygon) < 3:
             return None
-        from shapely.geometry import Polygon  # type: ignore[import-untyped]
-        from shapely.validation import make_valid  # type: ignore[import-untyped]
+        from shapely.geometry import Polygon
+        from shapely.validation import make_valid
 
         poly = Polygon(zone.polygon)
         return poly if poly.is_valid else make_valid(poly)
@@ -306,7 +306,7 @@ class PlaneSplitRule(DRCRule):
         outline: Any, obstacles: Any, anchors: list[_Item], bridges: list[_Item]
     ) -> list[_Group]:
         """Pieces of ``outline - obstacles`` merged through same-net copper."""
-        from shapely.ops import unary_union  # type: ignore[import-untyped]
+        from shapely.ops import unary_union
 
         remaining = outline.difference(obstacles)
         pieces = [g for g in getattr(remaining, "geoms", [remaining]) if g.geom_type == "Polygon"]
