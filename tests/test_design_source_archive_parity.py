@@ -31,7 +31,16 @@ BOARDS_DIR = Path(__file__).resolve().parent.parent / "boards"
 # "<board-dir>/<archive filename>" relative to the boards directory.  Each
 # entry cites the issue that owns the refresh; remove the entry when that
 # lands (strict xfail turns an unexpected pass into a failure).
-EXPECTED_STALE: dict[str, str] = {}
+EXPECTED_STALE: dict[str, str] = {
+    # Board 04's live recipe moved in #9097 (PR #9131) ahead of its archived
+    # copy; the regen + re-pin that refreshes the archive is owned by #9455
+    # (same staleness as the EXPECTED_STALE entry in
+    # test_board_readiness_committed_hashes.py).  Remove when #9455 lands.
+    "04-stm32-devboard/generate_design.py": (
+        "Issue #9455: board 04's recipe moved in #9097 (PR #9131) ahead of the "
+        "archived design-source copy; the regen + re-pin is owned by #9455."
+    ),
+}
 
 # Live recipes deliberately left out of the archive, keyed by
 # "<board-dir>/<live filename>" relative to the boards directory.  Each entry
