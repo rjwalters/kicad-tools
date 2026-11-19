@@ -123,22 +123,6 @@ identity_allowances:
       V3P3: 8858
       VCP: 8858
       VM: 8858
-  boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb:
-    mask_to_copper:
-      +3V3: 8858
-      GND: 8858
-      IN1: 8858
-      IN2: 8858
-      IN3: 8858
-      IN4: 8858
-      LVDS1_N: 8858
-      LVDS1_P: 8858
-      LVDS2_N: 8858
-      LVDS2_P: 8858
-      LVDS3_N: 8858
-      LVDS3_P: 8858
-      LVDS4_N: 8858
-      LVDS4_P: 8858
   boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb:
     mask_to_copper:
       +3V3: 8858
