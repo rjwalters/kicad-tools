@@ -45,9 +45,12 @@ PLACEMENTS = [
     pytest.param(30.0, "B", id="30-back"),
 ]
 
-# The refused-primitive fixture: the most common stock-library refusal after
-# stroked gr_poly (issue evidence), and the one #9501 tracks first.
-GR_CIRCLE_PRIMITIVE = "(gr_circle (center 1.0 0.0) (end 2.0 0.0) (width 0.2) (fill yes))"
+# The refused-primitive fixture: gr_rect stays refused by name after #9501
+# (which added gr_circle and stroked gr_poly support; AC3 keeps
+# gr_rect/gr_arc/gr_line refused).
+GR_RECT_PRIMITIVE = (
+    "(gr_rect (start 1.0 0.0) (end 2.0 0.9) (stroke (width 0.2) (type default)) (fill yes))"
+)
 
 TAB_POLY = (
     f"(gr_poly (pts (xy {TAB_NEAR} -{TAB_HALF_HEIGHT}) (xy {TAB_FAR} -{TAB_HALF_HEIGHT}) "
@@ -306,7 +309,7 @@ def test_refused_primitive_reports_named_incomplete_findings(tmp_path, capsys):
         track_local=(2.8625, 0.0),
         tht_pad=True,
         silk_local=(2.2, 0.0),
-        primitive=GR_CIRCLE_PRIMITIVE,
+        primitive=GR_RECT_PRIMITIVE,
     )
     report = _run(
         board,
@@ -327,7 +330,7 @@ def test_refused_primitive_reports_named_incomplete_findings(tmp_path, capsys):
         found = _violations(report, rule_id)
         assert found, f"{rule_id} must be reported for the refused custom pad"
         assert all(v["severity"] == severity for v in found)
-        assert all("gr_circle" in v["message"] for v in found), (
+        assert all("gr_rect" in v["message"] for v in found), (
             f"{rule_id} must name the refusing primitive kind"
         )
         assert all("Q1" in v["message"] for v in found), f"{rule_id} must name the pad"
@@ -401,7 +404,7 @@ _NO_COPPER_RULES = (
     "physical_copper_gap_incomplete",
 )
 # A refused primitive: with copper layers it must still be reported incomplete.
-_NO_COPPER_PRIMITIVE = GR_CIRCLE_PRIMITIVE
+_NO_COPPER_PRIMITIVE = GR_RECT_PRIMITIVE
 
 
 def _layers_board(tmp_path: Path, layers: str, name: str) -> Path:
@@ -471,3 +474,47 @@ def test_copper_custom_pad_with_refused_outline_is_still_incomplete(tmp_path, ca
     found = set(_incomplete(report))
     assert {"clearance_incomplete", "silk_over_copper_incomplete"} <= found
     assert "physical_copper_gap_incomplete" in found
+
+
+# --- Issue #9501: the stock Wuerth spacer is measured end to end ------------
+
+_WUERTH_SPACER = (
+    Path(__file__).parent
+    / "fixtures"
+    / "KiCad10_Library.pretty"
+    / "Mounting_Wuerth_WA-SMSE-ExternalM3_H10mm_9771100360.kicad_mod"
+)
+
+
+def test_stock_wuerth_spacer_alone_is_measured_not_incomplete(tmp_path, capsys):
+    """The #9528/#9501 acceptance probe: the stock Wuerth WA-SMSE spacer.
+
+    A verbatim copy of the pinned image's
+    ``Mounting_Wuerth:Mounting_Wuerth_WA-SMSE-ExternalM3_H10mm_9771100360``,
+    inlined alone on a 25 x 25 mm board.  Its copper pad 1 is a custom pad
+    built from one unfilled ``gr_circle`` primitive (radius 2.1, width 3.2);
+    until #9501 every rule reported that pad as ``*_incomplete`` with
+    "unsupported primitive 'gr_circle'".  No custom pad on the board may be
+    reported as unresolved coverage any more (the remaining stackup
+    copper-weight info names no pad and is out of scope here).
+    """
+    board = tmp_path / "wuerth-alone.kicad_pcb"
+    board.write_text(
+        f"""(kicad_pcb (version 20240108) (generator "test")
+ (general (thickness 1.6))
+ (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+ (setup (pad_to_mask_clearance 0))
+ (net 0 "")
+ (gr_rect (start 0 0) (end 25 25) (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))
+ {_WUERTH_SPACER.read_text().strip()})"""
+    )
+    report = _run(
+        board,
+        capsys,
+        "--only",
+        "clearance,silkscreen,tht_smd_spacing,physical_copper_gap",
+        "--physical-copper-gap",
+        "0.3",
+    )
+    unresolved = [v for v in report["violations"] if "custom pad copper unresolved" in v["message"]]
+    assert not unresolved, f"the stock spacer's pads must be measured: {unresolved}"
