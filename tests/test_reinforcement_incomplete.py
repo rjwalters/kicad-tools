@@ -820,3 +820,73 @@ class TestFullyPreExistingCopy:
             specs=[_spec(True)], wires=build_wire_records(result, 0.0, 0.0)
         )
         assert _subchecks(rule.check(pcb, _rules())) == []
+
+
+class TestFullyWiredLegs:
+    """Issue #9648: expose the legs this rule judges fully wired.
+
+    ``path_ampacity`` credits a fully wired leg's buttress wire, so the
+    exposed verdict must be exactly the per-leg verdict ``check`` reports --
+    re-derived from the board, never from the sidecar's intent.
+    """
+
+    def test_complete_board_yields_the_leg(self):
+        legs = ReinforcementIncompleteRule(specs=[_spec()]).fully_wired_legs(
+            _reinforced(), _rules()
+        )
+        assert len(legs) == 1
+        (leg,) = legs
+        assert leg.net == NET
+        assert leg.layer == "F.Cu"
+        assert leg.gauge == 16
+        assert leg.width == pytest.approx(2.0)
+        assert leg.points[0] == pytest.approx((20.0, 50.0))
+        assert leg.points[-1] == pytest.approx((120.0, 50.0))
+
+    def test_missing_anchor_yields_no_leg(self):
+        pcb = _reinforced()
+        pcb.vias.remove(_anchors(pcb)[0])
+        assert ReinforcementIncompleteRule(specs=[_spec()]).fully_wired_legs(pcb, _rules()) == []
+
+    def test_missing_mask_strip_yields_no_leg(self):
+        pcb = _reinforced()
+        pcb.graphic_lines[:] = [g for g in pcb.graphic_lines if g.layer != "F.Mask"]
+        assert ReinforcementIncompleteRule(specs=[_spec()]).fully_wired_legs(pcb, _rules()) == []
+
+    def test_tented_anchor_yields_no_leg(self):
+        pcb = _reinforced()
+        _anchors(pcb)[1].tenting_back = "yes"
+        assert ReinforcementIncompleteRule(specs=[_spec()]).fully_wired_legs(pcb, _rules()) == []
+
+    def test_no_specs_yields_nothing(self):
+        assert ReinforcementIncompleteRule(specs=[]).fully_wired_legs(_reinforced(), _rules()) == []
+
+    def test_ineligible_specs_yield_nothing(self):
+        rule = ReinforcementIncompleteRule(specs=[_spec(eligible=False)])
+        assert rule.fully_wired_legs(_reinforced(), _rules()) == []
+
+    def test_unreinforced_board_yields_nothing(self):
+        assert (
+            ReinforcementIncompleteRule(specs=[_spec()]).fully_wired_legs(_board(), _rules()) == []
+        )
+
+    def test_gauge_comes_from_the_sidecar(self):
+        from kicad_tools.pcb.reinforcement_sidecar import build_wire_records
+
+        pcb = _board()
+        outcome = reinforce_net(pcb, NET, wire_gauge_awg=14)
+        wires = build_wire_records(outcome, 0.0, 0.0)
+        rule = ReinforcementIncompleteRule(specs=[_spec()], wires=wires)
+        assert [leg.gauge for leg in rule.fully_wired_legs(pcb, _rules())] == [14]
+
+    def test_parallel_copy_leg_is_not_a_wired_leg(self):
+        """A leg doubled by a parallel copy carries no wire, so it must not
+        be credited as one (its ampacity is the parallel group's business)."""
+        from kicad_tools.pcb.reinforcement_sidecar import build_wire_records
+
+        pcb = _board(length=40.0)
+        outcome = reinforce_net(pcb, NET, current_paths=[_spec(True)], strategy="parallel")
+        wires = build_wire_records(outcome, 0.0, 0.0)
+        rule = ReinforcementIncompleteRule(specs=[_spec(True)], wires=wires)
+        assert _subchecks(rule.check(pcb, _rules())) == []  # complete...
+        assert rule.fully_wired_legs(pcb, _rules()) == []  # ...but wire-less
