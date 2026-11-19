@@ -87,6 +87,77 @@ def test_merge_fragment_runs_replaces_jog_with_45_corner(recipe, tmp_path: Path)
     assert (39.85, 15.87) in ends
 
 
+def test_merge_fragment_runs_skips_a_stray_and_merges_the_later_run(
+    recipe, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A lone stray short segment must not hide the flagged run later in the chain (#9133).
+
+    Chain shape ``[long, short, long, long, short, short, short, long]``: the
+    rule flags the 3-segment run at indices 4-6, but the merge used to commit
+    to the stray at index 1, reject it as too short, and fail the recipe.
+    """
+    from kicad_tools.schema.pcb import PCB
+
+    pts = [
+        (10.0, 10.0),
+        (12.0, 10.0),  # long leg
+        (12.0, 10.05),  # the stray 0.05 mm segment (a run of 1)
+        (14.0, 10.05),  # long leg
+        (14.0, 12.0),  # long leg, neighbour before the run
+        (14.05, 12.0),  # run segment 1
+        (14.1, 12.05),  # run segment 2
+        (14.1, 12.1),  # run segment 3
+        (12.5, 13.7),  # 135 degree leg, neighbour after the run
+    ]
+    pcb_path = tmp_path / "frag_stray.kicad_pcb"
+    pcb_path.write_text(
+        _BOARD.format(items="\n".join(_seg(a, b) for a, b in zip(pts, pts[1:], strict=False)))
+    )
+
+    assert recipe["merge_fragment_runs"](pcb_path) is True
+
+    out = capsys.readouterr().out
+    assert "no neighbour on both sides" not in out  # the old one-size-fits-all reason
+    assert "run of 1 in chain on F.Cu" in out  # the stray names its own length
+
+    segments = PCB.load(pcb_path).segments
+    ends = {(round(s.start[0], 4), round(s.start[1], 4)) for s in segments} | {
+        (round(s.end[0], 4), round(s.end[1], 4)) for s in segments
+    }
+    assert (14.0, 12.2) in ends  # the corner where the two neighbours meet
+    for gone in ((14.0, 12.0), (14.05, 12.0), (14.1, 12.05), (14.1, 12.1)):
+        assert gone not in ends  # the run and its touched neighbours are gone
+    assert (12.0, 10.0) in ends and (12.0, 10.05) in ends  # the stray is untouched
+    assert (12.5, 13.7) in ends  # the far end is untouched
+    for s in segments:  # the 0/45/90/135 census is preserved
+        angle = math.degrees(math.atan2(s.end[1] - s.start[1], s.end[0] - s.start[0])) % 45
+        assert min(angle, 45 - angle) < 1e-6
+
+
+def test_merge_fragment_runs_names_the_reason_for_a_boundary_run(
+    recipe, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A run touching the chain start has no neighbour before it; the rejection says so (#9133)."""
+    pts = [
+        (10.0, 10.0),
+        (10.05, 10.0),  # run: 0.05 mm, at the chain start
+        (10.05, 10.05),  # run: 0.05 mm
+        (10.1, 10.05),  # run: 0.05 mm
+        (12.0, 10.05),
+        (12.0, 12.0),
+    ]
+    pcb_path = tmp_path / "frag_start.kicad_pcb"
+    pcb_path.write_text(
+        _BOARD.format(items="\n".join(_seg(a, b) for a, b in zip(pts, pts[1:], strict=False)))
+    )
+
+    assert recipe["merge_fragment_runs"](pcb_path) is False
+
+    out = capsys.readouterr().out
+    assert "no neighbour before the run (chain start)" in out
+    assert "no neighbour on both sides" not in out
+
+
 def test_main_wires_fragment_merge_and_silk_clip_before_the_refill() -> None:
     """Source-pin: both steps run after the staircase pass and before ``fill_zones``."""
     source = RECIPE.read_text()
