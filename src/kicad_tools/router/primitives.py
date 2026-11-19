@@ -655,6 +655,15 @@ class Pad:
     default -- defers entirely to ``DesignRules.net_clearance_floors``.
     """
 
+    footprint_origin: tuple[float, float] | None = None
+    """Absolute ``(x, y)`` of the owning footprint's origin, in mm (issue #9434).
+
+    Set only by :func:`~kicad_tools.router.io.load_pads_for_analysis`; ``None``
+    for programmatic pads.  Lets the ``pad_grid`` preflight separate a
+    footprint's intrinsic pad lattice (``pad - origin``) from the placement
+    of the footprint as a whole.
+    """
+
     side: Layer | None = None
     """Copper layer of the owning footprint's side (issue #6780).
 
