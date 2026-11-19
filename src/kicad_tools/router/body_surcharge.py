@@ -96,6 +96,80 @@ class BodySurchargeRegion:
     local_nets: frozenset[int]
 
 
+@dataclass(frozen=True)
+class UnderBodyFootprint:
+    """One qualifying component's pad-ring bbox in world mm + its local nets.
+
+    The world-coordinate half of the #9622 derivation, shared by
+    :func:`compute_under_body_regions` (which snaps it to grid cells) and
+    the orchestrator's coarse corridor mirror (which has no routing grid
+    on the ``route-auto`` path), so both price exactly the same bodies
+    (review of #9635).
+    """
+
+    ref: str
+    min_x: float
+    min_y: float
+    max_x: float
+    max_y: float
+    local_nets: frozenset[int]
+
+
+def identify_under_body_footprints(
+    pads: list,
+    resolution: float = 0.1,
+) -> list[UnderBodyFootprint]:
+    """Qualifying fine-pitch components' pad-ring bboxes + local nets.
+
+    Same qualification as :func:`compute_under_body_regions` --
+    ``identify_fine_pitch_components`` with :data:`UNDER_BODY_PITCH_THRESHOLD`
+    and at least :data:`MIN_BODY_PAD_COUNT` pads -- but in world
+    millimetres.  ``resolution`` only feeds the fine-resolution
+    *recommendation* inside ``identify_fine_pitch_components`` (ignored
+    here; the qualifying set depends on pitch alone), so grid-less callers
+    may leave the default.
+
+    Net 0 never marks a net local, but it does not void the body either: a
+    component whose pads are ALL net 0 keeps its footprint with an EMPTY
+    ``local_nets`` set (see :func:`compute_under_body_regions`).
+    """
+    if not pads:
+        return []
+
+    fine_components = identify_fine_pitch_components(
+        pads,
+        resolution,
+        UNDER_BODY_PITCH_THRESHOLD,
+    )
+    if not fine_components:
+        return []
+
+    pads_by_ref: dict[str, list] = {}
+    for pad in pads:
+        key = pad.component_key
+        if key in fine_components:
+            pads_by_ref.setdefault(key, []).append(pad)
+
+    footprints: list[UnderBodyFootprint] = []
+    for ref, comp_pads in pads_by_ref.items():
+        if len(comp_pads) < MIN_BODY_PAD_COUNT:
+            continue
+        local_nets = frozenset(pad.net for pad in comp_pads if pad.net > 0)
+        xs = [pad.x for pad in comp_pads]
+        ys = [pad.y for pad in comp_pads]
+        footprints.append(
+            UnderBodyFootprint(
+                ref=ref,
+                min_x=min(xs),
+                min_y=min(ys),
+                max_x=max(xs),
+                max_y=max(ys),
+                local_nets=local_nets,
+            )
+        )
+    return footprints
+
+
 def compute_under_body_regions(grid: RoutingGrid) -> list[BodySurchargeRegion]:
     """Compute the per-component under-body surcharge regions for ``grid``.
 
@@ -116,12 +190,8 @@ def compute_under_body_regions(grid: RoutingGrid) -> list[BodySurchargeRegion]:
     if not pads:
         return []
 
-    fine_components = identify_fine_pitch_components(
-        pads,
-        grid.resolution,
-        UNDER_BODY_PITCH_THRESHOLD,
-    )
-    if not fine_components:
+    footprints = identify_under_body_footprints(pads, grid.resolution)
+    if not footprints:
         return []
 
     cols = grid.cols
@@ -132,34 +202,18 @@ def compute_under_body_regions(grid: RoutingGrid) -> list[BodySurchargeRegion]:
     if not outer_layers:
         return []
 
-    # Group the pads per component once; skip no-connect / unconnected
-    # nets (net id 0) so a NC pad never marks a real net "local".
-    pads_by_ref: dict[str, list] = {}
-    for pad in pads:
-        key = pad.component_key
-        if key in fine_components:
-            pads_by_ref.setdefault(key, []).append(pad)
-
+    # Group the pads per component once; the world-coordinate bbox and
+    # local-net derivation is shared with the orchestrator's coarse
+    # corridor mirror (``identify_under_body_footprints``).
     regions: list[BodySurchargeRegion] = []
-    for ref, comp_pads in pads_by_ref.items():
-        if len(comp_pads) < MIN_BODY_PAD_COUNT:
-            continue
-
-        # Net 0 never marks a net local, but it does not void the body
-        # either: a component whose pads are ALL net 0 (genuinely NC, or
-        # real nets withheld as net-0 obstacles by the route-auto loader's
-        # ``skip_nets`` retry) keeps its region with an EMPTY local set, so
-        # every routed net pays the surcharge around it.  Dropping the
-        # region instead let the hierarchical retry route the requested
-        # trunk straight through the body (review of #9635).
-        local_nets = frozenset(pad.net for pad in comp_pads if pad.net > 0)
-
-        xs = [pad.x for pad in comp_pads]
-        ys = [pad.y for pad in comp_pads]
-        gx1 = min(grid.world_to_grid(x, y)[0] for x, y in zip(xs, ys, strict=True))
-        gx2 = max(grid.world_to_grid(x, y)[0] for x, y in zip(xs, ys, strict=True))
-        gy1 = min(grid.world_to_grid(x, y)[1] for x, y in zip(xs, ys, strict=True))
-        gy2 = max(grid.world_to_grid(x, y)[1] for x, y in zip(xs, ys, strict=True))
+    for footprint in footprints:
+        # ``world_to_grid`` is monotone in x/y, so snapping the bbox
+        # corners equals the per-pad min/max snap this loop computed
+        # before the derivation was shared out.
+        gx1 = grid.world_to_grid(footprint.min_x, footprint.min_y)[0]
+        gx2 = grid.world_to_grid(footprint.max_x, footprint.max_y)[0]
+        gy1 = grid.world_to_grid(footprint.min_x, footprint.min_y)[1]
+        gy2 = grid.world_to_grid(footprint.max_x, footprint.max_y)[1]
         gx1 = max(0, gx1 - BODY_BBOX_MARGIN_CELLS)
         gy1 = max(0, gy1 - BODY_BBOX_MARGIN_CELLS)
         gx2 = min(cols - 1, gx2 + BODY_BBOX_MARGIN_CELLS)
@@ -169,13 +223,13 @@ def compute_under_body_regions(grid: RoutingGrid) -> list[BodySurchargeRegion]:
 
         regions.append(
             BodySurchargeRegion(
-                ref=ref,
+                ref=footprint.ref,
                 gx1=gx1,
                 gy1=gy1,
                 gx2=gx2,
                 gy2=gy2,
                 layers=outer_layers,
-                local_nets=local_nets,
+                local_nets=footprint.local_nets,
             )
         )
 

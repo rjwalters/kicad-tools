@@ -577,6 +577,27 @@ class TestManyFinePitchBodiesNoCap:
 
 
 class TestTrunkAvoidsBody:
+    def test_bidirectional_trunk_detours_around_body(self) -> None:
+        """The bidirectional A* expansion charges the same under-body
+        surcharge as the one-way search on BOTH expansion types (trace
+        steps and via drops).  Review of #9635 finding 2: the expansion
+        previously omitted the term, so ``route_auto`` over a long
+        Manhattan distance (and the public ``--fallback-bidirectional``
+        path) crossed bodies the one-way search detours around."""
+        router = _qfn_board(force_python=True)
+        finder = router.router
+        assert not isinstance(finder, CppPathfinder)
+        pads = [p for p in finder.grid.pads if p.net == TRUNK_NET]
+        assert len(pads) == 2
+
+        route = finder.route_bidirectional(pads[0], pads[1])
+        assert route is not None, "the bidirectional search must route the trunk"
+        assert route.segments
+        for seg in route.segments:
+            assert not _segment_crosses_body(seg.x1, seg.y1, seg.x2, seg.y2), (
+                f"bidirectional A* put trunk copper through the body: {seg}"
+            )
+
     @pytest.mark.parametrize("force_python", BACKENDS)
     def test_trunk_detours_around_body_and_all_nets_route(self, force_python: bool) -> None:
         router = _qfn_board(force_python=force_python)
@@ -740,3 +761,138 @@ class TestRouteAutoAvoidsBody:
             assert not _segment_crosses_body(
                 float(seg.start[0]), float(seg.start[1]), float(seg.end[0]), float(seg.end[1])
             ), f"route-auto put trunk copper through the body: {seg}"
+
+
+# ---------------------------------------------------------------------------
+# The ORIGINAL #9622 audit board (review of #9635: the replacement board
+# above selects HIERARCHICAL_DIFF_PAIR, which already avoided the body; on
+# the original board the CLI selected GLOBAL_WITH_REPAIR and its coarse
+# corridor emitted waypoint segments straight through U1 without ever
+# consulting the A* under-body cost).
+# ---------------------------------------------------------------------------
+
+# U1 body bbox in board coordinates (footprint at (20,12); net-less pad
+# rows at x 17.25..22.75 on y 9.2 and 15.2).
+AUDIT_BODY_BBOX = (17.25, 9.2, 22.75, 15.2)
+
+
+def _audit_board_text() -> str:
+    """The original audit fixture: a net-less 0.5mm-pitch QFN pad grid at
+    the board centre and one TRUNK net whose B.Cu pads sit at (4,12) and
+    (36,12) -- a dead horizontal shot through the middle of U1's body."""
+    u1_pads = []
+    for i in range(12):
+        x = -2.75 + i * 0.5
+        u1_pads.append(
+            f'\t\t(pad "T{i}" smd rect (at {x:.2f} -2.80) (size 0.25 0.3) '
+            '(layers "F.Cu" "F.Paste" "F.Mask"))'
+        )
+        u1_pads.append(
+            f'\t\t(pad "B{i}" smd rect (at {x:.2f} 3.20) (size 0.25 0.3) '
+            '(layers "F.Cu" "F.Paste" "F.Mask"))'
+        )
+    fp_u1 = "\n".join(u1_pads)
+    return f"""(kicad_pcb
+\t(version 20240108)
+\t(generator "row9_audit_fixture")
+\t(generator_version "8.0")
+\t(general (thickness 1.6) (legacy_teardrops no))
+\t(paper "A4")
+\t(layers
+\t\t(0 "F.Cu" signal)
+\t\t(31 "B.Cu" signal)
+\t\t(36 "B.SilkS" user "B.Silkscreen")
+\t\t(37 "F.SilkS" user "F.Silkscreen")
+\t\t(38 "B.Mask" user)
+\t\t(39 "F.Mask" user)
+\t\t(44 "Edge.Cuts" user)
+\t)
+\t(setup (pad_to_mask_clearance 0.05))
+\t(net 0 "")
+\t(net 1 "TRUNK")
+
+\t(gr_rect (start 0 0) (end 40 30) (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts") (uuid "edge"))
+
+\t(footprint "Audit:U1_QFN"
+\t\t(layer "F.Cu")
+\t\t(uuid "fp-u1")
+\t\t(at 20.0 12.0)
+\t\t(attr smd)
+\t\t(fp_text reference "U1" (at 0 -4) (layer "F.SilkS"))
+\t\t(fp_text value "QFN" (at 0 4.5) (layer "F.Fab"))
+{fp_u1}
+\t)
+
+\t(footprint "Audit:TRUNK"
+\t\t(layer "B.Cu")
+\t\t(uuid "fp-trunk")
+\t\t(at 0 0)
+\t\t(attr smd)
+\t\t(fp_text reference "T" (at 1 -1) (layer "B.SilkS"))
+\t\t(fp_text value "trunk" (at 1 1) (layer "B.Fab"))
+\t\t(pad "A" smd rect (at 4.00 12.00) (size 0.6 0.6) (layers "B.Cu" "B.Paste" "B.Mask") (net 1 "TRUNK"))
+\t\t(pad "B" smd rect (at 36.00 12.00) (size 0.6 0.6) (layers "B.Cu" "B.Paste" "B.Mask") (net 1 "TRUNK"))
+\t)
+)
+"""
+
+
+def _seg_crosses_box(
+    x1: float, y1: float, x2: float, y2: float, box: tuple[float, float, float, float]
+) -> bool:
+    """True when the segment touches ``box`` (sampled, as in the audit)."""
+    bx1, by1, bx2, by2 = box
+    for i in range(81):
+        t = i / 80
+        x = x1 + (x2 - x1) * t
+        y = y1 + (y2 - y1) * t
+        if bx1 <= x <= bx2 and by1 <= y <= by2:
+            return True
+    return False
+
+
+class TestRouteAutoOriginalAuditBoard:
+    def test_route_auto_trunk_avoids_body_on_original_audit_board(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """The corridor-materialising strategies must not accept copper the
+        A* under-body cost exists to prevent: the coarse corridor search
+        prices the body, so the emitted waypoints detour around it while a
+        detour exists (review of #9635 finding 1)."""
+        from kicad_tools.cli import main as kct_main
+
+        board = tmp_path / "audit.kicad_pcb"
+        board.write_text(_audit_board_text())
+        out = tmp_path / "routed.kicad_pcb"
+
+        rc = kct_main(
+            [
+                "route-auto",
+                str(board),
+                "--net",
+                "TRUNK",
+                "--output",
+                str(out),
+                "--format",
+                "json",
+            ]
+        )
+        doc = json.loads(capsys.readouterr().out)
+        assert rc == 0, doc
+        assert doc["success"], doc
+
+        from kicad_tools.schema.pcb import PCB
+
+        routed = PCB.load(str(out))
+        # Trunk copper on BOTH outer layers is checked (the pre-fix corridor
+        # wrote F.Cu segments through the body).
+        trunk_segments = [s for s in routed.segments if s.net_number == 1]
+        assert trunk_segments, "the saved board must contain trunk copper"
+        for seg in trunk_segments:
+            assert not _seg_crosses_box(
+                float(seg.start[0]),
+                float(seg.start[1]),
+                float(seg.end[0]),
+                float(seg.end[1]),
+                AUDIT_BODY_BBOX,
+            ), f"route-auto put trunk copper through U1's body: {seg}"
