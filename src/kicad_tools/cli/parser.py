@@ -1006,14 +1006,17 @@ def _add_voltage_map_merge_parser(subparsers) -> None:
     A NEW sibling top-level command: merges two or more per-scenario voltage
     maps (one per operating mode of the board) into a single envelope map --
     per-net ``{min, max}`` spans plus generated ``_pair_bounds`` entries
-    restoring each pair's worst per-scenario |dV| -- that every existing
-    ``--voltage-map`` consumer accepts unchanged.
+    restoring each pair's worst per-scenario |dV| -- accepted unchanged by the
+    interval-aware ``--voltage-map`` consumers.  ``kct route``/``kct pcb``
+    collapse ranges to one signed endpoint (#4411) and can understate a
+    sign-flipping pair; the command warns on stderr when its output has such
+    pairs.
     """
     p = subparsers.add_parser(
         "voltage-map-merge",
         help=(
             "Merge two or more per-scenario voltage maps into one envelope map "
-            "usable as --voltage-map (Issue #9582)"
+            "for the interval-aware --voltage-map consumers (Issue #9582)"
         ),
     )
     p.add_argument(

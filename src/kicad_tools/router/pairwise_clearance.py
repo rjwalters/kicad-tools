@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, NamedTuple, 
 from kicad_tools.core.geometry import segment_to_segment_distance
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from kicad_tools.creepage.engine import VoltageInterval
     from kicad_tools.router.layers import Layer
     from kicad_tools.router.primitives import Route, Segment, Via
     from kicad_tools.schema.pcb import Footprint
@@ -321,6 +322,16 @@ class PairwiseClearanceTable:
         return max(self.dru, max(self.required_by_pair.values()))
 
 
+def _signed_endpoint(iv: VoltageInterval) -> float:
+    """Collapse a voltage interval to its largest-magnitude endpoint *with sign* (#4411).
+
+    The exact rule :func:`load_signed_voltage_map` applies to every net; shared
+    with :func:`route_understated_pairs` so the understatement detector cannot
+    drift from the loader.
+    """
+    return iv.hi if abs(iv.hi) >= abs(iv.lo) else iv.lo
+
+
 def load_signed_voltage_map(path: str | Path) -> dict[str, float]:
     """Load a ``--voltage-map`` sidecar preserving each net's **sign** (#4867).
 
@@ -358,7 +369,7 @@ def load_signed_voltage_map(path: str | Path) -> dict[str, float]:
         # ``ValueError`` contract the CLI loaders already catch.
         raise ValueError(f"voltage map must be a JSON object, got {type(raw).__name__}")
     intervals = voltage_map_from_dict(raw)[0]
-    return {name: (iv.hi if abs(iv.hi) >= abs(iv.lo) else iv.lo) for name, iv in intervals.items()}
+    return {name: _signed_endpoint(iv) for name, iv in intervals.items()}
 
 
 def load_pair_bounds(path: str | Path) -> dict[frozenset[str], tuple[float, str]]:
@@ -376,6 +387,55 @@ def load_pair_bounds(path: str | Path) -> dict[frozenset[str], tuple[float, str]
     if not isinstance(raw, dict):
         raise ValueError(f"voltage map must be a JSON object, got {type(raw).__name__}")
     return pair_bounds_from_dict(raw)
+
+
+def route_understated_pairs(
+    data: Mapping[str, Any],
+    *,
+    eps: float = 1e-9,
+) -> dict[frozenset[str], tuple[float, float]]:
+    """Pairs a *range-bearing* voltage map understates at route time (#4411, #9582).
+
+    :func:`load_signed_voltage_map` -- what ``kct route`` / ``kct pcb`` read a
+    ``--voltage-map`` sidecar with -- collapses each net's ``[lo, hi]`` interval
+    to its largest-magnitude endpoint (:func:`_signed_endpoint`).  On a map
+    carrying ranges (notably a ``kct voltage-map-merge`` envelope, #9582) a
+    sign-flipping net and its opposite bank can collapse to the *same* endpoint:
+    the pair's route-time |dV| then scores **below** the interval-aware census
+    value -- down to 0 V, dropping the pair out of the route widening matrix
+    entirely (the #4867 failure mode).
+
+    Args:
+        data: a raw voltage-map dict as decoded from the JSON sidecar (the
+            ``kicad_tools.creepage.engine.voltage_map_from_dict`` /
+            ``pair_bounds_from_dict`` parse contract).
+
+    Returns:
+        ``{frozenset({net_a, net_b}): (census_dv, route_dv)}`` for every pair
+        where the scalar-collapsed route-time |dV| falls short of the
+        interval-aware census worst case ``max(|a.hi - b.lo|, |b.hi - a.lo|)``
+        (capped by a ``_pair_bounds`` entry, exactly as the census applies it).
+        Nets are normalised; an all-scalar map -- where the collapse is the
+        identity -- yields ``{}``.
+    """
+    from kicad_tools.creepage.engine import pair_bounds_from_dict, voltage_map_from_dict
+
+    intervals, _ = voltage_map_from_dict(data)
+    bounds = pair_bounds_from_dict(data)
+    scalars = {name: _signed_endpoint(iv) for name, iv in intervals.items()}
+    out: dict[frozenset[str], tuple[float, float]] = {}
+    names = sorted(scalars)
+    for i, a in enumerate(names):
+        for b in names[i + 1 :]:
+            ia, ib = intervals[a], intervals[b]
+            census_dv = max(abs(ia.hi - ib.lo), abs(ib.hi - ia.lo))
+            bound = bounds.get(frozenset((a, b)))
+            if bound is not None:
+                census_dv = min(census_dv, bound[0])
+            route_dv = abs(scalars[a] - scalars[b])
+            if route_dv < census_dv - eps:
+                out[frozenset((a, b))] = (census_dv, route_dv)
+    return out
 
 
 def build_pairwise_clearance_table(

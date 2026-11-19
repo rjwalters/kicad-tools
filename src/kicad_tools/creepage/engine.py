@@ -250,8 +250,10 @@ def merge_voltage_scenarios(
     ranges plus one ``_pair_bounds`` entry per varying-net pair — author the
     per-scenario maps and merge them:
 
-    ``merge_voltage_scenarios([forward, reverse])`` -> a single map that every
-    existing ``--voltage-map`` consumer accepts unchanged:
+    ``merge_voltage_scenarios([forward, reverse])`` -> a single envelope map in
+    the ordinary ``--voltage-map`` format, accepted unchanged by the
+    interval-aware consumers (``kct creepage``, ``kct audit``,
+    ``kct repair-creepage``, ``kct route-link``):
 
     * each net becomes the span of its per-scenario intervals: ``{"min": lo,
       "max": hi}`` over the scenarios, emitted as a plain scalar when every
@@ -295,6 +297,17 @@ def merge_voltage_scenarios(
         A net present in only one scenario is treated as 0 V in the others --
         the same "unmapped nets default to 0 V" rule every consumer applies --
         so its envelope spans 0 V and its present-scenario potential.
+
+        The signed-collapse route consumers -- ``kct route`` / ``kct pcb`` via
+        :func:`kicad_tools.router.pairwise_clearance.load_signed_voltage_map` --
+        reduce each net's interval to its largest-magnitude endpoint (#4411),
+        so a pair whose census |dV| rests on interval differencing (a
+        sign-flipping net against its opposite bank) can score *below* this
+        envelope, down to 0 V and out of the route widening matrix.  Use the
+        merged map with the interval-aware census/audit gate and drive
+        route-time spacing per scenario; detect the affected pairs with
+        :func:`kicad_tools.router.pairwise_clearance.route_understated_pairs`
+        (``kct voltage-map-merge`` warns on stderr when its output has any).
     """
     if len(maps) < 2:
         raise ValueError("merge_voltage_scenarios expects at least two scenario maps")

@@ -23,7 +23,12 @@ from kicad_tools.creepage.engine import (
     voltage_map_from_dict,
 )
 from kicad_tools.placement.hv_domains import build_required_by_domain_pair
-from kicad_tools.router.pairwise_clearance import build_pairwise_clearance_table
+from kicad_tools.router.pairwise_clearance import (
+    build_pairwise_clearance_table,
+    load_pair_bounds,
+    load_signed_voltage_map,
+    route_understated_pairs,
+)
 
 DRU = 0.2
 THRESH = 30.0
@@ -53,12 +58,20 @@ def _pair_interval_dv(m: dict, a: str, b: str, absent_zero: bool = True) -> floa
 
 
 def _merged_required_by_pair(merged: dict) -> dict[tuple[str, str], float]:
-    """Per-pair requirement table built from the merged map.
+    """Per-pair requirement table built from the merged map (the CENSUS side).
 
-    The merged map's envelope intervals give each pair its envelope |ΔV|; the
-    generated ``_pair_bounds`` cap it back to the worst per-scenario |ΔV|; the
-    shared :func:`build_required_by_domain_pair` builder (the SAME builder the
-    router/placement tables and the census consume) maps |ΔV| -> mm.
+    The merged map's envelope intervals give each pair its envelope |ΔV| (the
+    interval-aware census model: ``voltage_map_from_dict`` plus the documented
+    worst-case endpoint combination); the generated ``_pair_bounds`` cap it
+    back to the worst per-scenario |ΔV|; the shared
+    :func:`build_required_by_domain_pair` builder (the SAME builder the census
+    consumes) maps |ΔV| -> mm.
+
+    This is NOT the route path: ``kct route`` / ``kct pcb`` read the map
+    through the signed-collapse loader (:func:`load_signed_voltage_map`,
+    #4411) and can understate a sign-flipping pair -- that consumer path is
+    pinned separately by
+    :func:`test_route_loader_path_pins_actual_table_and_cli_warns`.
     """
     intervals, _ = voltage_map_from_dict(merged)
     bounds = pair_bounds_from_dict(merged)
@@ -202,11 +215,85 @@ def test_cli_writes_envelope(tmp_path, capsys):
     assert merged["_pair_bounds"][0]["nets"] == ["F1", "F2"]
     assert "1 generated pair bound" in capsys.readouterr().out
 
-    # The merged file is an ordinary map: the existing loader round-trips it.
+    # The merged file is an ordinary map: the interval-aware loader round-trips
+    # it (the route-time signed-collapse loader is pinned separately below).
     loaded = json.loads(out.read_text())
     intervals, edge = voltage_map_from_dict(loaded)
     assert edge == 0.0
     assert intervals["LINE"].lo == -150.0 and intervals["LINE"].hi == 150.0
+
+
+def test_route_understated_pairs_flags_sign_flipping_pairs():
+    merged = merge_voltage_scenarios([SCEN_A, SCEN_B])
+    flagged = route_understated_pairs(merged)
+    # LINE/F1/F2 all collapse to the same +150 V endpoint: the two 300 V pairs
+    # vanish at route time; the follower pair is capped to 0 V by its bound on
+    # both sides, so it is not understated.
+    assert set(flagged) == {frozenset({"LINE", "F1"}), frozenset({"LINE", "F2"})}
+    for census_dv, route_dv in flagged.values():
+        assert census_dv == pytest.approx(300.0)
+        assert route_dv == 0.0
+
+
+def test_route_understated_pairs_clean_without_sign_spans():
+    # All-scalar maps: the collapse is the identity, nothing is understated.
+    assert route_understated_pairs({"/A": 150, "/B": -150}) == {}
+    # Ranges that never cross zero collapse to an endpoint that still
+    # reproduces the census worst case.
+    assert (
+        route_understated_pairs(
+            merge_voltage_scenarios([{"/A": 100, "/B": 0}, {"/A": 90, "/B": 0}])
+        )
+        == {}
+    )
+
+
+def test_route_loader_path_pins_actual_table_and_cli_warns(tmp_path, capsys):
+    """The REAL route path: ``load_signed_voltage_map`` + ``load_pair_bounds``.
+
+    Pins what ``kct route`` / ``kct pcb`` actually build from the CLI-written
+    envelope (the #4411 signed collapse), so the regression the merge enables
+    -- HV pairs dropping out of the route widening matrix -- is recorded in
+    the suite instead of rediscovered in copper, and the CLI's stderr warning
+    is pinned to name exactly the affected pairs.
+    """
+    a = tmp_path / "fwd.json"
+    b = tmp_path / "rev.json"
+    out = tmp_path / "env.json"
+    a.write_text(json.dumps(SCEN_A))
+    b.write_text(json.dumps(SCEN_B))
+
+    rc = run_voltage_map_merge_command(SimpleNamespace(inputs=[str(a), str(b)], output=str(out)))
+    assert rc == 0
+
+    loaded = load_signed_voltage_map(out)
+    bounds = load_pair_bounds(out)
+    t_route = build_pairwise_clearance_table(
+        loaded, dru=DRU, hv_threshold=THRESH, pair_bounds=bounds
+    ).required_by_pair
+
+    # LINE/F1/F2 collapse to the same +150 V endpoint, so the 300 V pairs
+    # (LINE-F1, LINE-F2) drop out entirely; F1-F2 stays out via its
+    # max_dv: 0 bound; only the 150 V AUX pairs survive -- the documented gap
+    # against the census envelope's 300 V entries for the LINE pairs.
+    assert set(t_route) == {("AUX", "F1"), ("AUX", "F2"), ("AUX", "LINE")}
+    t_a = build_pairwise_clearance_table(SCEN_A, dru=DRU, hv_threshold=THRESH).required_by_pair
+    for pair, req in t_route.items():
+        assert req == pytest.approx(t_a[pair])  # each survivor matches its per-scenario value
+
+    # The census side (interval-aware) DOES carry the dropped pairs; the
+    # signed collapse is exactly what loses them.
+    t_census = _merged_required_by_pair(merge_voltage_scenarios([SCEN_A, SCEN_B]))
+    for pair in (("F1", "LINE"), ("F2", "LINE")):
+        assert pair in t_census
+        assert pair not in t_route
+
+    # The CLI warned on stderr, naming exactly the understated pairs.
+    err = capsys.readouterr().err
+    assert "understated" in err
+    assert "F1 <-> LINE" in err and "F2 <-> LINE" in err
+    assert "F1 <-> F2" not in err  # the capped follower pair is not understated
+    assert "per-scenario" in err
 
 
 def test_cli_errors(tmp_path, capsys):
