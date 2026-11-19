@@ -1574,6 +1574,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             build_pairwise_clearance_table,
             load_pair_bounds,
             load_signed_voltage_map,
+            load_voltage_intervals,
         )
 
         vm_path = Path(voltage_map_arg)
@@ -1589,6 +1590,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 material_group=getattr(args, "material_group", "IIIa"),
                 hv_threshold=getattr(args, "hv_threshold", 30.0),
                 pair_bounds=load_pair_bounds(vm_path) or None,
+                net_intervals=load_voltage_intervals(vm_path),
             )
         except (ValueError, OSError, StandardLookupError) as e:
             print(f"Error: invalid voltage-map: {e}", file=sys.stderr)

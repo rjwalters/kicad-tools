@@ -453,6 +453,56 @@ class TestRow4RouteAuto:
         # clobber it.
         assert "start 155 105" in out.read_text()
 
+    def test_write_during_load_is_refused(self, tmp_path, monkeypatch):
+        """#9663: the stale signature is taken BEFORE the board file is read.
+
+        An external write landing inside ``PCB.load`` -- after the file read,
+        before the pre-fix post-load stat -- must refuse the save; under the
+        old stat-after-load ordering it slipped into the signature and the
+        save clobbered it.
+        """
+        import kicad_tools.schema.pcb as pcb_mod
+
+        board = _partial_seal_board(tmp_path)
+        out = tmp_path / "ra_race.kicad_pcb"
+        # Baseline identity present at the pre-load stat.
+        out.write_text(board.read_text())
+
+        real_load_pcb = pcb_mod.load_pcb
+
+        def load_pcb_then_external_write(path: str):
+            sexp = real_load_pcb(path)  # the read
+            # Another writer lands mid-load: after the read, before the
+            # in-memory copy could include the edit.
+            out.write_text(
+                _BOARD_HEADER + "  (segment (start 155 105) (end 159 105) (width 0.25) "
+                '(layer "F.Cu") (net 2 "EASY"))\n)\n'
+            )
+            return sexp
+
+        monkeypatch.setattr(pcb_mod, "load_pcb", load_pcb_then_external_write)
+
+        result = route_net_auto(str(board), "EASY", output_path=str(out))
+
+        assert result["success"] is False
+        assert "changed since" in (result.get("error_message") or "")
+        # The external editor's content is intact -- the stale run did not
+        # clobber it.
+        assert "start 155 105" in out.read_text()
+
+    def test_preexisting_output_untouched_during_run_still_saves(self, tmp_path):
+        """Edge case (#9663): an output file written BEFORE the run's stat
+        is in both the signature and the content this run reads -- no false
+        reject."""
+        board = _partial_seal_board(tmp_path)
+        out = tmp_path / "ra_pre.kicad_pcb"
+        out.write_text(board.read_text())
+
+        result = route_net_auto(str(board), "EASY", output_path=str(out))
+
+        assert result["success"] is True
+        assert result.get("output_path") == str(out)
+
     def test_uncontended_run_still_saves(self, tmp_path):
         board = _partial_seal_board(tmp_path)
         out = tmp_path / "ra_normal.kicad_pcb"

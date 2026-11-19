@@ -87,7 +87,17 @@ from kicad_tools.transaction import board_transaction
 # orphaned zone-fill island has no ``required_value`` and no clearance
 # nudge can connect it -- the fix is a routing/zone decision (stitch it,
 # re-fill, or accept the island).  Same exclusion, same rationale.
-_UNREPAIRABLE_TOPOLOGY_RULE_IDS = frozenset({"track_dangling", "via_dangling", "isolated_copper"})
+#
+# ``physical_copper_gap_incomplete`` (Issue #9590 review: the fab-view pass
+# now runs through ``build_check_rule_set``) is a declaration gap, not a
+# copper defect: the board's stackup has no DFM entry / declared copper
+# weight, so the gap bands or pad mask-bridge severity are unknown.  It is
+# info severity, carries no location and no values, and no clearance nudge
+# can repair it -- the fix is to declare the stackup (or pass ``--copper``),
+# which is an operator decision.  ``kct check`` remains where it surfaces.
+_UNREPAIRABLE_TOPOLOGY_RULE_IDS = frozenset(
+    {"track_dangling", "via_dangling", "isolated_copper", "physical_copper_gap_incomplete"}
+)
 
 # Violation types fix-drc targets, per ``--only`` category.
 # kicad-cli reports every copper pair as plain ``clearance``; ``kct check``
@@ -1815,8 +1825,9 @@ def _run_python_drc(
     (:func:`kicad_tools.cli.check_cmd.build_check_rule_set`) and runs it
     through the CLI's own dispatch.
 
-    Unrepairable *topology* advisories and waived findings are dropped from
-    the converted report -- see :data:`_UNREPAIRABLE_TOPOLOGY_RULE_IDS`.
+    Unrepairable advisories (topology findings, declaration gaps) and waived
+    findings are dropped from the converted report -- see
+    :data:`_UNREPAIRABLE_TOPOLOGY_RULE_IDS`.
 
     Args:
         pcb_path: The board whose copper is checked.
