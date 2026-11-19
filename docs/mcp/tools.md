@@ -267,7 +267,7 @@ Run design rule check and return violations.
 |-----------|------|----------|---------|-------------|
 | `pcb_path` | string | Yes | - | Absolute path to .kicad_pcb file |
 | `manufacturer` | string | No | resolved like `kct check` | Manufacturer preset or tier id (any registry id, e.g. `"jlcpcb"`, `"jlcpcb-tier1"`, `"oshpark"`, `"pcbway"`, `"seeed"`). Omitted: `fab_profile.json` > `project.kct` `target_fab` > `"jlcpcb"` |
-| `severity_filter` | string | No | `"all"` | `"all"`, `"error"` or `"warning"`. A view filter: the verdict always counts every violation |
+| `severity_filter` | string | No | `"all"` | `"all"`, `"error"` or `"warning"`. A view filter: the verdict always counts every violation; `info` findings (fab-view advisory rows) appear only under `"all"` |
 | `allow_incomplete` | boolean | No | `false` | Like `kct check --allow-incomplete`: an `incomplete` verdict returns `exit_code: 0` (`passed` stays `false`) |
 | `schematic_path` | string | No | discovered | Explicit `.kicad_sch` for the ERC/LVS meta rollup |
 
