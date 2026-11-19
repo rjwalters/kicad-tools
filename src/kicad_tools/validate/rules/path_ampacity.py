@@ -278,39 +278,38 @@ class PathAmpacityRule(DRCRule):
         design_rules: DesignRules,
         required_cache: dict[bool, float],
     ) -> DRCViolation | None:
-        """Judge a doubled-copper group on its summed cross-section (issue #8790).
+        """Judge doubled copper on its effective cross-section (issues #8790, #9542).
 
-        Each branch contributes ``width / required_width`` for its layer class
-        (its narrowest segment, so a pinch point limits the branch), which
-        weights outer vs inner copper correctly; the group passes when the
-        contributions sum to at least 1.  Current is not split by resistance.
+        Each copper layer contributes its :meth:`ParallelGroup.layer_widths`
+        share over that layer class's requirement: distinct-layer branches
+        each contribute their narrowest width (so a pinch point limits its
+        branch), while branches sharing a layer count once at their merged
+        union extent -- two overlapping 1.0 mm F.Cu tracks offset 0.6 mm are
+        1.6 mm of copper, not 2.0 mm. The group passes when the
+        contributions sum to at least 1. Current is not split by resistance.
         """
         capacity = 0.0
-        widths = []
-        for branch in group.branches:
-            ratios = []
-            for segment in branch:
-                external = self._is_external_layer(segment.layer)
-                required = required_cache.get(external)
-                if required is None:
-                    required = self._required_width_mm(
-                        thermal.current_a, design_rules, external=external
-                    )
-                    required_cache[external] = required
-                ratios.append(segment.width / required if required > 0 else float("inf"))
-            capacity += min(ratios)
-            widths.append(min(seg.width for seg in branch))
+        for layer, width in group.layer_widths().items():
+            external = self._is_external_layer(layer)
+            required = required_cache.get(external)
+            if required is None:
+                required = self._required_width_mm(
+                    thermal.current_a, design_rules, external=external
+                )
+                required_cache[external] = required
+            capacity += width / required if required > 0 else float("inf")
         if capacity >= 1.0:
             return None
         first = group.branches[0][0]
         loc_x, loc_y = self._segment_midpoint(first)
+        noun = "merged width" if group.same_layer else "summed width"
         return DRCViolation(
             rule_id=self.rule_id,
             severity="error",
             message=(
                 f"Current path {spec.name!r} ({spec.source.label()} -> "
                 f"{spec.sink.label()}) {group.describe()} too narrow for "
-                f"{thermal.description}: summed width {sum(widths):.3f}mm provides "
+                f"{thermal.description}: {noun} {group.width_mm:.3f}mm provides "
                 f"{capacity:.0%} of the IPC-2221 requirement"
             ),
             location=(loc_x, loc_y),
