@@ -1901,6 +1901,7 @@ class LatticePathfinder:
                     net_class=net_class,
                     allow_vias=allow_vias,
                     via_in_pad_override=via_in_pad_override,
+                    stub_half=body_w / 2.0,
                 )
                 for stub in stubs
             ):
@@ -2043,9 +2044,11 @@ class LatticePathfinder:
         so the escape-egress check cannot drift from the search); the
         Edge.Cuts boundary test is applied by the caller.
 
-        ``attached`` (issue #9517) is the search's own pad-attached stub
-        legs, letting the band guard accept the collinear continuation out
-        of a stub that ends inside the band.
+        ``attached`` (issue #9517) is the pad-attached stub copper the
+        path emits at this edge's own end -- the SELECTED escape's legs, on
+        this layer, at their emitted half-width -- letting the band guard
+        accept the collinear continuation out of a stub that ends inside
+        the band.
         """
         lattice = self.build()
         ea = lattice.node_point(edge[0])
@@ -2112,6 +2115,7 @@ class LatticePathfinder:
         net_class: object | None = None,
         allow_vias: bool = True,
         via_in_pad_override: bool | None = None,
+        stub_half: float | None = None,
     ) -> bool:
         """Whether a full-width stub's landing node can be LEFT (issue #6381).
 
@@ -2120,6 +2124,15 @@ class LatticePathfinder:
         predicates and Edge.Cuts test the A* applies), or -- when vias are
         allowed -- a through via at the node is legal.  A stub without egress
         is a dead end the search can only pop and drop.
+
+        ``stub_half`` (#9538 review) is the half-width the stub's own legs
+        are EMITTED at -- the neck, when the escape tapered (#4293).  The
+        band exemption's ride copper must be measured at that emitted
+        radius, not the body radius: a neck stub's attachment to its pad
+        (and the copper a continuation leg may ride) is narrower than the
+        body, and grading it at the body radius accepted validator slits a
+        neck-width ride rejects.  ``None`` keeps ``half`` (the full-width
+        scan's own legs, emitted at the body width).
         """
         lattice = self.build()
         if committed is None:
@@ -2132,7 +2145,8 @@ class LatticePathfinder:
         # straight continuation out of its landing node must count as riding
         # them, or a stub ending inside the band is graded a dead end here
         # exactly the way it deadlocks the A* it seeds.
-        attached = tuple((c, d, half) for c, d in zip(stub[2], stub[2][1:], strict=False))
+        ride_half = half if stub_half is None else stub_half
+        attached = tuple((c, d, ride_half) for c, d in zip(stub[2], stub[2][1:], strict=False))
         for nbr, _elen in lattice.adj.get(key, ()):
             edge = (min(key, nbr), max(key, nbr))
             if not self._body_edge_legal(
@@ -2885,18 +2899,42 @@ class LatticePathfinder:
 
         g_score: dict[_State, float] = {}
         came: dict[_State, tuple[_State, str]] = {}
-        # Issue #9517: this search's own stub legs are the pad-attached
-        # copper a band-interior leg may ride collinearly out of (the
-        # validator's connector-coverage exemption).  Both ends' stubs: the
-        # start stub for the leaving legs, the goal stub for the arriving
-        # edge (edge legality is memoised direction-free, so one set must
-        # serve both).  Built once; the exemption consults it only when a
-        # leg actually sits in the band.
-        own_attached: list[tuple[Pt, Pt, float]] = []
-        for _skey, _slayer, spoly, _slen in stubs_a:
-            own_attached.extend((c, d, half) for c, d in zip(spoly, spoly[1:], strict=False))
-        for _skey, _slayer, spoly, _slen in stubs_b:
-            own_attached.extend((c, d, half) for c, d in zip(spoly, spoly[1:], strict=False))
+
+        # Issue #9517 (#9538 review): a band-interior leg may ride only the
+        # pad-attached stub copper the EMITTED path uses at that end of the
+        # leg -- never an unselected candidate's.  The first cut pooled every
+        # start and goal stub's legs into one ride set, so a stub the router
+        # does NOT emit legalised the selected escape's first body leg (and a
+        # collinear stub on ANOTHER layer did the same across layers): the
+        # validator then measured the slit the search never saw.  The search
+        # seeds exactly one stub per ``(node, layer)`` state -- ``start_stub``
+        # below and ``goal`` above each keep their best candidate -- and a
+        # path joins a stub only at its landing node, so the rides an edge
+        # may claim are precisely:
+        #
+        # * the start stub seeded at the expansion's FROM node, when that
+        #   state is a seed (no ``came`` predecessor): the edge is the first
+        #   body leg out of the escape a path through it actually emits; and
+        # * the goal stub landing at the expansion's TO node: the edge is
+        #   the arrival leg into the escape a path ending there emits.
+        #
+        # Both are keyed on the edge's own layer, so foreign-layer stub
+        # copper never exempts anything.  Rides carry the stub's EMITTED
+        # half-width (``width_a``/``width_b`` -- the neck, when the escape
+        # tapered, #4293), never the body radius.
+        def _start_rides(key: NodeKey, layer: int) -> tuple[tuple[Pt, Pt, float], ...]:
+            poly = start_stub.get((key, layer))
+            if poly is None:
+                return ()
+            return tuple((c, d, width_a / 2.0) for c, d in zip(poly, poly[1:], strict=False))
+
+        def _goal_rides(key: NodeKey, layer: int) -> tuple[tuple[Pt, Pt, float], ...]:
+            landed = goal.get((key, layer))
+            if landed is None:
+                return ()
+            poly = landed[1]
+            return tuple((c, d, width_b / 2.0) for c, d in zip(poly, poly[1:], strict=False))
+
         # Issue #6957: the via sites already on each state's best path, as a
         # persistent linked list ``(site, rest)`` (newest first).  Kept in step
         # with ``came`` so a via expansion can be checked against its OWN
@@ -2966,7 +3004,7 @@ class LatticePathfinder:
         # only those can already lie on a path (cheap pre-filter for the loop
         # check below).
         reached: set[_State] = {state[:2] for state in g_score} if turn_aware else set()
-        edge_ok: dict[tuple[EdgeKey, int], bool] = {}
+        edge_ok: dict[tuple, bool] = {}
         node_ok: dict[_State, bool] = {}
         via_ok: dict[NodeKey, bool] = {}
         end_state: _State | None = None
@@ -3004,7 +3042,7 @@ class LatticePathfinder:
         def fat_edge_legal(edge: EdgeKey, lyr: int) -> bool:
             """The fat branch of the planar edge check, sharing its memo (#7932)."""
             nonlocal ko_pruned
-            ek = (edge, lyr)
+            ek = (edge, lyr, ())
             ok = edge_ok.get(ek)
             if ok is None:
                 pa = lattice.node_point(edge[0])
@@ -3202,7 +3240,20 @@ class LatticePathfinder:
                         # launder the winding count.
                         continue
                 edge = (min(key, nbr), max(key, nbr))
-                ek = (edge, layer)
+                # #9538 review: the rides this edge may claim (see the
+                # _start_rides comment above) ride along in the memo key.
+                # The memo is per UNORDERED edge, but a verdict earned with
+                # one end's stub copper must never be replayed for the
+                # reverse direction or a mid-path pass through the same
+                # edge -- only the expansion contexts below are ones whose
+                # path actually emits that copper.  The fat branch shares
+                # the dict with empty-ride keys and never consults rides.
+                rides: tuple[tuple[Pt, Pt, float], ...] = ()
+                if not fat:
+                    if state not in came:
+                        rides += _start_rides(key, layer)
+                    rides += _goal_rides(nbr, layer)
+                ek = (edge, layer, rides)
                 ok = edge_ok.get(ek)
                 if ok is None:
                     if fat:
@@ -3231,7 +3282,7 @@ class LatticePathfinder:
                             extra=extra,
                             pw=pw,
                             ko=ko,
-                            attached=own_attached,
+                            attached=rides,
                         )
                         if ko_hit:
                             ko_pruned = True
@@ -3247,7 +3298,7 @@ class LatticePathfinder:
                                     extra=extra,
                                     pw=None,
                                     ko=ko,
-                                    attached=own_attached,
+                                    attached=rides,
                                 )[0]
                     ok = ok and boundary.segment_clear(
                         lattice.node_point(edge[0]),
@@ -3572,7 +3623,12 @@ class LatticePathfinder:
             # failure was U2.8's in-pad dead-end stubs).
             if not fat:
 
-                def no_egress(stubs: list) -> bool:
+                def no_egress(stubs: list, stub_half: float) -> bool:
+                    # Rides at the stub's EMITTED half-width (#9538 review):
+                    # these stubs may be the neck fallback's, whose copper is
+                    # narrower than the body -- an egress verdict graded at
+                    # the body radius would accept rides the emitted neck
+                    # does not cover.
                     return not any(
                         self._stub_has_egress(
                             stub,
@@ -3583,13 +3639,14 @@ class LatticePathfinder:
                             net_class=net_class,
                             allow_vias=allow_vias,
                             via_in_pad_override=via_in_pad_override,
+                            stub_half=stub_half,
                         )
                         for stub in stubs
                     )
 
-                if no_egress(stubs_a):
+                if no_egress(stubs_a, width_a / 2.0):
                     return None, "no-egress-start"
-                if no_egress(stubs_b):
+                if no_egress(stubs_b, width_b / 2.0):
                     return None, "no-egress-end"
             # Issue #4979: same honesty contract for a hard layer constraint.
             # ``layer_pruned`` is set when the net's hard-avoided set actually

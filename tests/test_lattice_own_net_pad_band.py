@@ -33,12 +33,17 @@ gate, not here.
 from __future__ import annotations
 
 import math
+import sys
+from pathlib import Path
 
 from kicad_tools.router.lattice.coupled import CoupledConnection
 from kicad_tools.router.lattice.pathfinder import LatticePathfinder
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules, NetClassRouting
+
+sys.path.insert(0, str(Path(__file__).parent))
+from test_physical_copper_gap import board, gaps  # noqa: E402
 
 EDGE = 0.15  # jlcpcb 4layer pad_spacing detection edge (#9016)
 HALF = 0.1  # 0.2 mm trace, the board default in these fixtures
@@ -453,6 +458,130 @@ def test_body_edge_legal_accepts_continuation_of_attached_stub() -> None:
         ko=None,
         attached=attached,
     )
+
+
+# ---------------------------------------------------------------------------
+# The #9538 review pins: the ride is the SELECTED escape's own copper, on
+# its own layer, at its emitted width, and collinear means ON the line
+# ---------------------------------------------------------------------------
+
+
+def _pad_footprint(pad: Pad) -> str:
+    layer = "F.Cu" if pad.layer == Layer.F_CU else "B.Cu"
+    return (
+        f'(footprint "R" (layer "{layer}") (at {pad.x} {pad.y}) '
+        f'(property "Reference" "{pad.ref}") (pad "1" smd rect (at 0 0) '
+        f'(size {pad.width} {pad.height}) (layers "{layer}") (net 1 "GND")))'
+    )
+
+
+def _route_sexps(route) -> list[str]:
+    items = [
+        f"(segment (start {s.x1} {s.y1}) (end {s.x2} {s.y2}) (width {s.width}) "
+        f'(layer "{s.layer.kicad_name}") (net 1) (uuid "s{i}"))'
+        for i, s in enumerate(route.segments)
+    ]
+    items.extend(
+        f"(via (at {v.x} {v.y}) (size 0.6) (drill 0.3) "
+        f'(layers "F.Cu" "B.Cu") (net 1) (uuid "v{i}"))'
+        for i, v in enumerate(route.vias)
+    )
+    return items
+
+
+def test_route_emits_no_slit_riding_an_unselected_stub_candidate() -> None:
+    # #9538 review finding 1: pooling EVERY start/goal stub candidate into
+    # one ride set let an unselected candidate's copper legalise the
+    # SELECTED escape's first body leg.  On this two-pad fixture the first
+    # body edge (2.2, 1.0) -> (2.4, 1.2) failed the guard with the stub the
+    # router emits, passed only via a candidate it does not, and the board
+    # carried a 0.1245 mm same-net slit to U1.  The ride set must follow
+    # the selected stub at each end of the path (and the unordered-edge
+    # memo must key on it), so the search takes the collinear continuation
+    # the emitted escape actually covers -- or another legal leg.
+    a = _pad(2.03, 1.015, width=0.12, height=0.6)
+    b = _pad(5.02, 2.05, width=0.3, height=0.6, ref="J2")
+    pf = _pf([a, b], fine=0.4)
+    route = pf.route(a, b)
+    assert route is not None, "the connection must still route (#9517 unlock)"
+    assert not route.vias
+    findings = [
+        (v.actual_value, v.items)
+        for v in gaps(board(*map(_pad_footprint, (a, b)), *_route_sexps(route)), EDGE)
+    ]
+    assert findings == [], findings
+
+
+def test_route_never_rides_a_foreign_layer_stub_out_of_the_band() -> None:
+    # #9538 review finding 1, layer half: the pooled ride set also ignored
+    # the stubs' layers, so a collinear B.Cu escape legalised F.Cu band
+    # legs.  With pad b moved to B.Cu the same two-pad fixture emitted the
+    # same 0.1245 mm F.Cu slit beside U1, graded clean only because a
+    # foreign-layer stub sat on the line.  Rides are keyed on the edge's
+    # own layer now, so the F.Cu exit must stand on F.Cu copper.
+    a = _pad(2.03, 1.015, width=0.12, height=0.6)
+    b = Pad(
+        x=5.02,
+        y=2.05,
+        width=0.3,
+        height=0.6,
+        net=1,
+        net_name="GND",
+        layer=Layer.B_CU,
+        ref="J2",
+        pin="1",
+    )
+    pf = _pf([a, b], fine=0.4)
+    route = pf.route(a, b)
+    assert route is not None, "the connection must still route (#9517 unlock)"
+    findings = [
+        (v.actual_value, v.items)
+        for v in gaps(board(*map(_pad_footprint, (a, b)), *_route_sexps(route)), EDGE)
+    ]
+    assert findings == [], findings
+
+
+def test_parallel_leg_within_combined_half_widths_is_not_collinear() -> None:
+    # #9538 review finding 2: a leg offset 0.15 mm sideways rides the tail
+    # (contact: 0.15 <= half + hw = 0.2) and is parallel to it, yet its
+    # copper sits BESIDE the pad-attached escape -- the validator measures
+    # a 0.02 mm slit between the leg and the pad where the guard accepted.
+    # Collinear means ON the supporting line (perpendicular distance ~ 0),
+    # not merely parallel; the same leg moved onto the tail's centerline
+    # (x = 0) is the accepted continuation.
+    pf = _pf([_pad(0.0, 0.0)])
+    pf.build()
+    tail = ((0.0, 0.0), (0.0, -0.42), HALF)
+    assert _band_blocked(pf, (0.15, -0.42), (0.15, -0.62))
+    assert pf.obstacles.same_net_pad_band_blocked(
+        (0.15, -0.42), (0.15, -0.62), 0, 1, HALF, EDGE, attached=(tail,)
+    )
+    assert not pf.obstacles.same_net_pad_band_blocked(
+        (0.0, -0.42), (0.0, -0.62), 0, 1, HALF, EDGE, attached=(tail,)
+    )
+
+
+def test_stub_egress_rides_attach_at_the_stubs_emitted_width() -> None:
+    # #9538 review finding 1, taper half: a neck escape's rides were graded
+    # at the body radius, accepting rides the emitted neck does not cover.
+    # The stub below lands with every outgoing edge in the band beside the
+    # 1.4 mm pad (corner gaps inside (half, half + edge) at half = 0.1), so
+    # its egress is decided entirely by the straight continuation's ride --
+    # and the ride only covers the pad when the stub's own half-width
+    # reaches it: 0.125 mm standoff attaches at the 0.15 body radius, not
+    # at the 0.05 emitted neck.
+    pf = LatticePathfinder(
+        [(-1.0, -1.0), (7.0, -1.0), (7.0, 1.0), (-1.0, 1.0)],
+        [_pad(5.0, 0.0, width=1.4, height=0.6)],
+        _rules(EDGE),
+        LayerStack.two_layer(),
+        fine=0.025,
+    )
+    lattice = pf.build()
+    stub = (lattice.node_key(5.825, -0.45), 0, [(5.825, 0.0), (5.825, -0.45)], 0.45)
+    committed = pf._fresh_committed()
+    assert not pf._stub_has_egress(stub, 1, committed, HALF, 0.15, allow_vias=False, stub_half=0.05)
+    assert pf._stub_has_egress(stub, 1, committed, HALF, 0.15, allow_vias=False, stub_half=0.15)
 
 
 # ---------------------------------------------------------------------------

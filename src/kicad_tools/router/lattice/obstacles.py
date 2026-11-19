@@ -521,11 +521,18 @@ class LatticeObstacleModel:
           verdict.  The collinearity test below pins the other endpoint to
           the same line, so the leg's copper and the attached copper are one
           connected shape -- the join the validator's shoulder test sees;
-        * **collinear** -- ``a-b`` stays on that segment's line (unit cross
-          product ~ 0; the tolerance is loose enough for float lattice
-          coordinates, tight enough that any 45-degree dogleg corner fails
-          it).  The degenerate ``a == b`` point probe skips the line test: a
-          node sitting on pad-attached copper is covered copper, whatever
+        * **collinear** -- ``a-b`` stays on that segment's LINE: parallel
+          (unit cross product ~ 0) AND on the supporting line (each
+          endpoint's perpendicular distance ~ 0 -- the cross products below
+          are distance-times-``slen``, at the same 1e-6-of-length scale).
+          Parallel alone is not enough (#9538 review): a leg laterally
+          offset inside the combined half-widths still rides (contact) and
+          is parallel, yet its copper sits beside the attached escape and
+          the validator measures the slit between them.  The tolerance is
+          loose enough for float lattice coordinates, tight enough that any
+          45-degree dogleg corner or real lateral offset fails it.  The
+          degenerate ``a == b`` point probe skips the line test: a node
+          sitting on pad-attached copper is covered copper, whatever
           brought the search there.
 
         Direction-free on purpose: A* edge legality is memoised per
@@ -553,6 +560,17 @@ class LatticeObstacleModel:
             if degenerate:
                 return True
             if abs(ux * sdy - uy * sdx) > 1e-6 * slen:
+                continue
+            # Parallel is not on the line (#9538 review): each endpoint's
+            # cross product with the segment is its perpendicular distance
+            # to the supporting line times ``slen`` -- a lateral offset the
+            # ride/contact tests above still tolerate (inside the combined
+            # half-widths) must fail here, or the leg's copper sits beside
+            # the attached escape opening a validator slit.
+            if (
+                abs((a[0] - c[0]) * sdy - (a[1] - c[1]) * sdx) > 1e-6 * slen
+                or abs((b[0] - c[0]) * sdy - (b[1] - c[1]) * sdx) > 1e-6 * slen
+            ):
                 continue
             return True
         return False
