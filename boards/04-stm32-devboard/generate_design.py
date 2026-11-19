@@ -2342,50 +2342,76 @@ def merge_fragment_runs(routed_path: Path) -> bool:
         vias = [v.position for v in pcb.vias]
         changed = False
         for chain, layer in rule.flagged:
-            # The first maximal run of sub-threshold segments in this chain.
             lengths = [math.dist(step[0].start, step[0].end) for step in chain]
-            start = next((i for i, n in enumerate(lengths) if n < FRAGMENT_MAX_MM), None)
-            if start is None:
-                continue
-            stop = start
-            while stop + 1 < len(chain) and lengths[stop + 1] < FRAGMENT_MAX_MM:
-                stop += 1
-            if stop - start + 1 < FRAGMENT_RUN_MIN or start == 0 or stop == len(chain) - 1:
-                print(f"   run in chain on {layer}: no neighbour on both sides; not merged")
-                continue
-            before_seg, _bf, before_to = chain[start - 1]
-            after_seg, after_from, _at = chain[stop + 1]
-            a_from = chain[start - 1][1]
-            b_to = chain[stop + 1][2]
-            interior = [step[1] for step in chain[start : stop + 1]] + [after_from]
-            if any(math.dist(node, via) < 1e-3 for node in interior for via in vias):
-                print(f"   run in chain on {layer}: a via sits inside the run; not merged")
-                continue
-            d_a = (before_to[0] - a_from[0], before_to[1] - a_from[1])
-            d_b = (b_to[0] - after_from[0], b_to[1] - after_from[1])
-            hit = _line_intersection(a_from, d_a, after_from, d_b)
-            if hit is None:
-                print(f"   run in chain on {layer}: neighbours are parallel; not merged")
-                continue
-            corner, t, u = (hit[0], hit[1]), hit[2], hit[3]
-            if t <= 1e-6 or u >= 1.0 - 1e-6:
-                print(f"   run in chain on {layer}: corner falls outside the neighbours")
-                continue
-            width = max(step[0].width for step in chain[start - 1 : stop + 2])
-            net = before_seg.net_number
-            legs = [(a_from, corner), (corner, b_to)]
-            if not rule._path_clear(legs, net, layer, width):
-                print(f"   run in chain on {layer}: no clear corner at {corner}")
-                continue
-            pcb.remove_segments([step[0] for step in chain[start - 1 : stop + 2]])
-            for point_a, point_b in legs:
-                pcb.add_trace(point_a, point_b, width=width, layer=layer, net=net)
-            print(
-                f"   run of {stop - start + 1} on {layer}: {stop - start + 3} segments -> "
-                f"2 meeting at corner ({corner[0]:.4f}, {corner[1]:.4f}) at {width} mm"
-            )
-            merged += 1
-            changed = True
+            # Every maximal run of sub-threshold segments, not just the first:
+            # a stray short segment elsewhere in the chain must not hide the
+            # flagged run (#9133).
+            runs: list[tuple[int, int]] = []
+            i = 0
+            while i < len(chain):
+                if lengths[i] >= FRAGMENT_MAX_MM:
+                    i += 1
+                    continue
+                stop = i
+                while stop + 1 < len(chain) and lengths[stop + 1] < FRAGMENT_MAX_MM:
+                    stop += 1
+                runs.append((i, stop))
+                i = stop + 1
+            for start, stop in runs:
+                if stop - start + 1 < FRAGMENT_RUN_MIN:
+                    print(
+                        f"   run of {stop - start + 1} in chain on {layer}: "
+                        f"shorter than the {FRAGMENT_RUN_MIN}-segment run minimum; not merged"
+                    )
+                    continue
+                if start == 0:
+                    print(
+                        f"   run in chain on {layer}: no neighbour before the run "
+                        f"(chain start); not merged"
+                    )
+                    continue
+                if stop == len(chain) - 1:
+                    print(
+                        f"   run in chain on {layer}: no neighbour after the run "
+                        f"(chain end); not merged"
+                    )
+                    continue
+                before_seg, _bf, before_to = chain[start - 1]
+                after_seg, after_from, _at = chain[stop + 1]
+                a_from = chain[start - 1][1]
+                b_to = chain[stop + 1][2]
+                interior = [step[1] for step in chain[start : stop + 1]] + [after_from]
+                if any(math.dist(node, via) < 1e-3 for node in interior for via in vias):
+                    print(f"   run in chain on {layer}: a via sits inside the run; not merged")
+                    continue
+                d_a = (before_to[0] - a_from[0], before_to[1] - a_from[1])
+                d_b = (b_to[0] - after_from[0], b_to[1] - after_from[1])
+                hit = _line_intersection(a_from, d_a, after_from, d_b)
+                if hit is None:
+                    print(f"   run in chain on {layer}: neighbours are parallel; not merged")
+                    continue
+                corner, t, u = (hit[0], hit[1]), hit[2], hit[3]
+                if t <= 1e-6 or u >= 1.0 - 1e-6:
+                    print(f"   run in chain on {layer}: corner falls outside the neighbours")
+                    continue
+                width = max(step[0].width for step in chain[start - 1 : stop + 2])
+                net = before_seg.net_number
+                legs = [(a_from, corner), (corner, b_to)]
+                if not rule._path_clear(legs, net, layer, width):
+                    print(f"   run in chain on {layer}: no clear corner at {corner}")
+                    continue
+                pcb.remove_segments([step[0] for step in chain[start - 1 : stop + 2]])
+                for point_a, point_b in legs:
+                    pcb.add_trace(point_a, point_b, width=width, layer=layer, net=net)
+                print(
+                    f"   run of {stop - start + 1} on {layer}: {stop - start + 3} segments -> "
+                    f"2 meeting at corner ({corner[0]:.4f}, {corner[1]:.4f}) at {width} mm"
+                )
+                merged += 1
+                changed = True
+                break
+            else:
+                continue  # no run in this chain merged; the next chain is still valid
             break  # chains are stale after an edit; re-flag
         if not changed:
             break
