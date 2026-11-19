@@ -1104,6 +1104,10 @@ class WaiverMigrationItem:
     reason: str = ""
     #: Current finding keys that look like the same finding (``orphan`` items only).
     candidates: tuple[str, ...] = ()
+    #: The entry's rule produced no findings because it was inactive this run
+    #: (e.g. ``ampacity`` without a net-class-map; issue #9504) -- ``orphan``
+    #: items only.
+    rule_inactive: bool = False
 
 
 @dataclass
@@ -1118,6 +1122,10 @@ class WaiverMigrationReport:
     orphan: list[WaiverMigrationItem] = field(default_factory=list)
     #: Keyed entries that need no migration (already current version, mistake entries, ...).
     untouched: int = 0
+    #: Names of the untouched entries that have one (issue #9504): the key of
+    #: an ``ev2:``/``ev4:``/``ev5:`` entry, or the rule name of a legacy
+    #: ``rule``/``items`` entry. Keyless malformed entries are only counted.
+    untouched_keys: list[str] = field(default_factory=list)
     written: bool = False
 
 
@@ -1129,6 +1137,7 @@ def migrate_evidence_waivers(
     write: bool = False,
     tool_version: str = "",
     date: str | None = None,
+    inactive_rules: Iterable[str] = (),
 ) -> WaiverMigrationReport:
     """Re-bind ``ev3`` evidence-bound waivers in ``path`` to ``ev4`` (Issue #9454).
 
@@ -1148,11 +1157,18 @@ def migrate_evidence_waivers(
     written unless ``write`` is true; a file that fails validation is never
     clobbered.  ``kct detect-mistakes`` entries (``ev3.m1:``) are not handled.
 
+    ``inactive_rules`` (issue #9504) names rules that could not produce
+    findings this run for lack of input (e.g. ``ampacity`` without a
+    net-class-map, ``path_ampacity`` without ``--current-paths``); an orphan
+    naming such a rule is reported as ``rule_inactive`` so the report can say
+    the rule was not evaluated instead of implying the key changed.
+
     Raises:
         ValueError: when the file cannot be parsed or fails validation.
     """
     if prior_context.recipe != PRIOR_EVIDENCE_HASH_VERSION:
         raise ValueError("migrate_evidence_waivers needs a prior-recipe EvidenceContext")
+    inactive = frozenset(inactive_rules)
     try:
         data = json.loads(path.read_text())
     except json.JSONDecodeError as e:
@@ -1171,6 +1187,12 @@ def migrate_evidence_waivers(
     for idx, raw in enumerate(raw_entries):
         if not (isinstance(raw, dict) and isinstance(raw.get("key"), str)):
             report.untouched += 1
+            # Issue #9504: name what we can -- a legacy ``rule``/``items``
+            # entry by its rule name; a truly malformed entry is only counted.
+            if isinstance(raw, dict):
+                rule = raw.get("rule")
+                if isinstance(rule, str) and rule:
+                    report.untouched_keys.append(f"{rule} (legacy rule/items entry)")
             continue
         old_hash = str(raw.get("evidence_hash") or "")
         key = raw["key"]
@@ -1178,6 +1200,7 @@ def migrate_evidence_waivers(
             key.split(KEY_SEPARATOR, 1)[0]
         ):
             report.untouched += 1
+            report.untouched_keys.append(key)
             continue
         matches = by_key.get(key, [])
         if not matches:
@@ -1189,11 +1212,18 @@ def migrate_evidence_waivers(
                 issue="",
                 key=key,
             )
+            rule_inactive = shim.rule in inactive
             report.orphan.append(
                 WaiverMigrationItem(
                     key=key,
                     old_hash=old_hash,
-                    reason="key names no current finding (the key changed or the defect is gone)",
+                    reason=(
+                        "key names no current finding and the rule was not evaluated "
+                        "in this run (its required input was absent)"
+                        if rule_inactive
+                        else "key names no current finding (the key changed or the defect is gone)"
+                    ),
+                    rule_inactive=rule_inactive,
                     candidates=tuple(
                         _path_ampacity_layer_candidates(shim, current)
                         or _rewaive_candidates(shim, current)
@@ -1243,15 +1273,21 @@ def migrate_evidence_waivers(
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    """Write via a same-directory temp file and ``os.replace`` (no truncated file)."""
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    """Write via a same-directory temp file and ``os.replace`` (no truncated file).
+
+    Issue #9504: ``path`` is resolved first (``os.path.realpath``) and the
+    temp file is created beside the *target*, so a symlinked waivers file is
+    updated through its link instead of being replaced by a regular file.
+    """
+    target = Path(os.path.realpath(path))
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as fh:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
-        shutil.copymode(path, tmp)
-        os.replace(tmp, path)
+        shutil.copymode(target, tmp)
+        os.replace(tmp, target)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
@@ -1272,8 +1308,12 @@ def format_waiver_migration(report: WaiverMigrationReport, path: Path, *, write:
         lines.append(f"  stale: {it.key}  ({it.old_hash}): {it.reason}")
     for it in report.orphan:
         line = f"  orphan (no current finding): {it.key}  ({it.old_hash})"
+        if it.rule_inactive:
+            line += " [rule not evaluated in this run]"
         if it.candidates:
             shown = it.candidates[:_MAX_REWAIVE_HINT_KEYS]
             line += " -> re-waive candidate(s): " + ", ".join(repr(k) for k in shown)
         lines.append(line)
+    for key in report.untouched_keys:
+        lines.append(f"  untouched (no migration needed): {key}")
     return lines
