@@ -637,13 +637,16 @@ def subthreshold_coverage_gap(
     pollution_degree: int = 2,
     material_group: str = "IIIa",
     hv_threshold: float = 30.0,
+    pair_bounds: Mapping[frozenset[str], tuple[float, str]] | None = None,
     net_intervals: Mapping[str, tuple[float, float]] | None = None,
 ) -> SubthresholdCoverage:
     """Measure what ``hv_threshold`` hides from the pairwise matrix (#4507).
 
     Mirrors :func:`build_pairwise_clearance_table`'s inputs exactly -- same
     signed differencing (#4867), same interval differencing when *net_intervals*
-    is supplied (#9602), same standard lookup -- but reports the pairs
+    is supplied (#9602), same ``_pair_bounds`` lowering (#8043, applied BEFORE
+    the threshold test exactly as ``build_required_by_domain_pair`` applies it),
+    same standard lookup -- but reports the pairs
     that fall on the *other* side of the threshold and would still carry a
     requirement above ``dru``.  See :class:`SubthresholdCoverage`.
 
@@ -656,11 +659,21 @@ def subthreshold_coverage_gap(
     skipped) rather than raised: this is a diagnostic, and the fail-loud
     contract belongs to :func:`build_pairwise_clearance_table`, which sees the
     same voltages.
+
+    Like *net_voltages*, *net_intervals* keys are normalised here
+    (:func:`_norm_net_key`), so the raw outputs of
+    :func:`load_signed_voltage_map` / :func:`load_voltage_intervals` may be
+    passed unmodified -- a map keyed ``/A`` matches the same net either way.
     """
     from kicad_tools.creepage.standards import StandardLookupError, get_standard
 
     std = get_standard(standard_id)
     normalised = {_norm_net_key(name): float(v) for name, v in net_voltages.items()}
+    normalised_intervals: dict[str, tuple[float, float]] | None = None
+    if net_intervals is not None:
+        normalised_intervals = {
+            _norm_net_key(name): (float(lo), float(hi)) for name, (lo, hi) in net_intervals.items()
+        }
     ids = sorted(normalised)
     lookup_cache: dict[float, float | None] = {}
 
@@ -673,14 +686,22 @@ def subthreshold_coverage_gap(
             a, b = ids[i], ids[j]
             # Issue #9602: interval-aware ΔV, mirroring
             # build_required_by_domain_pair's worst-case endpoint combination.
-            iv_a = net_intervals.get(a) if net_intervals else None
-            iv_b = net_intervals.get(b) if net_intervals else None
+            iv_a = normalised_intervals.get(a) if normalised_intervals else None
+            iv_b = normalised_intervals.get(b) if normalised_intervals else None
             if iv_a is not None or iv_b is not None:
                 lo_a, hi_a = iv_a if iv_a is not None else (normalised[a], normalised[a])
                 lo_b, hi_b = iv_b if iv_b is not None else (normalised[b], normalised[b])
                 dv = max(abs(hi_a - lo_b), abs(hi_b - lo_a))
             else:
                 dv = abs(normalised[a] - normalised[b])
+            # Issue #8043: lower by the device-bounded cap BEFORE the threshold
+            # test, exactly as the matrix builder does -- a pair whose raw
+            # interval span is far above hv_threshold but whose real stress is
+            # device-limited below it lands here instead of silently nowhere.
+            if pair_bounds:
+                bound = pair_bounds.get(frozenset((a, b)))
+                if bound is not None:
+                    dv = min(dv, bound[0])
             if dv <= 0.0 or dv >= hv_threshold:
                 continue
             if dv not in lookup_cache:

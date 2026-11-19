@@ -9345,12 +9345,15 @@ def _preload_voltage_map(args) -> int:
     inputs and fail with the same messages.  Stashes the result on
     ``args._pairwise_voltages`` / ``args._pairwise_required`` (both ``None``
     when ``--voltage-map`` was not supplied) plus the per-net ``[lo, hi]``
-    intervals on ``args._pairwise_intervals`` (#9602).  Returns 0, or 1 after
+    intervals on ``args._pairwise_intervals`` (#9602) and the parsed
+    ``_pair_bounds`` caps on ``args._pairwise_pair_bounds`` (#8043, consumed by
+    the sub-threshold advisory).  Returns 0, or 1 after
     printing the error to stderr.
     """
     args._pairwise_voltages = None
     args._pairwise_required = None
     args._pairwise_intervals = None
+    args._pairwise_pair_bounds = None
     if getattr(args, "voltage_map", None) is not None:
         from kicad_tools.creepage.standards import StandardLookupError
         from kicad_tools.placement.hv_domains import build_required_by_domain_pair
@@ -9413,6 +9416,7 @@ def _preload_voltage_map(args) -> int:
         args._pairwise_voltages = _voltages
         args._pairwise_required = _required
         args._pairwise_intervals = _intervals
+        args._pairwise_pair_bounds = _pair_bounds or None
     return 0
 
 
@@ -9517,6 +9521,7 @@ def _warn_subthreshold_coverage_gap(args, voltages, dru: float) -> None:
         pollution_degree=getattr(args, "pollution_degree", 2),
         material_group=getattr(args, "material_group", "IIIa"),
         hv_threshold=hv_threshold,
+        pair_bounds=getattr(args, "_pairwise_pair_bounds", None),
         net_intervals=getattr(args, "_pairwise_intervals", None),
     )
     if gap.pair_count == 0:
@@ -21119,8 +21124,9 @@ def _route_parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help=(
             "Path to a JSON per-net voltage map {net_name: volts} (reuses the "
-            "#4371 format; ranges {min,max} per #4411 collapse to the worst-case "
-            "endpoint). Potentials are read SIGNED, exactly as kct creepage "
+            "#4371 format; a range {min,max} per #4411 is differenced "
+            "end-to-end at its worst-case endpoint combination, #9602). "
+            "Potentials are read SIGNED, exactly as kct creepage "
             "reads the same file (#4867): a +150 V net and a -150 V net are a "
             "300 V pair, not 0 V. Enables HV-isolation pairwise clearance (Issue #4431 "
             "Phase 1): the router derives a net-pair required-clearance matrix "
