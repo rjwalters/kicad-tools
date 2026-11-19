@@ -106,7 +106,7 @@ from kicad_tools.manufacturers.attach_zone_dru import (
 
 from ..spatial import candidate_pairs
 from ..violations import DRCResults, DRCViolation
-from .base import DRC_TOLERANCE
+from .base import DRC_TOLERANCE, drc_clear
 from .clearance import (
     _COLOCATION_EPSILON_MM,
     ClearanceRule,
@@ -257,7 +257,7 @@ def check_netclass_clearance_copper(
                 ):
                     continue
             clearance, x, y = _calculate_clearance(a, b)
-            if clearance + DRC_TOLERANCE >= required_class:
+            if drc_clear(clearance, required_class):
                 continue
             # Issue #8048: an attach zone lifts the router-class floor (never a
             # designer's: only router-class and unclassed nets are members).

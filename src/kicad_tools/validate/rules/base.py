@@ -45,6 +45,27 @@ if TYPE_CHECKING:
 # from loading the router); keep the two in sync.
 DRC_TOLERANCE: float = 5e-4
 
+# Band-edge float guard (mm).  KiCad compares in integer nanometres, so its
+# acceptance-band edge is exact; the same board read as float64 carries
+# ~1e-15 mm of coordinate rounding (a 4-decimal mm coordinate like
+# ``20.3265`` is not binary-exact), which would otherwise decide an
+# exactly-at-the-band verdict by rounding: the #9619 probe board reads
+# ~7e-16 mm below its nominal 500 nm shortfall.  1e-9 mm is six orders of
+# magnitude above that dust and six below KiCad's 1 nm IU, so it cannot
+# move any verdict a nanometre-resolution check could see.  Folded into
+# :func:`drc_clear` -- use that predicate at band-edge verdict sites
+# instead of re-deriving the comparison per rule.
+DRC_FLOAT_GUARD_MM: float = 1e-9
+
+
+def drc_clear(measured_mm: float, required_mm: float) -> bool:
+    """True unless the measured gap falls short of ``required_mm`` by more
+    than :data:`DRC_TOLERANCE` (KiCad's probed band, widened by the
+    :data:`DRC_FLOAT_GUARD_MM` float-safety term so a gap KiCad's
+    integer-nm math accepts at exactly the band edge is not flagged here
+    on float dust alone)."""
+    return measured_mm + DRC_TOLERANCE >= required_mm - DRC_FLOAT_GUARD_MM
+
 
 class DRCRule(ABC):
     """Abstract base class for DRC rule implementations.

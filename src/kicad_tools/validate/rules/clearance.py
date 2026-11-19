@@ -47,7 +47,7 @@ from ..clearance_shapes import (
 from ..copper_refs import Origin, board_origin, segment_ref, via_ref
 from ..spatial import candidate_pairs
 from ..violations import DRCResults, DRCViolation
-from .base import DRC_TOLERANCE, DRCRule
+from .base import DRC_TOLERANCE, DRCRule, drc_clear
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers import DesignRules
@@ -1753,7 +1753,7 @@ class ClearanceRule(DRCRule):
                 and elem1.source_footprint is not elem2.source_footprint
             ):
                 required = max(required, min_smd_pad_clearance or 0)
-            if clearance + DRC_TOLERANCE < required:
+            if not drc_clear(clearance, required):
                 violation = self._create_violation(
                     elem1, elem2, clearance, required, layer_name, loc_x, loc_y
                 )
@@ -2301,7 +2301,7 @@ class SegmentZoneClearanceRule(DRCRule):
             )
 
         clearance = centerline_dist - half_w
-        if clearance + DRC_TOLERANCE >= min_clearance:
+        if drc_clear(clearance, min_clearance):
             return None
 
         p_line, p_poly = nearest_points(line, poly)
@@ -2527,7 +2527,7 @@ class ViaZoneClearanceRule(DRCRule):
 
         if dist > 0:
             clearance = dist
-            if clearance + DRC_TOLERANCE >= min_clearance:
+            if drc_clear(clearance, min_clearance):
                 return None
             from shapely.ops import nearest_points
 
