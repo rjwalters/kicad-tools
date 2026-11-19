@@ -34,9 +34,10 @@ pad corner is no longer judged against the corner's bounding square.
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Sequence
 
 from kicad_tools.geometry.copper import pad_gate_polygon as _pad_gate_polygon
 from kicad_tools.geometry.copper import pad_waiver_polygon as _pad_waiver_polygon
@@ -419,6 +420,8 @@ class LatticeObstacleModel:
         net: int,
         half: float,
         edge_mm: float,
+        committed: CommittedCopper | None = None,
+        attached: Sequence[tuple[Pt, Pt, float]] = (),
     ) -> bool:
         """True when the copper swept by segment ``a-b`` parks in the fab
         slit band beside an own-net SMD pad on ``layer`` (issue #9018).
@@ -444,6 +447,23 @@ class LatticeObstacleModel:
         through-hole neighbour is the hole-to-hole floor's business).  The
         degenerate ``a == b`` form is the point probe.  ``edge_mm <= 0``
         keeps the guard off (an unresolvable stackup changes nothing).
+
+        Issue #9517: the guard judged every leg in isolation and so
+        deadlocked any pad whose stub ends inside the band -- no leg could
+        leave the stub end, hence ``no-path`` (board 05's VCP).  The rule it
+        mirrors exempts exactly this shape:
+        ``check_physical_copper_gap``'s connector-coverage ``continue``
+        (``validate/rules/physical_gap.py``) does not flag a gap whose
+        connector is covered by other same-net copper -- which a collinear
+        continuation of a pad-joined stub is.  ``attached`` carries the
+        already-placed same-net copper segments ``(c, d, half_width)`` the
+        leg may ride: a band-violating leg that stays ON the line of such a
+        segment, whose copper unions the pad, is copper stacked on an
+        existing escape -- it lays no band copper of its own and is accepted.
+        ``committed`` (optional) contributes that net's committed segments
+        near the leg the same way.  Everything else -- above all a leg
+        running parallel to the pad edge beside its stub (the #9011 slit
+        shape) -- is rejected as before.
         """
         if edge_mm <= 0.0:
             return False
@@ -453,6 +473,7 @@ class LatticeObstacleModel:
         ax0, ax1 = min(a[0], b[0]), max(a[0], b[0])
         ay0, ay1 = min(a[1], b[1]), max(a[1], b[1])
         eps = ka.LATTICE_CLEARANCE_EPSILON_MM
+        rides: list[tuple[Pt, Pt, float]] | None = None
         for idx in self.pads_near(x0, y0, x1, y1):
             pad = self.pads[idx]
             if pad.net != net or pad.through_hole or pad.drill > 0:
@@ -469,7 +490,78 @@ class LatticeObstacleModel:
                 continue
             gap = self.pad_centerline_gap(idx, a, b) - half
             if eps < gap < edge_mm - eps:
+                # #9517: a leg riding a pad-attached same-net segment is the
+                # validator's covered connector, not a slit.  The ride set is
+                # resolved lazily and once per call -- clean legs never pay.
+                if rides is None:
+                    rides = list(attached)
+                    if committed is not None:
+                        rides.extend(
+                            (c, d, seg_hw)
+                            for c, d, cnet, seg_hw, _iclr in committed.copper[layer].query_seg(
+                                a, b, pad=half + edge_mm + 1.0
+                            )
+                            if cnet == net
+                        )
+                if rides and self._band_continuation_exempt(idx, a, b, half, rides, eps):
+                    continue
                 return True
+        return False
+
+    def _band_continuation_exempt(
+        self,
+        idx: int,
+        a: Pt,
+        b: Pt,
+        half: float,
+        rides: list[tuple[Pt, Pt, float]],
+        eps: float,
+    ) -> bool:
+        """#9517 exemption: leg ``a-b`` rides a pad-attached same-net segment.
+
+        True when some ``(c, d, hw)`` ride candidate satisfies all three:
+
+        * **pad-attached** -- its own swept copper unions pad ``idx``'s
+          outline (``pad_centerline_gap <= hw``); committed/stub copper that
+          never reaches the pad cannot exempt anything;
+        * **ridden** -- the leg's start sits on that segment's swept copper
+          (``seg_pt_dist(a, c, d) <= half + hw``): the leg's copper and the
+          attached copper are one connected shape, the join the validator's
+          shoulder test sees;
+        * **collinear** -- ``a-b`` stays on that segment's line (unit cross
+          product ~ 0; the tolerance is loose enough for float lattice
+          coordinates, tight enough that any 45-degree dogleg corner fails
+          it).  The degenerate ``a == b`` point probe skips the line test: a
+          node sitting on pad-attached copper is covered copper, whatever
+          brought the search there.
+
+        Direction-free on purpose: A* edge legality is memoised per
+        UNORDERED edge, so the outward egress and the goal-side arrival
+        evaluate the same edge in opposite orders and must agree.  Both
+        directions are validator-clean anyway -- copper stacked on the
+        pad-attached line lays no band copper of its own; only a LATERAL
+        offset (which fails the ride test) can open a slit.
+        """
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        leg_len = math.hypot(dx, dy)
+        degenerate = leg_len <= 1e-12
+        ux = uy = 0.0
+        if not degenerate:
+            ux, uy = dx / leg_len, dy / leg_len
+        for c, d, hw in rides:
+            sdx, sdy = d[0] - c[0], d[1] - c[1]
+            slen = math.hypot(sdx, sdy)
+            if slen <= 1e-12:
+                continue
+            if self.pad_centerline_gap(idx, c, d) > hw + eps:
+                continue
+            if seg_pt_dist(a, c, d) > half + hw + eps:
+                continue
+            if degenerate:
+                return True
+            if abs(ux * sdy - uy * sdx) > 1e-6 * slen:
+                continue
+            return True
         return False
 
     def pairwise_pad_blocked(

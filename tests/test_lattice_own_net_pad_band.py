@@ -264,6 +264,161 @@ def test_body_edge_legal_accepts_edge_beyond_the_band() -> None:
 
 
 # ---------------------------------------------------------------------------
+# The #9517 exemption: a leg riding a pad-attached stub is the validator's
+# covered connector, not a slit
+# ---------------------------------------------------------------------------
+
+
+def test_outward_collinear_continuation_of_pad_attached_stub_is_accepted() -> None:
+    # Pad 0.6x0.6 at the origin; its stub tail runs straight down from the
+    # pad centre to (0.0, -0.42) -- 0.12 mm past the bottom edge (y = -0.3).
+    # A continuation leg from there to (0.0, -0.52) parks in the band
+    # (centreline gap 0.02..0.12) yet is exactly the #9517 shape: on the
+    # tail's line, its start riding the tail's swept copper, the tail
+    # unions the pad.  In isolation it is the board 05 deadlock (rejected);
+    # with the stub legs attached the validator's connector-coverage
+    # exemption grades the composite escape clean, and so must the guard.
+    pf = _pf([_pad(0.0, 0.0)])
+    pf.build()
+    leg = ((0.0, -0.42), (0.0, -0.52))
+    tail = ((0.0, 0.0), (0.0, -0.42), HALF)
+    assert _band_blocked(pf, *leg)
+    assert not pf.obstacles.same_net_pad_band_blocked(
+        leg[0], leg[1], 0, 1, HALF, EDGE, attached=(tail,)
+    )
+
+
+def test_parallel_band_leg_stays_rejected_despite_attached_stub() -> None:
+    # The #9011 slit shapes beside the SAME tail: a leg parallel to the pad
+    # edge, a corner off the tail's end, and a collinear leg laterally
+    # offset from the tail's line -- none rides the tail, so none is
+    # exempt.  Board 07's slit count stays at 0.
+    pf = _pf([_pad(0.0, 0.0)])
+    pf.build()
+    tail = ((0.0, 0.0), (0.0, -0.42), HALF)
+    # parallel to the bottom edge, in the band
+    assert _band_blocked(pf, (-0.5, -0.42), (0.5, -0.42))
+    assert pf.obstacles.same_net_pad_band_blocked(
+        (-0.5, -0.42), (0.5, -0.42), 0, 1, HALF, EDGE, attached=(tail,)
+    )
+    # a corner off the tail's end: rides it, not collinear
+    assert pf.obstacles.same_net_pad_band_blocked(
+        (0.0, -0.42), (0.2, -0.42), 0, 1, HALF, EDGE, attached=(tail,)
+    )
+    # collinear with the tail's axis but laterally offset: misses it
+    assert _band_blocked(pf, (0.3, -0.42), (0.3, -0.52))
+    assert pf.obstacles.same_net_pad_band_blocked(
+        (0.3, -0.42), (0.3, -0.52), 0, 1, HALF, EDGE, attached=(tail,)
+    )
+
+
+def test_collinear_leg_back_toward_the_pad_is_accepted_on_the_tail() -> None:
+    # The #9517 plan's back-toward-pad probe.  Direction-free on purpose
+    # (the A* edge memo is unordered, so egress and arrival must agree): a
+    # leg on the tail's line lays no copper off the pad-attached escape
+    # either way, so it is the covered connector too.
+    pf = _pf([_pad(0.0, 0.0)])
+    pf.build()
+    leg = ((0.0, -0.52), (0.0, -0.42))
+    tail = ((0.0, 0.0), (0.0, -0.42), HALF)
+    assert _band_blocked(pf, *leg)
+    assert not pf.obstacles.same_net_pad_band_blocked(
+        leg[0], leg[1], 0, 1, HALF, EDGE, attached=(tail,)
+    )
+
+
+def test_stub_end_point_probe_on_attached_copper_is_accepted() -> None:
+    # The degenerate a == b form at the stub end itself: the node sits on
+    # pad-attached copper, so the point probe -- no direction to collinearity
+    # -- is exempt on ride + attachment alone.
+    pf = _pf([_pad(0.0, 0.0)])
+    pf.build()
+    tail = ((0.0, 0.0), (0.0, -0.42), HALF)
+    assert _band_blocked(pf, (0.0, -0.42), (0.0, -0.42))
+    assert not pf.obstacles.same_net_pad_band_blocked(
+        (0.0, -0.42), (0.0, -0.42), 0, 1, HALF, EDGE, attached=(tail,)
+    )
+
+
+def test_attached_segment_that_misses_the_pad_exempts_nothing() -> None:
+    # Attachment is what makes the composite escape validator-clean: a
+    # same-net segment whose copper stops short of the outline (centreline
+    # gap 0.15 > half) cannot exempt the leg that rides it.
+    pf = _pf([_pad(0.0, 0.0)])
+    pf.build()
+    orphan = ((0.0, -0.45), (0.0, -0.52), HALF)
+    leg = ((0.0, -0.45), (0.0, -0.52))
+    assert _band_blocked(pf, *leg)
+    assert pf.obstacles.same_net_pad_band_blocked(
+        leg[0], leg[1], 0, 1, HALF, EDGE, attached=(orphan,)
+    )
+
+
+def test_rotated_pad_stub_continuation_measures_the_true_outline() -> None:
+    # A 45-degree-rotated square pad is a diamond; the stub tail runs down
+    # its -y axis through the vertex, and the in-band continuation rides it
+    # out of the band.  Attachment and the band both measure the kernel's
+    # rotated outline (#7503), never the bbox.
+    pf = _pf([_pad(0.0, 0.0, rotation=45.0)])
+    pf.build()
+    leg = ((0.0, -0.55), (0.0, -0.6))
+    tail = ((0.0, 0.0), (0.0, -0.55), HALF)
+    assert _band_blocked(pf, *leg)
+    assert not pf.obstacles.same_net_pad_band_blocked(
+        leg[0], leg[1], 0, 1, HALF, EDGE, attached=(tail,)
+    )
+
+
+def test_body_edge_legal_accepts_continuation_of_attached_stub() -> None:
+    # The A* predicate form: the vertical in-band edge below the pad is
+    # refused without the stub legs (the #9517 deadlock) and accepted with
+    # them, while the in-band parallels beside it stay refused even with
+    # them attached.
+    pad = _pad(5.0, 0.0, width=3.0, height=0.6, ref="U1")
+    pf = _pf([pad], edge=EDGE, fine=0.1)
+    committed = pf._fresh_committed()
+    cont = parallel = None
+    for edge, a, b in _lattice_edges(pf):
+        gap = pf.obstacles.pad_centerline_gap(0, a, b) - HALF
+        if not (1e-9 < gap < EDGE - 1e-9):
+            continue
+        if abs(a[0] - b[0]) < 1e-9 and pad.x - pad.width / 2 < a[0] < pad.x + pad.width / 2:
+            cont = (edge, a, b)
+        elif abs(a[1] - b[1]) < 1e-9:
+            parallel = (edge, a, b)
+    assert cont is not None and parallel is not None, "fixture must offer both shapes"
+    (cx_edge, ca, _cb) = cont
+    (px_edge, pa, _pb) = parallel
+    attached = (((ca[0], 0.0), ca, HALF),)
+    assert not pf._body_edge_legal(
+        cx_edge, 0, 1, HALF, 0.15, committed, extra=0.0, pw=None, ko=None
+    )[0]
+    assert pf._body_edge_legal(
+        cx_edge, 0, 1, HALF, 0.15, committed, extra=0.0, pw=None, ko=None, attached=attached
+    )[0]
+    assert not pf._body_edge_legal(
+        px_edge, 0, 1, HALF, 0.15, committed, extra=0.0, pw=None, ko=None, attached=attached
+    )[0]
+    # The exemption rides the leg's START only: the same vertical edge
+    # discovered from its far end (the goal-side arrival order) is the
+    # direction-free memo's answer too.
+    assert pf._body_edge_legal(
+        cx_edge, 0, 1, HALF, 0.15, committed, extra=0.0, pw=None, ko=None, attached=attached
+    ) == pf._body_edge_legal(
+        (cx_edge[1], cx_edge[0]),
+        0,
+        1,
+        HALF,
+        0.15,
+        committed,
+        extra=0.0,
+        pw=None,
+        ko=None,
+        attached=attached,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Coupled attach doglegs (_pair_attach)
 # ---------------------------------------------------------------------------
 

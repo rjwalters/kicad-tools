@@ -48,7 +48,7 @@ import heapq
 import math
 import os
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -1565,7 +1565,15 @@ class LatticePathfinder:
 
     # -- own-net pad slit band (issue #9018) -----------------------------------
 
-    def _own_net_pad_band_ok(self, a: Pt, b: Pt, layer: int, net: int, half: float = 0.0) -> bool:
+    def _own_net_pad_band_ok(
+        self,
+        a: Pt,
+        b: Pt,
+        layer: int,
+        net: int,
+        half: float = 0.0,
+        attached: Sequence[tuple[Pt, Pt, float]] = (),
+    ) -> bool:
         """True when leg ``a-b`` keeps the fab slit band clear of own-net SMD pads.
 
         Issue #9018: same-net copper is exempt from every other leg-legality
@@ -1579,12 +1587,20 @@ class LatticePathfinder:
         in place between rungs); ``None``/0 keeps the guard off.  ``half <= 0``
         measures the board-default copper, matching the legacy board-default
         probe width the same callers fall back to.
+
+        ``attached`` (issue #9517) carries the connection's own pad-attached
+        stub legs ``(c, d, half_width)``: a band-interior leg riding one
+        collinearly is the validator's covered-connector shape, not a slit,
+        and is accepted -- without it a stub ending inside the band can emit
+        no leg at all and the connection deadlocks ``no-path``.
         """
         edge_mm = float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
         if edge_mm <= 0.0:
             return True
         eff_half = half if half > 0.0 else self._trace_half
-        return not self.obstacles.same_net_pad_band_blocked(a, b, layer, net, eff_half, edge_mm)
+        return not self.obstacles.same_net_pad_band_blocked(
+            a, b, layer, net, eff_half, edge_mm, attached=attached
+        )
 
     # -- pad stubs ------------------------------------------------------------
 
@@ -2018,6 +2034,7 @@ class LatticePathfinder:
         extra: float,
         pw: Any,
         ko: Any,
+        attached: Sequence[tuple[Pt, Pt, float]] = (),
     ) -> tuple[bool, bool]:
         """Single-ended full-width legality of one lattice edge on ``layer``.
 
@@ -2025,6 +2042,10 @@ class LatticePathfinder:
         A* in :meth:`_route_search` expands with (issue #6381 factored it out
         so the escape-egress check cannot drift from the search); the
         Edge.Cuts boundary test is applied by the caller.
+
+        ``attached`` (issue #9517) is the search's own pad-attached stub
+        legs, letting the band guard accept the collinear continuation out
+        of a stub that ends inside the band.
         """
         lattice = self.build()
         ea = lattice.node_point(edge[0])
@@ -2044,7 +2065,7 @@ class LatticePathfinder:
             # OWN-net pad, so A* freely picked band-interior parallels; hold
             # them to the two-region rule.  Cheap when the guard is off
             # (unresolvable stackup) -- one getattr, no pad query.
-            and self._own_net_pad_band_ok(ea, eb, layer, net, half)
+            and self._own_net_pad_band_ok(ea, eb, layer, net, half, attached=attached)
         )
         return ok, ko_hit
 
@@ -2107,10 +2128,15 @@ class LatticePathfinder:
         extra = max(0.0, half + clr - self._agent_radius)
         pw, ko = self._pairwise, self._keepouts
         boundary = self._escape_boundary
+        # Issue #9517: the stub's own legs are pad-attached copper -- the
+        # straight continuation out of its landing node must count as riding
+        # them, or a stub ending inside the band is graded a dead end here
+        # exactly the way it deadlocks the A* it seeds.
+        attached = tuple((c, d, half) for c, d in zip(stub[2], stub[2][1:], strict=False))
         for nbr, _elen in lattice.adj.get(key, ()):
             edge = (min(key, nbr), max(key, nbr))
             if not self._body_edge_legal(
-                edge, layer, net, half, clr, committed, extra=extra, pw=pw, ko=ko
+                edge, layer, net, half, clr, committed, extra=extra, pw=pw, ko=ko, attached=attached
             )[0]:
                 continue
             if not boundary.segment_clear(
@@ -2859,6 +2885,18 @@ class LatticePathfinder:
 
         g_score: dict[_State, float] = {}
         came: dict[_State, tuple[_State, str]] = {}
+        # Issue #9517: this search's own stub legs are the pad-attached
+        # copper a band-interior leg may ride collinearly out of (the
+        # validator's connector-coverage exemption).  Both ends' stubs: the
+        # start stub for the leaving legs, the goal stub for the arriving
+        # edge (edge legality is memoised direction-free, so one set must
+        # serve both).  Built once; the exemption consults it only when a
+        # leg actually sits in the band.
+        own_attached: list[tuple[Pt, Pt, float]] = []
+        for _skey, _slayer, spoly, _slen in stubs_a:
+            own_attached.extend((c, d, half) for c, d in zip(spoly, spoly[1:], strict=False))
+        for _skey, _slayer, spoly, _slen in stubs_b:
+            own_attached.extend((c, d, half) for c, d in zip(spoly, spoly[1:], strict=False))
         # Issue #6957: the via sites already on each state's best path, as a
         # persistent linked list ``(site, rest)`` (newest first).  Kept in step
         # with ``came`` so a via expansion can be checked against its OWN
@@ -3184,7 +3222,16 @@ class LatticePathfinder:
                             ko_pruned = True
                     else:
                         ok, ko_hit = self._body_edge_legal(
-                            edge, layer, net, half, clr, committed, extra=extra, pw=pw, ko=ko
+                            edge,
+                            layer,
+                            net,
+                            half,
+                            clr,
+                            committed,
+                            extra=extra,
+                            pw=pw,
+                            ko=ko,
+                            attached=own_attached,
                         )
                         if ko_hit:
                             ko_pruned = True
@@ -3200,6 +3247,7 @@ class LatticePathfinder:
                                     extra=extra,
                                     pw=None,
                                     ko=ko,
+                                    attached=own_attached,
                                 )[0]
                     ok = ok and boundary.segment_clear(
                         lattice.node_point(edge[0]),
