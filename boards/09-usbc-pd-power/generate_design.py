@@ -1055,6 +1055,16 @@ def generate(output: Path) -> dict:
         "hardware_tested": False,
         "manufacturing_ready": False,
     }
+    # Commit which toolchain -- and which footprint-library content -- produced
+    # the geometry above (Issue #9526): the CLI version gate constrains only
+    # the kicad-cli binary, while add_footprint reads whatever standard
+    # library this host resolved, so its identity is recorded, not gated.
+    # None outside the evidence toolchain (tests calling generate() directly).
+    from kicad_tools.cli.kicad_toolchain import evidence_provenance
+
+    provenance = evidence_provenance()
+    if provenance is not None:
+        result["toolchain"] = provenance
     (output / "circuit.json").write_text(json.dumps(result, indent=2) + "\n")
     (output / "readiness.json").write_text(
         json.dumps(

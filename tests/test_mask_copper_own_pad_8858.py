@@ -691,6 +691,91 @@ def test_fully_enclosed_collinear_redundant_segment_stays_an_error():
     assert not result.passed
 
 
+# --- the failed-condition diagnostic field (issue #9305) ------------------------------
+
+
+def test_failed_condition_names_the_gate_for_a_pass_through_error():
+    """Issue #9305: the field names which within-own-pad condition failed.
+
+    On the board-03 measurement snapshot (`usb_joystick_routed.kicad_pcb` at
+    `2969a6944`, issue thread 2026-11-18) all 101 pad `overlap` violations
+    failed condition 4 (band copper beside the opening beyond the entry
+    allowance); the consumer run (`936164ce0`) predates this field and leaves
+    the deciding condition unmeasured. A straight pass-through hits the same
+    gate in a fixture.
+    """
+    result, m = _only(_segment((-1.0, 0.5), (2.0, 0.5)))
+    assert m.disposition == "violation"
+    assert m.within_own_pad_failed_condition == 4
+
+
+def test_failed_condition_1_owner_shape_or_solder_mask_defined():
+    result, m = _only(_segment((0.5, 0.5), (2.0, 0.5), owner_kind="pad:custom"))
+    assert m.disposition == "violation"
+    assert m.within_own_pad_failed_condition == 1
+    result, m = _only(_segment((0.5, 0.5), (2.0, 0.5), margin=-0.05))
+    assert m.disposition == "violation"
+    assert m.within_own_pad_failed_condition == 1
+
+
+def test_failed_condition_2_no_proven_direct_overlap():
+    """Same-net copper that only touches the pad never enters the class."""
+    copper, extra = track((1.01, 0.3), (1.01, 0.7), width=0.02)
+    result, m = _only(_geometry(copper, extra=extra))
+    assert m.relation == "touching"
+    assert m.disposition == "violation"
+    assert m.within_own_pad_failed_condition == 2
+
+
+def test_failed_condition_3_exposure_beyond_the_pad():
+    """An enlarged opening exposing pour copper beyond the pad's own land."""
+    result, m = _only(_geometry(box(-2, -2, 3, 3), kind="zone", margin=0.05))
+    assert m.disposition == "violation"
+    assert m.within_own_pad_failed_condition == 3
+
+
+def test_failed_condition_5_via_drill_under_mask():
+    """A via wholly inside its pad: no band copper, but the drill is under mask."""
+    via = Point(0.5, 0.5).buffer(0.1, quad_segs=64)
+    result, m = _only(_geometry(via, kind="via", extra={"drill_mm": 0.3}))
+    assert m.disposition == "violation"
+    assert m.within_own_pad_failed_condition == 5
+
+
+def test_failed_condition_is_none_when_the_class_qualifies():
+    result, m = _only(_segment((0.5, 0.5), (2.0, 0.5)))
+    assert m.disposition == "within_own_pad"
+    assert m.within_own_pad_failed_condition is None
+
+
+def test_failed_condition_is_none_when_the_downgrade_path_is_not_attempted():
+    """Different-net copper never reaches the within-own-pad test."""
+    result, m = _only(_segment((0.5, 0.5), (2.0, 0.5), net="M"))
+    assert m.disposition == "violation"
+    assert m.same_net is False
+    assert m.within_own_pad_failed_condition is None
+
+
+def test_payload_without_the_failed_condition_still_loads():
+    result, m = _only(_segment((-1.0, 0.5), (2.0, 0.5)))
+    data = result.to_dict()
+    del data["measurements"][0]["within_own_pad_failed_condition"]
+    loaded = MaskCopperAssessment.from_dict(data)
+    assert loaded.measurements[0].within_own_pad_failed_condition is None
+
+
+def test_invalid_failed_condition_value_is_rejected():
+    from dataclasses import replace
+
+    _, m = _only(_segment((-1.0, 0.5), (2.0, 0.5)))
+    with pytest.raises(ValueError):
+        replace(m, within_own_pad_failed_condition=6)
+    with pytest.raises(ValueError):
+        replace(m, within_own_pad_failed_condition=True)
+    with pytest.raises(ValueError):
+        replace(m, within_own_pad_failed_condition=0)
+
+
 # --- bookkeeping ----------------------------------------------------------------------
 
 

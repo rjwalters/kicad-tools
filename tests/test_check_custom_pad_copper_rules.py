@@ -47,7 +47,7 @@ PLACEMENTS = [
 
 # The refused-primitive fixture: the most common stock-library refusal after
 # stroked gr_poly (issue evidence), and the one #9501 tracks first.
-GR_CIRCLE_PRIMITIVE = "(gr_circle (center 1.0 0.0) (width 0.2) (fill yes))"
+GR_CIRCLE_PRIMITIVE = "(gr_circle (center 1.0 0.0) (end 2.0 0.0) (width 0.2) (fill yes))"
 
 TAB_POLY = (
     f"(gr_poly (pts (xy {TAB_NEAR} -{TAB_HALF_HEIGHT}) (xy {TAB_FAR} -{TAB_HALF_HEIGHT}) "
@@ -390,3 +390,84 @@ def test_remeasure_after_in_memory_rotation_matches_fresh_parse(tmp_path):
         f"re-measure after an in-memory rotation must match a freshly parsed "
         f"90-degree board: {after} != {fresh_bounds}"
     )
+
+
+# --- Issue #9528: custom pads that carry no copper ---------------------------
+
+_NO_COPPER_RULES = (
+    "clearance_incomplete",
+    "silk_over_copper_incomplete",
+    "tht_smd_spacing_incomplete",
+    "physical_copper_gap_incomplete",
+)
+# A refused primitive: with copper layers it must still be reported incomplete.
+_NO_COPPER_PRIMITIVE = GR_CIRCLE_PRIMITIVE
+
+
+def _layers_board(tmp_path: Path, layers: str, name: str) -> Path:
+    """One footprint whose lone custom pad declares ``layers`` verbatim."""
+    text = f"""(kicad_pcb (version 20240108) (generator "test")
+ (general (thickness 1.6))
+ (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+ (setup (pad_to_mask_clearance 0))
+ (net 0 "") (net 1 "SIG")
+ (gr_rect (start 90 90) (end 130 130) (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))
+ (footprint "Mounting_Wuerth:Probe" (layer "F.Cu") (at 110 110)
+  (property "Reference" "U1" (at 0 -3.5) (layer "F.SilkS"))
+  (pad "" smd custom (at 0 0) (size 1.0 1.0) (layers {layers}) (net 1 "SIG")
+   (options (clearance outline) (anchor circle))
+   (primitives {_NO_COPPER_PRIMITIVE})))
+ )"""
+    path = tmp_path / f"{name}.kicad_pcb"
+    path.write_text(text)
+    return path
+
+
+def _incomplete(report: dict) -> list[str]:
+    return [v["rule_id"] for v in report["violations"] if v["rule_id"] in _NO_COPPER_RULES]
+
+
+@pytest.mark.parametrize("layers", ['"F.Paste"', '"B.Paste"'], ids=["front-paste", "back-paste"])
+def test_paste_only_custom_pad_is_not_incomplete_coverage(tmp_path, capsys, layers):
+    """A paste-only custom pad has no copper: no rule reports it as unjudged."""
+    board = _layers_board(tmp_path, layers, "paste-only")
+    report = _run(
+        board,
+        capsys,
+        "--only",
+        "clearance,silkscreen,tht_smd_spacing,physical_copper_gap",
+        "--physical-copper-gap",
+        "0.3",
+    )
+    assert _incomplete(report) == []
+
+
+def test_paste_and_mask_pad_is_still_measured_by_silk_rule(tmp_path):
+    """No copper but a mask opening: silk-over-copper keeps judging it."""
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp import parse_string
+    from kicad_tools.validate.rules.silkscreen import _iter_pad_apertures
+
+    paste_only = PCB(parse_string(_layers_board(tmp_path, '"F.Paste"', "a").read_text()))
+    paste_mask = PCB(parse_string(_layers_board(tmp_path, '"F.Paste" "F.Mask"', "b").read_text()))
+    assert list(_iter_pad_apertures(paste_only, 0.0)) == []
+    assert len(list(_iter_pad_apertures(paste_mask, 0.0))) == 1
+
+
+@pytest.mark.parametrize(
+    "layers", ['"F.Cu" "F.Mask"', '"*.Cu" "*.Mask"'], ids=["f-cu", "cu-wildcard"]
+)
+def test_copper_custom_pad_with_refused_outline_is_still_incomplete(tmp_path, capsys, layers):
+    """The #9498 honesty guarantee: copper + unresolved outline still reports."""
+    board = _layers_board(tmp_path, layers, "copper")
+    report = _run(
+        board,
+        capsys,
+        "--only",
+        "clearance,silkscreen,physical_copper_gap",
+        "--physical-copper-gap",
+        "0.3",
+    )
+    found = set(_incomplete(report))
+    assert {"clearance_incomplete", "silk_over_copper_incomplete"} <= found
+    assert "physical_copper_gap_incomplete" in found

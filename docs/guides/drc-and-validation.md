@@ -456,8 +456,13 @@ reported as `orphan (no current finding)` -- three possible causes: the key
 changed (e.g. per-layer `path_ampacity` keys or geometry-named silk keys), the
 defect is gone, or the rule did not run in this invocation (orphan lines say
 `[rule not evaluated in this run]` when so -- for example `ampacity` without a
-net-class-map sidecar, or `path_ampacity` without `--current-paths`); neither
-is touched. The command previews by default and changes no file; add
+net-class-map sidecar or when `project.kct` declares currents that no net
+class maps, or `path_ampacity` without `--current-paths`; any coverage
+`unknown` whose reason is `needs_input:<X>` counts, since the absent input
+keeps the rule from emitting anything); neither
+is touched. A keyed entry whose hash version predates `ev3` (e.g. an
+`ev2:` entry) cannot be recomputed at all: it is listed by key, with its
+version, and left alone too (Issue #9482). The command previews by default and changes no file; add
 `--write` to apply it. It never runs during a normal check, and it needs the
 full finding set, so do not combine it with `--only`/`--skip`.
 (`kct detect-mistakes` `ev3.m1:` waivers are not migrated.) Otherwise,

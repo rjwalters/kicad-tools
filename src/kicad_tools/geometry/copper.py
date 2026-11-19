@@ -270,8 +270,10 @@ def pad_copper_outline(
     (#6453) and was load-bearing only because the box's corners grazed
     foreign pours.
 
-    Shapes not modelled exactly (``trapezoid``, chamfered ``roundrect``,
-    ``custom``) fall back to the size box eroded by
+    A ``custom`` pad uses its real anchor-plus-filled-polygon copper (Issue
+    #9468, :func:`custom_pad_board_outline`).  Shapes not modelled exactly
+    (``trapezoid``, chamfered ``roundrect``, and a ``custom`` pad whose copper
+    that helper refuses) fall back to the size box eroded by
     :data:`PAD_FALLBACK_ERODE` (un-eroded if the erosion empties it), which
     can only under-report contact.  A pad with a non-positive size is its
     bare anchor point.  Returns ``None`` when shapely is unavailable.
@@ -279,6 +281,9 @@ def pad_copper_outline(
     if not _has_shapely():
         return None
     cx, cy = pad_board_center(pad, fp_position, fp_rotation)
+    custom = custom_pad_board_outline(pad, (cx, cy))
+    if custom is not None:
+        return custom
     w, h = pad.size
     if w <= 0 or h <= 0:
         return _ShapelyPoint((cx, cy))
