@@ -344,10 +344,11 @@ class PlaneSplitRule(DRCRule):
     def _culprits(tracks: list[_Item], pieces: list[_Group], clearance: float) -> list[_Item]:
         """Foreign tracks that touch two or more pad-bearing pieces (they cut
         between them); empty when no single track does."""
+        grown = [g.geom.buffer(clearance + _TOUCH_TOL) for g in pieces]
         out = []
         for track in tracks:
             probe = track.geom.buffer(_TOUCH_TOL)
-            hits = sum(1 for g in pieces if g.geom.buffer(clearance + _TOUCH_TOL).intersects(probe))
+            hits = sum(1 for g in grown if g.intersects(probe))
             if hits >= 2:
                 out.append(track)
         return out

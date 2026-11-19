@@ -78,6 +78,33 @@ def test_foreign_vias_alone_are_legitimate_obstacles(tmp_path, text):
     assert _run(_board(tmp_path, board)) == []
 
 
+def test_track_cut_into_a_fence_split_is_reported(tmp_path, text):
+    # A via fence (legitimate obstacle) already splits the zone in two; a
+    # foreign track then cuts a pad-bearing piece off one side.  This is the
+    # case that separates the B baseline from a naive piece counter: the
+    # fence split alone must not be blamed on the track.
+    fence = "".join(
+        f'  (via (at 20 {y / 2}) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2))\n'
+        for y in range(3, 37)
+    )
+    track10 = '  (segment (start 10 0.5) (end 10 19.5) (width 0.25) (layer "F.Cu") (net 2))\n'
+    pad15 = (
+        '  (footprint "Test:M" (layer "F.Cu")\n'
+        "    (at 15 10)\n"
+        '    (property "Reference" "M1" (at 0 -2 0) (layer "F.SilkS"))\n'
+        "    (attr smd)\n"
+        '    (pad "1" smd rect (at 0 0) (size 1 1)\n'
+        '      (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "+3V3"))\n'
+        "  )\n"
+    )
+    board = _TRACK.sub(fence + track10 + pad15, text)
+    found = _run(_board(tmp_path, board))
+    assert len(found) == 1
+    msg = found[0].message
+    assert "cut into 3 pad-bearing pieces (would be 2 without foreign tracks)" in msg
+    assert "piece 2: M1.1" in msg
+
+
 def test_track_on_another_layer_is_ignored(tmp_path, text):
     other = text.replace('(layer "F.Cu") (net 2)', '(layer "B.Cu") (net 2)')
     assert _run(_board(tmp_path, other)) == []
