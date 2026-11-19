@@ -263,6 +263,31 @@ def test_populated_ignores_dnp_style_smd_on_back(tmp_path):
     assert {f.layer for f in _fids(p)} == {"F.Cu"}
 
 
+_DNP_BACK_PART = """(footprint "Resistor_SMD:R_0402" (layer "B.Cu") (uuid "fp-r8") (at 10 10)
+    (attr smd {attrs})
+    (property "Reference" "R8" (at 0 0 0) (layer "B.SilkS"))
+    (property "Value" "x" (at 0 0 0) (layer "B.Fab"))
+    (pad "1" smd roundrect (at 0 0) (size 0.5 0.5) (layers "B.Cu") (net 0 "")))"""
+
+
+@pytest.mark.parametrize("attrs", ["dnp", "dnp exclude_from_bom"])
+def test_populated_ignores_bom_included_dnp_smd_on_back(tmp_path, attrs):
+    """Issue #9480: an SMD+DNP part is not placed, so it populates no side."""
+    p = _write(tmp_path, _board(extra=_DNP_BACK_PART.format(attrs=attrs)))
+    assert run_add_fiducials(p, sides="populated") == 0
+    fids = _fids(p)
+    assert len(fids) == 3
+    assert {f.layer for f in fids} == {"F.Cu"}
+
+
+def test_populated_dnp_part_does_not_unpopulate_side_with_live_part(tmp_path):
+    """Issue #9480: a second, non-DNP SMD part still populates the face."""
+    live = _DNP_BACK_PART.format(attrs="").replace('"fp-r8"', '"fp-r7"').replace("R8", "R7")
+    p = _write(tmp_path, _board(extra=_DNP_BACK_PART.format(attrs="dnp") + live))
+    assert run_add_fiducials(p, sides="populated") == 0
+    assert {f.layer for f in _fids(p)} == {"F.Cu", "B.Cu"}
+
+
 def test_populated_through_hole_only_board_has_no_populated_side(tmp_path, capsys):
     body = (
         _board()

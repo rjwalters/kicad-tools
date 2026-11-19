@@ -183,3 +183,28 @@ def test_through_hole_only_board_raises_neither(tmp_path):
     _, pcb = _load(tmp_path, _board(part=False, extra=_THT_BACK))
     assert FiducialsRule().check(pcb, None).violations == []
     assert BoardIdRule().check(pcb, None).violations == []
+
+
+_DNP_BACK = """(footprint "Resistor_SMD:R_0402" (layer "B.Cu") (uuid "fp-r8") (at 10 10)
+    (attr smd dnp)
+    (property "Reference" "R8" (at 0 -1.5 0) (layer "B.SilkS"))
+    (property "Value" "x" (at 0 1.5 0) (layer "B.Fab"))
+    (pad "1" smd roundrect (at 0 0) (size 0.5 0.5) (layers "B.Cu") (net 0 "")))"""
+
+
+def test_bom_included_dnp_smd_back_is_not_flagged(tmp_path):
+    """#9480: a back face holding only a DNP SMD part is not populated."""
+    p, pcb = _load(tmp_path, _board(extra=_DNP_BACK))
+    assert [v.layer for v in FiducialsRule().check(pcb, None).violations] == ["F.Cu"]
+    assert run_add_fiducials(p, sides="populated") == 0
+    assert run_add_board_info(p, auto=True) == 0
+    pcb = PCB.load(str(p))
+    assert {f.layer for f in pcb.footprints if f.reference.startswith("FID")} == {"F.Cu"}
+    assert FiducialsRule().check(pcb, None).violations == []
+    assert BoardIdRule().check(pcb, None).violations == []
+
+
+def test_dnp_only_board_raises_neither(tmp_path):
+    _, pcb = _load(tmp_path, _board(part=False, extra=_DNP_BACK))
+    assert FiducialsRule().check(pcb, None).violations == []
+    assert BoardIdRule().check(pcb, None).violations == []
