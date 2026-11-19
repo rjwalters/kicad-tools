@@ -588,16 +588,17 @@ def _board_label_nets_use_slash_prefix(pcb) -> bool:
     """Whether the board's non-power nets predominantly carry a leading ``/``.
 
     Power rails and ground nets (``GND``, ``+3V3``, ...) and KiCad's
-    auto-generated ``unconnected-(...)`` nets are excluded from the
-    census: they never carry the ``/`` prefix, so counting them would
-    bias a KiCad-native board toward the bare convention.  "More often
-    than not" decides; a tie (or no label nets at all) means bare,
-    which matches the historical kct convention (#3370).
+    auto-generated nets (``unconnected-(...)``, ``Net-(R1-Pad2)``) are
+    excluded from the census: they never carry the ``/`` prefix, so
+    counting them would bias a KiCad-native board toward the bare
+    convention.  "More often than not" decides; a tie (or no label nets
+    at all) means bare, which matches the historical kct convention
+    (#3370).
     """
     from kicad_tools.router.net_class import (
+        is_auto_net_name,
         is_ground_rail_name,
         is_power_rail_name,
-        is_unconnected_net_name,
     )
 
     prefixed = 0
@@ -606,7 +607,7 @@ def _board_label_nets_use_slash_prefix(pcb) -> bool:
         name = net.name
         if not name or net.number == 0:
             continue
-        if is_unconnected_net_name(name) or is_ground_rail_name(name) or is_power_rail_name(name):
+        if is_auto_net_name(name) or is_ground_rail_name(name) or is_power_rail_name(name):
             continue
         if name.startswith("/"):
             prefixed += 1
