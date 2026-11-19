@@ -13,7 +13,7 @@ limits, and live in one table at the top of `validate/rules/physical_gap.py`:
 |---|---|---|
 | Copper gap (tracks, pads, vias, fills; same-net included) | < 0.10 mm | `error` |
 | Copper gap | 0.10 to < 0.15 mm | `warning` |
-| Pad-to-pad mask bridge on **2 oz** copper | < 0.20 mm | `error` |
+| Pad-to-pad mask bridge on **2 oz** copper (exception below) | < 0.20 mm | `error` |
 | THT pad (any drill) or via drilled >= 1.0 mm, to SMD pad; via drilled >= 1.0 mm, to exposed via annulus except a same-net anchor↔anchor pair (`tht_smd_spacing`) | < 2.032 mm / < 3.05 mm | `error` / `warning` |
 
 Same-net near-parallel copper (e.g. 0.08 mm) is always listed; it uses the same
@@ -25,7 +25,14 @@ layers (`F.Cu` / `B.Cu`) only (Issue #8913): solder mask exists only as
 `F.Mask` / `B.Mask`, so there is no inner-layer mask to bridge, and a
 through-hole pad pair yields at most one finding per outer side rather than one
 per copper layer. No inner-layer mask-bridge findings on a 4-layer board is the
-intended scope, not a missed case. `tht_smd_spacing` measures **copper edge to copper
+intended scope, not a missed case. A same-footprint, same-net pad pair is
+exempt (Issue #9420): two pads of **one footprint** on **one identical
+non-empty net** are the land pattern of a stock module (its ground pad array),
+which a consumer cannot edit, so that finding reads `info`, still listed with
+distance and items intact; different footprints, different nets and no-net
+(net 0) pairs keep the `error` -- [mask-to-copper](mask-to-copper.md) documents
+the located fab evidence and the `mask_to_copper` twin exemption.
+`tht_smd_spacing` measures **copper edge to copper
 edge**; the epic does not say whether JLCDFM measures hole centre, hole edge or
 copper edge, so this is a documented choice.
 
