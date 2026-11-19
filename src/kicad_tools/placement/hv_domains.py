@@ -203,9 +203,7 @@ def as_domain_interval(value: DomainVoltage) -> tuple[float, float]:
     try:
         lo, hi = value
     except (TypeError, ValueError) as e:
-        raise TypeError(
-            f"domain voltage must be a scalar or a (lo, hi) pair, got {value!r}"
-        ) from e
+        raise TypeError(f"domain voltage must be a scalar or a (lo, hi) pair, got {value!r}") from e
     return (float(lo), float(hi))
 
 

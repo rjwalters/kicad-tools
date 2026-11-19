@@ -449,8 +449,7 @@ def render_dru_block_body(plan: ExportPlan) -> str:
     ]
     if plan.domain_voltages:
         domains = ", ".join(
-            f"{d}={interval_label(*plan.domain_voltages[d])}"
-            for d in sorted(plan.domain_voltages)
+            f"{d}={interval_label(*plan.domain_voltages[d])}" for d in sorted(plan.domain_voltages)
         )
         lines.append(f"# Voltage domains: {domains}")
     if plan.bridging_by_pair:

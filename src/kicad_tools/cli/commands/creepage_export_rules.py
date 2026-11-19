@@ -62,7 +62,6 @@ def run_creepage_export_rules_command(args) -> int:
     from kicad_tools.core.project_file import load_project, save_project
     from kicad_tools.creepage.engine import voltage_map_from_dict
     from kicad_tools.creepage.export_rules import (
-        interval_label,
         apply_netclass_assignments,
         build_export,
         interval_json,
@@ -185,9 +184,7 @@ def run_creepage_export_rules_command(args) -> int:
             "material_group": getattr(args, "material_group", "IIIa") or "IIIa",
             "hv_threshold_v": getattr(args, "hv_threshold", 30.0),
             "dru_floor_mm": plan.dru_floor_mm,
-            "domains": {
-                d: interval_json(*iv) for d, iv in plan.domain_voltages.items()
-            },
+            "domains": {d: interval_json(*iv) for d, iv in plan.domain_voltages.items()},
             "nets_assigned": len(plan.net_domains),
             "net_domains": dict(plan.net_domains),
             "rules": [
@@ -266,8 +263,7 @@ def _print_summary(plan, project_path: Path, pcb_path: Path, dru_path: Path) -> 
     print(
         f"  Voltage domains ({len(plan.domain_voltages)}): "
         + ", ".join(
-            f"{d}={interval_label(*plan.domain_voltages[d])}"
-            for d in sorted(plan.domain_voltages)
+            f"{d}={interval_label(*plan.domain_voltages[d])}" for d in sorted(plan.domain_voltages)
         )
     )
     print(f"  Nets assigned: {len(plan.net_domains)}")

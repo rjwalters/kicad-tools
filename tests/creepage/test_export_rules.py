@@ -314,8 +314,7 @@ def test_identical_ranges_share_domain_with_self_rule():
     assert self_rule.name == "kct_creepage_kct_m150Vto150V_vs_kct_m150Vto150V"
     assert self_rule.min_mm == pytest.approx(3.2)
     assert (
-        self_rule.condition
-        == "A.NetClass == 'kct_m150Vto150V' && B.NetClass == 'kct_m150Vto150V'"
+        self_rule.condition == "A.NetClass == 'kct_m150Vto150V' && B.NetClass == 'kct_m150Vto150V'"
     )
 
 
