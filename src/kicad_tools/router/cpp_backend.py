@@ -92,10 +92,6 @@ STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
 # diff-pair partner no longer relaxes a barrel, ``route_via_geometry_clear``
 # gained ``trace_clearance`` and ``router_cpp.trace_via_clearance`` is bound.
 # A v48 .so would let a trace land inside an earlier via's floor.
-# v66 (Issue #9019): ``Pathfinder.set_search_own_net_band`` /
-# ``own_net_band_step_ok`` -- the A* refuses a planar step whose swept copper
-# parks in the fab ``pad_spacing`` slit band beside an own-net SMD pad (twin of
-# ``PathFinder._own_net_band_step_ok``).  A v65 .so has no such gate.
 # v51 (Issue #6375): ``Pathfinder.set_search_own_pad_gate`` /
 # ``own_pad_step_clear`` and ``Grid3D.segment_pads_clear`` -- the A* holds
 # steps on the routing net's own pad cells to the validator's seg-vs-pad
@@ -159,7 +155,12 @@ STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
 # v71 (Issue #9019): ``Pathfinder::set_search_own_net_band`` -- the A* refuses
 # a planar step whose swept copper parks in the fab ``pad_spacing`` slit band
 # beside an own-net SMD pad.  A v70 .so has no such gate.
-_REQUIRED_CPP_BUILD_VERSION = 71
+# v72 (Issue #9019 review): the band gate exempts the search's own start/end
+# pads (the leg is unioned with them through the path -- a v71 .so refused
+# every planar pad exit and pushed routes through pad-edge via pairs) and
+# ``own_net_band_rejects()`` counts refusals so the Python side retries only
+# gate-caused failures and logs every gate-off fallback.
+_REQUIRED_CPP_BUILD_VERSION = 72
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -2910,7 +2911,26 @@ class CppPathfinder:
                 not result.success
                 and not self._relief_mode
                 and float(getattr(self._rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0) > 0.0
+                and hasattr(self._impl, "own_net_band_rejects")
+                and self._impl.own_net_band_rejects() > 0
             ):
+                # Issue #9019: a fence/band reshape must never lose a
+                # connection.  The retry fires ONLY when the gated search
+                # actually refused a step for the slit band (the counter is
+                # reset on every arming, i.e. every fresh search) -- a
+                # failure the gate never influenced (drained budget,
+                # unrelated blockage) is returned as-is instead of paying a
+                # second full search that would fail the same way (9019
+                # review).  The fallback is counted and logged, never silent.
+                band_rejects = self._impl.own_net_band_rejects()
+                self._own_net_band_fallbacks = getattr(self, "_own_net_band_fallbacks", 0) + 1
+                logger.info(
+                    "own-net pad slit-band gate suspended for one retry "
+                    "(fallback #%d, net=%d): gated search rejected %d step(s)",
+                    self._own_net_band_fallbacks,
+                    start.net,
+                    band_rejects,
+                )
                 band_state["on"] = False
                 result = _run_fresh_search(timeout_seconds, self._effective_search_iterations)
             if not result.success and fence_state["on"]:

@@ -325,11 +325,21 @@ public:
     // wedge a ``physical_copper_gap`` slit.  C++ twin of
     // ``PathFinder._own_net_band_step_ok`` (the same exact segment-vs-box gap
     // and the shared ``OWN_NET_BAND_STEP_TOL_MM`` float-noise slack).
-    // ``edge_mm`` <= 0 (the default) keeps the gate off.
-    void set_search_own_net_band(float edge_mm) { search_band_edge_mm_ = edge_mm; }
+    // ``edge_mm`` <= 0 (the default) keeps the gate off.  Arming resets the
+    // per-search rejection counter (``own_net_band_rejects``), so the caller
+    // can tell a gate-caused failure from any other and only then pay a
+    // gate-off retry (9019 review).
+    void set_search_own_net_band(float edge_mm) {
+        search_band_edge_mm_ = edge_mm;
+        band_gate_rejects_ = 0;
+    }
     float search_own_net_band_edge() const { return search_band_edge_mm_; }
+    // Steps the gate refused since the last ``set_search_own_net_band``.
+    int own_net_band_rejects() const { return band_gate_rejects_; }
     bool own_net_band_step_ok(int x1, int y1, int x2, int y2, int layer, int net,
-                              float width) const;
+                              float width,
+                              double exclude_sx = -1e30, double exclude_sy = -1e30,
+                              double exclude_ex = -1e30, double exclude_ey = -1e30) const;
     // Issue #7887: after the own-pad step gate refused (x1,y1)->(x2,y2),
     // record the refusal as a cross-domain block (``note_pairwise_block``)
     // when the pairwise (HV) floor alone decided it -- the gate is how an HV
@@ -540,6 +550,8 @@ private:
     mutable std::vector<BandPad> band_pads_;
     mutable int band_pads_net_ = std::numeric_limits<int>::min();
     mutable size_t band_pads_count_ = 0;
+    // Steps this gate refused since its last arming (see ``own_net_band_rejects``).
+    mutable int band_gate_rejects_ = 0;
     // True when (x, y, layer) is pad copper/halo of ``net`` itself.
     bool own_pad_cell(int x, int y, int layer, int net) const;
     float search_fill_via_clearance_ = -1.0f;

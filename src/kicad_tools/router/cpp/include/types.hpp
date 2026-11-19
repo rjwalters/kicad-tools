@@ -379,7 +379,12 @@ namespace router {
 // copper parks in the fab ``pad_spacing`` slit band beside an own-net SMD pad.
 // A v70 .so has no such gate, so Python and native searches would route
 // divergent bytes on a board that resolves a band edge.
-constexpr int ROUTER_CPP_BUILD_VERSION = 71;
+// v72 (Issue #9019 review): the band gate exempts the search's own start/end
+// pads (the leg is unioned with them through the path) and counts refusals
+// (``own_net_band_rejects``) so the caller retries only gate-caused failures.
+// A v71 .so refused every planar pad exit and pushed routes through pad-edge
+// via pairs.
+constexpr int ROUTER_CPP_BUILD_VERSION = 72;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor

@@ -684,8 +684,12 @@ NB_MODULE(router_cpp, m) {
              "emit_trace_width"_a = 0.0f)
         // Issue #9019: own-net pad slit-band step gate (fab detection edge, mm).
         .def("set_search_own_net_band", &Pathfinder::set_search_own_net_band, "edge_mm"_a)
+        .def("own_net_band_rejects", &Pathfinder::own_net_band_rejects,
+             "steps the slit-band gate refused since its last arming (9019 review)")
         .def("own_net_band_step_ok", &Pathfinder::own_net_band_step_ok,
-             "x1"_a, "y1"_a, "x2"_a, "y2"_a, "layer"_a, "net"_a, "width"_a)
+             "x1"_a, "y1"_a, "x2"_a, "y2"_a, "layer"_a, "net"_a, "width"_a,
+             "exclude_sx"_a = -1e30, "exclude_sy"_a = -1e30,
+             "exclude_ex"_a = -1e30, "exclude_ey"_a = -1e30)
         .def("set_search_partner_clearance", &Pathfinder::set_search_partner_clearance)
         .def("set_search_pair_widths", &Pathfinder::set_search_pair_widths,
              "trace_half_width_mm"_a, "via_half_diam_mm"_a,

@@ -399,7 +399,9 @@ double band_segment_box_gap(double ax, double ay, double bx, double by, double h
 }  // namespace
 
 bool Pathfinder::own_net_band_step_ok(int x1, int y1, int x2, int y2, int layer, int net,
-                                      float width) const {
+                                      float width,
+                                      double exclude_sx, double exclude_sy,
+                                      double exclude_ex, double exclude_ey) const {
     const double edge = static_cast<double>(search_band_edge_mm_);
     if (edge <= 0.0) return true;
     const auto& pads = grid_.pads();
@@ -428,9 +430,23 @@ bool Pathfinder::own_net_band_step_ok(int x1, int y1, int x2, int y2, int layer,
     for (const auto& bb : band_pads_) {
         if (bb.layer != layer) continue;
         if (bb.x1 < lo_x || bb.x0 > hi_x || bb.y1 < lo_y || bb.y0 > hi_y) continue;
+        // A pad the leg is UNIONED with (its own start/end: the exclusion
+        // points sit in its metal) is skipped -- measuring the step against
+        // it in isolation invents a slit that does not exist and refused
+        // every planar exit (9019 review).  The -1e30 sentinels never land
+        // in a real pad box, so unset exclusions skip nothing.
+        if ((bb.x0 <= exclude_sx && exclude_sx <= bb.x1 && bb.y0 <= exclude_sy &&
+             exclude_sy <= bb.y1) ||
+            (bb.x0 <= exclude_ex && exclude_ex <= bb.x1 && bb.y0 <= exclude_ey &&
+             exclude_ey <= bb.y1)) {
+            continue;
+        }
         const double gap = band_segment_box_gap(ax, ay, bx, by, half,
                                                 bb.x0, bb.y0, bb.x1, bb.y1);
-        if (kOwnNetBandTolMm < gap && gap < edge - kOwnNetBandTolMm) return false;
+        if (kOwnNetBandTolMm < gap && gap < edge - kOwnNetBandTolMm) {
+            ++band_gate_rejects_;
+            return false;
+        }
     }
     return true;
 }
@@ -2154,11 +2170,17 @@ RouteResult Pathfinder::route(
             }
 
             // Issue #9019: own-net pad slit-band gate (see
-            // ``set_search_own_net_band``), twin of the Python A* gate.
+            // ``set_search_own_net_band``), twin of the Python A* gate.  The
+            // exclusion points are the search's own start/end (the pads this
+            // leg is unioned with).
             if (search_band_edge_mm_ > 0.0f && nlayer == current.layer &&
                 !own_net_band_step_ok(current.x, current.y, nx, ny, nlayer, net,
                                       emit_trace_width > 0.0f ? emit_trace_width
-                                                              : rules_.trace_width)) {
+                                                              : rules_.trace_width,
+                                      static_cast<double>(start_x),
+                                      static_cast<double>(start_y),
+                                      static_cast<double>(end_x),
+                                      static_cast<double>(end_y))) {
                 if (astar_trace_enabled()) {
                     std::fprintf(stderr,
                         "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
@@ -2939,11 +2961,17 @@ RouteResult Pathfinder::run_astar_loop() {
             }
 
             // Issue #9019: own-net pad slit-band gate, as in the one-shot loop.
+            // The exclusion points are the search's own start/end (the pads
+            // this leg is unioned with).
             if (search_band_edge_mm_ > 0.0f && nlayer == current.layer &&
                 !own_net_band_step_ok(current.x, current.y, nx, ny, nlayer, search_net_,
                                       search_emit_trace_width_ > 0.0f
                                           ? search_emit_trace_width_
-                                          : rules_.trace_width)) {
+                                          : rules_.trace_width,
+                                      static_cast<double>(search_start_x_),
+                                      static_cast<double>(search_start_y_),
+                                      static_cast<double>(search_end_x_),
+                                      static_cast<double>(search_end_y_))) {
                 if (astar_trace_enabled()) {
                     std::fprintf(stderr,
                         "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
