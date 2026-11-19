@@ -1,17 +1,22 @@
 """Tests for the DRC numerical guard band on clearance and dimension checks.
 
-``DRC_TOLERANCE`` is a float-rounding guard band -- NOT a manufacturing
-tolerance.  Issue #3913 reduced it from 0.005 mm (5 um) to 1e-4 mm
-(0.1 um): the old 5 um dead band silently PASSED genuine marginal
+``DRC_TOLERANCE`` started life as a float-rounding guard band -- NOT a
+manufacturing tolerance.  Issue #3913 reduced it from 0.005 mm (5 um) to
+1e-4 mm (0.1 um): the old 5 um dead band silently PASSED genuine marginal
 violations up to 5 um below the floor (e.g. a 0.0999 mm clearance vs a
-0.1016 mm / 4 mil JLCPCB floor is only 1.7 um short).  The guard now
-suppresses only IEEE-754 rounding noise (~1e-9 mm at board coordinates)
-while marginal-class shortfalls of a few um correctly FAIL.
+0.1016 mm / 4 mil JLCPCB floor is only 1.7 um short).
+
+Issue #9619 widened it to 5e-4 mm (0.5 um): the black-box probe on pinned
+KiCad 10.0.6 accepts shortfalls up to 500 nm and flags 600 nm, so a guard
+of 1e-4 reported "failing" 100-500 nm gaps that kicad-cli DRC accepts.
+The band still sits below the ~1.6 um marginal-violation class, so those
+correctly fail, and float64 rounding noise (~1e-9 mm at board
+coordinates) is still five orders of magnitude below the band.
 
 Historical note: issue #1803 originally motivated a wide dead band to
 avoid a 1 um false positive (0.101 mm vs 0.102 mm).  #3913 established
-that such a shortfall is a TRUE positive at KiCad IU granularity (1 nm),
-so that case is now (correctly) reported.
+that such a shortfall is a TRUE positive, and it still is: 1 um > 0.5 um,
+so the widened band does not resurrect that false negative.
 """
 
 import pytest
@@ -129,9 +134,11 @@ class TestDRCToleranceConstant:
         assert DRC_TOLERANCE > 0
 
     def test_tolerance_value(self):
-        """Guard band is 0.1 um (#3913), tight enough to catch marginal-class
-        violations while still suppressing float64 rounding noise."""
-        assert pytest.approx(1e-4) == DRC_TOLERANCE
+        """Guard band is 0.5 um (#9619), KiCad's probed acceptance band:
+        shortfalls up to 500 nm pass (as kicad-cli DRC accepts), beyond
+        that a violation is reported.  Still tight enough to catch the
+        ~1.6 um marginal class (#3913)."""
+        assert pytest.approx(5e-4) == DRC_TOLERANCE
 
     def test_tolerance_is_sub_micron(self):
         """The band must stay well below the ~1.6 um marginal-violation width
@@ -139,6 +146,11 @@ class TestDRCToleranceConstant:
         rounding (~1e-9 mm at board coordinates)."""
         assert DRC_TOLERANCE < 1.6e-3  # below the marginal class it must catch
         assert DRC_TOLERANCE > 1e-9  # above float rounding noise
+
+    def test_issue_1803_one_um_shortfall_still_fails(self):
+        """The #3913 regression: a 1 um shortfall (1e-3 mm) must FAIL even
+        with the widened 0.5 um band (#9619)."""
+        assert DRC_TOLERANCE < 1e-3
 
 
 # ---------------------------------------------------------------------------
@@ -203,13 +215,14 @@ class TestClearanceRuleTolerance:
         assert result.error_count == 1
 
     def test_float_rounding_noise_still_passes(self):
-        """A shortfall below the 0.1 um guard band (pure float noise) passes."""
+        """A 0.05 um shortfall is far inside the 0.5 um guard band (float
+        noise, and inside KiCad's probed acceptance band) and passes."""
         # 0.10195mm clearance vs 0.102mm min => 0.05 um short, below the guard
         pcb, rules = self._make_segment_via_pcb(0.10195)
         result = ClearanceRule().check(pcb, rules)
         assert result.error_count == 0, (
-            "A 0.05 um shortfall is within float64 rounding noise and must not "
-            "be flagged; only genuine sub-floor clearances should fail."
+            "A 0.05 um shortfall is well inside the 0.5 um guard band and must "
+            "not be flagged; only genuine sub-floor clearances should fail."
         )
 
     def test_clearance_beyond_tolerance_fails(self):
@@ -259,7 +272,7 @@ class TestDimensionRulesTolerance:
         )
 
     def test_trace_width_float_noise_passes(self):
-        """Trace within the 0.1 um guard band of the floor still passes."""
+        """Trace 0.05 um below the floor passes (inside the 0.5 um band)."""
         seg = MockSegment(
             start=(0, 0),
             end=(10, 0),

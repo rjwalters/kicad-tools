@@ -18,23 +18,32 @@ if TYPE_CHECKING:
 
 # Numerical guard band for DRC clearance comparisons (in mm).
 #
-# This exists ONLY to suppress IEEE-754 float64 rounding artifacts in the
-# geometric distance computation -- NOT to model manufacturing precision.
-# Board coordinates live in the ~0-300 mm range; the relative epsilon of
-# float64 there is ~1e-14 mm, and a few chained subtract/hypot operations
-# accumulate to at most ~1e-9 mm. A guard band of 1e-4 mm (0.1 um) is
-# ~5 orders of magnitude above that noise floor while still being far
-# below any real manufacturing feature, and it matches
-# ``_COLOCATION_EPSILON_MM`` used for the co-location check in
-# ``clearance.py``.
+# Set to the largest shortfall pinned KiCad 10.0.6 accepts on a
+# track-to-track probe -- 500 nm accepted, 600 nm flagged (Issue #9619) --
+# so a finding at kct's verdict boundary is one kicad-cli DRC agrees on.
+# The band still sits far above the IEEE-754 noise floor it was originally
+# introduced for (#3913): float64 coordinates in the ~0-300 mm board range
+# accumulate at most ~1e-9 mm of rounding through a few chained
+# subtract/hypot operations, five orders of magnitude below 5e-4.
 #
-# The previous value of 0.005 mm (5 um) created a dead band that silently
-# passed genuine marginal violations: the entire marginal class this guard
-# was masking is on the order of 1.6 um (e.g. actual 0.1000 mm vs a
-# 0.1016 mm / 4 mil floor). KiCad's own DRC works at IU granularity
-# (1 nm), so a 5 um dead band was ~10^8x wider than float noise requires
-# and hid real, fabricable-clearance-violating copper. See issue #3913.
-DRC_TOLERANCE: float = 1e-4
+# History: the pre-#3913 value of 0.005 mm (5 um) created a dead band that
+# silently passed genuine marginal violations: the entire marginal class
+# this guard was masking is on the order of 1.6 um (e.g. actual 0.1000 mm
+# vs a 0.1016 mm / 4 mil floor).  #3913 tightened it to 1e-4 mm (0.1 um);
+# #9619 widened it to 5e-4 mm to match KiCad's probed acceptance band.  It
+# remains below the ~1.6 um marginal class, so those still fail.  Note the
+# band is wider than a purely-rounding guard needs to be: a shortfall
+# between 100 nm and 500 nm now passes where #3913 reported it -- that is
+# the KiCad-parity trade-off this issue accepts.
+#
+# The single shared value lives in ``router.clearance_kernel`` (the Python
+# kernel constant, mirrored by the C++ kernel); the router commits gates and
+# the validate rules share this number.  It is duplicated as a literal here
+# rather than imported because importing anything under ``kicad_tools.router``
+# from the validate package would break the lazy-import contract
+# (``tests/test_validate_lazy_imports.py`` forbids ``kicad_tools.validate.*``
+# from loading the router); keep the two in sync.
+DRC_TOLERANCE: float = 5e-4
 
 
 class DRCRule(ABC):

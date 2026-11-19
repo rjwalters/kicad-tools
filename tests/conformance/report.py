@@ -1108,8 +1108,8 @@ def render_document(
         f"{BOUNDARY_BAND_MM * 1000:.0f} um of the requirement. Counted "
         "separately and never as a disagreement: at that distance the two "
         "models are arguing about rounding, not about geometry (kct's "
-        "`CLEARANCE_EPSILON_MM` is 1e-4 mm; KiCad works in integer "
-        "nanometres).",
+        "`CLEARANCE_EPSILON_MM` is 5e-4 mm, KiCad's probed acceptance band "
+        "since #9619; KiCad itself works in integer nanometres).",
         "- **fill state** -- whether zones were refilled "
         "(`kicad-cli pcb drc --refill-zones`) before measuring. Zone verdicts "
         "are only meaningful against fresh fills, so they are dropped from "

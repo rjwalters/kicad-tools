@@ -22,8 +22,8 @@ What the adapter owns
   beside the shape and the predicate stays a property of the pair.
 * **The comparison tolerance.**  :data:`LATTICE_CLEARANCE_EPSILON_MM` is the
   lattice's own long-standing ``1e-9`` slack, preserved verbatim.  It is
-  deliberately **not** the kernel's ``CLEARANCE_EPSILON_MM`` (``1e-4``): this
-  phase swaps *geometry*, and adopting a 0.1 um looser verdict tolerance at
+  deliberately **not** the kernel's ``CLEARANCE_EPSILON_MM`` (``5e-4``): this
+  phase swaps *geometry*, and adopting a 0.5 um looser verdict tolerance at
   the same time would be a behaviour change wearing a refactor's clothes.
   Collapsing the epsilon copies is Phase 4's job, once every consumer is on
   the kernel.

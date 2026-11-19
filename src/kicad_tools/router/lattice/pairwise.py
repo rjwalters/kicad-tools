@@ -156,9 +156,10 @@ class LatticePairwise:
         ``round_r`` is the largest round-copper radius in the pair.  A lattice
         node's disc routinely sits exactly tangent to the zone edge, and shapely's
         16-segment circle puts its nearest point up to ``r*(1-cos(pi/32))`` past
-        that edge -- beyond the gate's 1e-4 slack -- so the both-nearest-points
-        test is run on zones grown by that approximation error (and only that
-        test: the residual clearance is re-measured on the exact zones).
+        that edge -- beyond the gate's 5e-4 slack (#9619) -- so the
+        both-nearest-points test is run on zones grown by that approximation
+        error (and only that test: the residual clearance is re-measured on the
+        exact zones).
         """
         import math
 

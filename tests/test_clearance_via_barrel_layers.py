@@ -326,15 +326,16 @@ class TestNonSegmentPairCountsUnchanged:
 
 
 class TestMarginalClearanceEpsilon:
-    """The tightened ``DRC_TOLERANCE`` catches sub-5um marginal violations.
+    """The guard band catches the marginal clearance class (floor − 1.6 um).
 
     Issue #3913: ``DRC_TOLERANCE`` was 0.005 mm (5 um), creating a dead
     band that silently PASSED any clearance shortfall within 5 um of the
     floor.  The entire marginal class this masked is ~1.6 um wide (an
     actual clearance of 0.0999 mm against the 4-layer JLCPCB floor of
-    0.1016 mm).  With the guard band reduced to 1e-4 mm (0.1 um), that
-    class now FAILS as it should, while genuine float rounding (~1e-9 mm)
-    is still suppressed.
+    0.1016 mm).  The band has been sub-marginal ever since: 1e-4 mm
+    (0.1 um) after #3913, and 5e-4 mm (0.5 um) since #9619 (KiCad's
+    probed acceptance band) -- still half the ~1.6 um class, so it fails
+    while genuine float rounding (~1e-9 mm) stays suppressed.
 
     Geometry: net-1 through-via (radius 0.3) at (100, 100) vs a net-2
     vertical segment (half-width 0.1) on In1.Cu.  Edge-to-edge clearance
@@ -343,15 +344,16 @@ class TestMarginalClearanceEpsilon:
 
     def test_marginal_shortfall_below_old_dead_band_now_fires(self, tmp_path: Path):
         # clearance = 0.4999 - 0.4 = 0.0999 mm -> 1.7 um below the 0.1016
-        # floor.  The old 5 um dead band passed this; the new 0.1 um band
-        # must flag it.
+        # floor.  The old 5 um dead band passed this; the sub-marginal
+        # band (0.5 um since #9619) must flag it.
         pcb = _pcb_via_vs_segment("In1.Cu", seg_x=100.4999)
         results = _check_clearances(pcb, tmp_path)
         viols = _segment_via_violations(results)
         assert len(viols) >= 1, (
             "A 0.0999 mm clearance vs a 0.1016 mm floor (1.7 um short) must "
-            "be flagged now that DRC_TOLERANCE is 1e-4 mm; the old 0.005 mm "
-            "dead band silently passed it (issue #3913)."
+            "be flagged while DRC_TOLERANCE stays below the ~1.6 um marginal "
+            "class; the old 0.005 mm dead band silently passed it (issue "
+            "#3913)."
         )
         v = viols[0]
         assert v.actual_value is not None and v.actual_value < 0.1016
@@ -362,9 +364,9 @@ class TestMarginalClearanceEpsilon:
         Guards against a future regression that widens DRC_TOLERANCE back
         toward the manufacturing-scale value: the fixture's 0.0999 mm
         clearance is inside the retired 5 um dead band (0.0999 + 0.005 =
-        0.1049 >= 0.1016) but outside the new 0.1 um band (0.0999 + 0.0001
-        = 0.1000 < 0.1016), so the assertion below only holds while the
-        tolerance stays sub-micron.
+        0.1049 >= 0.1016) but outside the current 0.5 um band (0.0999 +
+        0.0005 = 0.1004 < 0.1016), so the assertion below only holds
+        while the tolerance stays well under the ~1.6 um marginal class.
         """
         from kicad_tools.validate.rules.base import DRC_TOLERANCE
 

@@ -402,9 +402,10 @@ def _post_nudge_introduces_foreign_via_violation(
     the same two objects.  The geometry of a round barrel against a trace is
     the same reading in both; what the switch removes is a *second* place that
     reading is written down, and it brings the comparison under the kernel's
-    own :data:`~clearance_kernel.CLEARANCE_EPSILON_MM` (1e-4 mm, KiCad's
-    integer-nanometre band) in place of a private 1e-9.  Layer-span gating
-    stays here, in :func:`_via_spans_segment_layer`, because a ``KVia`` is
+    own :data:`~clearance_kernel.CLEARANCE_EPSILON_MM` (5e-4 mm, KiCad's
+    probed ~500 nm acceptance band, Issue #9619) in place of a private
+    1e-9.  Layer-span gating stays here, in
+    :func:`_via_spans_segment_layer`, because a ``KVia`` is
     implicitly all-layer copper.
 
     The trace_clearance defaults to ``router.rules.trace_clearance`` when

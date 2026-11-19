@@ -40,9 +40,12 @@ def test_board_without_kicad_pro_is_noop(tmp_path: Path) -> None:
     assert _count(pcb) == 0
 
 
-def test_half_micron_shortfall_counted_and_tolerance_respected(tmp_path: Path) -> None:
-    # STRAIGHT leaves a 0.45 mm gap.  Raise the HV floor to 0.5 um above it
+def test_micron_shortfall_counted_and_tolerance_respected(tmp_path: Path) -> None:
+    # STRAIGHT leaves a 0.45 mm gap.  Raise the HV floor to 1 um above it
     # (flagged), then to 0.05 um above it (inside DRC_TOLERANCE, kept).
+    # The flagged floor sits 2x the #9619 KiCad-parity band (5e-4 mm)
+    # above the gap; a half-micron shortfall is exactly AT the band and
+    # is accepted, matching kicad-cli DRC.
     def count_for_floor(floor: float, name: str) -> int:
         d = tmp_path / name
         d.mkdir()
@@ -52,5 +55,5 @@ def test_half_micron_shortfall_counted_and_tolerance_respected(tmp_path: Path) -
                 cls["clearance"] = floor
         return _count(_board(d, STRAIGHT, project))
 
-    assert count_for_floor(0.4505, "short") > 0
+    assert count_for_floor(0.4510, "short") > 0
     assert count_for_floor(0.45005, "within_tol") == 0

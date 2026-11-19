@@ -27,7 +27,7 @@ in-repo reference pad model, the same polygon ``kct check`` measures and the
 one that agrees with kicad-cli on the ``roundrect-corner-gap`` fixture.  That
 is deliberate: supplying the reference geometry means this row measures group
 6's *own* arithmetic (``half + max(clearance, fill.clearance)``, the
-``intersects`` short-circuit, the ``1e-4`` slack, the bbox pre-filter) rather
+``intersects`` short-circuit, the ``5e-4`` slack, the bbox pre-filter) rather
 than an approximation introduced by the harness.  A zone pour would have been
 the other candidate input, but the generator places no close pair against its
 pour (the pour exists to exercise the refill path, and KiCad's filler knocks

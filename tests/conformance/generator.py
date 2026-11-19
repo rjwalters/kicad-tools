@@ -16,8 +16,9 @@ vacuously zero.  So the generator samples the **target gap first** --
 pair analytically to realise exactly that gap.
 
 **Boundary band.**  A draw within +/-0.001 mm (1 um) of the requirement is
-re-drawn; the band is 10x kct's ``CLEARANCE_EPSILON_MM = 1e-4`` and ~1000x
-KiCad's integer-nm resolution, so what remains is model disagreement rather
+re-drawn; the band is ~1000x KiCad's integer-nm resolution and comfortably
+wider than kct's ``CLEARANCE_EPSILON_MM`` (5e-4 mm since Issue #9619, the
+KiCad-probed acceptance band), so what remains is model disagreement rather
 than rounding.  :attr:`PairIntent.boundary` still exists because the named
 fixtures are hand-placed and may deliberately sit in the band.
 

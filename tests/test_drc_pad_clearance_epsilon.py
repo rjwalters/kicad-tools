@@ -34,14 +34,28 @@ class TestEpsilonConstant:
         """Epsilon must be much smaller than any real clearance."""
         assert _CLEARANCE_EPSILON_MM < 0.001  # less than 1 micron
 
-    def test_epsilon_matches_edge_clearance_epsilon(self):
-        """For consistency the pad-pad epsilon should match the edge
-        clearance epsilon introduced in #2428."""
+    def test_epsilon_is_the_kernel_kicad_band(self):
+        """The pad-pad epsilon is the kernel's shared KiCad acceptance band
+        (#9619): 500 nm -- the largest shortfall pinned KiCad 10.0.6
+        accepts on the track-to-track probe."""
+        from kicad_tools.router.clearance_kernel import CLEARANCE_EPSILON_MM
+
+        assert _CLEARANCE_EPSILON_MM == CLEARANCE_EPSILON_MM == 5e-4
+
+    def test_edge_clearance_epsilon_diverges_deliberately(self):
+        """``validate/rules/edge.py`` keeps its own narrower 1e-4 epsilon.
+
+        The #9619 probe covered track-to-track clearance only; edge
+        clearance was left at the pre-#9619 value until its own probe
+        shows the same acceptance band (see the issue's out-of-scope
+        note), so the old equality with the drc epsilon no longer holds.
+        """
         from kicad_tools.validate.rules.edge import (
             _CLEARANCE_EPSILON_MM as edge_epsilon,
         )
 
-        assert edge_epsilon == _CLEARANCE_EPSILON_MM
+        assert edge_epsilon == 1e-4
+        assert edge_epsilon < _CLEARANCE_EPSILON_MM
 
 
 # ---------------------------------------------------------------------------
@@ -121,12 +135,13 @@ class TestPadPadEpsilonPython:
         """Floating-point edge case: clearance = min - 0.5*epsilon (within
         tolerance) must NOT flag.  This is the 0.149999mm vs 0.150mm
         case that motivated #2465."""
-        # Half-epsilon = 5e-5 mm; aim for clearance = 0.15 - 5e-5
+        # Half-epsilon shortfall; aim for clearance = min - epsilon/2
+        half_eps = _CLEARANCE_EPSILON_MM / 2
         pad1 = _make_pad("1", (0.0, 0.0), (0.5, 0.5), net_number=1, net_name="A")
         pad2 = _make_pad("2", (0.0, 0.0), (0.5, 0.5), net_number=2, net_name="B")
-        # dist = 0.150 + 0.25 + 0.25 - 5e-5 = 0.65 - 5e-5
+        # dist = 0.150 + 0.25 + 0.25 - half_eps = 0.65 - half_eps
         fp1 = _make_footprint("R1", (0.0, 0.0), [pad1])
-        fp2 = _make_footprint("R2", (0.650 - 5e-5, 0.0), [pad2])
+        fp2 = _make_footprint("R2", (0.650 - half_eps, 0.0), [pad2])
 
         drc = _make_drc(min_clearance=0.150)
         violation = drc._check_pair_clearance_python(fp1, fp2, "R1", "R2")
@@ -152,14 +167,14 @@ class TestPadPadEpsilonPython:
         # Make distance < min - 2*epsilon
         pad1 = _make_pad("1", (0.0, 0.0), (0.5, 0.5), net_number=1, net_name="A")
         pad2 = _make_pad("2", (0.0, 0.0), (0.5, 0.5), net_number=2, net_name="B")
-        # clearance shortfall = 3*epsilon = 3e-4 mm
+        # clearance shortfall = 2*epsilon
         fp1 = _make_footprint("R1", (0.0, 0.0), [pad1])
-        fp2 = _make_footprint("R2", (0.650 - 3e-4, 0.0), [pad2])
+        fp2 = _make_footprint("R2", (0.650 - 2 * _CLEARANCE_EPSILON_MM, 0.0), [pad2])
 
         drc = _make_drc(min_clearance=0.150)
         violation = drc._check_pair_clearance_python(fp1, fp2, "R1", "R2")
         assert violation is not None, (
-            "Shortfall of 3*epsilon must still flag (just past the tolerance)"
+            "Shortfall of 2*epsilon must still flag (just past the tolerance)"
         )
 
     def test_same_net_does_not_flag(self):

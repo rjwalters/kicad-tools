@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kicad_tools.router.clearance_kernel import CLEARANCE_EPSILON_MM
 from kicad_tools.router.via_clearance import COORD_WRITE_GUARD_MM
 
 if TYPE_CHECKING:
@@ -768,13 +769,13 @@ def _route_violates_foreign(
             Point(x_a, y_a) if (x_a, y_a) == (x_b, y_b) else LineString([(x_a, y_a), (x_b, y_b)])
         )
         for foreign, c in foreign_by_layer.get(layer, []):
-            if shape.distance(foreign) < c + half_w - 1e-4:
+            if shape.distance(foreign) < c + half_w - CLEARANCE_EPSILON_MM:
                 return True
     for vx, vy in route.vias:
         p = Point(vx, vy)
         for groups in foreign_by_layer.values():
             for foreign, c in groups:
-                if p.distance(foreign) < c + route.via_size / 2 - 1e-4:
+                if p.distance(foreign) < c + route.via_size / 2 - CLEARANCE_EPSILON_MM:
                     return True
     return False
 
@@ -820,10 +821,10 @@ def _via_site_blocker(
         for layer, geom in it.layers.items():
             for part, c in rules.clearance_parts(link_name, it.net, layer, geom):
                 need = c + rules.via_size / 2
-                if p.distance(part) < need - 1e-4:
+                if p.distance(part) < need - CLEARANCE_EPSILON_MM:
                     return f"via site is {p.distance(part):.3f} mm from foreign copper on {layer} (needs {need:.3f} mm)"
     for geom in model.pad_geoms:
-        if p.distance(geom) < rules.via_size / 2 + 0.05 - 1e-4:
+        if p.distance(geom) < rules.via_size / 2 + 0.05 - CLEARANCE_EPSILON_MM:
             return "via site is inside or against a pad (no via-in-pad)"
     # Issue #8974: the same-net slit band route_link's mask enforces -- a
     # seat whose annulus parks inside ``(0, band_edge_mm)`` beside its own
@@ -848,7 +849,7 @@ def _via_site_blocker(
             )
     for dx, dy, dd in model.drills:
         need = dd / 2 + rules.via_drill / 2 + rules.hole_to_hole + COORD_WRITE_GUARD_MM
-        if p.distance(Point(dx, dy)) < need - 1e-4:
+        if p.distance(Point(dx, dy)) < need - CLEARANCE_EPSILON_MM:
             return "via site violates the hole-to-hole rule against an existing drill"
     if model.outline is not None and not model.outline.buffer(
         -(rules.edge_clearance + rules.via_size / 2)
@@ -1062,7 +1063,9 @@ def _shortcut(
             if not _octilinear(pts[k], pts[m]):
                 continue
             line = LineString([pts[k], pts[m]])
-            if any(line.distance(geom) < c + half_width - 1e-4 for geom, c in foreign):
+            if any(
+                line.distance(geom) < c + half_width - CLEARANCE_EPSILON_MM for geom, c in foreign
+            ):
                 continue
             if legal_area is not None and not legal_area.covers(line):
                 continue

@@ -2,7 +2,8 @@
 
 06rf seed 42 routed 26/26 yet ``kct check`` reported 12 ``diffpair_clearance_intra``
 findings: legs offset exactly ``pitch/2`` apart lose up to ~0.14 um when the board
-file stores 4 decimals, and the checker allows only 1e-4 mm under the gap.
+file stores 4 decimals, and the checker allows only 5e-4 mm under the gap
+(#9619; was 1e-4).
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from kicad_tools.router.lattice.pathfinder import _PAIR_SERIALIZATION_MARGIN_MM
 
 TRACE_W = 0.275
 GAP = 0.1016  # 4 mil: the floor ``DesignRules.pair_gap`` hands the checker
-DRC_TOLERANCE = 1e-4  # validate/rules/base.py
+DRC_TOLERANCE = 5e-4  # validate/rules/base.py, the kernel's KiCad-probed slack (#9619)
 
 
 def _octilinear_centerline(rng: random.Random) -> list[tuple[float, float]]:

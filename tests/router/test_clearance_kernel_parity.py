@@ -732,7 +732,12 @@ def test_clear_uses_the_same_epsilon_on_both_sides() -> None:
 
     required = 0.2
     eps = ck.CLEARANCE_EPSILON_MM
-    for gap, expected in ((required, True), (required - eps, True), (required - 2 * eps, False)):
+    # "Inside" sits one picometre within the slack: a gap of exactly
+    # ``required - eps`` is decided by ~1e-16 float dust in the gap
+    # arithmetic, so the verbatim probe pair is pinned separately in
+    # ``test_clear_at_the_kicad_probe_boundary_9619``.
+    inside = required - eps + 1e-12
+    for gap, expected in ((required, True), (inside, True), (required - 2 * eps, False)):
         # Two parallel 0.2 mm tracks placed to realise ``gap`` exactly.
         offset = gap + 0.2
         a = ck.KSegment(0.0, 0.0, 10.0, 0.0, 0.2, 0)
@@ -740,6 +745,30 @@ def test_clear_uses_the_same_epsilon_on_both_sides() -> None:
         assert ck.clear(a, b, required) is expected, f"python clear() wrong at gap={gap}"
         assert router_cpp.clear(_to_cpp(a), _to_cpp(b), required) is expected, (
             f"cpp clear() wrong at gap={gap}"
+        )
+
+
+@requires_cpp
+def test_clear_at_the_kicad_probe_boundary_9619() -> None:
+    """The Issue #9619 black-box probe pair, verbatim, on both backends.
+
+    Pinned KiCad 10.0.6 accepts a 500 nm shortfall below the rule and flags
+    600 nm; the shared slack must reproduce exactly that split on the Python
+    kernel and the C++ kernel alike (and the C++ ``grid.cpp`` float32 copy
+    must not round 5e-4 away).
+    """
+    from kicad_tools.router import router_cpp
+
+    required = 0.127  # the probe's custom-rule minimum
+    for shortfall_nm, expected in ((500, True), (600, False)):
+        gap = required - shortfall_nm * 1e-6
+        a = ck.KSegment(0.0, 0.0, 10.0, 0.0, 0.2, 0)
+        b = ck.KSegment(0.0, gap + 0.2, 10.0, gap + 0.2, 0.2, 0)
+        assert ck.clear(a, b, required) is expected, (
+            f"python clear() wrong at {shortfall_nm} nm shortfall"
+        )
+        assert router_cpp.clear(_to_cpp(a), _to_cpp(b), required) is expected, (
+            f"cpp clear() wrong at {shortfall_nm} nm shortfall"
         )
 
 
@@ -1014,6 +1043,29 @@ MIGRATED_KERNEL_CALLERS: frozenset[str] = frozenset(
         # consumer, not a numbered epic group, so no ``MIGRATED_GROUPS`` row
         # (same as ``drc/repair_clearance.py``).
         "creepage/repair.py",
+        # Issue #9619: the shared clearance slack is KiCad's probed ~500 nm
+        # acceptance band.  The five modules below import only the kernel's
+        # ``CLEARANCE_EPSILON_MM`` constant -- no kernel geometry is called
+        # (same shape as ``router/grid.py`` / ``router/pathfinder.py``) --
+        # so every clearance comparison in the tree accepts exactly the
+        # shortfalls kicad-cli DRC accepts, on one value.
+        "router/pairwise_clearance.py",  # pair census PASS tolerance
+        "creepage/engine.py",  # creepage census PASS tolerance
+        "drc/incremental.py",  # pad-pad incremental DRC slack
+        "router/component_hole_index.py",  # hole-to-drill proximity gate
+        "router/link_router.py",  # link-route commit gates (six literals)
+        # Issue #9619: the lattice engine's diff-pair intra-pair floor gate
+        # spends the same slack ``kct check`` allows, so it imports the
+        # kernel constant rather than a private literal (the lattice's own
+        # verdict epsilon stays ``LATTICE_CLEARANCE_EPSILON_MM``).
+        "router/lattice/pathfinder.py",
+        # Issue #9619: ``validate/rules/base.py``'s ``DRC_TOLERANCE`` is the
+        # same KiCad-probed band.  It cites the kernel by name in its
+        # comment but imports nothing -- duplicating the literal is the
+        # price of the validate-must-not-load-router lazy-import contract
+        # (``tests/test_validate_lazy_imports.py``), the same trade
+        # ``manufacturers/fabrication_process.py`` already makes.
+        "validate/rules/base.py",
     }
 )
 """Python modules allowed to reference the kernel, one entry per migration.

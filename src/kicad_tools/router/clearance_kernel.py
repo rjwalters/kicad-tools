@@ -72,13 +72,18 @@ __all__ = [
     "ring_edge_crosses_ray",
 ]
 
-CLEARANCE_EPSILON_MM = 1e-4
+CLEARANCE_EPSILON_MM = 5e-4
 """Tolerance for "is this gap at least the requirement" comparisons.
 
+Set to the largest shortfall pinned KiCad 10.0.6 accepts on a track-to-track
+probe (500 nm accepted, 600 nm flagged -- Issue #9619), so a verdict here
+agrees with ``kicad-cli drc`` on marginal gaps instead of rejecting squeezes
+KiCad would accept.  Before #9619 this was 1e-4 (0.1 um).
+
 Deliberately a private copy of ``grid.cpp``'s file-local
-``CLEARANCE_EPSILON_MM`` and of ``router/io.py``'s ``_CLEARANCE_EPSILON_MM``.
-Phase 4 of Epic #5509 collapses the copies once every consumer is on this
-kernel.
+``CLEARANCE_EPSILON_MM`` and of ``router/io.py``'s ``_CLEARANCE_EPSILON_MM``
+(which now import *this* value).  Phase 4 of Epic #5509 collapses the copies
+once every consumer is on this kernel.
 """
 
 ALL_LAYERS = -1

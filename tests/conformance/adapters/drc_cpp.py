@@ -52,6 +52,7 @@ guess.  ``uv run kct build-native`` builds it alongside ``router_cpp``.
 
 from __future__ import annotations
 
+from kicad_tools.router import clearance_kernel as ck
 from tests.conformance.adapters import KIND_CLEARANCE, Verdict
 from tests.conformance.adapters._support import net_ids, pad_pad_pairs, router_rules
 from tests.conformance.generator import CopperCase, PadSpec, PairKind
@@ -61,11 +62,11 @@ __all__ = ["DrcCppAdapter"]
 #: The only pair shape ``check_pair_clearance`` can answer.
 PAD_PAIR_KINDS = frozenset({PairKind.PAD_PAD})
 
-#: The same slack every clearance comparison in the tree uses
-#: (``router/clearance_kernel.py`` ``CLEARANCE_EPSILON_MM``,
-#: ``grid.cpp``'s file-local copy, ``router/io.py``'s
-#: ``_CLEARANCE_EPSILON_MM``).  Phase 4 of the epic collapses the copies.
-CLEARANCE_EPSILON_MM = 1e-4
+#: The same slack every clearance comparison in the tree uses, imported from
+#: the kernel so the adapter cannot drift from the value it measures against
+#: (``router/clearance_kernel.py`` ``CLEARANCE_EPSILON_MM``, KiCad's probed
+#: 500 nm acceptance band since Issue #9619).
+CLEARANCE_EPSILON_MM = ck.CLEARANCE_EPSILON_MM
 
 
 class DrcCppAdapter:

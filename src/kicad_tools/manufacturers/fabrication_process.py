@@ -41,8 +41,9 @@ from dataclasses import dataclass
 #: validate-side ``via_in_pad`` DRC rule uses for the identical checks) --
 #: duplicated as a literal here rather than imported to avoid a
 #: ``manufacturers`` -> ``validate`` package dependency; keep the two
-#: values in sync if either changes.
-_ELIGIBILITY_TOLERANCE_MM = 1e-4
+#: values in sync if either changes.  Both are the kernel's KiCad-probed
+#: slack (500 nm acceptance band, Issue #9619).
+_ELIGIBILITY_TOLERANCE_MM = 5e-4
 
 
 @dataclass(frozen=True)

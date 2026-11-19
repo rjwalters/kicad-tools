@@ -50,6 +50,7 @@ from kicad_tools.drc.cpp_backend import (
 from kicad_tools.drc.cpp_backend import (
     is_cpp_available as _is_drc_cpp_available,
 )
+from kicad_tools.router.clearance_kernel import CLEARANCE_EPSILON_MM
 
 # Try to import rtree, gracefully handle missing dependency
 try:
@@ -61,14 +62,15 @@ except ImportError:
     rtree_index = None  # type: ignore[assignment]
 
 
-# Floating-point tolerance for pad-pad clearance comparisons (0.1 micron).
-# Without this epsilon, IEEE-754 rounding in radius and trig math can leave
-# pad-edge distances at e.g. 0.14999999... when the design intent was 0.15
-# exactly, producing spurious sub-micron DRC violations like "0.149mm vs
-# 0.150mm".  0.1 micron is well below any manufacturing precision and
-# matches the edge-clearance epsilon introduced in #2428
-# (validate/rules/edge.py).
-_CLEARANCE_EPSILON_MM = 1e-4
+# Floating-point tolerance for pad-pad clearance comparisons.
+# Set to the largest shortfall pinned KiCad 10.0.6 accepts on a
+# track-to-track probe (500 nm accepted, 600 nm flagged -- Issue #9619), so a
+# marginal pad-pad gap kct flags is one kicad-cli DRC also flags.  Before
+# #9619 this was 1e-4 (0.1 um), a purely float-noise band introduced for
+# IEEE-754 rounding in radius and trig math (e.g. 0.14999999... vs 0.15
+# exactly).  Imported from the clearance kernel so the copies cannot drift
+# apart.
+_CLEARANCE_EPSILON_MM = CLEARANCE_EPSILON_MM
 
 
 @dataclass

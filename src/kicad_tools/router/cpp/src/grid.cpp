@@ -60,10 +60,10 @@ const std::vector<std::pair<int, int>>& halo_offsets(int radius_cells) {
             const clearance::KShape probe = clearance::KVia{
                 static_cast<double>(dx), static_cast<double>(dy), 0.0, 0.0};
             // Units: copper_gap is queried in *cells* here, and the tolerance
-            // is the kernel's mm-domain CLEARANCE_EPSILON_MM (1e-4) reused as
+            // is the kernel's mm-domain CLEARANCE_EPSILON_MM (5e-4) reused as
             // a cell-unit slack.  Harmless at any realistic radius: squared
             // integer distances are integers, so a false inclusion needs
-            // sqrt(r^2 + 1) - r ~= 1/(2r) < 1e-4, i.e. r >~ 5000 cells.  The
+            // sqrt(r^2 + 1) - r ~= 1/(2r) < 5e-4, i.e. r >~ 1000 cells.  The
             // Python port (router/grid.py halo_offsets) does the same.
             if (clearance::copper_gap(centre, probe) <=
                 r + clearance::CLEARANCE_EPSILON_MM) {
@@ -162,14 +162,16 @@ bool Grid3D::fixed_fill_clear(double ax, double ay, double bx, double by,
     return true;
 }
 
-// Floating-point tolerance for clearance comparisons (Issue #2465).
+// Floating-point tolerance for clearance comparisons (Issue #2465; value
+// aligned with KiCad's probed ~500 nm acceptance band, Issue #9619).
 // IEEE-754 rounding in radius/distance math can leave computed
 // clearances at values like 0.14999999... when the design intent is
-// exactly 0.150mm, producing spurious sub-micron false-positive
-// violations during routing validation.  0.1 micron (1e-4 mm) is well
-// below any manufacturing precision and matches the epsilon used in
-// the Python paths (drc/incremental.py, router/io.py, validate/rules/edge.py).
-constexpr float CLEARANCE_EPSILON_MM = 1e-4f;
+// exactly 0.150mm, producing spurious false-positive violations during
+// routing validation.  0.5 micron matches the kernel epsilon in
+// clearance_kernel.hpp and the Python paths (router/io.py,
+// drc/incremental.py, validate/rules/base.py); validate/rules/edge.py
+// still carries its own narrower epsilon.
+constexpr float CLEARANCE_EPSILON_MM = 5e-4f;
 
 Grid3D::Grid3D(int cols, int rows, int layers, float resolution,
                float origin_x, float origin_y)

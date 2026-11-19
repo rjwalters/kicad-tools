@@ -1,4 +1,4 @@
-"""The Python post-route validators share the native 1e-4 mm clearance slack.
+"""The Python post-route validators share the native 5e-4 mm clearance slack.
 
 Issue #6509: ``Grid3D`` (``grid.cpp``) accepts a gap of
 ``required - CLEARANCE_EPSILON_MM`` and above; the Python
@@ -6,7 +6,16 @@ Issue #6509: ``Grid3D`` (``grid.cpp``) accepts a gap of
 ``required`` exactly, so a step landing on the rule to float noise
 (0.14999999999999963 against 0.15) was legal natively and refused in
 Python.  Each comparison is pinned on both sides of the slack: a gap
-``5e-5`` under the rule is accepted, ``2e-4`` under is rejected.
+``5e-5`` under the rule is accepted, ``1e-3`` under is rejected.
+
+Issue #9619: the slack is KiCad's -- the black-box probe on pinned
+KiCad 10.0.6 accepts a 500 nm shortfall and flags 600 nm, so the shared
+value is 5e-4 mm.  The *exact* probe pair is pinned at the kernel level,
+on both backends, in
+``tests/router/test_clearance_kernel_parity.py::test_clear_at_the_kicad_probe_boundary_9619``.
+The params here bracket it one nanometre inside each side instead,
+because these validators' measured distances carry ~1e-15 mm of float
+dust that would decide an exactly-at-the-boundary verdict by rounding.
 """
 
 from __future__ import annotations
@@ -28,16 +37,21 @@ TRACE = 0.2
 VIA_DIAMETER = 0.6
 
 #: (gap below the rule, expected verdict).  Inside the slack is legal,
-#: outside it is a violation; real overlap stays a violation.
+#: outside it is a violation; real overlap stays a violation.  The
+#: bracketing params sit 1 nm inside the KiCad probe pair (#9619: 500 nm
+#: accepted, 600 nm flagged) -- see the module docstring for why the
+#: exact pair lives at the kernel level.
 BOUNDARY = [
     pytest.param(-5e-5, True, id="inside-epsilon"),
-    pytest.param(-2e-4, False, id="outside-epsilon"),
+    pytest.param(-4.99e-4, True, id="inside-kicad-band-499nm"),
+    pytest.param(-6e-4, False, id="beyond-kicad-band-600nm"),
+    pytest.param(-1e-3, False, id="outside-epsilon"),
     pytest.param(-CLEARANCE - 0.05, False, id="overlap"),
 ]
 
 
 def test_epsilon_is_the_native_value() -> None:
-    assert CLEARANCE_EPSILON_MM == 1e-4
+    assert CLEARANCE_EPSILON_MM == 5e-4
 
 
 def _grid() -> RoutingGrid:
