@@ -233,6 +233,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_check_parser(subparsers)
     _add_creepage_parser(subparsers)
     _add_creepage_export_rules_parser(subparsers)
+    _add_voltage_map_merge_parser(subparsers)
     _add_sch_parser(subparsers)
     _add_pcb_parser(subparsers)
     _add_lib_parser(subparsers)
@@ -804,9 +805,14 @@ def _add_creepage_parser(subparsers) -> None:
             "reference (default 0 V); the reserved key _pair_bounds is a list of "
             '{"nets": [a, b], "max_dv": V, "why": "..."} device-bounded caps that '
             "can only LOWER that pair's |ΔV| (transitive pairs are the author's "
-            "to declare); other _-prefixed keys (e.g. _comment) are "
+            "to declare; `kct voltage-map-merge` also generates them to restore "
+            "scenario correlations, and max_dv: 0 declares 'always the same "
+            "potential'); other _-prefixed keys (e.g. _comment) are "
             "ignored.  Potentials are worst-case DC-equivalent magnitudes -- AC "
             "phase is not modelled, so |ΔV| is conservative for in-phase nets.  "
+            "Authoring one map per operating scenario?  Merge them into a single "
+            "envelope map with `kct voltage-map-merge a.json b.json -o env.json` "
+            "instead of hand-writing ranges + _pair_bounds (issue #9582).  "
             "Requires --standard (and --pollution-degree)."
         ),
     )
@@ -937,7 +943,10 @@ def _add_creepage_export_rules_parser(subparsers) -> None:
         help=(
             "Path to a JSON sidecar mapping net names to their RMS working "
             "potential (volts), same format as `kct creepage --voltage-map`.  "
-            "Without it the command is a clean no-op (nothing written)."
+            "Without it the command is a clean no-op (nothing written).  "
+            "Multiple operating scenarios?  Pre-merge them into one envelope "
+            "map with `kct voltage-map-merge a.json b.json -o env.json` "
+            "(issue #9582)."
         ),
     )
     p.add_argument(
@@ -989,6 +998,36 @@ def _add_creepage_export_rules_parser(subparsers) -> None:
         help="Print the derived netclasses + rules without writing any files.",
     )
     add_format_flag(p)
+
+
+def _add_voltage_map_merge_parser(subparsers) -> None:
+    """Add voltage-map-merge parser (multi-scenario envelope map, #9582).
+
+    A NEW sibling top-level command: merges two or more per-scenario voltage
+    maps (one per operating mode of the board) into a single envelope map --
+    per-net ``{min, max}`` spans plus generated ``_pair_bounds`` entries
+    restoring each pair's worst per-scenario |dV| -- that every existing
+    ``--voltage-map`` consumer accepts unchanged.
+    """
+    p = subparsers.add_parser(
+        "voltage-map-merge",
+        help=(
+            "Merge two or more per-scenario voltage maps into one envelope map "
+            "usable as --voltage-map (Issue #9582)"
+        ),
+    )
+    p.add_argument(
+        "inputs",
+        nargs="+",
+        metavar="SCENARIO",
+        help="Path to a per-scenario voltage-map JSON sidecar (two or more)",
+    )
+    p.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        help="Path to write the merged envelope map JSON",
+    )
 
 
 def _add_check_parser(subparsers) -> None:

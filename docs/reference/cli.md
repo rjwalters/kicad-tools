@@ -2600,6 +2600,31 @@ Provides an interactive shell for exploring and modifying PCB files.
 
 ---
 
+### `voltage-map-merge`
+
+Merge two or more per-scenario voltage maps into one **envelope map** usable
+as `--voltage-map` everywhere (`kct creepage`, `kct route`,
+`kct optimize-placement`, ...). Author one map per operating scenario of the
+board (e.g. mains forward vs. reverse) and merge, instead of hand-writing an
+envelope of ranges plus one `_pair_bounds` entry per varying-net pair:
+
+```bash
+kct voltage-map-merge forward.json reverse.json -o envelope.json
+```
+
+Each net becomes the span of its per-scenario potentials (`{"min": …, "max": …}`;
+a plain scalar when every scenario agrees). For every net pair whose envelope
+span overstates its real difference — nets that move together across scenarios
+(a follower bank riding the line) but not in the envelope — a generated
+`_pair_bounds` entry caps the pair back to its worst per-scenario |ΔV|
+("always the same potential" is `max_dv: 0`). A net present in only one
+scenario is treated as 0 V in the others (the consumers' own unmapped-net
+default). The scenarios must agree on `_edge_voltage` and must not carry
+their own `_pair_bounds`; the output is an ordinary voltage map, so every
+existing `--voltage-map` consumer accepts it unchanged (issue #9582).
+
+---
+
 ## Output Formats
 
 Most commands support multiple output formats:
