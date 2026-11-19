@@ -1251,7 +1251,7 @@ def _emit_single_pad_net_warning(
     )
 
 
-def _strip_route_blocks(pcb_content: str) -> tuple[str, int, int]:
+def _strip_route_blocks(pcb_content: str, collect: list[str] | None = None) -> tuple[str, int, int]:
     """Strip top-level ``(segment ...)`` and ``(via ...)`` blocks from PCB content.
 
     Issue #2976: When ``_stage_input_for_auto_pour`` aliases ``pcb_path`` to
@@ -1275,6 +1275,10 @@ def _strip_route_blocks(pcb_content: str) -> tuple[str, int, int]:
 
     Args:
         pcb_content: Original PCB file content.
+        collect: Optional list.  When given, the verbatim text of every
+            excised block is appended to it (issue #9599 row 2: the
+            existing-copper replacement notice lists the affected nets from
+            these blocks).
 
     Returns:
         Tuple of ``(stripped_content, segments_removed, vias_removed)``.
@@ -1336,6 +1340,8 @@ def _strip_route_blocks(pcb_content: str) -> tuple[str, int, int]:
                     segments_removed += 1
                 else:
                     vias_removed += 1
+                if collect is not None:
+                    collect.append(pcb_content[token_start - 1 : k])
                 # Skip whitespace that was preceding this form (trailing
                 # newline/tab from the previous emission) to keep the
                 # resulting file tidy.
@@ -1355,6 +1361,80 @@ def _strip_route_blocks(pcb_content: str) -> tuple[str, int, int]:
         prev_char = ch
         i += 1
     return "".join(out), segments_removed, vias_removed
+
+
+# Issue #9599 row 2: the net-declaration table ``(net 3 "NAME")`` maps stripped
+# copper's numeric ``(net 3)`` references onto user-visible net names.  Name-
+# only boards (KiCad 10, #4416) carry ``(net "NAME")`` directly on the copper.
+_NET_DECL_RE = re.compile(r'\(net\s+(\d+)\s+"((?:[^"\\]|\\.)*)"\)')
+_BLOCK_NET_RE = re.compile(
+    r'\(net\s+(\d+)(?:\s+"(?:[^"\\]|\\.)*")?\s*\)|\(net\s+"((?:[^"\\]|\\.)+)"\)'
+)
+
+
+def _baseline_copper_nets(pcb_content: str) -> tuple[int, int, list[str]]:
+    """Census the input board's existing routing copper (issue #9599 row 2).
+
+    Returns ``(segments, vias, sorted net names)`` carried by top-level
+    ``(segment ...)`` / ``(via ...)`` blocks -- the copper a plain ``kct
+    route`` run replaces with its own freshly routed paths.  Net id ``0``
+    copper (orphans) is not attributed to any named net.
+    """
+    net_names: dict[int, str] = {}
+    for decl in _NET_DECL_RE.finditer(pcb_content):
+        net_names.setdefault(int(decl.group(1)), decl.group(2))
+    blocks: list[str] = []
+    _, segs, vias = _strip_route_blocks(pcb_content, collect=blocks)
+    names: set[str] = set()
+    for block in blocks:
+        m = _BLOCK_NET_RE.search(block)
+        if m is None:
+            continue
+        if m.group(1) is not None:
+            net_id = int(m.group(1))
+            if net_id != 0:
+                names.add(net_names.get(net_id, f"Net {net_id}"))
+        elif m.group(2):
+            names.add(m.group(2))
+    return segs, vias, sorted(names)
+
+
+def _warn_existing_copper_replacement(pcb_path: Path, args) -> None:
+    """List the existing copper a plain ``kct route`` run will replace (#9599 row 2).
+
+    The save path treats the in-memory router state as authoritative: every
+    ``_write_routed_pcb`` call strips ALL top-level ``(segment ...)`` /
+    ``(via ...)`` blocks and re-inserts only this run's routes (issue #2976).
+    Without ``--preserve-existing`` that silently removes hand-placed copper;
+    this notice names every affected net before routing starts, and points at
+    the flag that locks existing copper (kept verbatim as fixed obstacles and
+    re-emitted unchanged, issue #5788).  Skipped for quiet / dry runs, and
+    whenever the preserve machinery is in effect (--preserve-existing, --nets,
+    --region, --complete -- all of which stamp the preserve path).
+    """
+    if getattr(args, "quiet", False) or getattr(args, "dry_run", False):
+        return
+    if getattr(args, "preserve_existing", False):
+        return
+    try:
+        in_segs, in_vias, nets = _baseline_copper_nets(Path(pcb_path).read_text())
+    except (OSError, UnicodeDecodeError):
+        return
+    if not in_segs and not in_vias:
+        return
+    names = ", ".join(nets) if nets else "(unnamed nets)"
+    print(
+        f"  Note: input board has existing routing copper "
+        f"({in_segs} segment(s), {in_vias} via(s)) on nets: {names}."
+    )
+    print(
+        "        This run replaces existing routing copper with freshly routed "
+        "paths -- hand-placed tracks/vias are NOT carried over."
+    )
+    print(
+        "        Pass --preserve-existing to lock existing copper (kept "
+        "verbatim and routed around)."
+    )
 
 
 # Issue #4416: a KiCad-10 name-only inline net reference is ``(net "SDA")`` --
@@ -4577,6 +4657,24 @@ def _fallback_receipt_fields(router: Any) -> dict[str, Any]:
     return fields
 
 
+def _grid_arrays_released(router: Any) -> bool:
+    """True once the routing grid's per-cell occupancy arrays are freed.
+
+    ``_release_routing_engine_state`` (issue #4292) swaps every dense plane
+    for a zero-length array before the CLI tail; anything that still indexes
+    them fails with a numpy "index 0 is out of bounds for axis 0 with size 0"
+    instead of a real answer.  The post-release partial save (#9579) must
+    serialise the already-finalized copper without touching the grid, so it
+    needs to know.  Structural on purpose: the freed-and-rebuilt cycle of an
+    escalation flow un-releases the grid, and a stale marker would not.
+    """
+    blocked = getattr(getattr(router, "grid", None), "_blocked", None)
+    shape = getattr(blocked, "shape", None)
+    if not shape:
+        return False
+    return bool(shape[0] == 0)
+
+
 def _save_partial_results() -> bool:
     """Save partial routing results if interrupted.
 
@@ -4646,6 +4744,10 @@ def _save_partial_results() -> bool:
             print("  No routes to save.")
         return False
 
+    # Issue #9579: name the step a failure happened in.  A bare ``str(e)``
+    # (e.g. a numpy "index 0 is out of bounds") said nothing about which
+    # artifact was or was not saved.
+    step = "reading the placement board"
     try:
         # The placement the copper was routed against: the source board, or
         # the moved one when a placement delta has been kept (issue #6314).
@@ -4655,17 +4757,35 @@ def _save_partial_results() -> bool:
         # dialect so the interrupted save does not flip name-based copper to
         # numeric.  Detect from the content already in hand (avoid re-reading).
         name_only = bool(_NAME_ONLY_NET_RE.search(original_content))
+        step = "serialising the routed copper"
         # Issue #8270: collapse per-grid-cell segments (on a copy) so the
         # ``_partial`` board is editable.  ``cleanup_artifacts`` is what
         # ``router.to_sexp`` runs first; keep it, then serialise merged routes.
+        # Issue #9579: on a released grid (#4292 tail) ``cleanup_artifacts``
+        # dies in the acute-foldback validation -- it indexes the freed
+        # per-cell arrays -- and the ``to_sexp`` fallback then repeats the
+        # same cleanup, so both attempts abort before anything is written.
+        # The released-grid callers run strictly after ``_finalize_routes``,
+        # whose cleanup already ran on the live grid, so the copper here is
+        # final: serialise it without querying the grid at all.  The live
+        # interrupt path (grid still allocated) keeps the full cleanup.
+        released = _grid_arrays_released(router)
         try:
-            router.cleanup_artifacts()
+            if not released:
+                router.cleanup_artifacts()
             route_sexp = "\n\t".join(
                 r.to_sexp(name_only=name_only)
                 for r in _merge_checkpoint_routes(router.routes, router)
             )
         except Exception:  # noqa: BLE001 - fall back to the raw serialisation
-            route_sexp = router.to_sexp(name_only=name_only)
+            # ``skip_cleanup`` only on the released-grid path (#9579): a
+            # live-grid call must stay what it always was, so routers (and
+            # test doubles) whose ``to_sexp`` predates the keyword keep
+            # accepting the fallback.
+            if released:
+                route_sexp = router.to_sexp(name_only=name_only, skip_cleanup=True)
+            else:
+                route_sexp = router.to_sexp(name_only=name_only)
         try:
             # Issue #8270: name the partially routed nets for the timeout report.
             info["partial_net_stubs"] = _partial_net_stubs(router)
@@ -4696,6 +4816,7 @@ def _save_partial_results() -> bool:
             else:
                 save_path = output_path.with_stem(output_path.stem + "_partial")
 
+            step = f"writing the partial board {save_path.name}"
             check_kicad_lock(cast(Path, save_path))
 
             # Insert routes before final closing parenthesis
@@ -4720,6 +4841,10 @@ def _save_partial_results() -> bool:
             from .route_receipt import record_publication
 
             record_publication(save_path)
+
+            # The partial board is on disk from here on (issue #9579): a later
+            # failure is about a sidecar or the summary, never the board.
+            step = f"recording the partial-save stage for {save_path.name}"
 
             # Issue #6330: publish the snapshot facts NOW, before the slow
             # access-witness sidecar below.  A hard kill during that write
@@ -4756,12 +4881,23 @@ def _save_partial_results() -> bool:
             # write is best-effort by construction (the helper swallows its own
             # errors) and the journal dump measures well under the 5 s
             # SIGTERM -> SIGKILL grace window the supervisor allows.
+            step = "writing the access-witness sidecar"
             _interrupt_state["access_witness_path"] = _write_access_witness_sidecar(
                 cast(Path, save_path), router, quiet=quiet, journal_first=True
             )
 
             if not quiet:
-                stats = router.get_statistics()
+                # Issue #9579: everything is saved at this point.  The
+                # statistics are a summary only, so a failure computing them
+                # must not be reported as a failed save (the board and its
+                # sidecars were already written).
+                stats_error = ""
+                try:
+                    stats: dict[str, Any] | None = router.get_statistics()
+                except Exception as stats_exc:  # noqa: BLE001 - summary only
+                    logger.debug("partial-save statistics failed", exc_info=True)
+                    stats = None
+                    stats_error = f"{type(stats_exc).__name__}: {stats_exc}"
                 # This snapshot inserts the current router copper into the
                 # source board. Interrupts can save it at any stage; clean
                 # partial exits save after optimization/tuning. It is not a
@@ -4775,13 +4911,17 @@ def _save_partial_results() -> bool:
                         f"(current routing state; NOT canonical)"
                     )
                     print(f"  Canonical output remains: {output_path}")
-                print(f"    Nets routed: {stats['nets_routed']}")
-                print(f"    Segments: {stats['segments']}")
-                print(f"    Vias: {stats['vias']}")
+                if stats is not None:
+                    print(f"    Nets routed: {stats['nets_routed']}")
+                    print(f"    Segments: {stats['segments']}")
+                    print(f"    Vias: {stats['vias']}")
+                else:
+                    print(f"    (routing statistics unavailable: {stats_error})")
             return True
     except Exception as e:
+        logger.debug("partial-save failed while %s", step, exc_info=True)
         if not quiet:
-            print(f"  Error saving partial results: {e}")
+            print(f"  Error saving partial results while {step}: {type(e).__name__}: {e}")
 
     return False
 
@@ -23935,6 +24075,12 @@ def _run_main_impl(args, parser, argv) -> int:
             argv,
             grid_explicit=grid_auto_result is None,
         )
+
+    # Issue #9599 row 2: name the existing copper this run is about to
+    # replace.  All preserve-flag coercions (--nets / --region / --complete)
+    # have run above, so a False ``preserve_existing`` here means the run
+    # really will strip the input board's routing copper at its first write.
+    _warn_existing_copper_replacement(pcb_path, args)
 
     # Issue #3352 (P_AS3): --auto-pcb-size wraps the layer escalation path
     # with an outer size-escalation loop.  Q5 decision: --auto-pcb-size

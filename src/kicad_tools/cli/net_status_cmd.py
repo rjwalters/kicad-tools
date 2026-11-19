@@ -406,7 +406,7 @@ def _output_flat(
             print(f"  [~] {net.net_name} ({net.padless_components} stranded fragment(s))")
             print(f"    -> Fix: {net.suggested_fix}")
             if net_filter is not None:
-                _print_pieces(net, "  ")
+                _print_pieces(net.pieces, "  ")
 
     # Show complete nets if not filtering
     if not incomplete_only and result.complete:
@@ -437,13 +437,14 @@ def _output_by_class(result: NetStatusResult, verbose: bool, show_pieces: bool =
                 _print_net_status(net, verbose, indent="  ", show_pieces=show_pieces)
 
 
-def _print_pieces(net: NetStatus, indent: str = "") -> None:
+def _print_pieces(pieces: list[dict], indent: str = "") -> None:
     """List each disconnected piece of a split net with its pads/vias (Issue #9598).
 
-    Prints nothing for a single-piece net.  Piece 1 is the largest pad island;
-    pad-less track/via fragments follow as their own pieces.
+    Takes the ``NetStatus.pieces`` listing (or the identical ``pieces`` field
+    a ``StuckNetDiagnosis`` carries, Issue #9612).  Prints nothing for a
+    single-piece net.  Piece 1 is the largest pad island; pad-less track/via
+    fragments follow as their own pieces.
     """
-    pieces = net.pieces
     if not pieces:
         return
     print(f"{indent}  Pieces ({len(pieces)} disconnected):")
@@ -501,7 +502,7 @@ def _print_net_status(
     print(f"{indent}  -> Fix: {net.suggested_fix}")
 
     if show_pieces:
-        _print_pieces(net, indent)
+        _print_pieces(net.pieces, indent)
 
 
 def output_json(
@@ -765,6 +766,13 @@ def output_why(pcb_path: Path, fmt: str, strict: bool = True, net: str | None = 
     flag, and again byte-identical output without a sidecar: the
     ``overflow_edge`` / ``routing_plan`` JSON keys are injected here, never
     added to ``StuckNetDiagnosis.to_dict`` (which other consumers share).
+
+    Issue #9612: under ``net`` (only), a multi-piece ``POUR_DISCONTINUOUS``
+    diagnosis additionally shows the per-piece listing of the split net
+    (``NetStatus.pieces``, Issue #9598) -- printed after the ``evidence``
+    line and injected into that net's JSON payload here, again never added
+    to ``StuckNetDiagnosis.to_dict``, so the no-``--net`` output stays
+    byte-identical.
     """
     from kicad_tools.router.stuck_classifier import StuckClassifierResult, classify_stuck_nets
 
@@ -809,6 +817,15 @@ def output_why(pcb_path: Path, fmt: str, strict: bool = True, net: str | None = 
                 edges = crossings.get(diag.net_name) or []
                 if edges:
                     payload["overflow_edge"] = edges[0].to_dict()
+        # Issue #9612: the --net per-piece listing (Issue #9598) on the
+        # selected net's payload -- additive ONLY under --net, exactly like
+        # ``include_pieces`` in ``output_json``, so plain --why JSON stays
+        # byte-identical.  The classifier populates ``diag.pieces`` for a
+        # multi-piece POUR_DISCONTINUOUS net only.
+        if net is not None:
+            for diag, payload in zip(result.diagnoses, data["nets"], strict=False):
+                if diag.pieces:
+                    payload["pieces"] = diag.pieces
         print(json.dumps(data, indent=2))
         return 2 if result.diagnoses else 0
 
@@ -858,6 +875,13 @@ def output_why(pcb_path: Path, fmt: str, strict: bool = True, net: str | None = 
                 )
             print(f"  blocking nets:    {', '.join(diag.blocking_nets)}{note}")
         print(f"  evidence:         {diag.evidence}")
+        # Issue #9612: under --net, a multi-piece POUR_DISCONTINUOUS net
+        # shows the same per-piece listing as the plain --net path (Issue
+        # #9598) -- the class where a split pour is actionable.  Without
+        # --net the block is withheld so the board-wide --why text stays
+        # byte-identical.
+        if net is not None and diag.pieces:
+            _print_pieces(diag.pieces)
         # Issue #5521: the measured plan witness goes BEFORE the inferred
         # recommendation (see _print_routing_plan_block).
         if plan is not None:

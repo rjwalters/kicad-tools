@@ -2478,6 +2478,36 @@ kct net-status board.kicad_pcb --by-class
 kct net-status board.kicad_pcb --net DAC_CLK --why   # only DAC_CLK's diagnosis
 ```
 
+#### `--net`: the per-piece listing
+
+A net in several disconnected pieces gets a piece-by-piece listing under
+`--net` (issue #9598): the largest pad island is `piece 1`, smaller islands
+follow, and pad-less track/via fragments come last, marked `[no pads]`.
+
+```
+[!] GND (1 pads unconnected)
+  R3.1     @ (9.50, 20.00) -- needs routing
+  -> Fix: Route traces to connect 1 pads
+  Pieces (3 disconnected):
+    piece 1: R1.1, R2.1
+    piece 2: R3.1, via @ 9.50,20.00
+    piece 3: via @ 30.00,30.00 [no pads]
+```
+
+In `--format json` the same data appears as a `pieces` list on the net:
+each entry carries `piece`, `pads[]` (`name` / `position`), `vias[]` as
+`[x, y]`, and `stranded_items[]` (track/via labels) for a pad-less
+fragment. The key is **absent** (not null) for a single-piece net and in
+the board-wide view — per
+[`machine-output.md`](machine-output.md) the field is additive, so
+`schema_version` is unchanged.
+
+`--net X --why` shows the same block for a `POUR_DISCONTINUOUS` diagnosis
+(issue #9612) — the class where a split pour net is actionable — printed
+after the `evidence` line, and the net's JSON payload carries the same
+`pieces` key. Other classifications and `--why` without `--net` never
+print it.
+
 #### `--why`: the access witness
 
 `--why` classifies each incomplete net into the `ESCAPE_BLOCKED` /
