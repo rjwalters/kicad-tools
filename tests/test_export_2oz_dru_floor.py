@@ -208,3 +208,45 @@ def test_hand_written_unscoped_rule_does_not_block_a_two_oz_export(
     dru = pcb.with_suffix(".kicad_dru").read_text(encoding="utf-8")
     assert re.search(r'rule "Clearance \(outer\) - jlcpcb".*?\(min 0\.15mm\)', dru, re.S)
     assert '(rule "Minimum Clearance"' in dru  # authored rule kept
+
+
+# ---------------------------------------------------------------------------
+# Router-declared net classes (``meta.kct_router_netclasses``, #9422 review):
+# kct's own "Reviewed clearance" rule for such a class carries an
+# ``isCoupledDiffPair()`` call and an ``A.Reference == B.Reference`` term.
+# Unmodelled, the rule dropped out of the gate and the inner-layer probe
+# landed on ``Clearance (inner)`` 0.1016 against the 0.15 net-class floor.
+# ---------------------------------------------------------------------------
+
+
+def _router_class_board(tmp_path: Path, zone_layer: str | None, *, class_name: str) -> Path:
+    pcb = _reporter_board(tmp_path, zone_layer)
+    dru = pcb.with_suffix(".kicad_dru")
+    # Drop the hand rule: the reviewer's shapes S7/S8 carry none.
+    dru.write_text(dru.read_text(encoding="utf-8").replace(_HAND_RULE, ""), encoding="utf-8")
+    pro = pcb.with_suffix(".kicad_pro")
+    data = json.loads(pro.read_text(encoding="utf-8"))
+    classes = data["net_settings"]["classes"]
+    declared = dict(classes[0], name=class_name, clearance=0.15)
+    classes.append(declared)
+    data.setdefault("meta", {})["kct_router_netclasses"] = {
+        "classes": [class_name],
+        "assignments": [],
+    }
+    pro.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return pcb
+
+
+@pytest.mark.parametrize("zone_layer", [None, "In1.Cu"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_router_declared_class_does_not_block_a_two_oz_export(
+    tmp_path: Path, zone_layer: str | None, dry_run: bool
+) -> None:
+    pcb = _router_class_board(tmp_path, zone_layer, class_name="Signal")
+
+    _export(pcb, dry_run=dry_run)  # used to raise: track_track lowered 0.15 -> 0.1016
+
+    if not dry_run:
+        dru = pcb.with_suffix(".kicad_dru").read_text(encoding="utf-8")
+        assert "isCoupledDiffPair" in dru  # the router-class rule really was written
+        assert _managed_clearance(pcb) == pytest.approx(0.15)
