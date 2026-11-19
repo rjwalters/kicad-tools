@@ -709,6 +709,23 @@ class TestCategorization:
         )
         assert _categorize_part("LED Indication - Discrete", "0603") == PartCategory.LED
 
+    def test_categorize_non_led_negation_not_led(self):
+        # C385834-style RJ45 wording: the negated "Non-LED" mention must not
+        # categorize the connector as an LED.
+        from kicad_tools.parts.lcsc import _categorize_part
+
+        assert (
+            _categorize_part(
+                "Non-LED Shielded cat5e - Ethernet Connectors / Modular Connectors (RJ45 RJ11) ROHS",
+                "",
+            )
+            == PartCategory.CONNECTOR
+        )
+        assert (
+            _categorize_part("Non-LED Phosphor bronze RJ45 Jack Right Angle Unshielded", "")
+            == PartCategory.CONNECTOR
+        )
+
     def test_categorize_inductor_and_diode_still_match(self):
         from kicad_tools.parts.lcsc import _categorize_part
 

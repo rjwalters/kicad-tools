@@ -234,8 +234,10 @@ def _categorize_part(description: str, package: str) -> PartCategory:
         return PartCategory.INDUCTOR
     # LED before the generic diode branch: some LCSC descriptions name both
     # ("Discrete Diode LED Indication - Discrete"), and the LED is the part.
-    # "\bled\b" avoids matching "indication"-style substrings in either word.
-    if re.search(r"\bled\b", desc_lower) or "light emitting" in desc_lower:
+    # "\bled\b" avoids matching "indication"-style substrings in either word;
+    # the lookbehind refuses the negated mention in connector wording
+    # ("Non-LED Shielded cat5e - Ethernet Connectors (RJ45 RJ11)").
+    if re.search(r"(?<!non-)\bled\b", desc_lower) or "light emitting" in desc_lower:
         return PartCategory.LED
     if any(x in desc_lower for x in ["diode", "rectifier", "schottky", "zener"]):
         return PartCategory.DIODE
