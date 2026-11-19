@@ -3041,7 +3041,11 @@ def _add_pcb_parser(subparsers) -> None:
         help="Sync PCB footprints from schematic netlist",
         description="Compare schematic components against PCB footprints. "
         "Adds missing footprints (placed at board edge), detects renamed "
-        "references, and reports orphaned footprints.",
+        "references, and reports orphaned footprints. Assigns pad nets from "
+        "the schematic netlist, annotates pad pin functions/types, and "
+        "copies schematic values onto matched footprints. Footprint lib ID "
+        "drift is reported, not swapped (kct sync --apply owns swaps); "
+        "exits 1 while a footprint difference is unresolved.",
     )
     pcb_sync_netlist.add_argument("pcb", help="Path to .kicad_pcb file")
     pcb_sync_netlist.add_argument(
