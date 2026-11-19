@@ -2300,7 +2300,7 @@ class TestLCSCViewerPageResolution:
             source="lcsc",
         )
 
-    def test_resolve_helper_prefers_wmsc_host_and_unescapes(self):
+    def test_resolve_helper_prefers_lcsc_file_host_and_unescapes(self):
         from kicad_tools.datasheet.sources.lcsc import _resolve_lcsc_pdf_url
 
         html = (
@@ -2311,6 +2311,38 @@ class TestLCSCViewerPageResolution:
             _resolve_lcsc_pdf_url(html, self.VIEWER_URL)
             == "https://wmsc.lcsc.com/wmsc/upload/file/pdf/a.pdf"
         )
+
+    # Trimmed excerpt of the real viewer page for C47787 (captured live, #9473
+    # review): the direct file link on datasheet.lcsc.com *and* the decoy
+    # pdf.js viewer link on static.lcsc.com whose ``.pdf`` is in the query.
+    REAL_FILE = (
+        "https://datasheet.lcsc.com/datasheet/pdf/"
+        "2151d544489a4d2883fddfc04ace778c.pdf?productCode=C47787"
+    )
+    REAL_DIRECT = f'<a href="{REAL_FILE}">PDF</a>'
+    REAL_DECOY = (
+        '<iframe src="https://static.lcsc.com/feassets/pc/html/pdfjs/web/viewer.html'
+        "?file=https%3A%2F%2Fdatasheet.lcsc.com%2Fdatasheet%2Fpdf%2F"
+        '2151d544489a4d2883fddfc04ace778c.pdf"></iframe>'
+    )
+    REAL_NOISE = '<link rel="dns-prefetch" href="//wmsc.lcsc.com"><svg><use href="https://wmsc.lcsc.com/sprite.svg"/></svg>'
+
+    @pytest.mark.parametrize("decoy_first", [False, True])
+    def test_resolve_real_page_ignores_pdfjs_viewer_decoy(self, decoy_first):
+        from kicad_tools.datasheet.sources.lcsc import _resolve_lcsc_pdf_url
+
+        parts = (
+            [self.REAL_DECOY, self.REAL_DIRECT]
+            if decoy_first
+            else [self.REAL_DIRECT, self.REAL_DECOY]
+        )
+        html = f"<html><head>{self.REAL_NOISE}</head><body>{''.join(parts)}</body></html>"
+        assert _resolve_lcsc_pdf_url(html, self.VIEWER_URL) == self.REAL_FILE
+
+    def test_resolve_decoy_only_returns_none(self):
+        from kicad_tools.datasheet.sources.lcsc import _resolve_lcsc_pdf_url
+
+        assert _resolve_lcsc_pdf_url(self.REAL_DECOY, self.VIEWER_URL) is None
 
     def test_resolve_helper_none_without_link(self):
         from kicad_tools.datasheet.sources.lcsc import _resolve_lcsc_pdf_url
@@ -2408,7 +2440,7 @@ class TestLCSCViewerPageResolution:
 
         message = str(exc_info.value)
         assert self.VIEWER_URL in message
-        assert "assets.nexperia.com" in message
+        assert mfr.datasheet_url in message
 
     def test_search_keeps_distinct_manufacturer_url_for_same_part(self):
         from kicad_tools.datasheet.manager import DatasheetManager

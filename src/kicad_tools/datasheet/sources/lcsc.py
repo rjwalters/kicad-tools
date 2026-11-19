@@ -21,17 +21,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Upper bound on how much of an HTML viewer page we read while hunting for the
-# embedded PDF URL. The viewer pages are small; this just guards against an
-# unexpectedly huge response.
-_MAX_VIEWER_PAGE_BYTES = 2 * 1024 * 1024
-
 # Candidate PDF URLs inside an HTML/JSON body: absolute or protocol-relative
 # links ending in ".pdf" (optionally followed by a query string).
 _PDF_URL_RE = re.compile(r"""(?:https?:)?//[^\s"'<>\\]+?\.pdf(?:\?[^\s"'<>\\]*)?""", re.IGNORECASE)
 
-# Host LCSC serves the real datasheet files from.
-_LCSC_FILE_HOST = "wmsc.lcsc.com"
+# Hosts LCSC serves the real datasheet files from, most preferred first.
+# ``datasheet.lcsc.com`` is what the real viewer page links to (measured on the
+# captured page for C47787); ``wmsc.lcsc.com`` is a secondary LCSC file host.
+_LCSC_FILE_HOSTS = ("datasheet.lcsc.com", "wmsc.lcsc.com")
 
 
 def _resolve_lcsc_pdf_url(html: str, base_url: str) -> str | None:
@@ -39,9 +36,12 @@ def _resolve_lcsc_pdf_url(html: str, base_url: str) -> str | None:
     Find the real PDF URL inside an LCSC datasheet viewer page.
 
     ``www.lcsc.com/datasheet/...`` answers with an HTML viewer page; the actual
-    file lives on ``wmsc.lcsc.com/wmsc/upload/file/pdf/...`` and is referenced
-    from the page (often inside embedded JSON with ``\\/`` or ``\\u002F``
-    escapes).
+    file lives on ``datasheet.lcsc.com/datasheet/pdf/...`` and is referenced
+    from the page (possibly inside embedded JSON with ``\\/`` or ``\\u002F``
+    escapes). The same page also links LCSC's pdf.js viewer
+    (``.../viewer.html?file=<encoded .pdf URL>``), whose ``.pdf`` sits in the
+    query string; only URLs whose *path* ends in ``.pdf`` are candidates, so
+    that decoy is ignored regardless of where it appears in the markup.
 
     Args:
         html: Decoded body of the viewer page.
@@ -49,18 +49,23 @@ def _resolve_lcsc_pdf_url(html: str, base_url: str) -> str | None:
             used to resolve protocol-relative links).
 
     Returns:
-        The best candidate PDF URL (preferring the ``wmsc.lcsc.com`` host), or
+        The best candidate PDF URL (preferring ``datasheet.lcsc.com``), or
         ``None`` if the page embeds no PDF link.
     """
     text = html.replace("\\u002F", "/").replace("\\/", "/").replace("&amp;", "&")
     candidates: list[str] = []
     for match in _PDF_URL_RE.findall(text):
         url = urljoin(base_url, match)
-        if url != base_url and url not in candidates:
+        if (
+            url != base_url
+            and url not in candidates
+            and urlparse(url).path.lower().endswith(".pdf")
+        ):
             candidates.append(url)
-    for url in candidates:
-        if urlparse(url).hostname == _LCSC_FILE_HOST:
-            return url
+    for host in _LCSC_FILE_HOSTS:
+        for url in candidates:
+            if urlparse(url).hostname == host:
+                return url
     return candidates[0] if candidates else None
 
 
@@ -168,7 +173,7 @@ class LCSCDatasheetSource(HTTPDatasheetSource):
 
         LCSC's ``www.lcsc.com/datasheet/...`` URLs often answer HTTP 200 with an
         HTML viewer page instead of the PDF. When that happens the page is
-        scanned for the embedded real file URL (``wmsc.lcsc.com/...``) and the
+        scanned for the embedded real file URL (``datasheet.lcsc.com/...``) and the
         download is retried once with it. Every written file is still gated by
         the PDF magic-byte check.
 
@@ -192,7 +197,7 @@ class LCSCDatasheetSource(HTTPDatasheetSource):
             try:
                 response = self._get_session().get(url, timeout=self.timeout, allow_redirects=True)
                 response.raise_for_status()
-                body = response.content[:_MAX_VIEWER_PAGE_BYTES]
+                body = response.content
                 html = body.decode(response.encoding or "utf-8", errors="replace")
             except (requests.RequestException, LookupError) as e:
                 raise DatasheetDownloadError(
