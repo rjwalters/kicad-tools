@@ -803,7 +803,14 @@ blocked:
    leaked expression; a **writer** who has never seen the source implements
    from it. The existing accept/reject probes
    ([embedded_checksum_probe.py](../../scripts/research/embedded_checksum_probe.py),
-   `verify` subcommand) remain the acceptance oracle.
+   `verify` subcommand) remain the acceptance oracle, under the acceptance
+   rule in [clean-room.md](../clean-room.md): acceptance needs a successful
+   run of the **pinned** CLI, passed explicitly via `--kicad-cli`, with a
+   positive control (a deliberately corrupted checksum must be reported as
+   rejected by the same CLI) and the recorded probe output. A standalone
+   `verify` exit of 0 defaults to the host CLI and only reports absent
+   reject lines — a CLI that never ran produces the same output — so it
+   establishes nothing on its own.
 
 This addendum is not that spec, and this document does not read KiCad source:
 the reader task is a separate issue, to be filed before any implementation

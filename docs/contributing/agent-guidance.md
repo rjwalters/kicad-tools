@@ -249,8 +249,12 @@ source implements from the reviewed spec, public docs and black-box probes,
 and acceptance stays black-box on the pinned kicad-cli image. Specs are
 committed under `docs/clean-room/` with full provenance (from
 `docs/clean-room/TEMPLATE.md`) and the implementing PR links the spec.
-Review gate on such PRs: the author is not the spec's reader, and the
-structural-port check (same function breakdown, identifiers, step order — as
+Review gate on such PRs: the spec's recorded reader and writer agent ids
+differ, and the recorded writer is tied to the implementing PR — forge
+author/committer identities are shared across agent sessions, so they
+corroborate but cannot carry this check, and missing or ambiguous
+attribution fails the PR before approval — plus the structural-port check
+(same function breakdown, identifiers, step order — as
 in #6661/#6779) runs against the committed spec, not KiCad source. Scope:
 KiCad, GPL derivatives and AGPL registry neighbours; **unlicensed** ecosystem
 neighbours stay ideas-only — the protocol does not apply to them
