@@ -18,11 +18,20 @@ Two directions, one test each, plus the edge cases the AC names:
   clearance rule, so a ``A.NetClass == 'HV'`` rule requiring 0.4 mm never
   reached the run's trace/via floors and vias landed 0.1 mm apart.  The
   strictest conditional minimum now floors both resolutions
-  (``PROJECT_DRU_CONDITIONAL``), with ``(severity ignore)`` rules excluded.
+  (``PROJECT_DRU_CONDITIONAL``), with ``(severity ignore)`` rules excluded,
+  ``mil`` minimums parsed by the evaluator's own unit conversion, and --
+  #9588 review, round 2 -- the floor binding even an explicit
+  ``--clearance`` / ``--via-clearance`` (raised with a warning) so committed
+  copper passes the board's own DRC with and without the flag.  A gap an
+  undecided *exemption* could legalize is measured against the smallest
+  value any resolution could produce, so it is named UNKNOWN rather than
+  misread as a definite input defect.
 """
 
 from __future__ import annotations
 
+import json
+import math
 from pathlib import Path
 
 import pytest
@@ -98,6 +107,86 @@ def _footprint_rule(
     minimum: float = 0.1,
 ) -> DruRule:
     return DruRule(name, condition, None, ((CLEARANCE, minimum),))
+
+
+def _min_line_to_neut_pad_gap_mm(out: Path) -> float | None:
+    """The smallest copper gap between /LINE and any /NEUT pad in ``out``.
+
+    Reads the written geometry the way the board does -- parsed, not
+    regexed, since the writer pretty-prints -- taking every segment and via
+    of net ``/LINE`` against every ``/NEUT`` pad (centre distance minus
+    both half-widths; the fixture's pads are circles).  ``None`` when the
+    board carries no /LINE copper.
+    """
+    from kicad_tools.sexp import parse_string
+
+    def _xy(node: object, key: str) -> tuple[float, float]:
+        atoms = node.find(key).get_atoms()
+        return float(atoms[0]), float(atoms[1])
+
+    tree = parse_string(out.read_text(encoding="utf-8"))
+
+    def _net_name(node: object) -> str:
+        net = node.find("net") if hasattr(node, "find") else None
+        if net is None:
+            return ""
+        atoms = net.get_atoms()  # the tag is not included: (net 2 "/NEUT") -> [2, "/NEUT"]
+        for atom in reversed(atoms):
+            text = str(atom)
+            if not text.isdigit():
+                return text
+        # Written copper carries only the net number: resolve it through
+        # the board's own ``(net N "name")`` declarations.
+        return _net_names.get(str(atoms[-1])) if atoms else ""
+
+    _net_names: dict[str, str] = {}
+    for decl in tree.find_all("net"):
+        atoms = decl.get_atoms()
+        if len(atoms) >= 2:
+            _net_names[str(atoms[0])] = str(atoms[-1])
+
+    pads = [
+        (
+            fp_xy[0] + _xy(pad, "at")[0],
+            fp_xy[1] + _xy(pad, "at")[1],
+            float(pad.find("size").get_atoms()[0]) / 2.0,
+        )
+        for fp in tree.find_all("footprint")
+        # Pad ``(at …)`` is footprint-relative; the fixture's footprints
+        # carry no rotation.
+        for fp_xy in (_xy(fp, "at"),)
+        for pad in fp.find_all("pad")
+        if _net_name(pad) == "/NEUT"
+    ]
+    assert pads, "no /NEUT pads found in the written board"
+    segments = [
+        (*_xy(seg, "start"), *_xy(seg, "end"), float(seg.find("width").get_atoms()[0]))
+        for seg in tree.find_all("segment")
+        if _net_name(seg) == "/LINE"
+    ]
+    vias = [
+        (_xy(via, "at"), float(via.find("size").get_atoms()[0]))
+        for via in tree.find_all("via")
+        if _net_name(via) == "/LINE"
+    ]
+    worst: float | None = None
+    for x1, y1, x2, y2, width in segments:
+        for px, py, pr in pads:
+            dx, dy = x2 - x1, y2 - y1
+            length_sq = dx * dx + dy * dy
+            t = (
+                0.0
+                if length_sq == 0.0
+                else max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / length_sq))
+            )
+            dist = math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+            gap = dist - pr - width / 2.0
+            worst = gap if worst is None else min(worst, gap)
+    for (vx, vy), size in vias:
+        for px, py, pr in pads:
+            gap = math.hypot(px - vx, py - vy) - pr - size / 2.0
+            worst = gap if worst is None else min(worst, gap)
+    return worst
 
 
 # ---------------------------------------------------------------- Direction 1
@@ -411,6 +500,113 @@ HV_DRU = """(version 1)
 """
 
 
+# -------------------------------- #9588 review: undecided exemptions vs the audit
+
+
+class TestUndecidedExemptionIsUnknownNotADefect:
+    """The lower bound spans **all** possible winners, not just the decided
+    ones (#9588 review).  With a 0.20 mm default and a 0.10 mm exemption
+    whose condition is undecided, the possible winners are 0.10 and 0.20 mm:
+    a 0.15 mm gap is legal in one resolution and illegal in the other, so it
+    must be reported as unknown -- named -- never as a definite input
+    defect.  Only a gap below *every* possible winner is a defect."""
+
+    WILDCARD_LIB_RULE = "A.memberOfFootprint('Conn:*')"  # wildcard on a known lib ID: undecided
+    AREA_RULE = "A.insideArea('HV zone')"  # not modelled: undecided
+
+    @staticmethod
+    def _router_with_gap(gap: float, footprint_name: str = "") -> Autorouter:
+        router = _router()
+        router.pads[("J3", "1")] = _pad(y=10.125 + gap + 0.5, footprint_name=footprint_name)
+        router.existing_routes.append(_kept_trace())
+        return router
+
+    def test_lower_bound_spans_all_possible_winners(self) -> None:
+        rules = BoardClearanceRules(
+            dru_rules=[_footprint_rule(self.WILDCARD_LIB_RULE, name="tight footprint", minimum=0.1)]
+        )
+        pad = ItemProps("Pad", "GND", footprint_ref="J3", footprint_lib_id=None)
+        track = ItemProps("Track", "+3V3", footprint_ref="", footprint_lib_id="")
+
+        res = rules.explain_required(CLEARANCE, pad, track)
+
+        assert res.requirement == pytest.approx(0.2)
+        assert res.lower_bound == pytest.approx(0.1)
+        assert res.unknown_rules == ("tight footprint",)
+
+    def test_gap_the_exemption_legalizes_is_unknown_not_a_defect(self) -> None:
+        # 0.15 mm: below the 0.2 default, at/above the 0.1 exemption -- the
+        # Judge's repro, previously reported as a definite defect.
+        rules = BoardClearanceRules(
+            dru_rules=[_footprint_rule(self.WILDCARD_LIB_RULE, name="tight footprint", minimum=0.1)]
+        )
+
+        near = kept_copper_clearance_violations(
+            self._router_with_gap(0.15, footprint_name="Conn:Hdr"), board_rules=rules
+        )
+
+        assert len(near) == 1
+        assert near[0].required == pytest.approx(0.2)
+        assert near[0].unknown_rules == ("tight footprint",)
+
+    def test_same_for_an_area_condition(self) -> None:
+        rules = BoardClearanceRules(
+            dru_rules=[_footprint_rule(self.AREA_RULE, name="area exempt", minimum=0.1)]
+        )
+
+        near = kept_copper_clearance_violations(self._router_with_gap(0.15), board_rules=rules)
+
+        assert len(near) == 1
+        assert near[0].unknown_rules == ("area exempt",)
+
+    def test_gap_below_every_possible_winner_is_still_a_definite_defect(self) -> None:
+        # 0.05 mm loses even under the exemption's own 0.1 mm.
+        rules = BoardClearanceRules(
+            dru_rules=[_footprint_rule(self.WILDCARD_LIB_RULE, name="tight footprint", minimum=0.1)]
+        )
+
+        near = kept_copper_clearance_violations(
+            self._router_with_gap(0.05, footprint_name="Conn:Hdr"), board_rules=rules
+        )
+
+        assert len(near) == 1
+        assert near[0].unknown_rules == ()
+
+    def test_gap_above_the_conservative_requirement_is_clean(self) -> None:
+        rules = BoardClearanceRules(
+            dru_rules=[_footprint_rule(self.WILDCARD_LIB_RULE, name="tight footprint", minimum=0.1)]
+        )
+
+        assert (
+            kept_copper_clearance_violations(
+                self._router_with_gap(0.25, footprint_name="Conn:Hdr"), board_rules=rules
+            )
+            == []
+        )
+
+    def test_cli_gate_names_the_rule_instead_of_failing(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        out = tmp_path / "out.kicad_pcb"
+        out.write_text("(kicad_pcb)")
+        out.with_suffix(".kicad_dru").write_text(
+            """(version 1)
+(rule "tight footprint"
+  (condition "A.insideArea('HV zone')")
+  (constraint clearance (min 0.1mm)))
+"""
+        )
+
+        errors = _audit_kept_copper_clearance(
+            self._router_with_gap(0.15), out, quiet=False, source_pcb=None
+        )
+        captured = capsys.readouterr().out
+
+        assert errors == []
+        assert "UNKNOWN" in captured
+        assert "tight footprint" in captured
+
+
 class TestConditionalNetClassRuleFloorsNewCopper:
     @staticmethod
     def _board(tmp_path: Path, dru: str = HV_DRU) -> Path:
@@ -448,16 +644,157 @@ class TestConditionalNetClassRuleFloorsNewCopper:
             declared=declared, trace_clearance_mm=0.15
         ).required_mm == pytest.approx(0.4)
 
-    def test_explicit_clearance_warns_instead_of_moving(self, tmp_path: Path) -> None:
+    def test_explicit_clearance_is_floored_by_the_conditional_rule(self, tmp_path: Path) -> None:
+        """#9588 review: an explicit ``--clearance`` must not buy copper below
+        a conditional rule -- AC: committed copper complies *with and without*
+        the flag.  The flag still waives every non-conditional layer."""
         declared = read_declared_clearance_rules(self._board(tmp_path))
 
         resolved = resolve_base_clearance(
             target_mm=0.2, declared=declared, explicit_target=True, fab_floor_mm=None
         )
 
-        assert resolved.required_mm == pytest.approx(0.2), "an explicit --clearance is a waiver"
+        assert resolved.required_mm == pytest.approx(0.4)
+        assert resolved.source is RuleSource.PROJECT_DRU_CONDITIONAL
         assert resolved.warning is not None
         assert "0.4" in resolved.warning
+
+    def test_explicit_clearance_above_the_conditional_rule_stands(self, tmp_path: Path) -> None:
+        declared = read_declared_clearance_rules(self._board(tmp_path))
+
+        resolved = resolve_base_clearance(
+            target_mm=0.5, declared=declared, explicit_target=True, fab_floor_mm=None
+        )
+
+        assert resolved.required_mm == pytest.approx(0.5)
+        assert resolved.source is RuleSource.EXPLICIT_TARGET
+        assert resolved.warning is None
+
+    def test_explicit_clearance_still_waives_non_conditional_layers(self) -> None:
+        """The #5656 waiver is unchanged outside the conditional floor."""
+        declared = DeclaredClearanceRules(net_class_clearance_mm=0.5, net_class_name="Default")
+
+        resolved = resolve_base_clearance(
+            target_mm=0.2, declared=declared, explicit_target=True, fab_floor_mm=None
+        )
+
+        assert resolved.required_mm == pytest.approx(0.2)
+        assert resolved.source is RuleSource.EXPLICIT_TARGET
+        assert resolved.warning is not None
+        assert "0.5" in resolved.warning
+
+    def test_explicit_via_clearance_is_floored_by_the_conditional_rule(
+        self, tmp_path: Path
+    ) -> None:
+        declared = read_declared_clearance_rules(self._board(tmp_path))
+
+        resolved = resolve_via_clearance(declared=declared, explicit_via_mm=0.2)
+
+        assert resolved.required_mm == pytest.approx(0.4)
+        assert resolved.source is RuleSource.PROJECT_DRU_CONDITIONAL
+        assert resolved.warning is not None
+        assert "0.4" in resolved.warning
+
+    def test_mil_conditional_rule_floors_like_its_mm_equivalent(self, tmp_path: Path) -> None:
+        """#9588 review: the placement reader's length parser dropped ``mil``
+        (``(min 40mil)`` vanished while the board-rule evaluator measured
+        1.016 mm), so new copper was placed below a rule the audit enforces.
+        Pin the mil rule and its mm equivalent for both trace and via."""
+        (tmp_path / "mil").mkdir()
+        (tmp_path / "mm").mkdir()
+        mil = self._board(
+            tmp_path / "mil",
+            """(version 1)
+(rule "HV clearance"
+  (condition "A.NetClass == 'HV' || B.NetClass == 'HV'")
+  (constraint clearance (min 40mil)))
+""",
+        )
+        mm = self._board(
+            tmp_path / "mm",
+            """(version 1)
+(rule "HV clearance"
+  (condition "A.NetClass == 'HV' || B.NetClass == 'HV'")
+  (constraint clearance (min 1.016mm)))
+""",
+        )
+
+        assert _read_dru_clearances(mil.with_suffix(".kicad_dru")) == (
+            None,
+            None,
+            pytest.approx(1.016),
+        )
+        declared_mil = read_declared_clearance_rules(mil)
+        declared_mm = read_declared_clearance_rules(mm)
+        assert declared_mil.dru_conditional_mm == pytest.approx(1.016)
+        assert declared_mm.dru_conditional_mm == pytest.approx(1.016)
+        # Both floors, trace and via, at the mil rule's mm value.
+        assert declared_mil.project_requirement() == (
+            pytest.approx(1.016),
+            RuleSource.PROJECT_DRU_CONDITIONAL,
+            None,
+        )
+        assert declared_mil.via_requirement() == (
+            pytest.approx(1.016),
+            RuleSource.PROJECT_DRU_CONDITIONAL,
+            None,
+        )
+        assert resolve_base_clearance(
+            target_mm=0.15, declared=declared_mil, fab_floor_mm=None
+        ).required_mm == pytest.approx(1.016)
+        assert resolve_via_clearance(
+            declared=declared_mil, trace_clearance_mm=0.15
+        ).required_mm == pytest.approx(1.016)
+
+    def test_written_geometry_honours_the_rule_with_and_without_the_flag(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """#9588 review, the Judge's repro: ``--complete --clearance 0.2`` on
+        ``_complete_board()`` with /LINE in class HV and a conditional 1 mm
+        ``HV && Pad`` rule wrote a /LINE track 0.5 mm from J1.2 (/NEUT) and
+        the run failed its own DRC.  The conditional rule is the DRU's last
+        word, so it -- not any lower floor -- governs the pairs it selects.
+        Both invocations must succeed and keep every /LINE copper at the
+        authored 1 mm from every /NEUT pad."""
+        from kicad_tools.cli.route_cmd import main as route_main
+        from tests.test_route_complete_pairwise_8277 import _complete_board
+
+        for explicit in (False, True):
+            work = tmp_path / ("explicit" if explicit else "default")
+            work.mkdir()
+            pcb = work / "board.kicad_pcb"
+            pcb.write_text(_complete_board())
+            pcb.with_suffix(".kicad_dru").write_text(
+                """(version 1)
+(rule "HV to pad"
+  (condition "A.NetClass == 'HV' && B.Type == 'Pad'")
+  (constraint clearance (min 1.0mm)))
+"""
+            )
+            pcb.with_suffix(".kicad_pro").write_text(
+                json.dumps(
+                    {
+                        "net_settings": {
+                            "classes": [
+                                {"name": "Default", "clearance": 0.2},
+                                {"name": "HV", "clearance": 0.2},
+                            ],
+                            "netclass_assignments": {"/LINE": ["HV"]},
+                        }
+                    }
+                )
+            )
+            out = work / "out.kicad_pcb"
+            argv = [str(pcb), "-o", str(out), "--complete", "--no-cache"]
+            if explicit:
+                argv += ["--clearance", "0.2"]
+
+            rc = route_main(argv)
+
+            assert rc == 0, capsys.readouterr().out
+            gap = _min_line_to_neut_pad_gap_mm(out)
+            assert gap is not None, "no /LINE copper was written"
+            assert gap >= 1.0 - 0.02, f"{'explicit' if explicit else 'default'}: gap {gap:.3f}"
 
     def test_severity_ignore_rule_does_not_floor(self, tmp_path: Path) -> None:
         pcb = self._board(

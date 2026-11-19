@@ -85,7 +85,11 @@ deterministic order.  ``target_mm`` is the router's own spacing target
 1. **Explicit operator target wins outright.**  An explicit ``--clearance``
    is authoritative and is never moved -- the operator opted in, exactly as
    #4875 defined it.  A warning is surfaced when it undercuts a declared
-   rule; the value is not changed.
+   rule; the value is not changed.  One exception (#9588 review): the #9578
+   conditional floor -- the strictest conditional ``.kicad_dru`` minimum
+   whose condition can select a routed pair -- floors even an explicit
+   target (with a warning), because copper committed below it fails the
+   board's own DRC; no other layer is waivable this way.
 2. A legacy ``.kicad_pcb`` top-level ``(net_class …)`` clearance **replaces**
    the target, in both directions.  This is #4875's rule, unchanged: a board
    that carries that node states the spacing it was designed at.  KiCad 6+
@@ -1123,23 +1127,19 @@ def _read_dru_clearances(dru_path: Path) -> tuple[float | None, float | None, fl
 
 
 def _parse_length_mm(raw: object) -> float | None:
-    """Parse a KiCad DRC length literal (``0.2mm``, ``0.2``) into mm."""
-    if raw is None:
-        return None
-    if isinstance(raw, (int, float)):
-        return float(raw)
-    text = str(raw).strip().lower()
-    if text.endswith("mm"):
-        text = text[:-2]
-    elif text.endswith("in"):
-        try:
-            return float(text[:-2]) * 25.4
-        except ValueError:
-            return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
+    """Parse a KiCad length literal (``0.2mm``, ``0.2``, ``40mil``) into mm.
+
+    Delegates to the board-rule evaluator's parser (#9588 review): the
+    local copy handled ``mm`` / ``in`` / bare numbers and silently dropped
+    ``mil`` -- so a conditional ``(min 40mil)`` rule vanished from the
+    placement reader while :class:`BoardClearanceRules` measured its
+    1.016 mm, and new copper was placed below a rule the audit enforces.
+    """
+    from kicad_tools.router.board_clearance_rules import (
+        _parse_length_mm as _board_parse_length_mm,
+    )
+
+    return _board_parse_length_mm(raw)
 
 
 def read_declared_clearance_rules(
@@ -1214,8 +1214,9 @@ def resolve_base_clearance(
             :func:`~kicad_tools.router.mfr_limits.resolve_clearance`.
             ``None`` when no manufacturer is configured.
         explicit_target: True when the operator passed ``--clearance``.  The
-            value is then authoritative and is never raised; a declared
-            requirement above it produces a warning instead.
+            value is then authoritative and is never raised -- except by
+            the #9578 conditional floor (see the docstring note below); a
+            declared requirement above it produces a warning instead.
         explicit_manufacturer: True when the operator passed
             ``--manufacturer`` / ``--mfr``.  Names the fab-floor term
             :attr:`RuleSource.MANUFACTURER_OVERRIDE` instead of
@@ -1225,7 +1226,12 @@ def resolve_base_clearance(
 
     Returns:
         The base requirement, its provenance, every term evaluated, and a
-        warning when a layer was deliberately not applied.
+        warning when a layer was deliberately not applied.  One layer is
+        never waivable (#9588 review): the strictest conditional
+        ``.kicad_dru`` minimum that can select a routed pair
+        (:attr:`DeclaredClearanceRules.dru_conditional_mm`) floors even an
+        explicit ``--clearance``, because copper committed below it fails
+        the board's own DRC (#9578 acceptance).
     """
     target = float(target_mm)
     target_source = RuleSource.EXPLICIT_TARGET if explicit_target else RuleSource.TARGET_DEFAULT
@@ -1238,8 +1244,29 @@ def resolve_base_clearance(
     )
 
     if explicit_target:
-        # The operator's value is authoritative -- say so when it undercuts a
-        # rule rather than silently overriding the board.
+        # The operator's value is authoritative against every board-wide
+        # layer (#5656) -- except the #9578 conditional floor: a
+        # ``.kicad_dru`` rule whose condition selects routed pairs is
+        # KiCad-enforced per pair, and copper placed below it fails the
+        # board's own DRC (#9588 review), so it floors even an explicit
+        # target instead of only warning about it.
+        conditional = declared.dru_conditional_mm
+        if conditional is not None and conditional > target + RESOLVER_TIE_EPSILON_MM:
+            raised = resolved.with_term(RuleSource.PROJECT_DRU_CONDITIONAL, conditional)
+            return ResolvedClearance(
+                raised.required_mm,
+                raised.source,
+                raised.terms,
+                (
+                    f"WARNING: explicit --clearance {target:.4g}mm is below the "
+                    f"{conditional:.4g}mm a conditional .kicad_dru rule requires "
+                    f"of some routed pairs; routing at {raised.required_mm:.4g}mm "
+                    f"so committed copper passes the board's own DRC."
+                ),
+            )
+        # Against every other declared layer the value stays the operator's
+        # -- say so when it undercuts a rule rather than silently
+        # overriding the board.
         strictest = declared.strictest_requirement()
         if strictest is not None and strictest[0] > target + RESOLVER_TIE_EPSILON_MM:
             where = strictest[2] or strictest[1].value
@@ -1336,7 +1363,9 @@ def resolve_via_clearance(
     Precedence, the via analogue of :func:`resolve_base_clearance`:
 
     1. **Explicit** ``--via-clearance`` wins outright and is never moved; a
-       warning names any declared via rule it undercuts.
+       warning names any declared via rule it undercuts -- except the #9578
+       conditional floor, which binds it like it binds ``--clearance``
+       (#9588 review).
     2. The board's strictest **declared** rule that applies to a via pair
        (:meth:`DeclaredClearanceRules.via_requirement`: the ``.kicad_pro``
        board minimum, a via-scoped or unconditional ``.kicad_dru`` clearance,
@@ -1384,6 +1413,24 @@ def resolve_via_clearance(
         resolved = ResolvedClearance(
             value, RuleSource.EXPLICIT_TARGET, ((RuleSource.EXPLICIT_TARGET, value),)
         )
+        # The #9578 conditional floor binds an explicit --via-clearance for
+        # the same reason it binds an explicit --clearance (#9588 review):
+        # a conditional rule that selects routed pairs is KiCad-enforced
+        # per pair, and copper placed below it fails the board's own DRC.
+        conditional = declared.dru_conditional_mm
+        if conditional is not None and conditional > value + RESOLVER_TIE_EPSILON_MM:
+            raised = resolved.with_term(RuleSource.PROJECT_DRU_CONDITIONAL, conditional)
+            return ResolvedClearance(
+                raised.required_mm,
+                raised.source,
+                raised.terms,
+                (
+                    f"WARNING: explicit --via-clearance {value:.4g}mm is below the "
+                    f"{conditional:.4g}mm a conditional .kicad_dru rule requires "
+                    f"of some routed pairs; routing at {raised.required_mm:.4g}mm "
+                    f"so committed copper passes the board's own DRC."
+                ),
+            )
         if requirement is not None and requirement[0] > value + RESOLVER_TIE_EPSILON_MM:
             where = requirement[2] or requirement[1].value
             return ResolvedClearance(

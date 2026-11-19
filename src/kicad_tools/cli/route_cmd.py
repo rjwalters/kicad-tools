@@ -11651,8 +11651,18 @@ def _decide_route_clearance(
             return f'board net_class "{class_name}"'
         return str(rule_source.value)
 
-    if explicit_clearance:
+    if explicit_clearance and resolved.source is RuleSource.EXPLICIT_TARGET:
         banner = f"Clearance: {value:.4g}mm (rules: explicit --clearance flag)"
+    elif explicit_clearance:
+        # The #9578 conditional floor raised the operator's explicit value
+        # (#9588 review): say so instead of crediting the flag with a value
+        # it did not choose.
+        banner = (
+            f"Clearance: {value:.4g}mm (rules: explicit --clearance "
+            f"{clearance:.4g}mm, floored by the "
+            f"{_label(resolved.source, resolved.source_label)} {value:.4g}mm)"
+        )
+        source = "board-clamped"
     elif resolved.source is RuleSource.TARGET_DEFAULT:
         # Nothing the board or the fab declared moved the target: byte-identical
         # to the pre-#4875 silent path.

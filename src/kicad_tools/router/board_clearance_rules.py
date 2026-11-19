@@ -86,10 +86,11 @@ values it could resolve to (the unknown rule's own value and whatever a
 lower-priority rule or the default would give).  The gate can therefore
 refuse copper KiCad would accept on such a board, but never the reverse.
 The kept-copper audit (#6237) needs the other reading -- "what does this
-pair *provably* require" -- so :meth:`BoardClearanceRules.explain_required`
-also returns the lower bound and the names of the undecided rules, and the
-audit reports those pairs as unknown, named, never as input defects
-(#9578).
+pair *at best* require" -- so :meth:`BoardClearanceRules.explain_required`
+also returns the lower bound (the *smallest* value any resolution of the
+undecided conditions could produce, so an undecided exemption lowers it)
+and the names of the undecided rules, and the audit reports those pairs
+as unknown, named, never as input defects (#9578).
 A ``(layer ...)`` clause is evaluated against the layer the new copper is on
 (a via is on every layer, so its layer clause is unknown).
 
@@ -282,12 +283,16 @@ class RuleResolution:
             could be, with undecided conditions treated as possibly
             applying.  What :meth:`BoardClearanceRules.required` returns and
             what new-copper gating is judged against.
-        lower_bound: What the requirement would be if every undecided
-            condition resolved false -- the largest value that *provably*
-            applies.  The floor the kept-copper audit compares against
-            before calling a pair an input defect: a gap between
-            ``lower_bound`` and ``requirement`` is an undecided pair, not a
-            decided violation.
+        lower_bound: The smallest the requirement could be under any
+            resolution of the undecided conditions -- the minimum across
+            every value that could win, decided or not.  The floor the
+            kept-copper audit compares against before calling a pair an
+            input defect: a gap between ``lower_bound`` and
+            ``requirement`` is an undecided pair, not a decided violation,
+            and only a gap below ``lower_bound`` violates the rule in
+            *every* resolution (#9588 review: an undecided *exemption*
+            must lower this bound, or a gap it legalizes is misread as a
+            definite defect).
         unknown_rules: Names of the rules that could have won but could not
             be decided.  Empty when the resolution is KiCad-exact.
     """
@@ -987,19 +992,18 @@ class BoardClearanceRules:
 
         The conservative :attr:`RuleResolution.requirement` is the value
         :meth:`required` has always returned.  :attr:`RuleResolution.lower_bound`
-        is what the requirement would be if every undecided condition
-        resolved false -- the largest value that *provably* applies, which is
-        what the kept-copper audit compares against before calling a pair an
-        input defect.  :attr:`RuleResolution.unknown_rules` names the rules
-        that could have won but could not be decided, so a caller can say so
-        instead of implying a KiCad-exact verdict.
+        is the smallest the requirement could be under any resolution of
+        the undecided conditions -- the minimum across every value that
+        could win, so an undecided exemption lowers it and an undecided
+        tightening raises nothing.  :attr:`RuleResolution.unknown_rules`
+        names the rules that could have won but could not be decided, so a
+        caller can say so instead of implying a KiCad-exact verdict.
         """
         key = (constraint, a, b, layer)
         cached = self._cache.get(key)
         if cached is not None:
             return cached
         conservative: list[float] = []
-        provable: list[float] = []
         unknown_rules: list[str] = []
         settled = False
         for rule in reversed(self.dru_rules):
@@ -1020,15 +1024,20 @@ class BoardClearanceRules:
             decided = 0.0 if rule.ignored else value
             conservative.append(decided)
             if applies is True:
-                provable.append(decided)
                 settled = True
                 break
             unknown_rules.append(rule.name)
         if not settled:
             default = self._default(constraint, a, b)
             conservative.append(default)
-            provable.append(default)
-        resolution = RuleResolution(max(conservative), max(provable), tuple(unknown_rules))
+        # Every candidate still in ``conservative`` is a value some
+        # resolution of the undecided conditions can make the winner (an
+        # undecided rule when its condition holds, the decided winner or
+        # the default otherwise), so the requirement is the largest of
+        # them and the lower bound the smallest (#9588 review: an
+        # undecided exemption must pull the bound down, never be dropped
+        # from it as the old decided-only ``provable`` maximum did).
+        resolution = RuleResolution(max(conservative), min(conservative), tuple(unknown_rules))
         self._cache[key] = resolution
         return resolution
 
