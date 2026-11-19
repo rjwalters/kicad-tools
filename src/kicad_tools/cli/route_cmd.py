@@ -4698,7 +4698,14 @@ def _save_partial_results() -> bool:
                 for r in _merge_checkpoint_routes(router.routes, router)
             )
         except Exception:  # noqa: BLE001 - fall back to the raw serialisation
-            route_sexp = router.to_sexp(name_only=name_only, skip_cleanup=released)
+            # ``skip_cleanup`` only on the released-grid path (#9579): a
+            # live-grid call must stay what it always was, so routers (and
+            # test doubles) whose ``to_sexp`` predates the keyword keep
+            # accepting the fallback.
+            if released:
+                route_sexp = router.to_sexp(name_only=name_only, skip_cleanup=True)
+            else:
+                route_sexp = router.to_sexp(name_only=name_only)
         try:
             # Issue #8270: name the partially routed nets for the timeout report.
             info["partial_net_stubs"] = _partial_net_stubs(router)
