@@ -217,6 +217,11 @@ def _requires_requests(func):
     return wrapper
 
 
+# Standalone "LED" word, not part of a negated "Non-LED" mention; "\bled\b"
+# also avoids "indication"-style substrings (issue #9574).
+_LED_RE = re.compile(r"(?<!non-)\bled\b")
+
+
 def _categorize_part(description: str, package: str) -> PartCategory:
     """Guess category from description and package."""
     desc_lower = description.lower()
@@ -232,14 +237,14 @@ def _categorize_part(description: str, package: str) -> PartCategory:
         r"\bind\b", desc_lower
     ):
         return PartCategory.INDUCTOR
-    # LED before the generic diode branch: some LCSC descriptions name both
-    # ("Discrete Diode LED Indication - Discrete"), and the LED is the part.
-    # "\bled\b" avoids matching "indication"-style substrings in either word;
-    # the lookbehind refuses the negated mention in connector wording
-    # ("Non-LED Shielded cat5e - Ethernet Connectors (RJ45 RJ11)").
-    if re.search(r"(?<!non-)\bled\b", desc_lower) or "light emitting" in desc_lower:
-        return PartCategory.LED
+    # LED-vs-diode decision made where it is needed: some LCSC descriptions
+    # name both ("Discrete Diode LED Indication - Discrete"), and the LED is
+    # the part. Descriptions that only *mention* an LED (connectors with an
+    # integrated LED, LED-driver regulators) never reach this branch, so they
+    # keep their own category below.
     if any(x in desc_lower for x in ["diode", "rectifier", "schottky", "zener"]):
+        if _LED_RE.search(desc_lower) or "light emitting" in desc_lower:
+            return PartCategory.LED
         return PartCategory.DIODE
     if any(x in desc_lower for x in ["transistor", "mosfet", "bjt", "jfet"]):
         return PartCategory.TRANSISTOR
@@ -250,6 +255,8 @@ def _categorize_part(description: str, package: str) -> PartCategory:
         return PartCategory.IC
     if any(x in desc_lower for x in ["connector", "header", "socket", "jack", "plug"]):
         return PartCategory.CONNECTOR
+    if _LED_RE.search(desc_lower) or "light emitting" in desc_lower:
+        return PartCategory.LED
     if any(x in desc_lower for x in ["switch", "button", "tactile"]):
         return PartCategory.SWITCH
     if any(x in desc_lower for x in ["relay"]):

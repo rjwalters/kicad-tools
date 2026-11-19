@@ -726,6 +726,25 @@ class TestCategorization:
             == PartCategory.CONNECTOR
         )
 
+    def test_categorize_led_mention_keeps_host_category(self):
+        # Positive "With LED ..." RJ45 magjack and LED-driver-regulator
+        # wording: a part that only *mentions* an LED keeps its own category.
+        from kicad_tools.parts.lcsc import _categorize_part
+
+        assert (
+            _categorize_part(
+                "With LED Shielded cat5e - Ethernet Connectors / Modular Connectors (RJ45 RJ11) ROHS",
+                "",
+            )
+            == PartCategory.CONNECTOR
+        )
+        assert _categorize_part("RJ45 Jack with LED Right Angle", "") == PartCategory.CONNECTOR
+        assert _categorize_part("USB Type-C connector with LED", "") == PartCategory.CONNECTOR
+        assert (
+            _categorize_part("Constant Current LED Driver Regulator SOT-23-6", "SOT-23-6")
+            == PartCategory.IC
+        )
+
     def test_categorize_inductor_and_diode_still_match(self):
         from kicad_tools.parts.lcsc import _categorize_part
 
