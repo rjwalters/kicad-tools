@@ -7499,6 +7499,45 @@ class PCB:
 
         return via
 
+    def add_arc(
+        self,
+        start: tuple[float, float],
+        mid: tuple[float, float],
+        end: tuple[float, float],
+        width: float = 0.25,
+        layer: str = "F.Cu",
+        net: str | int | None = None,
+    ) -> Arc:
+        """Add one circular copper track arc (``kct probe`` / ``kct apply``, #9590).
+
+        Inputs are board-relative millimetres, like :meth:`add_trace` /
+        :meth:`add_via`; the origin offset is added back on serialization.
+        Invalid circular geometry (collinear or coincident points) raises
+        ``ValueError`` from :meth:`Arc.circular_geometry` before anything is
+        appended, so a malformed arc never lands on the board.
+
+        Returns:
+            The :class:`Arc` object that was created.
+        """
+        net_number, net_name = self._resolve_copper_net_ref(net, "add_arc") if net else (0, "")
+        arc = Arc(
+            start=(float(start[0]), float(start[1])),
+            mid=(float(mid[0]), float(mid[1])),
+            end=(float(end[0]), float(end[1])),
+            width=width,
+            layer=layer,
+            net_number=net_number,
+            net_name=net_name,
+            # Issue #4416: match the board's net-reference dialect (see add_trace).
+            net_name_only=self._net_name_only_dialect and bool(net),
+            uuid=self.mint_uuid("arc", net_number, layer, *start, *mid, *end, width),
+        )
+        arc.circular_geometry()  # Validate before appending anything.
+        self._arcs.append(arc)
+        ox, oy = self._board_origin
+        self._sexp.append(arc.to_sexp(offset=(ox, oy)))
+        return arc
+
     def has_graphic_line(
         self,
         start: tuple[float, float],

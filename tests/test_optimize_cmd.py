@@ -941,7 +941,7 @@ class TestNameOnlyBoardAndGridSync:
                         pass
 
                 @staticmethod
-                def optimize_net(net_name, segments, optimize_fn):
+                def optimize_net(net_name, segments, optimize_fn, **kwargs):
                     optimize_fn(list(segments))
                     return list(segments)
 
