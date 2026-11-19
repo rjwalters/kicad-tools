@@ -62,17 +62,16 @@ except ImportError:
 
 
 # Floating-point tolerance for pad-pad clearance comparisons.
-# Set to the largest shortfall pinned KiCad 10.0.6 accepts (500 nm, Issue
-# #9619 -- the black-box probe in
-# tests/test_clearance_slack_kicad_band_9619.py), so a marginal pad-pad gap
-# kct flags is one kicad-cli DRC also flags.  Checker-side twin of
-# ``validate/rules/base.py``'s ``DRC_TOLERANCE``: deliberately wider than
-# the router's 1e-4 slack (the router keeps a margin inside KiCad's band;
-# see the #9619 ruling note next to the router's ``CLEARANCE_EPSILON_MM``).
-# Before #9619 this was 1e-4 (0.1 um), a purely float-noise band introduced
-# for IEEE-754 rounding in radius and trig math (e.g. 0.14999999... vs 0.15
-# exactly).
-_CLEARANCE_EPSILON_MM = 5e-4
+# Deliberately 1e-4, NOT the #9619 checker band (``validate/rules/base.py``'s
+# ``DRC_TOLERANCE``, 5e-4): this engine feeds ``optim/session.py``'s
+# placement feedback loop, which *writes* copper -- a placement accepted
+# because of the 500 nm parity band could round over into a real kicad-cli
+# violation on save, so the writer side keeps the pre-#9619 margin
+# (:data:`kicad_tools.validate.rules.base.WRITER_CLEARANCE_MARGIN_MM`;
+# #9619 ruling: split, don't change).  Before #3913-era cleanups this was
+# introduced for IEEE-754 rounding in radius and trig math (e.g.
+# 0.14999999... vs 0.15 exactly), which 1e-4 still absorbs.
+_CLEARANCE_EPSILON_MM = 1e-4
 
 
 @dataclass

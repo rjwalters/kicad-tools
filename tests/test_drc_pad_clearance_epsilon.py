@@ -34,31 +34,37 @@ class TestEpsilonConstant:
         """Epsilon must be much smaller than any real clearance."""
         assert _CLEARANCE_EPSILON_MM < 0.001  # less than 1 micron
 
-    def test_epsilon_is_the_checker_kicad_band(self):
-        """The pad-pad epsilon is the checker's KiCad acceptance band
-        (#9619): 500 nm -- the largest shortfall pinned KiCad 10.0.6
-        accepts on the probe.  Twin of ``validate/rules/base.py``'s
-        ``DRC_TOLERANCE`` (duplicated as a literal, like the pre-#9619
-        copies were); deliberately NOT the router kernel's 1e-4, which the
-        #9619 ruling keeps as the generator's own margin."""
-        from kicad_tools.validate.rules.base import DRC_TOLERANCE
+    def test_epsilon_is_the_writer_margin(self):
+        """The pad-pad epsilon is the writer margin (#9619): 1e-4, kept
+        deliberately below the checker's KiCad acceptance band because this
+        engine feeds ``optim/session.py``'s placement feedback loop, which
+        writes copper -- a placement accepted on the 500 nm parity band
+        could round over into a real kicad-cli violation on save.  Twin of
+        ``validate/rules/base.py``'s ``WRITER_CLEARANCE_MARGIN_MM``
+        (duplicated as a literal, like the pre-#9619 copies were)."""
+        from kicad_tools.validate.rules.base import (
+            DRC_TOLERANCE,
+            WRITER_CLEARANCE_MARGIN_MM,
+        )
 
-        assert _CLEARANCE_EPSILON_MM == DRC_TOLERANCE == 5e-4
+        assert _CLEARANCE_EPSILON_MM == WRITER_CLEARANCE_MARGIN_MM == 1e-4
+        assert _CLEARANCE_EPSILON_MM < DRC_TOLERANCE
 
-    def test_edge_clearance_epsilon_diverges_deliberately(self):
+    def test_edge_clearance_epsilon_keeps_the_pre_9619_value(self):
         """``validate/rules/edge.py`` keeps its own narrower 1e-4 epsilon.
 
         The #9619 probe covered track-to-track clearance only; edge
         clearance was left at the pre-#9619 value until its own probe
         shows the same acceptance band (see the issue's out-of-scope
-        note), so the old equality with the drc epsilon no longer holds.
+        note).  The drc epsilon is 1e-4 for the writer reason above, so
+        the two agree again -- both tighter than the checker band.
         """
         from kicad_tools.validate.rules.edge import (
             _CLEARANCE_EPSILON_MM as edge_epsilon,
         )
 
         assert edge_epsilon == 1e-4
-        assert edge_epsilon < _CLEARANCE_EPSILON_MM
+        assert edge_epsilon == _CLEARANCE_EPSILON_MM
 
 
 # ---------------------------------------------------------------------------

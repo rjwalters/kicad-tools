@@ -2,10 +2,13 @@
 
 The operator ruling on Issue #9619 splits the clearance slack in two: the
 *checker* (``validate/rules/base.py``'s ``DRC_TOLERANCE`` and its
-checker-side twins) takes the largest shortfall pinned KiCad 10.0.6 accepts,
-so a verdict at kct's boundary is one ``kicad-cli pcb drc`` agrees on; the
-*router* keeps its own 100 nm margin inside that band (see the note next to
-``router/clearance_kernel.py``'s constant).  This file pins the checker's
+checker-side twin in ``manufacturers/fabrication_process.py``) takes the
+largest shortfall pinned KiCad 10.0.6 accepts, so a verdict at kct's
+boundary is one ``kicad-cli pcb drc`` agrees on; everything that *writes*
+copper -- the router (see the note next to
+``router/clearance_kernel.py``'s constant), the via-moving commands and the
+placement optimiser's incremental DRC (``WRITER_CLEARANCE_MARGIN_MM``) --
+keeps its own 100 nm margin inside that band.  This file pins the checker's
 half of the split to the real KiCad behaviour.
 
 Probe method (2026-11-19, ``kicad/kicad:10.0`` image at the CI-pinned
@@ -27,11 +30,11 @@ refined at 1 nm, on three pair shapes --
 
 The rule-level tests below run everywhere and pin the checker's verdicts on
 those exact boards.  The black-box tests additionally re-run
-``kicad-cli pcb drc`` on the same boards (skipped unless the pinned 10.0.6
-binary answers -- CI installs it natively, ``KCT_KICAD_DOCKER=1`` routes it
-through the image) and fail if the two engines disagree, so a future KiCad
-that changes its tolerance breaks this test instead of silently diverging
-from kct.
+``kicad-cli pcb drc`` on the same boards -- the pinned 10.0.6 binary is
+*required* (a missing or wrong-version one fails the test; CI installs it
+natively, ``KCT_KICAD_DOCKER=1`` routes it through the image) -- and fail if
+the two engines disagree, so a future KiCad that changes its tolerance breaks
+this test instead of silently diverging from kct.
 """
 
 from __future__ import annotations
@@ -220,29 +223,41 @@ def test_rule_verdict_matches_the_pinned_probe(build, value: int, expect_clear: 
     )
 
 
-def _pinned_kicad_cli() -> str | None:
-    """The kicad-cli to probe with, or ``None`` when it cannot be trusted.
+def _pinned_kicad_cli() -> str:
+    """The kicad-cli to probe with; a hard failure when it cannot be trusted.
 
     Under ``KCT_KICAD_DOCKER=1`` the session fixture routes ``find_kicad_cli``
     to the pinned image; CI installs the same release natively.  Any other
-    host binary is skipped: the probe is only meaningful against the version
-    the constant was measured on.
+    answer fails the test instead of skipping it: the probe is only
+    meaningful against the version the constant was measured on, and a
+    silent skip would disarm the tripwire (operator rule: no added skips,
+    ``pytest.skip`` included) -- a CI image or version-string change that
+    breaks resolution must go red, not quietly unwatched.
     """
     from kicad_tools.cli.kicad_toolchain import PINNED_KICAD_VERSION
     from kicad_tools.cli.runner import find_kicad_cli
 
     binary = find_kicad_cli() or (shutil.which("kicad-cli"))
     if binary is None:
-        return None
+        pytest.fail(
+            f"pinned kicad-cli {PINNED_KICAD_VERSION} not found: the probe must run "
+            "against it (CI's Test job installs it natively; locally set "
+            "KCT_KICAD_DOCKER=1 to route through the pinned image)"
+        )
     try:
         version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=120)
-    except (OSError, subprocess.SubprocessError):
-        return None
+    except (OSError, subprocess.SubprocessError) as exc:
+        pytest.fail(f"pinned kicad-cli at {binary} is unusable: {exc!r}")
     if version.returncode != 0 or PINNED_KICAD_VERSION not in version.stdout:
-        return None
+        pytest.fail(
+            f"kicad-cli at {binary} is not the pinned {PINNED_KICAD_VERSION} "
+            f"(rc={version.returncode}, stdout={version.stdout.strip()!r}); set "
+            "KCT_KICAD_DOCKER=1 to route through the pinned image"
+        )
     return binary
 
 
+@pytest.mark.pr_required
 @pytest.mark.parametrize(("build", "value", "expect_clear"), CASES)
 def test_pinned_kicad_cli_agrees_with_the_checker(
     build, value: int, expect_clear: bool, tmp_path: Path
@@ -250,12 +265,11 @@ def test_pinned_kicad_cli_agrees_with_the_checker(
     """Black-box: ``kicad-cli pcb drc`` on the same board returns the pinned
     verdict *and* the same verdict the checker just returned.
 
-    Skipped unless the pinned 10.0.6 kicad-cli answers.  If a future KiCad
-    changes its acceptance band, the 500 nm rows flip here while the checker
-    rows above do not -- this test failing is the designed tripwire."""
-    binary = _pinned_kicad_cli()
-    if binary is None:
-        pytest.skip("pinned kicad-cli 10.0.6 not available")
+    A missing or wrong-version kicad-cli is a hard failure (see
+    :func:`_pinned_kicad_cli`), never a skip.  If a future KiCad changes its
+    acceptance band, the 500 nm rows flip here while the checker rows above
+    do not -- this test failing is the designed tripwire."""
+    _pinned_kicad_cli()  # hard-fails unless the pinned binary answers
     from kicad_tools.cli.runner import run_drc
 
     board = build(value)

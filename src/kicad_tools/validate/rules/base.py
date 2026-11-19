@@ -54,9 +54,28 @@ if TYPE_CHECKING:
 # ``kicad_tools.router`` from the validate package would break the
 # lazy-import contract (``tests/test_validate_lazy_imports.py`` forbids
 # ``kicad_tools.validate.*`` from loading the router).  Keep the
-# checker-side copies (this, ``drc/incremental.py``,
-# ``creepage/engine.py``) in sync.
+# checker-side copies (this and ``manufacturers/fabrication_process.py``)
+# in sync.  NOT twins: ``drc/incremental.py`` and ``creepage/engine.py``
+# deliberately stay at 1e-4 -- their consumers write copper (see
+# :data:`WRITER_CLEARANCE_MARGIN_MM` below) or sit outside the probe's
+# scope.
 DRC_TOLERANCE: float = 5e-4
+
+# Clearance slack for tools that *write* copper (mm) -- the margin the
+# generator side keeps inside KiCad's acceptance band.  #9619 widened the
+# *checker* (:data:`DRC_TOLERANCE`) to KiCad's probed 500 nm so verdicts
+# match ``kicad-cli`` verdict-for-verdict, but copper a kct command *moves*
+# or *places* and then saves must not rely on that band: rounding on save
+# can tip an exactly-at-the-band gap into a real kicad-cli violation.  Per
+# the #9619 ruling ("split, don't change") the writers keep the pre-#9619
+# 1e-4 margin: ``cli/pcb_move_via.py`` and ``cli/relocate_in_pad_vias.py``
+# (via moves / relocations that rewrite the board) compare against this
+# constant, and ``drc/incremental.py``'s ``_CLEARANCE_EPSILON_MM`` keeps
+# the same 1e-4 as a literal (it feeds ``optim/session.py``'s placement
+# feedback loop) -- as does the router package's own
+# ``CLEARANCE_EPSILON_MM`` and ``creepage/engine.py``'s ``_PASS_TOLERANCE``
+# (the probe measured copper clearance, not creepage).
+WRITER_CLEARANCE_MARGIN_MM: float = 1e-4
 
 # Band-edge float guard (mm).  KiCad compares in integer nanometres, so its
 # acceptance-band edge is exact; the same board read as float64 carries
