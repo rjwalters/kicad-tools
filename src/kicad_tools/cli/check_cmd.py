@@ -1459,21 +1459,25 @@ def _inactive_rules_from_coverage(coverage: dict[str, Any]) -> frozenset[str]:
     hand-mirrored helper knew (``ampacity``, ``path_ampacity``) and the nine
     more ``precheck`` carries, with no drift when ``precheck`` grows another.
 
-    ``unknown`` states are deliberately *not* inactive: there the rule did run
-    and may still produce findings (a diff-pair rule for pairs the net-class
-    map cannot judge, ampacity with declared-but-unmapped currents), so an
-    orphan naming one keeps the generic wording.
+    An ``unknown`` state counts as inactive exactly when its reason is
+    ``needs_input:<X>`` (:func:`kicad_tools.validate.coverage.rule_never_ran`,
+    issue #9552): the absent input is a prerequisite for any finding of that
+    category, so the rule was a no-op -- ``ampacity`` with declared-but-
+    unmapped currents is the reported case, and the rule's empty specs map
+    makes the pre-#9534 ``[rule not evaluated in this run]`` wording the
+    accurate one.  The other ``unknown`` reasons (``zone_fills_absent``,
+    ``no_courtyard_geometry``, ...) evaluated the board partially and may
+    still have found something, so an orphan naming one keeps the generic
+    wording.
 
     ``--migrate-waivers`` uses this so an orphan whose rule never ran is
     reported as such instead of implying the key changed (issue #9504).
     ``--only``/``--skip`` cannot combine with ``--migrate-waivers``, so the
     ``deselected:*`` skip reasons never reach this path.
     """
-    from kicad_tools.validate.coverage import SKIPPED
+    from kicad_tools.validate.coverage import rule_never_ran
 
-    return frozenset(
-        name for name, cov in coverage.items() if getattr(cov, "state", None) == SKIPPED
-    )
+    return frozenset(name for name, cov in coverage.items() if rule_never_ran(cov))
 
 
 def _run_waiver_migration(
