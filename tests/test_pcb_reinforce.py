@@ -3381,6 +3381,126 @@ class TestMaskOpening:
         assert ref.obstacle_at == pytest.approx((65.0, 52.4))
         assert "pad on through at (" in result.legs[0].mask_reason
 
+    def test_f_and_b_cu_pad_blocks_opening_on_both_faces(self):
+        """#9657: a pad whose copper selector is ``F&B.Cu`` has copper on
+        both outer faces -- each face's opening test must see it, instead
+        of it landing under a literal layer key the per-face lookup never
+        reads."""
+        for copper, pcb in (("F.Cu", _straight_run_pcb()), ("B.Cu", _back_straight_run_pcb())):
+            _add_shaped_pad_footprint(
+                pcb,
+                ref="U1",
+                x=65.0,
+                y=51.5,
+                net="OTHER",
+                shape="circle",
+                size=(1.0, 1.0),
+                layers=("F&B.Cu", "*.Mask"),
+            )
+            result = reinforce_net(pcb, "FUSED_LINE", pairwise_clearance=_hv_pairwise_table())
+            assert result.placed_count == 2, copper
+            assert not result.openings, copper
+            (ref,) = result.refused_openings
+            assert ref.obstacle_kind == "pad", copper
+            assert ref.obstacle_layer == copper, copper
+            assert ref.obstacle_at == pytest.approx((65.0, 51.5)), copper
+
+    def test_refusal_points_at_the_blocking_track_not_a_nearer_passing_one(self):
+        """#9657: the gap and its reported point come from the same
+        feature -- a near narrow track that clears must not be named
+        while the far wide one that blocks is what refused."""
+        pcb = _back_straight_run_pcb()
+        pcb.add_trace((60, 53.3), (75, 53.3), width=0.2, layer="B.Cu", net="OTHER")
+        pcb.add_trace((60, 54.0), (75, 54.0), width=4.0, layer="B.Cu", net="OTHER")
+        result = reinforce_net(pcb, "FUSED_LINE", pairwise_clearance=_hv_pairwise_table())
+        assert result.placed_count == 2
+        assert not result.openings
+        (ref,) = result.refused_openings
+        assert ref.obstacle_kind == "track"
+        # The blocking 4 mm track at y = 54, not the passing 0.2 mm one at y = 53.3.
+        assert ref.obstacle_at == pytest.approx((60.0, 54.0))
+        assert ref.actual_mm == pytest.approx(1.52, abs=0.01)
+
+    def test_refusal_points_at_the_blocking_via_not_a_nearer_passing_one(self):
+        """#9657: same attribution rule for through vias (and, via the
+        shared per-item code, pads): the reported centre is the
+        blocker's."""
+        pcb = _back_straight_run_pcb()
+        pcb.add_via(65.0, 53.0, size=0.2, drill=0.1, net="OTHER")
+        pcb.add_via(65.0, 53.2, size=2.0, drill=1.0, net="OTHER")
+        result = reinforce_net(pcb, "FUSED_LINE", pairwise_clearance=_hv_pairwise_table())
+        assert not result.openings
+        (ref,) = result.refused_openings
+        assert ref.obstacle_kind == "via"
+        assert ref.obstacle_layer == "through"
+        assert ref.obstacle_at == pytest.approx((65.0, 53.2))
+
+    def test_refusal_points_at_the_blocking_zone_boundary(self):
+        """#9657: a zone refusal names a point on the fill itself."""
+        from kicad_tools.schema.pcb import Zone
+
+        pcb = _back_straight_run_pcb()
+        net = pcb.add_net("OTHER")
+        zone = Zone(
+            net.number,
+            "OTHER",
+            "B.Cu",
+            polygon=[(35, 45), (80, 45), (80, 55), (35, 55)],
+        )
+        zone.filled_polygons = [[(40.0, 45.0), (80.0, 45.0), (80.0, 55.0), (40.0, 55.0)]]
+        pcb._zones.append(zone)
+        result = reinforce_net(pcb, "FUSED_LINE", pairwise_clearance=_hv_pairwise_table())
+        assert not result.openings
+        (ref,) = result.refused_openings
+        assert ref.obstacle_kind == "zone"
+        assert ref.obstacle_at == pytest.approx((40.0, 50.0))
+
+    def test_obstacle_point_inside_a_zone_fill_is_the_sample_itself(self):
+        """#9657: a sample inside a fill is blocked by interior copper --
+        the locating point is that sample, not the nearest boundary."""
+        from kicad_tools.pcb.reinforce import _FilledPolyObstacle, _obstacle_point
+
+        poly = _FilledPolyObstacle([(-20.0, -20.0), (20.0, -20.0), (20.0, 20.0), (-20.0, 20.0)])
+        assert _obstacle_point("zone", poly, 0.0, 0.0) == (0.0, 0.0)
+        assert _obstacle_point("zone", poly, 25.0, 0.0) == pytest.approx((20.0, 0.0))
+
+    def test_shifted_board_text_and_json_agree_on_obstacle_location(self, tmp_path, capsys):
+        """#9657: on a board with a nonzero sheet origin the prose obstacle
+        coordinate and the structured ``obstacle_at`` must agree -- both in
+        sheet coordinates."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        pcb = PCB.create(width=200, height=100)  # centered on A4: origin (48.5, 55)
+        for i in range(4):
+            pcb.add_trace(
+                (20.0 + 25.0 * i, 50.0),
+                (20.0 + 25.0 * (i + 1), 50.0),
+                width=2.0,
+                layer="B.Cu",
+                net="FUSED_LINE",
+            )
+        pcb.add_trace((60, 52.54), (70, 52.54), width=0.2, layer="B.Cu", net="OTHER")
+        pcb_path = tmp_path / "shifted.kicad_pcb"
+        pcb.save(pcb_path)
+        assert PCB.load(pcb_path).board_origin == pytest.approx((48.5, 55.0))
+        vm = tmp_path / "vm.json"
+        vm.write_text(json.dumps({"FUSED_LINE": 150.0, "OTHER": 3.3}))
+
+        rc = run_pcb_command(
+            _reinforce_args(pcb_path, format="json", dry_run=True, voltage_map=str(vm))
+        )
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        (entry,) = data["refused_openings"]
+        assert entry["obstacle_at"] == pytest.approx([108.5, 107.54])
+        assert "track on B.Cu at (108.500, 107.540) mm" in data["legs"][0]["mask_reason"]
+
+        rc = run_pcb_command(_reinforce_args(pcb_path, voltage_map=str(vm)))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "track on B.Cu at (108.500, 107.540) mm" in out
+        assert "obstacle: track on B.Cu at (108.50, 107.54)" in out
+
     def test_cli_json_refused_opening_locates_obstacle(self, tmp_path, capsys):
         from kicad_tools.cli.commands.pcb import run_pcb_command
 

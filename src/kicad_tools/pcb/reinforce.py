@@ -78,8 +78,9 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
-from kicad_tools.core.geometry import rotate_pad_offset
+from kicad_tools.core.geometry import point_in_polygon, rotate_pad_offset
 from kicad_tools.core.types import CopperLayer
 from kicad_tools.manufacturers.base import DesignRules
 from kicad_tools.physics.wire_gauge import (
@@ -457,8 +458,10 @@ class RefusedOpening:
     obstacle_layer: str = ""
     #: ``track`` / ``via`` / ``pad`` / ``zone`` (#9649).
     obstacle_kind: str = ""
-    #: Board-relative point on the obstacle nearest the exposed run --
-    #: also where the leg would have to be split to open around it (#9649).
+    #: Board-relative point on the blocking obstacle -- same feature the
+    #: measured gap comes from, never a nearer neighbour that clears --
+    #: also where the leg would have to be split to open around it
+    #: (#9649, #9657).
     obstacle_at: tuple[float, float] | None = None
 
 
@@ -1195,7 +1198,8 @@ class _Violation:
     obstacle_layer: str = ""
     #: ``track`` / ``via`` / ``pad`` / ``zone`` (#9649). Empty when unattributed.
     obstacle_kind: str = ""
-    #: Board-relative point on the obstacle nearest the failing sample (#9649).
+    #: Board-relative point on the blocking obstacle itself -- same feature
+    #: the measured gap comes from (#9649, #9657).
     obstacle_at: tuple[float, float] | None = None
 
 
@@ -1424,7 +1428,17 @@ def _collect_other_net_copper(
                 through_group(pad.net_number).pads.append((px, py, radius, pad.net_number))
             else:
                 for pad_layer in pad.layers:
-                    if pad_layer.endswith(".Cu"):
+                    if pad_layer == "F&B.Cu":
+                        # KiCad's both-outer-faces selector: the opening test
+                        # looks each face up by its own key, so a literal
+                        # ``"F&B.Cu"`` entry would be missed (#9657).
+                        layer_group("F.Cu", pad.net_number).pads.append(
+                            (px, py, radius, pad.net_number)
+                        )
+                        layer_group("B.Cu", pad.net_number).pads.append(
+                            (px, py, radius, pad.net_number)
+                        )
+                    elif pad_layer.endswith(".Cu"):
                         layer_group(pad_layer, pad.net_number).pads.append(
                             (px, py, radius, pad.net_number)
                         )
@@ -2383,34 +2397,58 @@ def _nearest_point_on_segment(
     return (a[0] + t * dx, a[1] + t * dy)
 
 
-def _nearest_obstacle_point(
-    kind: str, group: _NetCopper, x: float, y: float
-) -> tuple[float, float] | None:
-    """Point of ``group``'s ``kind`` obstacles nearest ``(x, y)`` (#9649)."""
+def _obstacle_point(kind: str, item: Any, x: float, y: float) -> tuple[float, float] | None:
+    """A locating point on one obstacle of ``kind`` (#9649, #9657).
+
+    Track centerline, via centre or pad centre; for a zone fill the
+    nearest boundary point, or the sample itself when it lies inside
+    the fill -- interior copper, not the edge, is what blocks (#9657).
+    """
     p = (x, y)
     if kind == "track":
-        return min(
-            (
-                _nearest_point_on_segment(p, (t.start_x, t.start_y), (t.end_x, t.end_y))
-                for t in group.tracks
-            ),
-            key=lambda q: math.dist(p, q),
-            default=None,
-        )
+        return _nearest_point_on_segment(p, (item.start_x, item.start_y), (item.end_x, item.end_y))
     if kind == "via":
-        return min(((v[0], v[1]) for v in group.vias), key=lambda q: math.dist(p, q), default=None)
+        return (item[0], item[1])
     if kind == "pad":
-        return min(((d[0], d[1]) for d in group.pads), key=lambda q: math.dist(p, q), default=None)
+        return (item[0], item[1])
+    pts = [(float(px), float(py)) for px, py in item.points]
+    if point_in_polygon(x, y, pts, boundary_inside=True):
+        return p
     best: tuple[float, float] | None = None
     best_d = math.inf
-    for poly in group.filled_polygons:
-        pts = [(float(px), float(py)) for px, py in poly.points]
-        for a, b in zip(pts, pts[1:] + pts[:1], strict=False):
-            q = _nearest_point_on_segment(p, a, b)
-            d = math.dist(p, q)
-            if d < best_d:
-                best, best_d = q, d
+    for a, b in zip(pts, pts[1:] + pts[:1], strict=False):
+        q = _nearest_point_on_segment(p, a, b)
+        d = math.dist(p, q)
+        if d < best_d:
+            best, best_d = q, d
     return best
+
+
+def _opening_blocker(
+    kind: str,
+    field_name: str,
+    items: list[Any],
+    x: float,
+    y: float,
+    exposed_width: float,
+    required: float,
+) -> tuple[float, tuple[float, float] | None] | None:
+    """The worst single blocking obstacle of ``kind`` at sample ``(x, y)``.
+
+    Returns that obstacle's measured gap and a point on that **same**
+    obstacle (#9657): the gap and the reported coordinates must identify
+    the same copper, never a nearer neighbour that clears the opening.
+    Among several blockers the one with the smallest gap wins.
+    """
+    worst: tuple[float, tuple[float, float] | None] | None = None
+    for item in items:
+        single = _NetCopper(**{field_name: [item]})
+        if _group_clear(x, y, exposed_width, required, single):
+            continue
+        gap = _actual_gap(x, y, exposed_width, required, single)
+        if worst is None or gap < worst[0]:
+            worst = (gap, _obstacle_point(kind, item, x, y))
+    return worst
 
 
 def _opening_violation(
@@ -2450,24 +2488,17 @@ def _opening_violation(
                 items = getattr(group, field_name)
                 if not items:
                     continue
-                single = _NetCopper(**{field_name: items})
                 for x, y in samples:
-                    if not _group_clear(x, y, exposed_width, required, single):
+                    blocker = _opening_blocker(
+                        kind, field_name, items, x, y, exposed_width, required
+                    )
+                    if blocker is not None:
                         tag = (
                             RULE_MASK_OPENING_PAIRWISE
                             if rule == RULE_VOLTAGE_MAP_PAIRWISE
                             else RULE_MASK_OPENING_CLEARANCE
                         )
-                        gap = _actual_gap(x, y, exposed_width, required, single)
-                        return _Violation(
-                            tag,
-                            required,
-                            gap,
-                            net,
-                            source,
-                            kind,
-                            _nearest_obstacle_point(kind, single, x, y),
-                        )
+                        return _Violation(tag, required, blocker[0], net, source, kind, blocker[1])
     return None
 
 
@@ -2500,7 +2531,14 @@ def _plan_mask_opening(
             if v.obstacle_kind:
                 obstacle = f"{v.obstacle_kind} on {v.obstacle_layer}"
                 if v.obstacle_at is not None:
-                    obstacle += f" at ({v.obstacle_at[0]:.3f}, {v.obstacle_at[1]:.3f}) mm -- "
+                    # Sheet coordinates: both user-facing reports (CLI text
+                    # line and JSON) quote this prose verbatim, while the
+                    # structured fields are origin-shifted by the reporter
+                    # -- all four must agree (#9657).
+                    ox, oy = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+                    obstacle += (
+                        f" at ({v.obstacle_at[0] + ox:.3f}, {v.obstacle_at[1] + oy:.3f}) mm -- "
+                    )
             leg.mask_status = MASK_REFUSED
             leg.mask_reason = (
                 f"exposed run would be {v.actual_mm:.3f} mm from net {v.obstacle_net!r} "
