@@ -14,8 +14,21 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-19
+
+- **PR #9462**: fix: report same-footprint same-net pad mask bridges at info
+- **Issue #9420** (closed): Same-net pads inside one library footprint are reported as errors by physical_copper_gap and mask_to_copper (stock RF_Module:ESP32-C3-WROOM-02 ground pad array)
+- **PR #9429**: fix: raise tht_smd_spacing thresholds to 2.032/3.05 mm and record fab DFM values
+- **Issue #9421** (closed): Fab DFM limits that differ from the parity table: tht to smd 2.03/3.05 mm, a separate via-to-pad row, silk-to-hole clearance
+- **PR #9463**: docs: cite located JLCDFM rows in the within_own_footprint parity entry
+- **Issue #9450** (closed): Parity entry for within_own_footprint predates the located fab evidence on #9420
+- **PR #9460**: test: assert adopted vs production leg endpoints diverge in native chain test
+- **Issue #9457** (closed): Pin the adopted-vs-production leg-endpoint divergence the #9443 native chain test exists to cover
+
 ### 2026-11-18
 
+- **PR #9438**: fix: derive pad_grid auto tolerance per footprint, not board-wide
+- **Issue #9434** (closed): pad_grid flags parts that did not move when other parts move onto round coordinates (percentile threshold)
 - **PR #9449**: fix: print sch_field_offset threshold at full precision
 - **Issue #9447** (closed): sch_field_offset message rounds a user-supplied --sch-field-threshold to 1 dp
 - **PR #9445**: test: chain pcb reinforce --adopt records through check_mask_to_copper on a native export

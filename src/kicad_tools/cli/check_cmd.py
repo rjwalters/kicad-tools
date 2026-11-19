@@ -1846,8 +1846,8 @@ def main(argv: list[str] | None = None) -> int:
             "blocking by default."
         ),
     )
-    # Issue #3061: auto-derive the pad_grid tolerance from each board's
-    # pad-offset histogram by default for the CLI.  Users can opt back into
+    # Issues #3061, #9434: auto-derive the pad_grid tolerance per footprint
+    # from that footprint's own pad lattice by default for the CLI.  Users can opt back into
     # the fixed-0.05mm behaviour with --pad-grid-strict, or pin a custom
     # value with --pad-grid-tolerance.
     pad_grid_group = parser.add_mutually_exclusive_group()
@@ -3804,7 +3804,7 @@ def run_selected_checks(
             Issue #3061.
         pad_grid_auto_derive: When ``True`` and ``pad_grid_threshold``
             is ``None``, the pad_grid check derives the threshold from
-            the board's pad-offset histogram (issue #3061).  Defaults
+            each footprint's own pad lattice (issues #3061, #9434).  Defaults
             to ``True`` for the CLI; ``False`` preserves the PR #3057
             fixed-0.05mm behaviour.
         sch_path: Resolved schematic path for the ``sch_fields``

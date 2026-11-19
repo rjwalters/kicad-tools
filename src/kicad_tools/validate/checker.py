@@ -812,10 +812,10 @@ class DRCChecker:
                 provided, matching violations are suppressed or reclassified
                 and the ``suppressed_count`` field is populated.
             pad_grid_auto_derive: When ``True``, the ``pad_grid`` check
-                derives its tolerance from the board's pad-offset
-                histogram instead of the fixed 0.05 mm default -- the
-                same policy ``kct check`` applies by default (issue
-                #3061).  Defaults to ``False`` to preserve the existing
+                derives its tolerance per footprint from that
+                footprint's own pad lattice instead of the fixed 0.05 mm
+                default -- the same policy ``kct check`` applies by
+                default (issues #3061, #9434).  Defaults to ``False`` to preserve the existing
                 Python-API behaviour; gating consumers that must agree
                 with ``kct check`` (e.g. ``ManufacturingAudit``) opt in
                 so report and CLI verdicts cannot drift (issue #3497).
@@ -2134,8 +2134,8 @@ class DRCChecker:
                 explicit ``threshold`` always wins over
                 ``auto_derive_threshold``.
             auto_derive_threshold: When ``True`` and ``threshold`` is
-                ``None``, derive the threshold per-board from the
-                pad-offset histogram (issue #3061).  Defaults to
+                ``None``, derive the threshold per footprint from that
+                footprint's own pad lattice (issues #3061, #9434).  Defaults to
                 ``False`` so the Python API preserves PR #3057 behaviour;
                 ``kct check`` opts in by default.
             aggregate: When ``True`` (the default), collapse the per-pad
