@@ -326,27 +326,34 @@ def test_gr_circle_just_under_the_cap_is_attributed():
 
 
 def test_gr_circle_exactly_at_the_cap_is_attributed_on_the_far_side_only():
-    """The cap's inclusive edge is the far side; the strip side refuses it (#9490).
+    """The cap's inclusive edge is the far side; the strip side may refuse it (#9490).
 
     At exactly ``drill + 2 x flash`` the circle attributes where it is the
     whole native opening (F.Mask here, the far side a doubled net is exposed
-    on): the refusal is strictly-greater with a ``2 * _CENTRE_EPS_MM`` slack.
-    On the strip's own side the opening's material is clipped to ``native``
-    (circle union strip), which widens its hull span by the buffer dilation
-    -- past that slack -- so the same circle stays unattributed there and the
-    copper it exposes keeps its measured verdict.
+    on): the refusal is strictly-greater with a ``2 * _CENTRE_EPS_MM`` (2e-6)
+    slack. On the strip's own side (B.Mask) the opening's material is
+    ``native.intersection(shape.buffer(uncertainty))`` with ``native`` the
+    circle union the strip, so the buffer dilation survives the clip. The
+    ``uncertainty`` here is NOT 0.0: ``mask_copper.py`` builds it as
+    ``2 * max_error_mm_per_construction + 0.000004``, and this fixture's
+    ``max_error`` is 0, leaving the 4e-6 mm floor. Measured: the circle's hull
+    span is 2.416000 on F.Mask and 2.416008 on B.Mask, the 7.99e-6 mm excess
+    being ``2 x 3.995e-6`` (a 4e-6 buffer's 64-gon excursion at the circle's
+    left/right extremes, which the strip interior leaves unclipped).
+
+    That 7.99e-6 clears the 2e-6 slack, so the strip side normally stays
+    unattributed and keeps its measured verdict. Fragility: the margin is the
+    size of ``uncertainty``'s floor against a 2e-6 slack, not a geometric
+    property of the cap; a smaller floor, or a different buffer resolution,
+    would attribute B.Mask too. So only the far side is pinned; the strip side
+    is deliberately not required to be (un)attributed here.
     """
     result = _run(_run_pieces() + [_circle_of_diameter(_cap_mm()), _near_run_track()])
     exposed = _near(result, (20.0, 10.7), radius=0.3)
     far = [m for m in exposed if m.mask_side == "F.Mask"]
-    near = [m for m in exposed if m.mask_side == "B.Mask"]
     assert far
     assert {m.disposition for m in far} == {"within_reinforce_run"}
     assert {m.owner_run for m in far} == {"HS_POWER"}
-    assert near
-    assert {m.disposition for m in near} == {"violation"}
-    assert all(m.owner_run is None for m in near)
-    assert not result.passed
 
 
 def test_gr_circle_just_over_the_cap_is_not_attributed():
