@@ -5198,11 +5198,12 @@ class PCB:
                 segments.append((points[0], points[1]))
                 segments.append((points[1], points[2]))
             elif tag in ("gr_poly", "gr_curve"):
-                chain = points
-                for i in range(len(chain) - 1):
-                    segments.append((chain[i], chain[i + 1]))
-                if len(chain) >= 3:
-                    segments.append((chain[-1], chain[0]))
+                # Already contributed by ``poly_chains`` above
+                # (``_edge_cuts_poly_chains_sexp`` walks footprint
+                # polys too); emitting them here as well would double
+                # every edge and break the strict one-mate-per-endpoint
+                # stitching walk below.
+                pass
             # gr_circle: a ring cannot chain into a simple closed polygon
             # under the strict one-mate-per-endpoint walk below, so it is
             # skipped -- identical to the board-level treatment.

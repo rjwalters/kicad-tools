@@ -350,6 +350,14 @@ class BoardGeometry:
                     lines.append(_linearize_bezier(chain))
                 else:
                     lines.append([*chain, chain[0]])
+            elif tag == "gr_circle":
+                # Mirrors the board-level circle branch above: a lone
+                # circle outline becomes a buffered polygon directly.
+                (cx_raw, cy_raw), (ex_raw, ey_raw) = outline_node_points(node)
+                cx, cy = cx_raw - ox, cy_raw - oy
+                radius = math.sqrt((ex_raw - cx_raw) ** 2 + (ey_raw - cy_raw) ** 2)
+                circle_poly = Point(cx, cy).buffer(radius, resolution=_DEFAULT_ARC_SEGMENTS)
+                return cls(polygon=circle_poly, origin=origin)
 
         if not lines:
             raise ValueError("No Edge.Cuts elements found -- cannot construct board outline.")

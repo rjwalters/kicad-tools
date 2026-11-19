@@ -331,6 +331,90 @@ def test_rotated_fp_rect_emits_four_lines_not_a_rect() -> None:
     assert len(segments) == 4
 
 
+# --------------------------------------- fp_poly / fp_curve / fp_circle shapes
+
+_RECT_CORNERS_LOCAL = ((-20.0, -15.0), (20.0, -15.0), (20.0, 15.0), (-20.0, 15.0))
+
+
+def _fp_shape_board(shape_sexp: str) -> PCB:
+    """One footprint at fixture A's placement holding the given Edge.Cuts shape."""
+    return PCB(
+        parse_string(
+            f"""(kicad_pcb
+                 (footprint "SHAPE" (layer "F.Cu") (at 60 50 30)
+                   {shape_sexp})
+               )"""
+        )
+    )
+
+
+def test_footprint_poly_outline_chains_closed_through_get_board_outline() -> None:
+    pts = " ".join(f"(xy {x} {y})" for x, y in _RECT_CORNERS_LOCAL)
+    pcb = _fp_shape_board(f'(fp_poly (pts {pts}) (layer "Edge.Cuts"))')
+    assert [n.tag for n in footprint_outline_graphics(pcb._sexp)] == ["gr_poly"]
+
+    polygon = pcb.get_board_outline()
+    # Regression guard (#9593 review): the poly chain used to be emitted by
+    # BOTH _edge_cuts_poly_chains_sexp and get_board_outline's footprint
+    # loop, doubling every edge and stitching to an empty outline.
+    assert len(polygon) >= 3
+    assert polygon[0] == polygon[-1]
+    ox, oy = pcb.board_origin
+    expected = sorted((x - ox, y - oy) for x, y in A_CORNERS)
+    actual = sorted(polygon[:-1])
+    assert all(
+        math.isclose(ax, ex, abs_tol=1e-6) and math.isclose(ay, ey, abs_tol=1e-6)
+        for (ax, ay), (ex, ey) in zip(actual, expected, strict=True)
+    )
+    bounds = board_outline_bounds(pcb._sexp)
+    assert bounds == pytest.approx(A_BOUNDS, abs=1e-6)
+    assert pcb.board_size == pytest.approx(
+        (A_BOUNDS[2] - A_BOUNDS[0], A_BOUNDS[3] - A_BOUNDS[1]), abs=1e-6
+    )
+
+    # Identical board-frame vertices hoisted to a top-level gr_poly chain to
+    # the same polygon: footprint and board-level polys agree.
+    board_pts = " ".join(f"(xy {x:.6f} {y:.6f})" for x, y in A_CORNERS)
+    level = PCB(parse_string(f"""(kicad_pcb (gr_poly (pts {board_pts}) (layer "Edge.Cuts")))"""))
+    assert level.get_board_outline()
+
+
+def test_footprint_curve_outline_chains_closed_through_get_board_outline() -> None:
+    # Four cubic control points on a non-degenerate quadrilateral.
+    pts = " ".join(f"(xy {x} {y})" for x, y in _RECT_CORNERS_LOCAL)
+    pcb = _fp_shape_board(f'(fp_curve (pts {pts}) (layer "Edge.Cuts"))')
+    assert [n.tag for n in footprint_outline_graphics(pcb._sexp)] == ["gr_curve"]
+
+    polygon = pcb.get_board_outline()
+    assert len(polygon) >= 3
+    assert polygon[0] == polygon[-1]
+    bounds = board_outline_bounds(pcb._sexp)
+    assert bounds is not None and all(math.isfinite(v) for v in bounds)
+
+
+def test_footprint_circle_outline_supported_by_bounds_and_geometry() -> None:
+    pcb = _fp_shape_board('(fp_circle (center 0 0) (end 20 0) (layer "Edge.Cuts"))')
+    assert [n.tag for n in footprint_outline_graphics(pcb._sexp)] == ["gr_circle"]
+
+    # A ring cannot chain into a simple closed polygon under the strict
+    # one-mate-per-endpoint walk -- identical to the board-level treatment.
+    assert pcb.get_board_outline() == []
+    bounds = board_outline_bounds(pcb._sexp)
+    assert bounds == pytest.approx((40.0, 30.0, 80.0, 70.0), abs=1e-6)
+
+    # BoardGeometry must polygonize it like a board-level circle instead of
+    # raising "No Edge.Cuts elements found".
+    pytest.importorskip("shapely")
+    from kicad_tools.pcb.board_geometry import BoardGeometry
+
+    geometry = BoardGeometry.from_pcb(pcb)
+    assert geometry.polygon.area == pytest.approx(math.pi * 20.0**2, rel=1e-3)
+    # from_pcb is origin-relative: centroid = board-frame (60, 50) - origin.
+    ox, oy = pcb.board_origin
+    assert geometry.polygon.centroid.x == pytest.approx(60.0 - ox, abs=1e-6)
+    assert geometry.polygon.centroid.y == pytest.approx(50.0 - oy, abs=1e-6)
+
+
 # ------------------------------------------------------- kct check vs kicad-cli
 
 
