@@ -384,6 +384,11 @@ def run_check_command(args) -> int:
         sub_argv.extend(["--courtyard-waivers", args.courtyard_waivers])
     if getattr(args, "waivers", None):
         sub_argv.extend(["--waivers", args.waivers])
+    # Issue #9454: forward the ev3 -> ev4 waiver migration flags.
+    if getattr(args, "migrate_waivers", False):
+        sub_argv.append("--migrate-waivers")
+    if getattr(args, "migrate_write", False):
+        sub_argv.append("--write")
     # Issue #3061: forward pad_grid tolerance flags.
     if getattr(args, "pad_grid_strict", False):
         sub_argv.append("--pad-grid-strict")

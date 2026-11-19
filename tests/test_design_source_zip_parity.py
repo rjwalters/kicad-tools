@@ -18,6 +18,7 @@ archive form with their own escape hatch; keep the two independent.
 
 from __future__ import annotations
 
+import hashlib
 import zipfile
 from pathlib import Path
 
@@ -115,9 +116,14 @@ def test_design_source_zip_member_matches_live_recipe(
         request.applymarker(pytest.mark.xfail(reason=EXPECTED_STALE[key], strict=True))
     with zipfile.ZipFile(archive) as zf:
         archived = zf.read(member)
-    assert archived == live.read_bytes(), (
+    # Compare digests, not raw bytes, so a mismatch never renders a huge
+    # sequence diff that trips pytest-timeout and hides this message (Issue #9481).
+    archived_digest = hashlib.sha256(archived).hexdigest()
+    live_digest = hashlib.sha256(live.read_bytes()).hexdigest()
+    assert archived_digest == live_digest, (
         f"{key}: archived design-source.zip member drifted from the live "
-        f"recipe ({live}); {refresh_guidance(board.name)}, or record it in "
+        f"recipe ({live}; sha256 archive={archived_digest[:12]} "
+        f"live={live_digest[:12]}); {refresh_guidance(board.name)}, or record it in "
         "EXPECTED_STALE citing the owning issue."
     )
 

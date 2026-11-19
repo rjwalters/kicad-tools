@@ -1,6 +1,7 @@
 """THT / via to SMD-pad spacing (Issue #8843): error / warning / clean bands."""
 
 import math
+import re
 
 import pytest
 
@@ -109,6 +110,19 @@ def test_message_states_the_exact_limit(gap, limit_text):
     assert limit_text in v.message
 
 
+@pytest.mark.parametrize(
+    ("gap", "severity"),
+    [(2.0315, "error"), (2.0319, "error"), (3.0495, "warning"), (3.0499, "warning")],
+)
+def test_message_distance_is_strictly_below_printed_limit_at_band_edge(gap, severity):
+    """Issue #9483: a gap within 0.5 um of an edge must not print ``x < x``."""
+    (v,) = check_tht_smd_spacing(board(tht(), smd(gap))).violations
+    assert v.severity == severity
+    match = re.search(r"spacing ([\d.]+)mm < ([\d.]+)mm", v.message)
+    assert match is not None, v.message
+    assert float(match.group(1)) < float(match.group(2)), v.message
+
+
 def test_back_side_smd_pad_is_measured():
     found = check_tht_smd_spacing(board(tht(), smd(1.5, "B.Cu"))).violations
     assert [v.severity for v in found] == ["error"]
@@ -167,12 +181,18 @@ def test_via_copper_touching_an_smd_pad_stays_via_in_pad_territory():
 
 def test_unmeasurable_pad_shape_is_reported_not_cleared():
     """Issue #8914: a shape the rule cannot measure must not look like a cleared pad."""
+    # Issue #9498: a custom pad is measurable through the shared outline
+    # builder, so the refused shape here is one carrying an unsupported
+    # primitive (``gr_circle``) -- the builder names it in the finding.
     custom = """(footprint "T" (layer "F.Cu") (at 0 0) (property "Reference" "J2")
       (pad "1" thru_hole custom (at 0 0) (size 1.6 1.6) (drill 0.9)
-        (layers "*.Cu" "*.Mask") (net 1 "A") (uuid "odd")))"""
+        (layers "*.Cu" "*.Mask") (net 1 "A") (uuid "odd")
+        (options (anchor circle))
+        (primitives (gr_circle (center 0 0) (width 0.2) (fill yes)))))"""
     found = check_tht_smd_spacing(board(custom, smd(1.5))).violations
     assert [(v.rule_id, v.severity) for v in found] == [("tht_smd_spacing_incomplete", "info")]
     assert "custom" in found[0].message
+    assert "gr_circle" in found[0].message
     assert "odd" in found[0].message
     # A measurable pad on the same board is still judged.
     both = check_tht_smd_spacing(board(custom, tht(), smd(1.5))).violations

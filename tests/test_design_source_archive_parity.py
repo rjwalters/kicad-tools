@@ -21,6 +21,7 @@ artifacts — board 03's ``silk_repair.py`` sat unarchived this way).
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -31,7 +32,16 @@ BOARDS_DIR = Path(__file__).resolve().parent.parent / "boards"
 # "<board-dir>/<archive filename>" relative to the boards directory.  Each
 # entry cites the issue that owns the refresh; remove the entry when that
 # lands (strict xfail turns an unexpected pass into a failure).
-EXPECTED_STALE: dict[str, str] = {}
+EXPECTED_STALE: dict[str, str] = {
+    # Board 04's live recipe moved in #9097 (PR #9131) ahead of its archived
+    # copy; the regen + re-pin that refreshes the archive is owned by #9455
+    # (same staleness as the EXPECTED_STALE entry in
+    # test_board_readiness_committed_hashes.py).  Remove when #9455 lands.
+    "04-stm32-devboard/generate_design.py": (
+        "Issue #9455: board 04's recipe moved in #9097 (PR #9131) ahead of the "
+        "archived design-source copy; the regen + re-pin is owned by #9455."
+    ),
+}
 
 # Live recipes deliberately left out of the archive, keyed by
 # "<board-dir>/<live filename>" relative to the boards directory.  Each entry
@@ -72,9 +82,16 @@ def test_design_source_copy_matches_live_recipe(archive_copy: Path, request) -> 
     )
     if key in EXPECTED_STALE:
         request.applymarker(pytest.mark.xfail(reason=EXPECTED_STALE[key], strict=True))
-    assert archive_copy.read_bytes() == live.read_bytes(), (
+    # Compare digests, not raw bytes: a bare ``bytes == bytes`` failure makes
+    # pytest's assertion rewriting render a ~150k-element sequence diff, which
+    # can exceed the pytest-timeout bound and hide this message (Issue #9481).
+    archive_digest = hashlib.sha256(archive_copy.read_bytes()).hexdigest()
+    live_digest = hashlib.sha256(live.read_bytes()).hexdigest()
+    assert archive_digest == live_digest, (
         f"{key}: archived design-source copy drifted from the live recipe "
-        f"({live}); refresh it through scripts/boards/refresh_readiness.py so "
+        f"({live}; sha256 archive={archive_digest[:12]} "
+        f"live={live_digest[:12]}); refresh it through "
+        "scripts/boards/refresh_readiness.py so "
         "the manifest hashes stay consistent, or record it in EXPECTED_STALE "
         "citing the owning issue."
     )

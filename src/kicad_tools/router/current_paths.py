@@ -1956,7 +1956,9 @@ def _reduce_parallel_groups(
 
     Via barrels are zero-resistance and contracted; edges joining the same two
     junctions are merged when they form a qualifying group (see
-    :func:`_group_qualifies`); non-load degree-2 junctions are series-merged.
+    :func:`_group_qualifies`); dead-end leaves that are not a declared
+    endpoint are pruned first (a test-point stub is a tree branch, not a
+    loop, issue #9492); non-load degree-2 junctions are series-merged.
     Returns the groups used when the component reduces to a tree, ``None``
     otherwise (a loop through another load, a mesh, same-layer detours), so the
     caller keeps today's ambiguity and witness.  When ``blockers`` is given, the
@@ -1996,10 +1998,30 @@ def _reduce_parallel_groups(
             return None
         edges.append(_SPEdge(ru, rv, [edge.segment]))
     keep = {find(roots.get(n, n)) for n in (start, goal, *graph.pads.values())}
+    # A dead-end stub (e.g. a test point hanging off a power bar, issue #9492)
+    # is a tree branch: it carries no path current, but its junction keeps the
+    # bar from series-merging, so a two-layer bar never forms a group and the
+    # path stays ambiguous. Prune leaves that are not a declared endpoint
+    # before grouping. Pruning here -- not in _build_graph -- keeps the stub
+    # in the graph, so the audit still reports it as uncovered copper.
+    endpoints = {find(roots.get(start, start)), find(roots.get(goal, goal))}
     groups: list[ParallelGroup] = []
     changed = True
     while changed:
         changed = False
+        degree: dict[_Node, int] = {}
+        for e in edges:
+            degree[e.u] = degree.get(e.u, 0) + 1
+            degree[e.v] = degree.get(e.v, 0) + 1
+        stubs = [
+            e
+            for e in edges
+            if (degree[e.u] == 1 and e.u not in endpoints)
+            or (degree[e.v] == 1 and e.v not in endpoints)
+        ]
+        if stubs:
+            edges = [e for e in edges if e not in stubs]
+            changed = True
         by_pair: dict[frozenset[_Node], list[_SPEdge]] = {}
         for e in edges:
             by_pair.setdefault(frozenset((e.u, e.v)), []).append(e)

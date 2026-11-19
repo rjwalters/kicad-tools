@@ -663,3 +663,54 @@ class TestStockLibraryFriendlyDefault:
         violation = report.off_grid_pads[0]
         assert violation.ref == "U1"
         assert violation.offset_mm == pytest.approx(0.0640, abs=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Issue #9468: custom pads must not abort the pad-grid measurement
+# ---------------------------------------------------------------------------
+
+_CUSTOM_PAD_BOARD = """(kicad_pcb (version 20240108) (generator "test")
+ (general (thickness 1.6)) (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+ (net 0 "") (net 1 "SIG")
+ (footprint "Package_TO_SOT_SMD:SOT-89-3" (layer "F.Cu") (at 110 110)
+  (property "Reference" "Q1" (at 0 0) (layer "F.SilkS"))
+  (pad "2" smd custom (at -1.8625 0) (size 1.5 0.9) (layers "F.Cu") (net 1 "SIG")
+   (options (clearance outline) (anchor rect))
+   (primitives (gr_poly (pts (xy 0.5 -0.45) (xy 3.8625 -0.45) (xy 3.8625 0.45) (xy 0.5 0.45))
+     (width 0) (fill yes)))))
+ (footprint "Resistor_SMD:R_0603" (layer "F.Cu") (at 95.05 95.05)
+  (property "Reference" "R9" (at 0 0) (layer "F.SilkS"))
+  (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG"))))"""
+
+
+class TestCustomPadPlacement:
+    """Pad-grid reads a custom pad's placement; routing consumers stay strict."""
+
+    def test_routing_loader_still_refuses_custom_pad(self) -> None:
+        from kicad_tools.router.io import load_pads_for_analysis
+
+        with pytest.raises(ValueError, match="Unsupported routing geometry 'custom'"):
+            load_pads_for_analysis(_CUSTOM_PAD_BOARD)
+
+    def test_placement_loader_returns_custom_pad_centre(self) -> None:
+        from kicad_tools.router.io import load_pads_for_analysis
+
+        pads = {
+            (p.ref, p.pin): p
+            for p in load_pads_for_analysis(_CUSTOM_PAD_BOARD, placement_only=True)
+        }
+        q12 = pads[("Q1", "2")]
+        assert (q12.x, q12.y) == pytest.approx((108.1375, 110.0))
+        assert q12.footprint_name == "Package_TO_SOT_SMD:SOT-89-3"
+
+    def test_strict_pad_grid_measures_custom_pad_centre_and_ordinary_pad(self) -> None:
+        report = check_pad_grid_alignment(_CUSTOM_PAD_BOARD, threshold=0.01)
+        flagged = {(p.ref, p.pin): p for p in report.off_grid_pads}
+        assert report.total_pads == 2
+        assert flagged[("Q1", "2")].x == pytest.approx(108.1375)
+        assert flagged[("Q1", "2")].offset_mm == pytest.approx(0.0375)
+        assert ("R9", "1") in flagged
+
+    def test_auto_derived_tolerance_absorbs_custom_pad_but_flags_ordinary_pad(self) -> None:
+        report = check_pad_grid_alignment(_CUSTOM_PAD_BOARD, auto_derive_threshold=True)
+        assert {(p.ref, p.pin) for p in report.off_grid_pads} == {("R9", "1")}

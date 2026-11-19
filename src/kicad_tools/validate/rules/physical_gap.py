@@ -34,7 +34,13 @@ from typing import Any
 from ...schema.pcb import _fill_token_is_filled
 from ..copper_refs import board_origin, segment_ref, via_ref
 from ..violations import DRCResults, DRCViolation
-from .clearance import _pad_on_layer, _pad_polygon, _repair_fill_polygon
+from .clearance import (
+    _pad_has_no_copper,
+    _pad_on_layer,
+    _pad_polygon,
+    _repair_fill_polygon,
+    _transform_pad_position,
+)
 
 # Polygon approximation and comparison tolerance, in millimetres.
 TOLERANCE = 0.001
@@ -488,13 +494,34 @@ def _collect(pcb):
         for index, pad in enumerate(fp.pads):
             if pad.type == "np_thru_hole":
                 continue
-            if pad.shape not in {"circle", "rect", "oval", "obround", "roundrect"}:
-                unsupported.append(f"unsupported pad shape: {fp.reference}:{pad.number}")
+            if _pad_has_no_copper(pad):
+                # Issue #9528: a pad with no copper layer (paste-only custom
+                # pads in the stock library) has nothing to measure, and must
+                # not surface as unsupported/unresolved coverage.
                 continue
-            geom = _pad_polygon(pad, fp)
-            if geom is None:
-                unsupported.append(f"degenerate pad: {fp.reference}:{pad.number}")
-                continue
+            if pad.shape == "custom":
+                # Issue #9498: a custom pad contributes its real
+                # anchor-plus-primitives copper whenever the shared outline
+                # builder produces it; a refusal is a named incomplete entry
+                # (pad and primitive kind), never a silent anchor-only source.
+                from kicad_tools.geometry.copper import custom_pad_outline_detail
+
+                geom, refusal = custom_pad_outline_detail(pad, _transform_pad_position(pad, fp))
+                if geom is None:
+                    unsupported.append(
+                        f"custom pad copper unresolved: {fp.reference}:{pad.number} "
+                        f"({refusal or 'source pad node unavailable'}); gap around "
+                        f"its primitives is unjudged, not cleared"
+                    )
+                    continue
+            else:
+                if pad.shape not in {"circle", "rect", "oval", "obround", "roundrect"}:
+                    unsupported.append(f"unsupported pad shape: {fp.reference}:{pad.number}")
+                    continue
+                geom = _pad_polygon(pad, fp)
+                if geom is None:
+                    unsupported.append(f"degenerate pad: {fp.reference}:{pad.number}")
+                    continue
             for layer in layer_names:
                 if _pad_on_layer(pad, layer):
                     sources.append(
