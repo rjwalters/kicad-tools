@@ -104,11 +104,11 @@ def pad_outline_is_exact(pad: Any) -> bool:
 
 # The refusal half of ``custom_pad_outline_detail``: the router's ValueError
 # reads "Cannot preserve placement-excluded custom pad REF.PIN: <detail>; only
-# filled zero-width gr_poly primitives ...".  The detail is the part a check
-# finding wants (it names the primitive kind, e.g. "unsupported primitive
-# 'gr_circle'"); the wrapper sentence is routing-speak, and the pad identity
-# is added by the calling rule, which knows the footprint reference.
-_CUSTOM_REFUSAL_DETAIL = re.compile(r"^[^:]+: (.*?); only filled", re.DOTALL)
+# gr_circle and filled or stroked gr_poly primitives ...".  The detail is the
+# part a check finding wants (it names the primitive kind, e.g. "unsupported
+# primitive 'gr_arc'"); the wrapper sentence is routing-speak, and the pad
+# identity is added by the calling rule, which knows the footprint reference.
+_CUSTOM_REFUSAL_DETAIL = re.compile(r"^[^:]+: (.*?); only ", re.DOTALL)
 
 
 def custom_pad_outline_detail(
@@ -125,11 +125,11 @@ def custom_pad_outline_detail(
     ``center`` is the pad *anchor* in board coordinates; the pad's ABSOLUTE
     angle is applied exactly once inside ``custom_pad_copper``.  Returns
     ``(geometry, None)`` when the builder produced the anchor-plus-primitives
-    union, ``(None, detail)`` when it refused (unsupported primitive kind,
-    stroked ``gr_poly``, layer-specific padstack, ...), and ``(None, None)``
-    when the pad is not ``custom``, has no source node, or shapely is
-    unavailable.  The ``detail`` names the primitive kind where the refusal is
-    about one.
+    union, ``(None, detail)`` when it refused (unsupported primitive kind --
+    ``gr_rect`` / ``gr_arc`` / ``gr_line`` remain refused, Issue #9501 --
+    layer-specific padstack, ...), and ``(None, None)`` when the pad is not
+    ``custom``, has no source node, or shapely is unavailable.  The ``detail``
+    names the primitive kind where the refusal is about one.
 
     Memoised on the pad object (keyed by the centre and the pad's ABSOLUTE
     rotation, each rounded to nm): one pad is asked for its outline by several
