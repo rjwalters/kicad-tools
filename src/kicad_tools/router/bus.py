@@ -6,6 +6,8 @@ This module provides:
 - BusGroup: A group of related bus signals (e.g., DATA[7:0])
 - detect_bus_signals: Parse net names to identify bus signals
 - group_buses: Group related signals into bus groups
+- group_by_length_window: Cluster similar-length nets into synthetic groups
+- order_group_by_escape: Re-rank a group's members by escape feasibility
 - BusRoutingMode: Routing modes for bus signals
 
 Bus signals are detected from common naming conventions:
@@ -222,6 +224,133 @@ def group_buses(
     return groups
 
 
+def group_by_length_window(
+    nets_with_lengths: dict[int, tuple[str, float]],
+    pct: float,
+    min_width: int = 2,
+    exclude: set[int] | None = None,
+) -> list[BusGroup]:
+    """Cluster nets of similar MST length into synthetic bus groups (Issue #9621).
+
+    Nets whose MST lengths fall within ``pct`` percent of a cluster's
+    reference length (the cluster's shortest member) form one cluster:
+    sorted by length, each net joins the open cluster while
+    ``length <= reference * (1 + pct / 100)``, otherwise it seeds the next
+    cluster.  Clusters narrower than ``min_width`` members are dropped.
+
+    The returned groups carry synthetic ``BusSignal`` members whose indices
+    are assigned in ascending net-id order (deterministic); re-rank them by
+    escape feasibility with :func:`order_group_by_escape`.
+
+    Args:
+        nets_with_lengths: Mapping of net ID to (net name, MST length in mm)
+        pct: Window width in percent (>= 0; 0 groups only exact ties)
+        min_width: Minimum members to keep a cluster
+        exclude: Net IDs to leave out (already in a name-detected bus, or
+            power/plane nets -- filtered by the caller)
+
+    Returns:
+        List of synthetic BusGroups ordered by reference length (shortest
+        first), named ``LEN1``, ``LEN2``, ... in that order.
+
+    Raises:
+        ValueError: If ``pct`` is negative.
+    """
+    if pct < 0:
+        raise ValueError(f"length window percent must be >= 0, got {pct}")
+
+    skipped = exclude or set()
+    candidates = sorted(
+        (
+            (length, net_id, net_name)
+            for net_id, (net_name, length) in nets_with_lengths.items()
+            if net_id not in skipped
+        ),
+        key=lambda item: (item[0], item[1]),
+    )
+    if not candidates:
+        return []
+
+    limit = 1.0 + pct / 100.0
+    clusters: list[list[tuple[float, int, str]]] = []
+    current: list[tuple[float, int, str]] = []
+    reference = 0.0
+    for entry in candidates:
+        length = entry[0]
+        if not current:
+            current = [entry]
+            reference = length
+            continue
+        if length <= reference * limit:
+            current.append(entry)
+        else:
+            clusters.append(current)
+            current = [entry]
+            reference = length
+    if current:
+        clusters.append(current)
+
+    groups: list[BusGroup] = []
+    kept = 0
+    for cluster in clusters:
+        if len(cluster) < min_width:
+            continue
+        kept += 1
+        members = sorted(cluster, key=lambda item: item[1])  # by net id
+        signals = [
+            BusSignal(
+                net_name=net_name,
+                net_id=net_id,
+                bus_name=f"LEN{kept}",
+                index=rank,
+                notation="length-window",
+            )
+            for rank, (_, net_id, net_name) in enumerate(members)
+        ]
+        groups.append(BusGroup(name=f"LEN{kept}", signals=signals))
+    return groups
+
+
+def order_group_by_escape(
+    group: BusGroup,
+    escape_openness: dict[int, int],
+) -> BusGroup:
+    """Return ``group`` re-indexed so members route fewest open directions first.
+
+    Issue #9621: within a synthetic length-window group, the members with
+    the tightest pad escapes (fewest open directions per pad, summed over
+    the net's pads) must claim their corridor first.  Members are sorted by
+    ascending ``escape_openness[net_id]`` (missing entries count as fully
+    open, i.e. routed last); ties keep the incoming index order.  Each
+    signal's index in the returned group is its rank, so
+    ``BusGroup.get_net_ids()`` yields the escape-ordered sequence.
+
+    Args:
+        group: The group to reorder (left unmodified)
+        escape_openness: Mapping of net ID to its open-direction count
+
+    Returns:
+        A new BusGroup with the same name and re-ranked signals.
+    """
+    ordered = sorted(
+        group.signals,
+        key=lambda s: (escape_openness.get(s.net_id, 4 * 64), s.index),
+    )
+    return BusGroup(
+        name=group.name,
+        signals=[
+            BusSignal(
+                net_name=s.net_name,
+                net_id=s.net_id,
+                bus_name=s.bus_name,
+                index=rank,
+                notation=s.notation,
+            )
+            for rank, s in enumerate(ordered)
+        ],
+    )
+
+
 @dataclass
 class BusRoutingConfig:
     """Configuration for bus routing.
@@ -232,6 +361,9 @@ class BusRoutingConfig:
         spacing: Spacing between bus signals in mm (default: trace_width + clearance)
         min_bus_width: Minimum signals to consider a bus
         maintain_order: Keep signals in bit order during routing
+        length_window: Optional percent window for grouping non-bus nets of
+            similar MST length into synthetic groups (Issue #9621). ``None``
+            disables length-window grouping.
     """
 
     enabled: bool = False
@@ -239,6 +371,7 @@ class BusRoutingConfig:
     spacing: float | None = None  # None = auto (trace_width + clearance)
     min_bus_width: int = 2
     maintain_order: bool = True
+    length_window: float | None = None
 
     def get_spacing(self, trace_width: float, clearance: float) -> float:
         """Get the actual spacing value."""

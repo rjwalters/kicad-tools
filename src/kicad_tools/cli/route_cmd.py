@@ -18072,6 +18072,10 @@ def _warn_escalation_flags_ignored(args) -> None:
     this warning the run silently behaves as if it was not passed.  Stderr, so
     ``--format json`` stdout is untouched; guarded by a flag on ``args`` so the
     wrappers' repeated ladder entries do not repeat it.
+
+    Issue #9621: ``--group-length-window`` rides on ``--bus-routing`` and is
+    ignored by the same branches; ``0.0`` is a set value, so the check is
+    "is not None / not False", not plain truthiness.
     """
     if getattr(args, "_escalation_flags_warned", False):
         return
@@ -18080,8 +18084,9 @@ def _warn_escalation_flags_ignored(args) -> None:
         for flag, attr in (
             ("--progressive-clearance", "progressive_clearance"),
             ("--bus-routing", "bus_routing"),
+            ("--group-length-window", "group_length_window"),
         )
-        if getattr(args, attr, False)
+        if (value := getattr(args, attr, None)) is not None and value is not False
     ]
     if not ignored:
         return
@@ -18091,6 +18096,36 @@ def _warn_escalation_flags_ignored(args) -> None:
         f"warning: {', '.join(ignored)} ignored: the escalation ladders "
         "(--auto-layers / --adaptive-rules / --auto-mfr-tier / --auto-pcb-size) "
         "do not support it; re-run with --no-auto-layers to use it",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _warn_bus_flags_ignored_on_negotiated(args) -> None:
+    """Warn once per run that bus flags are ignored under --strategy negotiated (#9621).
+
+    Only the single-attempt ``--strategy basic`` path honours
+    ``--bus-routing`` (and its ``--group-length-window`` companion); the
+    negotiated branch dispatches before the bus branch and never reads
+    ``bus_config``, so without this warning the run silently behaves as if
+    the flag was not passed.  Stderr, so ``--format json`` stdout is
+    untouched; guarded by a flag on ``args`` so repeated dispatches (the
+    diff-pair pre-pass wrapper) do not repeat it.
+    """
+    if getattr(args, "_negotiated_bus_flags_warned", False):
+        return
+    ignored = []
+    if getattr(args, "bus_routing", False):
+        ignored.append("--bus-routing")
+    if getattr(args, "group_length_window", None) is not None:
+        ignored.append("--group-length-window")
+    if not ignored:
+        return
+    with contextlib.suppress(AttributeError):  # frozen namespace
+        args._negotiated_bus_flags_warned = True
+    print(
+        f"warning: {', '.join(ignored)} ignored: --strategy negotiated does "
+        "not support bus-aware routing; re-run with --strategy basic to use it",
         file=sys.stderr,
         flush=True,
     )
@@ -20960,6 +20995,20 @@ def _route_parser() -> argparse.ArgumentParser:
         type=int,
         default=2,
         help="Minimum signals to form a bus group (default: 2)",
+    )
+    parser.add_argument(
+        "--group-length-window",
+        type=float,
+        default=None,
+        metavar="PCT",
+        help=(
+            "Group non-bus nets whose MST lengths fall within PCT percent of a "
+            "cluster's reference length into synthetic bus groups, and order "
+            "each group by escape feasibility (fewest open pad directions "
+            "first) (Issue #9621).  Requires --bus-routing --strategy basic; "
+            "ignored with a warning on --strategy negotiated and the "
+            "escalation ladders"
+        ),
     )
     parser.add_argument(
         "--differential-pairs",
@@ -24220,6 +24269,8 @@ def _run_main_impl(args, parser, argv) -> int:
             print(f"Skip:     {', '.join(skip_nets)}")
         if args.bus_routing:
             print(f"Bus:      enabled ({args.bus_mode} mode)")
+            if getattr(args, "group_length_window", None) is not None:
+                print(f"          length window: {args.group_length_window}% (Issue #9621)")
         if args.differential_pairs:
             print("DiffPair: enabled")
 
@@ -24720,6 +24771,7 @@ def _run_main_impl(args, parser, argv) -> int:
             mode=bus_mode_map[args.bus_mode],
             spacing=args.bus_spacing,
             min_bus_width=args.bus_min_width,
+            length_window=getattr(args, "group_length_window", None),
         )
 
         # Show detected buses
@@ -24732,6 +24784,15 @@ def _run_main_impl(args, parser, argv) -> int:
                     print(f"    - {group['name']}: {group['width']} bits ({status})")
             else:
                 print("\n  No bus signals detected")
+
+    elif getattr(args, "group_length_window", None) is not None:
+        # Issue #9621: the window rides on bus routing; without --bus-routing
+        # there is no bus_config to carry it.
+        print(
+            "warning: --group-length-window ignored: it requires --bus-routing",
+            file=sys.stderr,
+            flush=True,
+        )
 
     # Configure differential pair routing if enabled
     diffpair_config = None
@@ -25263,6 +25324,8 @@ def _run_main_impl(args, parser, argv) -> int:
                 # The negotiated loop honors prerouted nets via the new skip
                 # logic in route_all_negotiated.  coupled_only=True so
                 # unsupported pad configurations fall through cleanly.
+                _warn_bus_flags_ignored_on_negotiated(args)
+
                 def _neg_strategy():
                     return router.route_all_negotiated(
                         **_negotiated_kwargs(
@@ -25287,6 +25350,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 diffpair_budget_exit_pairs.extend(router.diffpair_budget_exit_pair_names())
                 return result
             elif args.strategy == "negotiated":
+                _warn_bus_flags_ignored_on_negotiated(args)
                 return router.route_all_negotiated(
                     **_negotiated_kwargs(
                         args, timeout=_budgeted_timeout(args), checkpoint_callback=_checkpoint_cb
