@@ -38,7 +38,7 @@ from kicad_tools.cli.kicad_toolchain import KiCadEnvironmentError, evidence_tool
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "boards" / "refresh_readiness.py"
 BOARDS_DIR = REPO_ROOT / "boards"
-REPO = "rjwalters/kicad-tools"
+REPO = "2AMLogic/kicad-tools"
 
 #: Boards whose dry-run is allowed to list files, keyed by board directory and
 #: mapped to the open issue that owns the drift.  Empty: every board reproduces.

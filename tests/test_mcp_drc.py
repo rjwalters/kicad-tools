@@ -319,6 +319,30 @@ class TestCheckParity7260:
         assert result.passed is False
         assert result.verdict == "fail"
 
+    def test_severity_views_match_their_reported_severity(self, narrow_track_board: Path):
+        """Each view returns only findings of its own severity (info only in "all").
+
+        The default rule set runs the fab-view passes for the jlcpcb family,
+        so this board carries ``info`` findings (``physical_copper_gap``) on
+        top of its errors.  They must appear under ``severity_filter="all"``
+        and under neither ``"error"`` nor ``"warning"``.
+        """
+        from kicad_tools.mcp.tools.analysis import get_drc_violations
+
+        result_all = get_drc_violations(str(narrow_track_board), rules="jlcpcb")
+        assert "info" in {v.severity for v in result_all.violations}
+
+        result_warning = get_drc_violations(
+            str(narrow_track_board), rules="jlcpcb", severity_filter="warning"
+        )
+        assert {v.severity for v in result_warning.violations} <= {"warning"}
+
+        result_error = get_drc_violations(
+            str(narrow_track_board), rules="jlcpcb", severity_filter="error"
+        )
+        assert {v.severity for v in result_error.violations} == {"error"}
+        assert "physical_copper_gap" not in result_error.summary_by_type
+
     def test_mcp_server_call(self, narrow_track_board: Path):
         from kicad_tools.mcp.server import MCPServer
 
