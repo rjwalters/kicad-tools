@@ -4577,6 +4577,24 @@ def _fallback_receipt_fields(router: Any) -> dict[str, Any]:
     return fields
 
 
+def _grid_arrays_released(router: Any) -> bool:
+    """True once the routing grid's per-cell occupancy arrays are freed.
+
+    ``_release_routing_engine_state`` (issue #4292) swaps every dense plane
+    for a zero-length array before the CLI tail; anything that still indexes
+    them fails with a numpy "index 0 is out of bounds for axis 0 with size 0"
+    instead of a real answer.  The post-release partial save (#9579) must
+    serialise the already-finalized copper without touching the grid, so it
+    needs to know.  Structural on purpose: the freed-and-rebuilt cycle of an
+    escalation flow un-releases the grid, and a stale marker would not.
+    """
+    blocked = getattr(getattr(router, "grid", None), "_blocked", None)
+    shape = getattr(blocked, "shape", None)
+    if not shape:
+        return False
+    return bool(shape[0] == 0)
+
+
 def _save_partial_results() -> bool:
     """Save partial routing results if interrupted.
 
@@ -4646,6 +4664,10 @@ def _save_partial_results() -> bool:
             print("  No routes to save.")
         return False
 
+    # Issue #9579: name the step a failure happened in.  A bare ``str(e)``
+    # (e.g. a numpy "index 0 is out of bounds") said nothing about which
+    # artifact was or was not saved.
+    step = "reading the placement board"
     try:
         # The placement the copper was routed against: the source board, or
         # the moved one when a placement delta has been kept (issue #6314).
@@ -4655,17 +4677,35 @@ def _save_partial_results() -> bool:
         # dialect so the interrupted save does not flip name-based copper to
         # numeric.  Detect from the content already in hand (avoid re-reading).
         name_only = bool(_NAME_ONLY_NET_RE.search(original_content))
+        step = "serialising the routed copper"
         # Issue #8270: collapse per-grid-cell segments (on a copy) so the
         # ``_partial`` board is editable.  ``cleanup_artifacts`` is what
         # ``router.to_sexp`` runs first; keep it, then serialise merged routes.
+        # Issue #9579: on a released grid (#4292 tail) ``cleanup_artifacts``
+        # dies in the acute-foldback validation -- it indexes the freed
+        # per-cell arrays -- and the ``to_sexp`` fallback then repeats the
+        # same cleanup, so both attempts abort before anything is written.
+        # The released-grid callers run strictly after ``_finalize_routes``,
+        # whose cleanup already ran on the live grid, so the copper here is
+        # final: serialise it without querying the grid at all.  The live
+        # interrupt path (grid still allocated) keeps the full cleanup.
+        released = _grid_arrays_released(router)
         try:
-            router.cleanup_artifacts()
+            if not released:
+                router.cleanup_artifacts()
             route_sexp = "\n\t".join(
                 r.to_sexp(name_only=name_only)
                 for r in _merge_checkpoint_routes(router.routes, router)
             )
         except Exception:  # noqa: BLE001 - fall back to the raw serialisation
-            route_sexp = router.to_sexp(name_only=name_only)
+            # ``skip_cleanup`` only on the released-grid path (#9579): a
+            # live-grid call must stay what it always was, so routers (and
+            # test doubles) whose ``to_sexp`` predates the keyword keep
+            # accepting the fallback.
+            if released:
+                route_sexp = router.to_sexp(name_only=name_only, skip_cleanup=True)
+            else:
+                route_sexp = router.to_sexp(name_only=name_only)
         try:
             # Issue #8270: name the partially routed nets for the timeout report.
             info["partial_net_stubs"] = _partial_net_stubs(router)
@@ -4696,6 +4736,7 @@ def _save_partial_results() -> bool:
             else:
                 save_path = output_path.with_stem(output_path.stem + "_partial")
 
+            step = f"writing the partial board {save_path.name}"
             check_kicad_lock(cast(Path, save_path))
 
             # Insert routes before final closing parenthesis
@@ -4720,6 +4761,10 @@ def _save_partial_results() -> bool:
             from .route_receipt import record_publication
 
             record_publication(save_path)
+
+            # The partial board is on disk from here on (issue #9579): a later
+            # failure is about a sidecar or the summary, never the board.
+            step = f"recording the partial-save stage for {save_path.name}"
 
             # Issue #6330: publish the snapshot facts NOW, before the slow
             # access-witness sidecar below.  A hard kill during that write
@@ -4756,12 +4801,23 @@ def _save_partial_results() -> bool:
             # write is best-effort by construction (the helper swallows its own
             # errors) and the journal dump measures well under the 5 s
             # SIGTERM -> SIGKILL grace window the supervisor allows.
+            step = "writing the access-witness sidecar"
             _interrupt_state["access_witness_path"] = _write_access_witness_sidecar(
                 cast(Path, save_path), router, quiet=quiet, journal_first=True
             )
 
             if not quiet:
-                stats = router.get_statistics()
+                # Issue #9579: everything is saved at this point.  The
+                # statistics are a summary only, so a failure computing them
+                # must not be reported as a failed save (the board and its
+                # sidecars were already written).
+                stats_error = ""
+                try:
+                    stats: dict[str, Any] | None = router.get_statistics()
+                except Exception as stats_exc:  # noqa: BLE001 - summary only
+                    logger.debug("partial-save statistics failed", exc_info=True)
+                    stats = None
+                    stats_error = f"{type(stats_exc).__name__}: {stats_exc}"
                 # This snapshot inserts the current router copper into the
                 # source board. Interrupts can save it at any stage; clean
                 # partial exits save after optimization/tuning. It is not a
@@ -4775,13 +4831,17 @@ def _save_partial_results() -> bool:
                         f"(current routing state; NOT canonical)"
                     )
                     print(f"  Canonical output remains: {output_path}")
-                print(f"    Nets routed: {stats['nets_routed']}")
-                print(f"    Segments: {stats['segments']}")
-                print(f"    Vias: {stats['vias']}")
+                if stats is not None:
+                    print(f"    Nets routed: {stats['nets_routed']}")
+                    print(f"    Segments: {stats['segments']}")
+                    print(f"    Vias: {stats['vias']}")
+                else:
+                    print(f"    (routing statistics unavailable: {stats_error})")
             return True
     except Exception as e:
+        logger.debug("partial-save failed while %s", step, exc_info=True)
         if not quiet:
-            print(f"  Error saving partial results: {e}")
+            print(f"  Error saving partial results while {step}: {type(e).__name__}: {e}")
 
     return False
 
