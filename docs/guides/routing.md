@@ -168,7 +168,7 @@ the emitted copper and native saved/refilled connectivity: an electrical
 same-net connectivity result alone does not prove the intended Kelvin tap.
 On the board 05 DRV8301 stress fixture (`design.py::legacy_main()`), all five
 ISENSE nets now finish as stars that meet only on their shunt pads
-([issue #5398](https://github.com/rjwalters/kicad-tools/issues/5398)).
+([issue #5398](https://github.com/2AMLogic/kicad-tools/issues/5398)).
 
 #### Inward off-pad access for trapped Kelvin terminals
 
@@ -890,7 +890,7 @@ while not agent.is_complete():
 agent.save("routed.kicad_pcb")
 ```
 
-See [LLM Routing Example](https://github.com/rjwalters/kicad-tools/tree/main/examples/llm-routing).
+See [LLM Routing Example](https://github.com/2AMLogic/kicad-tools/tree/main/examples/llm-routing).
 
 ---
 
@@ -1194,7 +1194,7 @@ cells ≈ (width / grid) × (height / grid)
 
 For a 160×100mm board at a 0.03175mm (1.25 mil) fine grid that is
 `(160/0.03175) × (100/0.03175) ≈ 5040 × 3150 ≈ 15.9M cells` — far above the
-`--max-cells` default of 500,000 (see [#4249](https://github.com/rjwalters/kicad-tools/issues/4249)).
+`--max-cells` default of 500,000 (see [#4249](https://github.com/2AMLogic/kicad-tools/issues/4249)).
 `--grid auto` reacts by selecting a coarse, less-safe grid, and forcing the
 fine grid with an explicit `--grid` would need a 16M-cell budget and the
 memory to match.
@@ -1233,7 +1233,7 @@ whole board **first**, at a cheap coarse grid. Their copper then crosses every
 future tile boundary, so each tile pass finds a same-net stub to reconnect to.
 
 Worked example — a softstart-shape **160×100mm** board (motivating case from
-[#4242](https://github.com/rjwalters/kicad-tools/issues/4242)), tiled into a
+[#4242](https://github.com/2AMLogic/kicad-tools/issues/4242)), tiled into a
 5×5 grid of 32×20mm boxes:
 
 ```bash
@@ -1277,7 +1277,7 @@ connections**. A net whose pads are already all on one piece of copper — what
 zones — is held out of the route set entirely: its copper stays a hard
 clearance obstacle for everything else and is re-emitted unchanged, rather than
 being replaced by a fresh route
-([#5788](https://github.com/rjwalters/kicad-tools/issues/5788)). Before that
+([#5788](https://github.com/2AMLogic/kicad-tools/issues/5788)). Before that
 fix a complete net was re-routed and its copper dropped, which cost board 06 all
 64 of its pre-routed, coupled LVDS segments. The pass prints the nets it left
 untouched.
@@ -1296,7 +1296,7 @@ from earlier steps as a fixed obstacle. On the **lattice** engine
 (`--engine lattice`) that preserved copper is spaced at the
 `--net-class-map` clearance **of the preserved net**, not merely at the
 board-global DRU clearance
-([#4597](https://github.com/rjwalters/kicad-tools/issues/4597)). The required
+([#4597](https://github.com/2AMLogic/kicad-tools/issues/4597)). The required
 edge-to-edge gap between new copper and preserved copper is
 
 ```
@@ -1322,7 +1322,7 @@ rewrites a skipped net's pads to net 0 and the key was resolved only against
 the nets being routed. The symptom was a
 `Net-class map: merged 0/N sidecar entries` line and DRU-floor spacing on
 preserved copper; that is fixed
-([#4622](https://github.com/rjwalters/kicad-tools/issues/4622)) — the merge
+([#4622](https://github.com/2AMLogic/kicad-tools/issues/4622)) — the merge
 line now reports the true count, and the run prints the usual
 `WARNING: net-class-map: …` only for keys that match no net at all.
 
@@ -1360,7 +1360,7 @@ Not covered — document, do not assume:
 
 The **lattice** engine (`--route-engine lattice`) honors KiCad **keepout rule
 areas** — `(zone … (keepout …))` — at search time
-([#4605](https://github.com/rjwalters/kicad-tools/issues/4605)):
+([#4605](https://github.com/2AMLogic/kicad-tools/issues/4605)):
 
 - `(tracks not_allowed)` keeps every routed segment's **copper edge** (not
   just the centerline) out of the area, on the area's declared layers;
@@ -1418,7 +1418,7 @@ downstream).
 - [Swap Groups and Recorded Deltas](#swap-groups-and-recorded-deltas-netlist-degrees-of-freedom) — declaring a swap group, and replaying a committed delta as a recipe input
 - [Placement Optimization Guide](placement-optimization.md)
 - [DRC & Validation Guide](drc-and-validation.md)
-- [Example: Autorouter](https://github.com/rjwalters/kicad-tools/tree/main/examples/04-autorouter)
+- [Example: Autorouter](https://github.com/2AMLogic/kicad-tools/tree/main/examples/04-autorouter)
 
 ### Project rules when changing the output name
 

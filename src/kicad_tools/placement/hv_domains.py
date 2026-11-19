@@ -187,6 +187,7 @@ def build_required_by_domain_pair(
     material_group: str = "IIIa",
     hv_threshold: float = 30.0,
     pair_bounds: Mapping[frozenset[str], tuple[float, str]] | None = None,
+    domain_intervals: Mapping[str, tuple[float, float]] | None = None,
 ) -> dict[tuple[str, str], float]:
     """Build the per-domain-pair required-creepage table.
 
@@ -207,6 +208,14 @@ def build_required_by_domain_pair(
             ``frozenset({domain_a, domain_b})`` -> ``(max_dv, why)``. The pair's
             ``|ΔV|`` becomes ``min(|ΔV|, max_dv)``: a bound only lowers.
             ``None`` (default) leaves behaviour unchanged.
+        domain_intervals: Optional per-domain closed ``[lo, hi]`` working-voltage
+            intervals (#4411, consumed end-to-end for issue #9602). When either
+            domain of a pair carries an interval the pair stress is the census'
+            worst-case endpoint combination
+            ``dv = max(|a.hi - b.lo|, |b.hi - a.lo|)`` instead of the scalar
+            ``abs(va - vb)``; a domain absent from the mapping stays the
+            degenerate interval ``(v, v)`` built from its scalar, so an
+            all-scalar (or ``None``) input is unchanged by construction.
 
     Returns:
         ``{(domain_a, domain_b): required_mm}`` with order-independent keys.
@@ -221,7 +230,20 @@ def build_required_by_domain_pair(
     for i in range(len(ids)):
         for j in range(i + 1, len(ids)):
             a, b = ids[i], ids[j]
-            dv = abs(domain_voltages[a] - domain_voltages[b])
+            va, vb = domain_voltages[a], domain_voltages[b]
+            # Issue #9602: difference intervals end-to-end like the creepage
+            # census. A collapsed scalar cannot be right for both banks of a
+            # sign-flipping pair (the #4867 failure mode for ranges): two nets
+            # both spanning -150..150 collapse to the same endpoint and
+            # difference to 0 V, while the census sees 300 V.
+            iv_a = domain_intervals.get(a) if domain_intervals else None
+            iv_b = domain_intervals.get(b) if domain_intervals else None
+            if iv_a is not None or iv_b is not None:
+                lo_a, hi_a = iv_a if iv_a is not None else (va, va)
+                lo_b, hi_b = iv_b if iv_b is not None else (vb, vb)
+                dv = max(abs(hi_a - lo_b), abs(hi_b - lo_a))
+            else:
+                dv = abs(va - vb)
             if pair_bounds:
                 bound = pair_bounds.get(frozenset((a, b)))
                 if bound is not None:

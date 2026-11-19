@@ -28,7 +28,7 @@ A flag is judged on three observable signals:
 | **Deprecation candidate** | No recipe passes it and it has no CLI ON-test after two releases. Deprecate with a warning first; remove a release later. |
 
 Diff-pair and pair-feature flags are frozen by
-[#6448](https://github.com/rjwalters/kicad-tools/issues/6448) (unify the
+[#6448](https://github.com/2AMLogic/kicad-tools/issues/6448) (unify the
 diff-pair engines). They are listed here but are not graduated or deprecated
 until #6448 decides; this note does not re-decide it.
 
