@@ -302,7 +302,7 @@ class PathAmpacityRule(DRCRule):
             return None
         first = group.branches[0][0]
         loc_x, loc_y = self._segment_midpoint(first)
-        noun = "merged width" if group.same_layer else "summed width"
+        noun = f"{group.shape} width"
         return DRCViolation(
             rule_id=self.rule_id,
             severity="error",
@@ -330,19 +330,33 @@ class PathAmpacityRule(DRCRule):
 
         Error when the path is ``reinforcement_eligible`` (a force path),
         warning otherwise. Waivable via ``.kct_waivers.json`` like any other
-        ``path_ampacity`` finding.
+        ``path_ampacity`` finding. The count is broken down into centreline
+        and tie vias when the change grew through the #9561 pass, and nearby
+        same-net vias it rejected are named with a reason so the reader can
+        see why their stitching did not clear the finding.
         """
+        via_clause = f"{change.count} via(s)"
+        if change.tie_vias:
+            via_clause += (
+                f" ({change.centreline_count} on the centreline, "
+                f"{len(change.tie_vias)} tie vias in the bar)"
+            )
+        excluded_clause = ""
+        if change.excluded_tie_vias:
+            detail = ", ".join(f"{n} {reason}" for reason, n in change.excluded_tie_vias)
+            total = sum(n for _, n in change.excluded_tie_vias)
+            excluded_clause = f"; {total} same-net via(s) not counted: {detail}"
         return DRCViolation(
             rule_id=self.rule_id,
             severity="error" if spec.reinforcement_eligible else "warning",
             message=(
                 f"Current path {spec.name!r} ({spec.source.label()} -> "
                 f"{spec.sink.label()}) changes layer {change.from_layer} -> "
-                f"{change.to_layer} through {change.count} via(s) "
+                f"{change.to_layer} through {via_clause} "
                 f"(drill {change.drill:.3f}mm, pad {change.pad_diameter:.3f}mm) with "
                 f"combined capacity {capacity_a:.2f}A, below {thermal.description} "
                 f"(barrel model: {VIA_PLATING_THICKNESS_MM * 1000:.0f}um plating, "
-                "IPC-2221 external, 10C rise)"
+                f"IPC-2221 external, 10C rise){excluded_clause}"
             ),
             location=change.position,
             layer=change.from_layer,

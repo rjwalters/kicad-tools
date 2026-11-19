@@ -17,6 +17,8 @@ if TYPE_CHECKING:
     from ..parts.models import Part
     from ..schema.bom import BOM
 
+from ..parts.models import PartCategory
+
 logger = logging.getLogger(__name__)
 
 
@@ -163,6 +165,15 @@ _RESISTANCE_DESCRIPTION = re.compile(
 )
 _RESISTANCE_SHORT_TOKEN = re.compile(r"(?<![\w.])(?:\d+(?:\.\d+)?[kKMG]|\d+[RrKkM]\d*)(?![\w.])")
 
+# Categories whose catalogue text must not be read for resistance nominals:
+# derived as "everything but RESISTOR/OTHER" so a category added to
+# ``PartCategory`` later is excluded too rather than silently parsing.
+_NON_RESISTOR_CATEGORIES = frozenset(
+    category
+    for category in PartCategory
+    if category not in (PartCategory.RESISTOR, PartCategory.OTHER)
+)
+
 
 def _resistor_core(value: str) -> tuple[str, str]:
     """Separate a parseable nominal/tolerance from whitespace annotations."""
@@ -195,7 +206,17 @@ def resistances_in_text(text: str) -> list[float]:
 
 
 def candidate_resistances(part: Part) -> list[float]:
-    """Read nominal resistance without substring or MPN-number matching."""
+    """Read nominal resistance without substring or MPN-number matching.
+
+    Returns ``[]`` for parts in a known non-resistor category: LED colour
+    temperatures (``6500K``), CCT ranges (``13172K~100000K``) and MOSFET
+    ``Rds(on)`` figures (``47mΩ@1.8V``) parse as ohms otherwise, and crystal
+    pages false-positive on MPN/ESR tokens (#9551). ``RESISTOR`` and ``OTHER``
+    parse as before, because ``_categorize_part`` is a description-keyword
+    heuristic and many real resistors fall through to ``OTHER``.
+    """
+    if part.category in _NON_RESISTOR_CATEGORIES:
+        return []
     values = []
     if part.value:
         parsed = parse_component_value(part.value, "R")

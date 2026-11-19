@@ -821,6 +821,13 @@ class ParallelGroup:
         layers = [branch[0].layer for branch in self.branches]
         return len(layers) != len(set(layers))
 
+    def _branches_by_layer(self) -> dict[str, list[tuple[Segment, ...]]]:
+        """The per-layer grouping both :meth:`layer_widths` and :attr:`shape` read."""
+        by_layer: dict[str, list[tuple[Segment, ...]]] = {}
+        for branch in self.branches:
+            by_layer.setdefault(branch[0].layer, []).append(branch)
+        return by_layer
+
     def layer_widths(self) -> dict[str, float]:
         """Effective conductor width this group provides, per copper layer.
 
@@ -833,17 +840,33 @@ class ParallelGroup:
         inside another's shadow therefore under-reports, the fail-closed
         direction.
         """
-        by_layer: dict[str, list[tuple[Segment, ...]]] = {}
-        for branch in self.branches:
-            by_layer.setdefault(branch[0].layer, []).append(branch)
         widths: dict[str, float] = {}
-        for layer, layer_branches in by_layer.items():
+        for layer, layer_branches in self._branches_by_layer().items():
             widths[layer] = (
                 _merged_same_layer_width(layer_branches)
                 if len(layer_branches) > 1
                 else _branch_min_width(layer_branches[0])
             )
         return widths
+
+    @property
+    def shape(self) -> str:
+        """How :attr:`width_mm` is composed (issue #9560).
+
+        ``"summed"`` -- branches sit on pairwise distinct layers, so the
+        figure is the sum of per-layer widths. ``"merged"`` -- every branch
+        shares one copper layer, so the figure is a single bar's union
+        extent. ``"merged+summed"`` -- both at once: some layer carries an
+        overlapping pair while another carries a branch of its own, so the
+        figure is merged within a layer and summed across layers, and
+        neither word alone describes it. Derived from the same per-layer
+        grouping :meth:`layer_widths` uses, so the label both surfaces
+        print can never disagree with the figure it decorates.
+        """
+        by_layer = self._branches_by_layer()
+        if all(len(branches) == 1 for branches in by_layer.values()):
+            return "summed"
+        return "merged" if len(by_layer) == 1 else "merged+summed"
 
     @property
     def width_mm(self) -> float:
@@ -939,16 +962,18 @@ class MinimumWidth:
         position: Midpoint of that segment, in **board** coordinates (mm).
         parallel_group: True when ``width_mm`` is a group's effective width,
             so a reader never mistakes it for one trace's width.
-        merged: True when that group width is a same-layer union extent
-            (:attr:`ParallelGroup.same_layer`) rather than a sum across
-            layers; meaningful only when ``parallel_group`` is True (#9557).
+        shape: The group's width composition (:attr:`ParallelGroup.shape` --
+            ``"merged"`` / ``"summed"`` / ``"merged+summed"``) when
+            ``parallel_group`` is True, so both label surfaces print the
+            same derivation the figure was computed with; ``None`` for a
+            single segment, whose width is its own (#9557, #9560).
     """
 
     width_mm: float
     layer: str
     position: tuple[float, float]
     parallel_group: bool = False
-    merged: bool = False
+    shape: str | None = None
 
 
 @dataclass(frozen=True)
@@ -956,34 +981,52 @@ class LayerChange:
     """One layer change on a resolved path, with the vias that carry it.
 
     Attributes:
-        position: Centroid of the vias (mm).
+        position: Centroid of all parallel vias, centreline and tie (mm).
         from_layer: Layer of the first path segment touching the vias.
         to_layer: The other layer the path continues on.
-        vias: ``(position, drill, pad_diameter)`` per parallel via.
+        vias: ``(position, drill, pad_diameter)`` per parallel via admitted
+            by centreline contact -- grouped array members and packed tie
+            rows. Off-centreline tie vias (#9561) are in :attr:`tie_vias`.
+        tie_vias: Off-centreline same-net vias proved parallel to a
+            :attr:`vias` member (pad overlap with continuous path copper on
+            both joined layers, chained within the tie bound, #9561). Empty
+            unless the change grew through the tie pass.
+        excluded_tie_vias: ``(reason, count)`` per reason for nearby
+            same-net vias the tie pass rejected (off the copper, not
+            spanning both layers, beyond the tie bound), so a finding can
+            say why stitching did not clear it. Empty when nothing nearby
+            was rejected.
     """
 
     position: tuple[float, float]
     from_layer: str
     to_layer: str
     vias: tuple[tuple[tuple[float, float], float, float], ...]
+    tie_vias: tuple[tuple[tuple[float, float], float, float], ...] = ()
+    excluded_tie_vias: tuple[tuple[str, int], ...] = ()
 
     @property
     def count(self) -> int:
+        return len(self.vias) + len(self.tie_vias)
+
+    @property
+    def centreline_count(self) -> int:
+        """Parallel vias admitted by centreline contact (not tie vias)."""
         return len(self.vias)
 
     @property
     def drill(self) -> float:
-        return min(v[1] for v in self.vias)
+        return min(v[1] for v in (*self.vias, *self.tie_vias))
 
     @property
     def pad_diameter(self) -> float:
-        return min(v[2] for v in self.vias)
+        return min(v[2] for v in (*self.vias, *self.tie_vias))
 
     def current_capacity_a(self) -> float:
         """Summed barrel capacity (A) of the parallel vias (issue #8745)."""
         from kicad_tools.physics.ampacity import via_barrel_current_capacity
 
-        return sum(via_barrel_current_capacity(v[1]) for v in self.vias)
+        return sum(via_barrel_current_capacity(v[1]) for v in (*self.vias, *self.tie_vias))
 
 
 #: Clearance allowance (mm) in the packed tie-row gap bound of
@@ -1002,6 +1045,17 @@ _TIE_ROW_GAP_CLEARANCE_MM = 0.5
 #: that absorbs the drift while staying negligible against the 5.0 mm
 #: distributed-stitch pitch the bound must never reach.
 _TIE_ROW_GAP_TOLERANCE_MM = 0.05
+
+#: Centre-distance cap (mm) for admitting an off-centreline same-net via
+#: (a "tie via") into an existing layer change's parallel group (#9561):
+#: the via must sit at most this far from a via already counted in that
+#: change -- a centreline via or an already-admitted tie via, so a spread
+#: row chains -- which keeps a via far down the bar or in series elsewhere
+#: on the net out. The cap sits above the widest hand-placed tie gap
+#: reported (within 3.2 mm, #9561) and below the 5.0 mm distributed-stitch
+#: pitch, and is always paired with the both-layer shared-copper proof in
+#: :func:`_layer_changes`, so distance alone never admits a via.
+_TIE_VIA_LINK_MAX_MM = 3.5
 
 
 def _layer_changes(
@@ -1030,6 +1084,19 @@ def _layer_changes(
     :data:`_TIE_ROW_GAP_TOLERANCE_MM` and capped at half the distributed
     stitch pitch, so vias at ``STITCH_PITCH_MM`` never group. Without it,
     the historical :data:`_TIE_ROW_GAP_CLEARANCE_MM` bound applies.
+
+    A same-net via the 0.01 mm centreline test never sees can still be
+    *proved parallel* to a change (#9561): a hand-placed tie via inside a
+    wide bar whose pad overlaps one continuous path segment on each joined
+    layer -- a segment both its pad and a counted via's pad touch -- is
+    tied into both layers' copper between them, so the transfer is
+    distributed across the barrels, not series through one. Such a via
+    joins the first change (in path order) it chains to within
+    :data:`_TIE_VIA_LINK_MAX_MM` of, directly or through an already-tied
+    via. Vias near a change that fail the proof (off the copper on a
+    layer, not spanning the pair, or on copper the change does not share)
+    are recorded on :attr:`LayerChange.excluded_tie_vias` instead of
+    counted, so a finding can say why they did not help.
     """
     net = pcb.get_net_by_name(net_name)
     array_of: dict[tuple[float, float], int] = {
@@ -1048,6 +1115,32 @@ def _layer_changes(
         layers = list(dict.fromkeys(layer for _, layer in touching))
         if len(layers) >= 2:
             found.append((min(i for i, _ in touching), via, layers[0], layers[1]))
+
+    def _pad_on_copper(via: Via, seg: Segment) -> bool:
+        """True when ``via``'s pad overlaps ``seg``'s width envelope."""
+        return (
+            point_to_segment_distance(*via.position, *seg.start, *seg.end)
+            <= seg.width / 2.0 + via.size / 2.0
+        )
+
+    def _tie_link(anchor: Via, cand: Via, layers: tuple[str, str]) -> bool:
+        """True when ``cand`` is proved parallel to ``anchor`` (#9561).
+
+        Centres within the tie bound, and on each joined layer one path
+        segment whose copper envelope overlaps both pads -- that shared
+        stroke is continuous copper joining the two vias on that layer, so
+        both layers' copper runs between them and the barrels split the
+        transfer instead of carrying it in series.
+        """
+        if math.dist(anchor.position, cand.position) > _TIE_VIA_LINK_MAX_MM:
+            return False
+        return all(
+            any(
+                seg.layer == layer and _pad_on_copper(cand, seg) and _pad_on_copper(anchor, seg)
+                for seg in segments
+            )
+            for layer in layers
+        )
 
     def _row_terminus(item: tuple[int, Via, str, str]) -> bool:
         """True when a parallel branch begins or ends at this via (#8950).
@@ -1159,18 +1252,79 @@ def _layer_changes(
             else ("via", n),
             [],
         ).append(item)
-    changes = []
-    for c in sorted(groups.values(), key=lambda c: min(m[0] for m in c)):
+
+    # Off-centreline tie vias (#9561): same-net vias the centreline test
+    # never admitted, chained into the changes they are proved parallel to.
+    ordered_groups = sorted(groups.values(), key=lambda c: min(m[0] for m in c))
+    for c in ordered_groups:
         c.sort(key=lambda m: m[0])
+    found_ids = {id(item[1]) for item in found}
+    pending = [
+        via for via in pcb.vias if id(via) not in found_ids and _matches_net(via, net, net_name)
+    ]
+    admitted: list[list[Via]] = [[] for _ in ordered_groups]
+    for gi, c in enumerate(ordered_groups):
+        pair = (c[0][2], c[0][3])
+        anchors = [m[1] for m in c]
+        anchors.extend(admitted[gi])
+        grown = True
+        while grown:
+            grown = False
+            for via in list(pending):
+                if not all(via_spans_layer(via.layers, layer) for layer in pair):
+                    continue
+                if any(_tie_link(anchor, via, pair) for anchor in anchors):
+                    anchors.append(via)
+                    admitted[gi].append(via)
+                    pending.remove(via)
+                    grown = True
+
+    def _shares_change_copper(via: Via, anchors: list[Via], layer: str) -> bool:
+        """True when a path segment on ``layer`` carries copper shared by
+        ``via`` and an anchor via -- the change's own copper reaches it."""
+        return any(
+            seg.layer == layer
+            and _pad_on_copper(via, seg)
+            and any(_pad_on_copper(a, seg) for a in anchors)
+            for seg in segments
+        )
+
+    excluded: list[dict[str, int]] = [{} for _ in ordered_groups]
+    for gi, c in enumerate(ordered_groups):
+        pair = (c[0][2], c[0][3])
+        anchors = [m[1] for m in c] + admitted[gi]
+        for via in pending:
+            near = any(
+                math.dist(via.position, anchor.position) <= _TIE_VIA_LINK_MAX_MM
+                for anchor in anchors
+            )
+            if not all(via_spans_layer(via.layers, layer) for layer in pair):
+                if near:
+                    reason = "not spanning both layers"
+                    excluded[gi][reason] = excluded[gi].get(reason, 0) + 1
+                continue
+            if not all(_shares_change_copper(via, anchors, layer) for layer in pair):
+                if near:
+                    reason = "off the bar copper"
+                    excluded[gi][reason] = excluded[gi].get(reason, 0) + 1
+            else:
+                reason = f"beyond the {_TIE_VIA_LINK_MAX_MM:g}mm tie bound"
+                excluded[gi][reason] = excluded[gi].get(reason, 0) + 1
+
+    changes = []
+    for gi, c in enumerate(ordered_groups):
+        positions = [m[1].position for m in c] + [v.position for v in admitted[gi]]
         changes.append(
             LayerChange(
                 position=(
-                    round(sum(m[1].position[0] for m in c) / len(c), 4),
-                    round(sum(m[1].position[1] for m in c) / len(c), 4),
+                    round(sum(p[0] for p in positions) / len(positions), 4),
+                    round(sum(p[1] for p in positions) / len(positions), 4),
                 ),
                 from_layer=c[0][2],
                 to_layer=c[0][3],
                 vias=tuple((m[1].position, m[1].drill, m[1].size) for m in c),
+                tie_vias=tuple((v.position, v.drill, v.size) for v in admitted[gi]),
+                excluded_tie_vias=tuple(excluded[gi].items()) if excluded[gi] else (),
             )
         )
     return tuple(changes)
@@ -1273,7 +1427,7 @@ class PathResolution:
                 layer=pinch.layer,
                 position=_segment_midpoint(pinch),
                 parallel_group=True,
-                merged=group.same_layer,
+                shape=group.shape,
             )
 
         candidates: list[MinimumWidth] = []
@@ -1322,6 +1476,12 @@ class PathResolution:
 
         ``layer_changes`` itself is unchanged, so an audit still lists every
         via that joins two layers.
+
+        An off-centreline tie via admitted by the #9561 pass never keeps a
+        benign change alive: it chained to a centreline via through copper
+        continuous on both layers, so it sits inside the same doubled run
+        as that via, and the change is dropped on its centreline vias'
+        verdict alone.
         """
         grouped = {id(seg) for group in self.parallel_groups for seg in group.segments}
         if not grouped:

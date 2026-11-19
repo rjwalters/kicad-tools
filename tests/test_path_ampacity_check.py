@@ -669,6 +669,23 @@ class TestSameLayerDoubledCopper:
         assert "merged width 4.500mm" in message
         assert "summed width" not in message
 
+    def test_mixed_group_names_merged_and_summed(self) -> None:
+        """Issue #9560: merged within F.Cu, summed with B.Cu -- say both.
+
+        0.6 + 2 x 1.0 = 2.6 mm of merged F.Cu copper plus 2.0 mm on B.Cu;
+        plain "merged" would read the 4.6 mm figure as one contiguous bar.
+        """
+        pcb = _same_layer_doubled_ampacity_pcb(2.0, 0.6)
+        pcb.add_trace(("J1", "1"), ("J2", "1"), width=2.0, layer="B.Cu", net="NET1")
+        rule = PathAmpacityRule(specs=[_trunk_spec(15.0)])
+        results = rule.check(pcb, _design_rules_2oz())
+        assert len(results.errors) == 1
+        message = results.errors[0].message
+        assert "merged+summed width 4.600mm" in message
+        # Not the plain merged noun: "merged width" is absent (the mixed
+        # wording embeds "summed width", so it cannot double as the negative).
+        assert "merged width" not in message
+
 
 # --------------------------------------------------------------------------
 # A width-swap via between doubled stretches (Issue #8950 part b)
@@ -719,6 +736,168 @@ class TestWidthSwapVia:
         pcb = _width_swap_pcb(swap=False)
         resolution = resolve_current_path(pcb, _trunk_spec(15.0))
         assert resolution.series_layer_changes == ()
+        assert (
+            PathAmpacityRule(specs=[_trunk_spec(15.0)]).check(pcb, _design_rules_2oz()).errors == []
+        )
+
+
+# --------------------------------------------------------------------------
+# Off-centreline tie vias in a layer-change bar (Issue #9561)
+# --------------------------------------------------------------------------
+
+
+def _tie_bar_pcb(*, ties: int = 7, width: float = 5.5, layers: int = 2) -> PCB:
+    """The reporter's shape: a wide two-layer bar changing layer once.
+
+    F.Cu carries the bar from J1 to the change at x=60, B.Cu from there to
+    J2. One via sits exactly on the centreline junction; ``ties`` extra
+    same-net vias are hand-placed inside the bar's copper, off the
+    centreline, spreading to ~2.8 mm from the junction via (the reporter's
+    own board stays within 3.2 mm).
+    """
+    pcb = PCB.create(width=200, height=120, center=False, layers=layers)
+    _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+    _add_pad_footprint(pcb, ref="J2", x=120, y=50, net="NET1")
+    pcb.add_trace(("J1", "1"), (60, 50), width=width, layer="F.Cu", net="NET1")
+    pcb.add_trace((60, 50), ("J2", "1"), width=width, layer="B.Cu", net="NET1")
+    pcb.add_via(60, 50, size=0.6, drill=0.3, net="NET1")
+    offsets = [
+        (0.9, 0.9),
+        (-0.9, 0.9),
+        (0.9, -0.9),
+        (-0.9, -0.9),
+        (1.8, 0.9),
+        (-1.8, -0.9),
+        (2.4, 1.5),
+    ]
+    for dx, dy in offsets[:ties]:
+        pcb.add_via(60 + dx, 50 + dy, size=0.6, drill=0.3, net="NET1")
+    return pcb
+
+
+def _branch_via_pcb() -> PCB:
+    """A same-net via on a thin branch teed off the junction, hanging off
+    the bar's copper on the B.Cu side -- near the change, never parallel."""
+    pcb = _tie_bar_pcb(ties=0)
+    pcb.add_trace((60, 50), (61.2, 53.2), width=0.3, layer="F.Cu", net="NET1")
+    pcb.add_via(61.2, 53.2, size=0.6, drill=0.3, net="NET1")
+    return pcb
+
+
+def _wide_bar_pcb() -> PCB:
+    """An 8 mm bar with a same-net via on both layers' copper but 4.12 mm
+    from the junction via -- past the tie bound, so never counted."""
+    pcb = _tie_bar_pcb(ties=0, width=8.0)
+    pcb.add_via(64.0, 51.0, size=0.6, drill=0.3, net="NET1")
+    return pcb
+
+
+def _blind_via_pcb() -> PCB:
+    """A 4-layer bar with a blind via (F.Cu -> In1.Cu) inside the bar's
+    F.Cu copper: it never reaches the change's B.Cu side."""
+    pcb = _tie_bar_pcb(ties=0, layers=4)
+    pcb.add_via(60.9, 50.9, size=0.6, drill=0.3, layers=("F.Cu", "In1.Cu"), net="NET1")
+    return pcb
+
+
+def _two_hop_pcb() -> PCB:
+    """Two series layer changes 3 mm apart with one off-centre via inside
+    the copper of both hops -- it must join the first change only."""
+    pcb = PCB.create(width=200, height=120, center=False)
+    _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+    _add_pad_footprint(pcb, ref="J2", x=120, y=50, net="NET1")
+    pcb.add_trace(("J1", "1"), (50, 50), width=5.5, layer="F.Cu", net="NET1")
+    pcb.add_trace((50, 50), (53, 50), width=5.5, layer="B.Cu", net="NET1")
+    pcb.add_trace((53, 50), ("J2", "1"), width=5.5, layer="F.Cu", net="NET1")
+    pcb.add_via(50, 50, size=0.6, drill=0.3, net="NET1")
+    pcb.add_via(53, 50, size=0.6, drill=0.3, net="NET1")
+    pcb.add_via(51.5, 50.8, size=0.6, drill=0.3, net="NET1")
+    return pcb
+
+
+class TestTieViasInLayerChangeBar:
+    """Off-centreline tie vias inside the bar's copper count in parallel.
+
+    A same-net via whose pad overlaps the change's copper on both layers,
+    chained to a centreline via within the tie bound, is provably parallel
+    to it, so its barrel capacity joins the change (Issue #9561).
+    """
+
+    def test_tie_vias_join_the_layer_change(self) -> None:
+        from kicad_tools.physics.ampacity import via_barrel_current_capacity
+        from kicad_tools.router.current_paths import resolve_current_path
+
+        res = resolve_current_path(_tie_bar_pcb(ties=7), _trunk_spec())
+        assert res.ok, res.reason
+        (change,) = res.layer_changes
+        assert change.count == 8
+        assert len(change.vias) == 1 and len(change.tie_vias) == 7
+        assert change.current_capacity_a() == pytest.approx(8 * via_barrel_current_capacity(0.3))
+
+    def test_tie_vias_clear_the_warning_at_a_suitable_current(self) -> None:
+        """One 0.3 mm drill barrel carries ~1.6 A: 8 A needs the tie vias.
+        With them the finding is gone; without them it fires."""
+        with_ties = PathAmpacityRule(specs=[_trunk_spec(8.0)]).check(
+            _tie_bar_pcb(ties=7), _design_rules_2oz()
+        )
+        assert with_ties.errors == []
+        assert with_ties.warnings == []
+        without = PathAmpacityRule(specs=[_trunk_spec(8.0)]).check(
+            _tie_bar_pcb(ties=0), _design_rules_2oz()
+        )
+        assert len([e for e in without.errors if "changes layer" in e.message]) == 1
+
+    def test_message_breaks_the_count_down(self) -> None:
+        out = PathAmpacityRule(specs=[_trunk_spec(8.0)]).check(
+            _tie_bar_pcb(ties=2), _design_rules_2oz()
+        )
+        (message,) = [e.message for e in out.errors if "changes layer" in e.message]
+        assert "through 3 via(s) (1 on the centreline, 2 tie vias in the bar)" in message
+        assert "not counted" not in message
+
+    def test_branch_via_off_the_bar_copper_is_excluded_with_reason(self) -> None:
+        out = PathAmpacityRule(specs=[_trunk_spec(8.0)]).check(
+            _branch_via_pcb(), _design_rules_2oz()
+        )
+        (message,) = [e.message for e in out.errors if "changes layer" in e.message]
+        assert "through 1 via(s)" in message
+        assert "1 same-net via(s) not counted: 1 off the bar copper" in message
+
+    def test_on_copper_via_beyond_the_tie_bound_is_excluded_with_reason(self) -> None:
+        out = PathAmpacityRule(specs=[_trunk_spec(8.0)]).check(_wide_bar_pcb(), _design_rules_2oz())
+        (message,) = [e.message for e in out.errors if "changes layer" in e.message]
+        assert "through 1 via(s)" in message
+        assert "1 same-net via(s) not counted: 1 beyond the 3.5mm tie bound" in message
+
+    def test_blind_via_on_one_layer_of_the_pair_is_excluded_with_reason(self) -> None:
+        out = PathAmpacityRule(specs=[_trunk_spec(8.0)]).check(
+            _blind_via_pcb(), _design_rules_2oz()
+        )
+        (message,) = [e.message for e in out.errors if "changes layer" in e.message]
+        assert "through 1 via(s)" in message
+        assert "1 same-net via(s) not counted: 1 not spanning both layers" in message
+
+    def test_via_within_range_of_two_changes_joins_the_first(self) -> None:
+        from kicad_tools.router.current_paths import resolve_current_path
+
+        res = resolve_current_path(_two_hop_pcb(), _trunk_spec())
+        assert res.ok, res.reason
+        assert [c.count for c in res.layer_changes] == [2, 1]
+        assert len(res.layer_changes[0].tie_vias) == 1
+        assert res.layer_changes[1].tie_vias == ()
+
+    def test_off_centre_stitch_beside_an_interior_stitch_stays_benign(self) -> None:
+        """#8916 guard: an off-centre hand via that chains to a benign
+        interior stitch inside doubled copper must not turn that stitch
+        into a series layer change."""
+        from kicad_tools.router.current_paths import resolve_current_path
+
+        pcb = _doubled_ampacity_pcb(3.5, 3.5)
+        pcb.add_via(26, 50, size=0.6, drill=0.3, net="NET1")
+        pcb.add_via(26.9, 50.8, size=0.6, drill=0.3, net="NET1")
+        res = resolve_current_path(pcb, _trunk_spec(15.0))
+        assert res.ok, res.reason
+        assert res.series_layer_changes == ()
         assert (
             PathAmpacityRule(specs=[_trunk_spec(15.0)]).check(pcb, _design_rules_2oz()).errors == []
         )

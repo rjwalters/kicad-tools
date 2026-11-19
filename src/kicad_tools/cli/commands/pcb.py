@@ -2077,12 +2077,13 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                         "from_layer": c.from_layer,
                         "to_layer": c.to_layer,
                         "via_count": c.count,
+                        "tie_via_count": len(c.tie_vias),
                         "drill_mm": c.drill,
                         "pad_diameter_mm": c.pad_diameter,
                         "capacity_a": round(c.current_capacity_a(), 4),
                         "vias": [
                             {"position": _sheet(v[0]), "drill_mm": v[1], "pad_diameter_mm": v[2]}
-                            for v in c.vias
+                            for v in (*c.vias, *c.tie_vias)
                         ],
                     }
                     for c in r.layer_changes
@@ -2144,11 +2145,10 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                     nx, ny = _sheet(narrowest.position)
                     # Say when the figure is a group's effective width, so
                     # 2.0 mm is not misread as one trace's width (#8917) --
-                    # naming the shape: merged same-layer copper or a sum
-                    # across layers (#9557).
+                    # naming the shape: merged same-layer copper, a sum
+                    # across layers, or both at once (#9557, #9560).
                     if narrowest.parallel_group:
-                        shape = "merged" if narrowest.merged else "summed"
-                        doubled = f" ({shape} parallel group)"
+                        doubled = f" ({narrowest.shape} parallel group)"
                     else:
                         doubled = ""
                     print(
