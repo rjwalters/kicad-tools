@@ -1,7 +1,14 @@
 """Clearance rule implementation for DRC checks.
 
-Validates minimum spacing between copper elements (traces, pads, vias)
-on the same layer but different nets.
+Validates minimum spacing between copper elements (traces, arcs, pads,
+vias) on the same layer but different nets.
+
+Runtime note on arcs (Issue #9673): an arc's pair distance is minimised
+over its covering chord tessellation, so an arc-vs-arc pair costs the
+product of the two chord counts (at the 1 um sagitta bound a 90 deg arc
+of radius 50 mm is ~125 chords).  The broad-phase ``bounds`` gate keeps
+that off every pair but near neighbours; a heavily arc'd imported board
+has no committed timing under ``boards/`` yet.
 """
 
 from __future__ import annotations
@@ -333,6 +340,8 @@ class CopperElement:
         if self.element_type == "segment":
             x1, y1, x2, y2, width = self.geometry
             return KSegment(x1=x1, y1=y1, x2=x2, y2=y2, width=width)
+        if self.element_type == "arc":
+            return _arc_kernel_shape(self)
         cx, cy, width, height = self.geometry
         if self.element_type == "via":
             # ``from_via`` records ``(size, size)``, so either dimension is the
@@ -1267,6 +1276,26 @@ def _arc_copper_geom(arc: CopperElement):
     return geom
 
 
+def _arc_kernel_shape(arc: CopperElement) -> KShape:
+    """An arc's covering chord footprint as one kernel zone shape (Issue #9673).
+
+    The pairwise predicates never ask this -- they minimise over the arc's
+    chords (``_element_chord_shapes``), which is exact.  A caller that does
+    ask ``kernel_shape()`` directly gets the same copper as one filled
+    polygon: the chord polyline buffered by half the covering chord width
+    (``_arc_copper_geom``'s footprint, the shape ``bounds`` and the overlap
+    refinement already model), so the public helper answers its own new
+    element type instead of dying on the pad/via 4-tuple unpack.
+    """
+    geom = _arc_copper_geom(arc)
+    polygons = list(geom.geoms) if geom.geom_type == "MultiPolygon" else [geom]
+    rings: list[list[tuple[float, float]]] = []
+    for polygon in polygons:
+        rings.append(list(polygon.exterior.coords))
+        rings.extend(list(interior.coords) for interior in polygon.interiors)
+    return _kernel_zone_shape(rings)
+
+
 def _segment_polygon_clearance(seg: CopperElement, circle: CopperElement) -> float | None:
     """Signed segment-to-pad clearance using the pad's true copper polygon.
 
@@ -1443,12 +1472,13 @@ def _rect_segment_centerline_distance(
 
 
 def _element_to_shapely_geom(elem: CopperElement):
-    """Return a shapely geometry for a pad/via copper element.
+    """Return a shapely geometry for a pad/via/arc copper element.
 
     Pads carry a precomputed ``polygon`` (true outline).  Vias (and any
     element without a polygon) are represented as a circle buffered around
-    their center using the AABB diameter.  Returns ``None`` if no geometry
-    can be built.
+    their center using the AABB diameter.  Arcs answer their covering
+    chord footprint (Issue #9673, :func:`_arc_copper_geom`).  Returns
+    ``None`` if no geometry can be built.
 
     Memoised per element (Issue #5240): the result is a pure function of
     ``elem.polygon`` / ``elem.geometry``, both assigned once at construction
@@ -1469,6 +1499,11 @@ def _element_to_shapely_geom(elem: CopperElement):
 
 def _build_pad_copper_geom(elem: CopperElement):
     """Build a pad/via shapely geometry without consulting the memo."""
+    if elem.element_type == "arc":
+        # Issue #9673: an arc's geometry is the 5-tuple track form, not the
+        # pad/via centre box -- answer its covering chord footprint so this
+        # helper never dies on the 4-tuple unpack below.
+        return _arc_copper_geom(elem)
     if elem.polygon is not None:
         return elem.polygon
     from shapely.geometry import Point

@@ -26,6 +26,8 @@ import pytest
 pytest.importorskip("shapely")
 
 from kicad_tools.cli import main  # noqa: E402
+from kicad_tools.cli.pcb_move_via import run_move_via  # noqa: E402
+from kicad_tools.manufacturers import get_profile  # noqa: E402
 from kicad_tools.schema.pcb import PCB  # noqa: E402
 from kicad_tools.validate import DRCChecker  # noqa: E402
 
@@ -376,3 +378,142 @@ class TestSeparateBatchProbeApply:
         assert [v.rule_id for v in findings] == ["clearance_arc_segment"]
         assert set(findings[0].items) == {_ARC_REF, "Trace@B.Cu:w0.3:130/134~130/140"}
         assert set(findings[0].nets) == {"GND", "VCC"}
+
+
+# ---------------------------------------------------------------------------
+# Regression (PR #9678 review): every other consumer of the shared collector
+# and the public element helpers must answer an arc element, not crash on
+# the pad/via 4-tuple geometry unpack.
+# ---------------------------------------------------------------------------
+
+_HEADER4 = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "VCC")
+"""
+
+_PTH_PAD = (
+    '  (footprint "test:pth" (layer "F.Cu") (at 128 134.5)\n'
+    '    (pad "1" thru_hole circle (at 0 0) (size 0.8 0.8) (drill 0.4) '
+    '(layers "*.Cu" "*.Mask") (net 1 "GND")))\n'
+)
+
+
+class TestFactoryPthHoleArc:
+    """``check_pth_hole_clearance`` sees an inner-layer arc (Blocking 1).
+
+    Before the fix the inner-layer arm handed the arc to the pad/via
+    shapely builder and died on ``ValueError: too many values to unpack``.
+    """
+
+    def test_inner_arc_through_pth_hole_reports(self, tmp_path: Path):
+        from kicad_tools.validate.rules.factory_clearance import check_pth_hole_clearance
+
+        # The fixture arc is GND; flip it to VCC so it is foreign to the
+        # GND hole (same geometry, foreign net).
+        arc = _ARC.replace('(layer "B.Cu")', '(layer "In1.Cu")').replace(
+            '(net 1 "GND")', '(net 2 "VCC")'
+        )
+        # The hole sits 0.5 mm below the arc's authored endpoint (128,135):
+        # drill edge to swept copper = 0.5 - 0.2 - 0.151 = 0.149 mm, short
+        # of the 0.30 mm JLCPCB inner minimum.
+        path = tmp_path / "inner.kicad_pcb"
+        path.write_text(_HEADER4 + _PTH_PAD + arc + "\n)\n")
+        rules = get_profile("jlcpcb").get_design_rules(layers=4)
+        violations = check_pth_hole_clearance(PCB.load(path), rules).violations
+        assert [v.rule_id for v in violations] == ["pth_hole_clearance"]
+        v = violations[0]
+        assert v.layer == "In1.Cu"
+        assert v.actual_value == pytest.approx(0.149, abs=0.005)
+        assert v.required_value == pytest.approx(0.3)
+        assert "Arc@In1.Cu:w0.3:128/135~130/137~132/135" in v.items
+
+    def test_distant_inner_arc_stays_clean(self, tmp_path: Path):
+        from kicad_tools.validate.rules.factory_clearance import check_pth_hole_clearance
+
+        arc = (
+            "  (arc (start 128 145) (mid 130 147) (end 132 145) (width 0.3) "
+            '(layer "In1.Cu") (uuid "arc-far") (net 2 "VCC"))\n'
+        )
+        path = tmp_path / "far.kicad_pcb"
+        path.write_text(_HEADER4 + _PTH_PAD + arc + "\n)\n")
+        rules = get_profile("jlcpcb").get_design_rules(layers=4)
+        assert check_pth_hole_clearance(PCB.load(path), rules).violations == []
+
+
+class TestMoveViaCheckArc:
+    """``kct pcb move-via --check`` measures arc copper (Blocking 2).
+
+    Before the fix the collector loop unpacked the arc's 5-tuple geometry
+    (``ValueError``) and, past that, ``kinds['arc']`` raised ``KeyError``.
+    """
+
+    def _board(self, tmp_path: Path) -> Path:
+        via = (
+            '  (via (at 130 141) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") '
+            '(net 2 "VCC") (uuid "via-mv"))\n'
+        )
+        outline = (
+            "  (gr_rect (start 0 0) (end 200 200) (stroke (width 0.1) "
+            '(type default)) (fill none) (layer "Edge.Cuts"))\n'
+        )
+        f = _write_board(tmp_path, outline + _ARC + via, name="mv.kicad_pcb")
+        f.with_suffix(".kicad_pro").write_text(
+            json.dumps({"board": {"design_settings": {"rules": {"min_hole_clearance": 0.5}}}})
+        )
+        return f
+
+    def test_move_onto_arc_refused(self, tmp_path: Path, capsys):
+        f = self._board(tmp_path)
+        before = f.read_bytes()
+        # Destination (130, 136.5): the drill edge sits ~0.2 mm from the
+        # apex copper, short of the 0.5 mm project hole_clearance.
+        assert (
+            run_move_via(f, uuid="via-mv", to=(130, 136.5), check=True, output_format="json") == 1
+        )
+        out = json.loads(capsys.readouterr().out)
+        ids = {d["rule_id"] for d in out["check"]["details"]}
+        assert "hole_clearance" in ids
+        assert f.read_bytes() == before
+
+    def test_move_clear_of_arc_allowed(self, tmp_path: Path):
+        f = self._board(tmp_path)
+        assert run_move_via(f, uuid="via-mv", to=(130, 141.5), check=True) == 0
+
+
+class TestArcElementHelpers:
+    """The public CopperElement helpers answer arcs (Blocking 3)."""
+
+    def test_kernel_shape_and_shapely_geom_answer_arc(self, tmp_path: Path):
+        from shapely.geometry import Point, Polygon  # type: ignore[import-untyped]
+
+        from kicad_tools.validate.clearance_shapes import KZonePoly
+        from kicad_tools.validate.rules.clearance import (
+            ClearanceRule,
+            _element_to_shapely_geom,
+        )
+
+        pcb = _load(_write_board(tmp_path, _ARC))
+        (elem,) = (
+            e for e in ClearanceRule()._collect_elements(pcb, "B.Cu") if e.element_type == "arc"
+        )
+        shape = elem.kernel_shape()  # raised ValueError before the fix
+        assert isinstance(shape, KZonePoly)
+        poly = Polygon(shape.rings[0])
+        assert poly.contains(Point(130, 137))  # the apex centreline
+        assert not poly.contains(Point(130, 139))  # 2 mm above the apex
+        geom = _element_to_shapely_geom(elem)  # raised ValueError before the fix
+        assert geom is not None and geom.contains(Point(130, 137))
