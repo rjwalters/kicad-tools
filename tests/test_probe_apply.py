@@ -162,6 +162,35 @@ class TestParseItems:
         with pytest.raises(ItemsFileError, match="cannot read"):
             load_items_file(tmp_path / "absent.json")
 
+    @pytest.mark.parametrize(
+        ("bad_item", "expected"),
+        [
+            # A segment carrying 'mid' means an arc: without the hint the
+            # author gets a chord probed and written, with no diagnostic.
+            (_seg("SIG", 1, 2, 3, 4).copy() | {"mid": [2, 3]}, 'use "type": "arc"'),
+            ({"type": "via", "net": "SIG", "at": [5, 6], "layer": "F.Cu"}, "'layer'"),
+            ({"type": "via", "net": "SIG", "at": [5, 6], "width": 0.25}, "'width'"),
+            # A missing arc midpoint must name the item, not raise KeyError.
+            (
+                {
+                    "type": "arc",
+                    "net": "SIG",
+                    "layer": "F.Cu",
+                    "width": 0.2,
+                    "start": [3, 4],
+                    "end": [5, 4],
+                },
+                "'mid'",
+            ),
+        ],
+    )
+    def test_fields_outside_the_items_type_are_rejected(self, bad_item, expected):
+        # The malformed entry sits second in a batch: the error must name
+        # the 1-based item index and the offending field.
+        with pytest.raises(ItemsFileError, match="item 2") as exc_info:
+            parse_items({"items": [_seg("SIG", 0, 0, 1, 1), bad_item]})
+        assert expected in str(exc_info.value)
+
 
 class TestProbe:
     def test_good_batch_passes_and_writes_nothing(self, board, capsys):
@@ -434,6 +463,43 @@ class TestApplyChecked:
         reloaded = PCB.load(str(board))
         assert any(s.net_name == "SIG" and s.layer == "F.Cu" for s in reloaded.segments)
         assert (board.parent / "b.kicad_pcb.bak").read_bytes() == original
+
+    def test_apply_arc_writes_arc_node_and_round_trips(self, board, capsys):
+        # AC #9618: pin the deliberate check/write divergence -- the arc is
+        # checked as a tessellation but written as a real (arc ...) node.
+        # Same clean SIG arc as TestProbe.test_arc_items; the fixture board's
+        # origin is (100, 100), so written geometry is board-relative.
+        arc = {
+            "type": "arc",
+            "net": "SIG",
+            "layer": "F.Cu",
+            "width": 0.25,
+            "start": [118, 104],
+            "mid": [120, 105.5],
+            "end": [122, 104],
+        }
+        rc, doc = _run(
+            capsys,
+            "apply",
+            str(board),
+            str(_items_file(board.parent, arc)),
+            "--checked",
+            "--format",
+            "json",
+        )
+        assert rc == 0 and doc["ok"] is True, doc["problems"]
+
+        text = board.read_text()
+        assert "(arc" in text and "(mid 120 105.5)" in text
+
+        reloaded = PCB.load(str(board))
+        assert len(reloaded.segments) == 1  # the original FOE straight segment
+        (written,) = reloaded.arcs
+        assert written.net_name == "SIG" and written.layer == "F.Cu"
+        assert written.width == pytest.approx(0.25)
+        assert written.start == pytest.approx((18.0, 4.0))
+        assert written.mid == pytest.approx((20.0, 5.5))
+        assert written.end == pytest.approx((22.0, 4.0))
 
     def test_apply_failure_leaves_file_byte_identical(self, board, capsys):
         before = _md5(board)
