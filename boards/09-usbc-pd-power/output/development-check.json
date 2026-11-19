@@ -150,7 +150,7 @@
   ],
   "sha256": {
     "usbc_pd_power.kicad_sch": "025ed270feacb0d33557cdfcbb5e14cb8f6b7c814d76579a7ee170ae65b338a7",
-    "usbc_pd_power.kicad_pcb": "aa07b0a4a277ab569cfb66f56225c94c67fe0424457bf097eac63c600acc95e3",
+    "usbc_pd_power.kicad_pcb": "2d82bb1bb9df65cf373bb9c62aa41ea64acba686f44abc4aede7e16d74842f45",
     "circuit.json": "8a1921cbc4b3ba23a836a2da26cf9d637e9f72e797d05039093098072378816d",
     "net_class_map.json": "080bfbd951526b2171bac077b61cc28330f5371a60f39d1cbfcb748d746d6a54",
     "usbc_pd_power.kicad_pro": "46e70ad622f62a250039b8ed3a792497b33bf6c7a0d18eb689a5f513a4ae2c22",
