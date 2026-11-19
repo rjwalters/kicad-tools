@@ -27,7 +27,9 @@ Verdicts under test, one test (or group) per row per entry point:
   The fix under test is the stale-output guard that refuses the save.
 
 The boards are small synthetic ``.kicad_pcb`` files; the sealed/wall keepout
-rule areas make specific nets deterministically unreachable.
+rule areas make specific nets deterministically unreachable.  They are kept
+compact (~30x26mm) deliberately: an unreachable pad makes the router search
+its whole reachable component to exhaustion, so fixture area is test runtime.
 """
 
 from __future__ import annotations
@@ -37,6 +39,29 @@ from pathlib import Path
 
 from kicad_tools.cli import route_cmd
 from kicad_tools.mcp.tools.routing import route_net_auto
+from kicad_tools.router import wall_deadline
+
+# Wall-clock bound for the route-auto calls that hit a sealed pad (review of
+# PR #9629): the first C++ NO_PATH on an unroutable pad hands off to the
+# pure-Python A* fallback, which otherwise searches the grid to exhaustion
+# with no deadline on this entry point -- 74s on the original 60x50mm
+# fixture, past CI's per-test ``pytest --timeout=60`` cap.  The deadline
+# context manager clamps every A* search (both backends) to the remaining
+# budget, so the run finishes partial instead of being killed.  25s is well
+# above the natural drain time on the compact fixtures below, so unloaded
+# behavior is unchanged; a loaded runner cuts the grind instead of the cap.
+_ROUTE_AUTO_DEADLINE_S = 25.0
+
+
+def _bounded_route_net_auto(*args, **kwargs) -> dict:
+    """``route_net_auto`` under the wall-clock bound above.
+
+    Only the calls that can hit a sealed pad need it (SIG3/SIGW); routable
+    nets finish in seconds either way.
+    """
+    with wall_deadline.deadline(_ROUTE_AUTO_DEADLINE_S):
+        return route_net_auto(*args, **kwargs)
+
 
 # ---------------------------------------------------------------------------
 # Board fixtures
@@ -49,7 +74,7 @@ _BOARD_HEADER = """(kicad_pcb
     (0 "F.Cu" signal)
     (31 "B.Cu" signal)
   )
-  (gr_rect (start 100 100) (end 160 150) (layer "Edge.Cuts") (width 0.05))
+  (gr_rect (start 100 100) (end 130 126) (layer "Edge.Cuts") (width 0.05))
   (net 0 "")
   (net 1 "SIG3")
   (net 2 "EASY")
@@ -59,7 +84,7 @@ _BOARD_HEADER = """(kicad_pcb
 
 _FOOTPRINTS = """  (footprint "T:U1"
     (layer "F.Cu")
-    (at 110 110)
+    (at 105 104)
     (fp_text reference "U1" (at 0 -3) (layer "F.SilkS"))
     (pad 1 smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "SIG3"))
     (pad 2 smd rect (at 0 4) (size 1 1) (layers "F.Cu") (net 1 "SIG3"))
@@ -67,21 +92,21 @@ _FOOTPRINTS = """  (footprint "T:U1"
   )
   (footprint "T:U2"
     (layer "F.Cu")
-    (at 150 140)
+    (at 117 116)
     (fp_text reference "U2" (at 0 3) (layer "F.SilkS"))
     (pad 1 smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "SIG3"))
     (pad 2 smd rect (at 0 -10) (size 1 1) (layers "F.Cu") (net 2 "EASY"))
   )
   (footprint "T:U3"
     (layer "F.Cu")
-    (at 120 145)
+    (at 104 121)
     (fp_text reference "U3" (at 0 3) (layer "F.SilkS"))
     (pad 1 smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 3 "HAND"))
-    (pad 2 smd rect (at 12 0) (size 1 1) (layers "F.Cu") (net 3 "HAND"))
+    (pad 2 smd rect (at 8 0) (size 1 1) (layers "F.Cu") (net 3 "HAND"))
   )
 """
 
-# Seals U2 pad 1 (150, 140) inside a track-blocking keepout ring.
+# Seals U2 pad 1 (117, 116) inside a track-blocking keepout ring.
 _SEAL_ZONE = """  (zone
     (net 0)
     (net_name "")
@@ -91,29 +116,29 @@ _SEAL_ZONE = """  (zone
     (priority 1)
     (polygon
       (pts
-        (xy 147 137)
-        (xy 153 137)
-        (xy 153 143)
-        (xy 147 143)
+        (xy 114 113)
+        (xy 120 113)
+        (xy 120 119)
+        (xy 114 119)
       )
     )
     (keepout (tracks not_allowed) (vias not_allowed) (pads allowed) (zones allowed))
   )
 """
 
-# Per-pad track-blocking seal rings: SIGW's two pads (103,130) / (157,130)
-# sit inside keepout rectangles (board edge on the outboard side), so no
-# trace can reach either pad -- the net is deterministically unroutable while
-# EASY and HAND stay routable.
+# Per-pad track-blocking seal rings: SIGW's two pads (124,104) / (124,112)
+# each sit inside a closed keepout rectangle, so no trace can reach either
+# pad -- the net is deterministically unroutable while EASY and HAND stay
+# routable.
 _WALL_BOARD_SIGW = """  (footprint "T:W1"
     (layer "F.Cu")
-    (at 103 130)
+    (at 124 104)
     (fp_text reference "W1" (at 0 -3) (layer "F.SilkS"))
     (pad 1 smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 4 "SIGW"))
   )
   (footprint "T:W2"
     (layer "F.Cu")
-    (at 157 130)
+    (at 124 112)
     (fp_text reference "W2" (at 0 3) (layer "F.SilkS"))
     (pad 1 smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 4 "SIGW"))
   )
@@ -126,10 +151,10 @@ _WALL_BOARD_SIGW = """  (footprint "T:W1"
     (priority 1)
     (polygon
       (pts
-        (xy 99.5 126.5)
-        (xy 105.5 126.5)
-        (xy 105.5 133.5)
-        (xy 99.5 133.5)
+        (xy 121 101)
+        (xy 127 101)
+        (xy 127 107)
+        (xy 121 107)
       )
     )
     (keepout (tracks not_allowed) (vias not_allowed) (pads allowed) (zones allowed))
@@ -143,18 +168,18 @@ _WALL_BOARD_SIGW = """  (footprint "T:W1"
     (priority 1)
     (polygon
       (pts
-        (xy 154.5 126.5)
-        (xy 160.5 126.5)
-        (xy 160.5 133.5)
-        (xy 154.5 133.5)
+        (xy 121 109)
+        (xy 127 109)
+        (xy 127 115)
+        (xy 121 115)
       )
     )
     (keepout (tracks not_allowed) (vias not_allowed) (pads allowed) (zones allowed))
   )
 """
 
-_HAND_COPPER = """  (segment (start 120 145) (end 132 145) (width 0.25) (layer "F.Cu") (net 3 "HAND"))
-  (segment (start 110 110) (end 114 110) (width 0.25) (layer "F.Cu") (net 1 "SIG3"))
+_HAND_COPPER = """  (segment (start 104 121) (end 112 121) (width 0.25) (layer "F.Cu") (net 3 "HAND"))
+  (segment (start 105 104) (end 109 104) (width 0.25) (layer "F.Cu") (net 1 "SIG3"))
 """
 
 
@@ -181,13 +206,23 @@ def _route_argv(board: Path, out: Path) -> list[str]:
         str(board),
         "-o",
         str(out),
+        # 15s, not 25s: the sealed nets grind until this budget expires (the
+        # run is budget-bound, not work-bound), and every second of it lands
+        # on the test's wall clock.  The compact fixtures keep setup ~2s, so
+        # this still leaves ~7x headroom before the "deadline reached before
+        # attempt 1" failure mode a loaded host can produce.
         "--timeout",
-        "25",
+        "15",
         "--skip-drc",
         "--no-auto-pour",
         # The sealed nets are unroutable by construction; the chained
         # completion pass would otherwise re-run on them and exit 2.
         "--no-chain-complete",
+        # The post-negotiation rescue sweep re-attempts stranded nets with
+        # its own 10s-per-net cap AFTER the main budget expires (measured
+        # +10.3s here); it cannot rescue a pad sealed by a keepout, so the
+        # listing/persistence behavior under test is identical without it.
+        "--no-rescue-pass",
     ]
 
 
@@ -282,7 +317,7 @@ class TestRow1RouteAuto:
         out = tmp_path / "ra_partial.kicad_pcb"
         baseline = board.read_text()
 
-        result = route_net_auto(str(board), "SIG3", output_path=str(out))
+        result = _bounded_route_net_auto(str(board), "SIG3", output_path=str(out))
 
         assert result["success"] is False
         assert result.get("partial") is True
@@ -296,7 +331,9 @@ class TestRow1RouteAuto:
         board = _partial_seal_board(tmp_path)
         out = tmp_path / "ra_partial_optin.kicad_pcb"
 
-        result = route_net_auto(str(board), "SIG3", output_path=str(out), allow_partial=True)
+        result = _bounded_route_net_auto(
+            str(board), "SIG3", output_path=str(out), allow_partial=True
+        )
 
         assert result["success"] is False
         assert result.get("partial") is True
@@ -308,7 +345,7 @@ class TestRow1RouteAuto:
         out = tmp_path / "ra_failed.kicad_pcb"
         baseline = board.read_text()
 
-        result = route_net_auto(str(board), "SIGW", output_path=str(out))
+        result = _bounded_route_net_auto(str(board), "SIGW", output_path=str(out))
 
         assert result["success"] is False
         assert not result.get("partial", False)
