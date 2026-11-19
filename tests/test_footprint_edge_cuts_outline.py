@@ -213,7 +213,13 @@ def test_board_level_outline_graphics_are_untouched() -> None:
     assert list(footprint_outline_graphics(sexp)) == []
 
 
-def test_back_side_footprint_mirrors_y_before_rotating() -> None:
+def test_back_side_footprint_reads_rotation_and_translation_only() -> None:
+    # KiCad stores a flipped footprint's local geometry already mirrored in
+    # the file (flip_footprint_children_to_back, Issue #8581), so the read
+    # frame is anchor + R(angle) . local with NO extra y mirror. Adding one
+    # double-mirrored every back-side outline onto the wrong side of its
+    # anchor -- native parity is pinned by
+    # test_back_side_outline_verdicts_match_kicad_cli below.
     sexp = parse_string(
         """(kicad_pcb
              (footprint "CUT" (layer "B.Cu") (at 100 100 90)
@@ -223,8 +229,8 @@ def test_back_side_footprint_mirrors_y_before_rotating() -> None:
     nodes = list(footprint_outline_graphics(sexp))
     assert [node.tag for node in nodes] == ["gr_line"]
     start = nodes[0].find_child("start")
-    # Mirror y first (1,2) -> (1,-2), then R(90): x' = y, y' = -x -> (-2,-1).
-    assert start.get_float(0) == pytest.approx(100 + -2.0)
+    # R(90) only: (1,2) -> x' = y = 2, y' = -x = -1, then + (100, 100).
+    assert start.get_float(0) == pytest.approx(100 + 2.0)
     assert start.get_float(1) == pytest.approx(100 + -1.0)
 
 
@@ -379,17 +385,52 @@ def test_footprint_poly_outline_chains_closed_through_get_board_outline() -> Non
     assert level.get_board_outline()
 
 
-def test_footprint_curve_outline_chains_closed_through_get_board_outline() -> None:
-    # Four cubic control points on a non-degenerate quadrilateral.
+def test_footprint_curve_outline_tessellates_without_implicit_closing_edge() -> None:
+    # Four cubic control points on a non-degenerate quadrilateral: an OPEN
+    # curve (first != last control point). Native KiCad reports a lone open
+    # curve as ``invalid_outline`` and accepts the contour only once a
+    # neighbouring graphic closes it, so kct must not invent the closing
+    # edge: the curve stays a tessellated open chain.
     pts = " ".join(f"(xy {x} {y})" for x, y in _RECT_CORNERS_LOCAL)
     pcb = _fp_shape_board(f'(fp_curve (pts {pts}) (layer "Edge.Cuts"))')
     assert [n.tag for n in footprint_outline_graphics(pcb._sexp)] == ["gr_curve"]
 
+    # A lone open curve cannot close a polygon.
+    assert pcb.get_board_outline() == []
+    # It remains a clearance obstacle: its tessellated boundary is visible
+    # to the segment-based consumers.
+    assert pcb.get_board_outline_segments()
+    bounds = board_outline_bounds(pcb._sexp)
+    assert bounds is not None and all(math.isfinite(v) for v in bounds)
+
+
+def test_footprint_curve_plus_closing_line_chains_closed() -> None:
+    # The same open curve plus an explicit closing line chains into a
+    # closed contour through the curve's true (tessellated) endpoints --
+    # the acceptance native DRC gives a curve-plus-line outline. The
+    # implicit closing edge used to duplicate this line's segment and the
+    # strict one-mate-per-endpoint walk returned [] instead.
+    pts = " ".join(f"(xy {x} {y})" for x, y in _RECT_CORNERS_LOCAL)
+    start, end = _RECT_CORNERS_LOCAL[0], _RECT_CORNERS_LOCAL[-1]
+    pcb = _fp_shape_board(
+        f'(fp_curve (pts {pts}) (layer "Edge.Cuts"))\n'
+        f"                (fp_line (start {end[0]} {end[1]}) (end {start[0]} {start[1]}) "
+        f'(layer "Edge.Cuts"))'
+    )
     polygon = pcb.get_board_outline()
     assert len(polygon) >= 3
     assert polygon[0] == polygon[-1]
-    bounds = board_outline_bounds(pcb._sexp)
-    assert bounds is not None and all(math.isfinite(v) for v in bounds)
+
+
+def test_closed_footprint_curve_chains_without_extra_edge() -> None:
+    # A genuinely closed cubic (first == last control point) tessellates
+    # to a chain whose ends already meet; no extra edge is needed or added.
+    ctrl = ((-20.0, -15.0), (20.0, -15.0), (20.0, 15.0), (-20.0, -15.0))
+    pts = " ".join(f"(xy {x} {y})" for x, y in ctrl)
+    pcb = _fp_shape_board(f'(fp_curve (pts {pts}) (layer "Edge.Cuts"))')
+    polygon = pcb.get_board_outline()
+    assert len(polygon) >= 3
+    assert polygon[0] == polygon[-1]
 
 
 def test_footprint_circle_outline_supported_by_bounds_and_geometry() -> None:
@@ -427,37 +468,56 @@ def _probe_net(violation: dict) -> str:
 
 
 def _kicad_cli_edge_probes(pcb_path: Path, tmp_path: Path) -> set[str]:
+    """Run pinned-toolchain ``kicad-cli pcb drc`` and collect edge violations.
+
+    Routed through the evidence toolchain
+    (:func:`kicad_tools.cli.kicad_toolchain.evidence_toolchain`): with
+    ``KCT_KICAD_DOCKER=1`` kicad-cli is the pinned image's Docker shim, and
+    any host kicad-cli is version-gated to ``PINNED_KICAD_VERSION`` first,
+    so a Homebrew 10.0.8 can never stand in for the pinned release.  There
+    is deliberately **no skip**: an unresolvable toolchain fails the test
+    loudly (operator ruling on added skips) instead of quietly passing on
+    whatever KiCad happens to be installed.
+    """
+    import os
+
     from kicad_tools.cli.kicad_toolchain import (
-        kicad_cli_env,
-        scratch_config_home,
+        KiCadEnvironmentError,
+        evidence_toolchain,
     )
     from kicad_tools.cli.runner import find_kicad_cli
 
-    cli = find_kicad_cli()
-    if cli is None:
-        pytest.skip("kicad-cli not installed")
-    report = tmp_path / "drc.json"
-    # Run on a copy: kicad-cli writes a .kicad_prl next to the board.
-    board_copy = tmp_path / pcb_path.name
-    board_copy.write_bytes(pcb_path.read_bytes())
-    with scratch_config_home("kct-fp-edge-") as config_home:
-        proc = subprocess.run(
-            [
-                str(cli),
-                "pcb",
-                "drc",
-                "--format",
-                "json",
-                "--exit-code-violations",
-                "-o",
-                str(report),
-                str(board_copy),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=kicad_cli_env(config_home),
-        )
+    try:
+        with evidence_toolchain(mounts=[tmp_path]):
+            cli = find_kicad_cli()
+            if cli is None:  # pragma: no cover - the toolchain gate raises first
+                pytest.fail(
+                    "kicad-cli could not be resolved on the pinned evidence "
+                    "toolchain; re-run with KCT_KICAD_DOCKER=1"
+                )
+            report = tmp_path / "drc.json"
+            # Run on a copy: kicad-cli writes a .kicad_prl next to the board.
+            board_copy = tmp_path / pcb_path.name
+            board_copy.write_bytes(pcb_path.read_bytes())
+            proc = subprocess.run(
+                [
+                    str(cli),
+                    "pcb",
+                    "drc",
+                    "--format",
+                    "json",
+                    "--exit-code-violations",
+                    "-o",
+                    str(report),
+                    str(board_copy),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=600,
+                env=os.environ,
+            )
+    except KiCadEnvironmentError as exc:
+        pytest.fail(f"pinned kicad-cli unavailable for native edge parity: {exc}")
     assert proc.returncode in (0, 5), proc.stderr  # 5 = violations found
     data = json.loads(report.read_text())
     return {_probe_net(v) for v in data["violations"] if v["type"] == "copper_edge_clearance"}
@@ -481,6 +541,140 @@ def test_edge_verdicts_match_kicad_cli(
     cli_probes = _kicad_cli_edge_probes(fixture, tmp_path)
     assert cli_probes == kicad_violating
     kct_probes = _kct_edge_probes(fixture, probes, KICAD_DEFAULT_EDGE_CLEARANCE_MM)
+    assert kct_probes == kicad_violating
+    assert kct_clean.isdisjoint(kct_probes)
+
+
+def _variant_board(
+    footprint: str, tracks: list[tuple[str, tuple[float, float], tuple[float, float]]]
+) -> str:
+    """A minimal KiCad 10 board holding one outline footprint and probe tracks.
+
+    Each track names the net its copper_edge_clearance verdict is attributed
+    to, so both engines' findings map onto net names (``_probe_net`` /
+    ``_kct_edge_probes``).
+    """
+    nets = "".join(f'\t(net {i + 1} "{name}")\n' for i, (name, _, _) in enumerate(tracks))
+    segments = "".join(
+        f"\t(segment (start {a[0]} {a[1]}) (end {b[0]} {b[1]}) "
+        f'(width 0.2) (layer "F.Cu") (net {i + 1}))\n'
+        for i, (_, a, b) in enumerate(tracks)
+    )
+    return (
+        "(kicad_pcb\n"
+        "\t(version 20260206)\n"
+        '\t(generator "pcbnew")\n'
+        '\t(generator_version "10.0")\n'
+        "\t(general (thickness 1.6) (legacy_teardrops no))\n"
+        '\t(layers (0 "F.Cu" signal) (2 "B.Cu" signal) (25 "Edge.Cuts" user)\n'
+        '\t\t(31 "F.CrtYd" user) (37 "F.Fab" user))\n'
+        "\t(setup (pad_to_mask_clearance 0))\n"
+        '\t(net 0 "")\n'
+        f"{nets}{footprint}\n{segments})\n"
+    )
+
+
+_VARIANT_BOARDS = {
+    # Judge's back-side scenario: an asymmetric B.Cu footprint at
+    # (50,40,90) whose fp_rect (1,2)-(6,12) lands at x 52..62, y 34..39
+    # under anchor + R(90). Only the x=52 track touches the outline; the
+    # extra Y mirror used to flip the outline to x 38..48 and flag the
+    # WRONG (x=48) track.
+    "back_side": _variant_board(
+        '\t(footprint "OUTLINE" (layer "B.Cu") (at 50 40 90)\n'
+        "\t\t(attr board_only exclude_from_pos_files exclude_from_bom)\n"
+        '\t\t(fp_rect (start 1 2) (end 6 12) (layer "Edge.Cuts")))',
+        [("TRACK_EDGE", (52.0, 35.0), (52.0, 37.0)), ("TRACK_FAR", (48.0, 35.0), (48.0, 37.0))],
+    ),
+    # Fixture A's outline expressed as an fp_poly with the same corners and
+    # probes: the polygon boundary must reach EdgeClearanceRule exactly like
+    # the rect did.
+    "fp_poly": _variant_board(
+        '\t(footprint "OUTLINE" (layer "F.Cu") (at 60 50 30)\n'
+        "\t\t(attr board_only exclude_from_pos_files exclude_from_bom)\n"
+        "\t\t(fp_poly (pts (xy -20 -15) (xy 20 -15) (xy 20 15) (xy -20 15)) "
+        '(layer "Edge.Cuts")))',
+        [
+            ("PROBE_IN", (60.0, 50.0), (65.0, 50.0)),
+            ("PROBE_CROSS", (65.0, 45.0), (95.0, 50.0)),
+            ("PROBE_NEAR", (39.584619, 44.639523), (65.565381, 29.639523)),
+        ],
+    ),
+    # A circular board: the ring must reach EdgeClearanceRule as a
+    # tessellated boundary.
+    "fp_circle": _variant_board(
+        '\t(footprint "OUTLINE" (layer "F.Cu") (at 60 50)\n'
+        "\t\t(attr board_only exclude_from_pos_files exclude_from_bom)\n"
+        '\t\t(fp_circle (center 0 0) (end 20 0) (layer "Edge.Cuts")))',
+        [("TRACK_EDGE", (60.0, 50.0), (85.0, 50.0)), ("TRACK_IN", (55.0, 50.0), (60.0, 50.0))],
+    ),
+    # An open cubic closed by an explicit fp_line (the contour native DRC
+    # accepts): the tessellated curve plus the closing line bound the board,
+    # and copper crossing the closing line is flagged.
+    "fp_curve": _variant_board(
+        '\t(footprint "OUTLINE" (layer "F.Cu") (at 40 30)\n'
+        "\t\t(attr board_only exclude_from_pos_files exclude_from_bom)\n"
+        '\t\t(fp_curve (pts (xy 0 0) (xy 0 20) (xy 40 20) (xy 40 0)) (layer "Edge.Cuts"))\n'
+        '\t\t(fp_line (start 40 0) (end 0 0) (layer "Edge.Cuts")))',
+        [("TRACK_EDGE", (60.0, 28.0), (60.0, 32.0)), ("TRACK_IN", (60.0, 35.0), (60.0, 40.0))],
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "board_text, probes, kicad_violating, kct_clean",
+    [
+        (
+            _VARIANT_BOARDS["back_side"],
+            {
+                "TRACK_EDGE": ((52.0, 35.0), (52.0, 37.0)),
+                "TRACK_FAR": ((48.0, 35.0), (48.0, 37.0)),
+            },
+            {"TRACK_EDGE"},
+            {"TRACK_FAR"},
+        ),
+        (
+            _VARIANT_BOARDS["fp_poly"],
+            FIXTURE_A_PROBES,
+            {"PROBE_CROSS", "PROBE_NEAR"},
+            {"PROBE_IN"},
+        ),
+        (
+            _VARIANT_BOARDS["fp_circle"],
+            {
+                "TRACK_EDGE": ((60.0, 50.0), (85.0, 50.0)),
+                "TRACK_IN": ((55.0, 50.0), (60.0, 50.0)),
+            },
+            {"TRACK_EDGE"},
+            {"TRACK_IN"},
+        ),
+        (
+            _VARIANT_BOARDS["fp_curve"],
+            {
+                "TRACK_EDGE": ((60.0, 28.0), (60.0, 32.0)),
+                "TRACK_IN": ((60.0, 35.0), (60.0, 40.0)),
+            },
+            {"TRACK_EDGE"},
+            {"TRACK_IN"},
+        ),
+    ],
+    ids=["back_side", "fp_poly", "fp_circle", "fp_curve"],
+)
+def test_outline_representations_match_kicad_cli(
+    board_text, probes, kicad_violating, kct_clean, tmp_path
+) -> None:
+    """Native parity for the equivalent outline representations.
+
+    The same asymmetric back-side outline expressed as a rect, poly, circle
+    and curve-plus-line: pinned kicad-cli and ``EdgeClearanceRule`` must
+    agree on exactly which probe tracks violate, on the pinned image
+    release (10.0.6, via the evidence toolchain).
+    """
+    board = tmp_path / "variant.kicad_pcb"
+    board.write_text(board_text)
+    cli_probes = _kicad_cli_edge_probes(board, tmp_path)
+    assert cli_probes == kicad_violating
+    kct_probes = _kct_edge_probes(board, probes, KICAD_DEFAULT_EDGE_CLEARANCE_MM)
     assert kct_probes == kicad_violating
     assert kct_clean.isdisjoint(kct_probes)
 
@@ -551,6 +745,59 @@ def test_board_geometry_polygonizes_footprint_outline() -> None:
     # Board area minus the footprint cut-out, as an interior ring.
     assert b.polygon.area == pytest.approx(80.0 * 60.0 - 20.0 * 10.0, abs=1e-6)
     assert len(b.polygon.interiors) == 1
+
+
+def test_board_geometry_keeps_other_contours_beside_a_circle() -> None:
+    # A circular cut-out used to replace the whole board via an early
+    # return: an 80 x 60 mm board with a radius-5 mm fp_circle at its
+    # centre came back as a 78.51 mm^2 disc. The circle is now one ring in
+    # the shared polygonization: the board keeps its area with the disc as
+    # a hole.
+    pytest.importorskip("shapely")
+    from kicad_tools.pcb.board_geometry import BoardGeometry
+
+    text = FIXTURE_B.read_text()
+    # Replace the CUTOUT footprint's four fp_line edges with one fp_circle
+    # (same centre): swap everything from the first fp_line to the end of
+    # the footprint block.
+    first = text.index("(fp_line")
+    cutout_end = text.index('(footprint "R1"')
+    circle = '(fp_circle (center 0 0) (end 5 0) (layer "Edge.Cuts"))\n\t)\n\t'
+    pcb = PCB(parse_string(text[:first] + circle + text[cutout_end:]))
+    geometry = BoardGeometry.from_pcb(pcb)
+    assert geometry.polygon.area == pytest.approx(80.0 * 60.0 - math.pi * 5.0**2, rel=1e-3)
+    assert len(geometry.polygon.interiors) == 1
+    # The board-level early return had the same defect.
+    board_level = PCB(
+        parse_string(
+            '(kicad_pcb (gr_rect (start 0 0) (end 80 60) (layer "Edge.Cuts"))\n'
+            '  (gr_circle (center 40 30) (end 45 30) (layer "Edge.Cuts")))'
+        )
+    )
+    geometry = BoardGeometry.from_pcb(board_level)
+    assert geometry.polygon.area == pytest.approx(80.0 * 60.0 - math.pi * 5.0**2, rel=1e-3)
+    assert len(geometry.polygon.interiors) == 1
+
+
+def test_placement_optimizer_keeps_parts_out_of_footprint_cutout() -> None:
+    # The optimizer's board polygon copies only BoardGeometry's exterior
+    # ring, so a movable part parked inside the board's cut-out used to sit
+    # there forever -- even at the hole's centre, where keepout-style
+    # repulsion cancels by symmetry. Containment must be enforced on the
+    # optimizer itself (#9593).
+    pytest.importorskip("shapely")
+    from kicad_tools.optim.placement import PlacementOptimizer
+
+    text = FIXTURE_B.read_text().replace("(at 15 45)", "(at 40 30)")  # R1 into the hole centre
+    pcb = PCB(parse_string(text))
+    optimizer = PlacementOptimizer.from_pcb(pcb, enable_clustering=False)
+    assert optimizer.board_holes, "fixture B's cut-out must reach the optimizer as a hole"
+    optimizer.run(iterations=10)
+    r1 = next(c for c in optimizer.components if c.ref == "R1")
+    from kicad_tools.optim.geometry import Vector2D
+
+    assert not optimizer.board_holes[0].contains_point(Vector2D(r1.x, r1.y))
+    assert optimizer.out_of_bounds_components() == []
 
 
 def test_silkscreen_accepts_footprint_outline() -> None:

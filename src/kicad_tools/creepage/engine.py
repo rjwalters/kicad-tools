@@ -21,7 +21,7 @@ reinventing them:
 * zone fills     -> :meth:`ConnectivityValidator._fill_solid_region`
 
 and derives slot/cutout obstacles from the ``Edge.Cuts`` outline
-(:meth:`PCB.get_board_outline_segments` + :meth:`PCB._edge_cuts_poly_chains_sexp`).
+(:meth:`PCB.get_board_outline_segments`).
 
 The MVP surface-path model is an honest approximation: if the straight
 nearest-points segment between two conductors does NOT cross an interior
@@ -1434,26 +1434,13 @@ def _witness_in_attach_zone(
 def _edge_line_segments(pcb: PCB) -> list[tuple[tuple[float, float], tuple[float, float]]]:
     """All Edge.Cuts segments (outer boundary + interior slots/cutouts).
 
-    Combines the parsed ``gr_line``/``gr_arc``/``gr_rect`` segments
-    (:meth:`PCB.get_board_outline_segments`) with any ``gr_poly``/``gr_curve``
-    vertex chains (:meth:`PCB._edge_cuts_poly_chains_sexp`, closed into
-    segments and shifted into the board frame).
+    :meth:`PCB.get_board_outline_segments` is the single owner: it already
+    carries the ``gr_poly`` boundaries (closed into rings) and the
+    tessellated ``gr_curve`` chains alongside the parsed
+    ``gr_line``/``gr_arc``/``gr_rect`` segments -- re-deriving the poly
+    chains here would duplicate every edge.
     """
-    segments = list(pcb.get_board_outline_segments())
-
-    chains = pcb._edge_cuts_poly_chains_sexp()
-    if chains:
-        ox, oy = pcb._board_origin
-        for chain in chains:
-            if len(chain) < 2:
-                continue
-            pts = [(x - ox, y - oy) for x, y in chain]
-            # Close the ring so a polygon can be recovered from it.
-            if pts[0] != pts[-1]:
-                pts.append(pts[0])
-            for a, b in zip(pts, pts[1:], strict=False):
-                segments.append((a, b))
-    return segments
+    return list(pcb.get_board_outline_segments())
 
 
 def board_slot_obstacles(pcb: PCB) -> list[Any]:

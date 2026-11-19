@@ -364,8 +364,14 @@ def _outline_polylines(pcb: PCB, shift: Point) -> list[list[Point]]:
             if tag == "gr_curve":
                 from ..core.outline_tessellation import tessellate_cubic
 
+                # A cubic is tessellated to its true curve and left open:
+                # only a polygon is authored closed, and an implicit
+                # closing edge on an open curve invents contour area
+                # native KiCad reports as invalid_outline (#9593).
                 chain = tessellate_cubic(chain)
-            if len(chain) >= 2:
+                if len(chain) >= 2:
+                    lines.append([mv(p) for p in chain])
+            elif len(chain) >= 3:
                 lines.append([mv(p) for p in [*chain, chain[0]]])
     return lines
 

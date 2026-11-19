@@ -823,6 +823,28 @@ class TestBoardOutline:
         poly = self._boundary(dsn)
         assert poly.area == pytest.approx(80 * 50, abs=0.1)
 
+    def test_legacy_module_edge_cuts_cutout_exported(self, tmp_path):
+        # KiCad 5 ``(module ...)`` blocks carry the same footprint-local
+        # Edge.Cuts graphics; the shared reader used to filter on the modern
+        # ``footprint`` tag alone, so a legacy module's cut-out silently
+        # disappeared from DSN export (pinned kicad-cli's DXF export shows
+        # all eight lines). Both spellings must be accepted (#9593).
+        p = [(0, 0), (100, 0), (100, 60), (0, 60)]
+        edges = "\n".join(self._line(p[i], p[(i + 1) % 4]) for i in range(4))
+        mod = (
+            '(module "CUT" (layer "F.Cu") (at 40 30)\n'
+            '  (fp_line (start -10 -5) (end 10 -5) (layer "Edge.Cuts"))\n'
+            '  (fp_line (start 10 -5) (end 10 5) (layer "Edge.Cuts"))\n'
+            '  (fp_line (start 10 5) (end -10 5) (layer "Edge.Cuts"))\n'
+            '  (fp_line (start -10 5) (end -10 -5) (layer "Edge.Cuts")))'
+        )
+        exporter, dsn = self._export(tmp_path, edges, mod)
+        assert self._boundary(dsn).area == pytest.approx(6000)
+        keepouts = self._keepouts(dsn)
+        assert sorted(layer for layer, _ in keepouts) == ["B.Cu", "F.Cu"]
+        assert all(hole.area == pytest.approx(200.0) for _, hole in keepouts)
+        assert not any("Edge.Cuts" in o for o in exporter.omissions)
+
     def test_micron_gap_is_snapped(self, tmp_path):
         edges = "\n".join(
             [

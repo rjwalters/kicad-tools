@@ -295,9 +295,15 @@ def outline_graphics(root: SExp) -> Iterator[SExp]:
     because KiCad treats footprint-local Edge.Cuts as board outline (real
     boards ship this way -- SparkFun's IoT RedBoard ESP32-P4 keeps its whole
     outline in a locked footprint). The transform is each footprint's
-    placement frame: ``board = anchor + R(rotation) . M(is_back) . local``
-    (Y-down rotate, ``y`` mirrored for back-side footprints; pinned against
-    pcbnew 10.0.1 by ``tests/fixtures/fp_zone_transform/``, Issue #6119).
+    placement frame: ``board = anchor + R(rotation) . local`` (Y-down
+    rotate). A back-side footprint needs no extra mirror: KiCad stores its
+    children's local geometry already mirrored across the x axis
+    (:func:`kicad_tools.schema.pcb.flip_footprint_children_to_back`,
+    Issue #8581), and applying the zone formula's ``M(is_back)`` here
+    double-mirrored every back-side outline (native-parity pinned by
+    ``tests/test_footprint_edge_cuts_outline.py``). Both the modern
+    ``(footprint ...)`` and legacy KiCad 5 ``(module ...)`` block tags are
+    accepted.
 
     A footprint ``fp_rect`` is emitted as four ``gr_line`` nodes: a rotated
     rectangle is not axis-aligned, and every outline consumer already handles
@@ -313,9 +319,15 @@ def outline_graphics(root: SExp) -> Iterator[SExp]:
 
 _FP_OUTLINE_TAGS = frozenset({"fp_line", "fp_arc", "fp_circle", "fp_poly", "fp_rect", "fp_curve"})
 
+# Both spellings of a footprint block: modern ``(footprint ...)`` and the
+# KiCad 5 legacy ``(module ...)`` (the schema accepts both everywhere a
+# footprint block is walked; Edge.Cuts graphics inside a legacy module are
+# board outline exactly like modern ones).
+_FOOTPRINT_BLOCK_TAGS = frozenset({"footprint", "module"})
 
-def _footprint_frame(fp: SExp) -> tuple[Point, float, bool]:
-    """``(sheet-absolute anchor, rotation deg, is_back)`` of a footprint node."""
+
+def _footprint_frame(fp: SExp) -> tuple[Point, float]:
+    """``(sheet-absolute anchor, rotation deg)`` of a footprint/module node."""
     at = fp.find_child("at")
     if at is None or len(at.children) < 2:
         raise ValueError("Malformed footprint Edge.Cuts: missing (at x y [angle]) anchor")
@@ -325,16 +337,22 @@ def _footprint_frame(fp: SExp) -> tuple[Point, float, bool]:
     angle = at.get_float(2) if len(at.children) > 2 else 0.0
     if angle is None or not math.isfinite(angle):
         raise ValueError("Malformed footprint Edge.Cuts: invalid (at ...) rotation")
-    layer = fp.find_child("layer")
-    is_back = bool(layer and (layer.get_string(0) or "").startswith("B."))
-    return (ax, ay), angle, is_back
+    return (ax, ay), angle
 
 
-def _to_board_frame(local: Point, anchor: Point, angle_deg: float, mirror_y: bool) -> Point:
-    """Push a footprint-local point through the placement frame."""
+def _to_board_frame(local: Point, anchor: Point, angle_deg: float) -> Point:
+    """Push a footprint-local point through the placement frame.
+
+    KiCad stores a flipped footprint's local geometry already mirrored in
+    the file: flipping to the back rewrites the children's local ``y``
+    (verified black-box against pcbnew 10.0.6 ``Flip`` output in
+    :func:`kicad_tools.schema.pcb.flip_footprint_children_to_back`,
+    Issue #8581), so reading applies rotation and translation only -- an
+    extra mirror here would double-mirror every back-side footprint and
+    put its outline on the wrong side of the anchor (native-parity pinned
+    by ``tests/test_footprint_edge_cuts_outline.py``).
+    """
     x, y = local
-    if mirror_y:
-        y = -y
     a = math.radians(angle_deg)
     cos_a, sin_a = math.cos(a), math.sin(a)
     return (anchor[0] + x * cos_a + y * sin_a, anchor[1] - x * sin_a + y * cos_a)
@@ -355,14 +373,12 @@ def _layer_node() -> SExp:
     return SExp.list("layer", "Edge.Cuts")
 
 
-def _footprint_outline_nodes(
-    node: SExp, anchor: Point, angle_deg: float, mirror_y: bool
-) -> list[SExp]:
+def _footprint_outline_nodes(node: SExp, anchor: Point, angle_deg: float) -> list[SExp]:
     """Re-emit one footprint Edge.Cuts graphic as board-frame ``gr_*`` node(s)."""
     tag = node.tag or ""
 
     def board(local: Point) -> Point:
-        return _to_board_frame(local, anchor, angle_deg, mirror_y)
+        return _to_board_frame(local, anchor, angle_deg)
 
     if tag == "fp_line":
         return [
@@ -454,7 +470,7 @@ def footprint_outline_graphics(root: SExp) -> Iterator[SExp]:
     the footprint contribution without double-counting the board-level ones.
     """
     for fp in root.iter_children():
-        if fp.tag != "footprint":
+        if (fp.tag or "") not in _FOOTPRINT_BLOCK_TAGS:
             continue
         if not any(
             (child.tag or "") in _FP_OUTLINE_TAGS
@@ -463,12 +479,12 @@ def footprint_outline_graphics(root: SExp) -> Iterator[SExp]:
             for child in fp.iter_children()
         ):
             continue
-        anchor, angle, mirror_y = _footprint_frame(fp)
+        anchor, angle = _footprint_frame(fp)
         for node in fp.iter_children():
             if (node.tag or "") in _FP_OUTLINE_TAGS:
                 layer = node.find_child("layer")
                 if layer is not None and layer.get_string(0) == "Edge.Cuts":
-                    yield from _footprint_outline_nodes(node, anchor, angle, mirror_y)
+                    yield from _footprint_outline_nodes(node, anchor, angle)
 
 
 def outline_node_points(node: SExp) -> list[Point]:

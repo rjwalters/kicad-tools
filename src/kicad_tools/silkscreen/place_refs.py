@@ -542,7 +542,11 @@ def _board_material(pcb: _SilkscreenPCB, Polygon: Any) -> tuple[list, Any | None
                 vertices.pop()
             if len(vertices) < 3:
                 return segments, None, "board outline unavailable: malformed polygon"
-            segments.extend(zip(vertices, vertices[1:] + vertices[:1], strict=True))
+            # The polygon's boundary edges are already in ``segments``:
+            # ``get_board_outline_segments`` is their single owner. Adding
+            # them here too duplicated every edge and the strict
+            # one-mate-per-endpoint walk below saw a branched contour
+            # (#9593 review).
     if not segments:
         return segments, None, "board outline unavailable: missing Edge.Cuts"
     if any(not math.isfinite(v) for segment in segments for point in segment for v in point):
