@@ -98,16 +98,16 @@ EXPECTED_STALE: dict[str, str] = {
     # both files are recorded input hashes of the receipt (check_design.py
     # AND generate_design.py), so read_readiness() fails closed on two
     # stale inputs. The staleness is the known consequence of that scope
-    # decision; the re-pin regenerates output the way #9469 did (pinned
-    # Docker toolchain, scratch KICAD_CONFIG_HOME). Remove the entry when
-    # that re-pin lands (strict xfail turns an unexpected pass into a
-    # failure).
+    # decision; #9519 tracks the receipt refresh, which regenerates output
+    # the way #9469 did (pinned Docker toolchain, scratch
+    # KICAD_CONFIG_HOME). Remove the entry when that re-pin lands (strict
+    # xfail turns an unexpected pass into a failure).
     "09-usbc-pd-power": (
         "Issue #9495: PR #9502 put board 09's producers (check_design.py, "
         "generate_design.py -- both recorded receipt inputs) under "
         "run_on_evidence_toolchain without regenerating output; the re-pin "
-        "regenerates via the #9469 pinned-toolchain workflow. Remove when "
-        "the re-pin lands."
+        "tracked in #9519 regenerates via the #9469 pinned-toolchain "
+        "workflow. Remove when #9519 lands."
     ),
 }
 

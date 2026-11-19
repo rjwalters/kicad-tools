@@ -140,14 +140,21 @@ def critical_route_opens(pcb_path, drc_report):
     return sorted(CRITICAL_NETS & open_nets)
 
 
-def check(output):
+def check(output, kicad_cli: str = "kicad-cli"):
+    """Run the board checks, invoking *kicad-cli* for the native ERC/DRC.
+
+    *kicad_cli* defaults to the bare PATH name for direct calls; ``__main__``
+    threads in the executable the evidence wrapper qualified -- which can live
+    outside ``PATH`` (e.g. a macOS app bundle), so re-resolving the bare name
+    there would lose it (Issue #9502 review).
+    """
     schematic = output / "usbc_pd_power.kicad_sch"
     pcb = output / "usbc_pd_power.kicad_pcb"
     erc_path = output / "native-erc.json"
     erc_path.unlink(missing_ok=True)
     erc = subprocess.run(
         [
-            "kicad-cli",
+            kicad_cli,
             "sch",
             "erc",
             str(schematic),
@@ -167,7 +174,7 @@ def check(output):
     authored_uuids = uuids_in_file(pcb)
     drc = subprocess.run(
         [
-            "kicad-cli",
+            kicad_cli,
             "pcb",
             "drc",
             str(pcb),
@@ -356,17 +363,26 @@ def check(output):
     )
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, kicad_cli: str = "kicad-cli") -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path, nargs="?", default=ROOT / "output")
-    return 0 if check(parser.parse_args(argv).output) else 1
+    return 0 if check(parser.parse_args(argv).output, kicad_cli) else 1
 
 
 if __name__ == "__main__":
-    # The native ERC/DRC below call a bare ``kicad-cli``; run on the pinned
-    # evidence toolchain so a host with another KiCad release is refused (exit 2,
-    # nothing written) instead of stamping its version into committed evidence
+    # Native ERC/DRC must invoke the kicad-cli this wrapper qualified -- which
+    # can live outside PATH (e.g. a macOS app bundle) -- so the toolchain's
+    # executable is threaded into main() instead of re-resolving the bare name.
+    # The wrapper refuses a host with another KiCad release (exit 2, nothing
+    # written) instead of stamping its version into committed evidence
     # (Issue #9495, contract of #6962).
-    from kicad_tools.cli.kicad_toolchain import run_on_evidence_toolchain
+    import sys
 
-    raise SystemExit(run_on_evidence_toolchain(main, [Path(__file__).resolve().parents[2]]))
+    from kicad_tools.cli.kicad_toolchain import KiCadEnvironmentError, evidence_toolchain
+
+    try:
+        with evidence_toolchain([Path(__file__).resolve().parents[2]]) as chain:
+            raise SystemExit(main(kicad_cli=chain.kicad_cli))
+    except KiCadEnvironmentError as exc:
+        print(f"REFUSED (KiCad environment, Issue #6962): {exc}", file=sys.stderr)
+        raise SystemExit(2)
