@@ -2351,6 +2351,7 @@ class TestLCSCViewerPageResolution:
         # The viewer page's own URL is not a resolution.
         assert _resolve_lcsc_pdf_url(f'<a href="{self.VIEWER_URL}">', self.VIEWER_URL) is None
 
+    @pytest.mark.skipif(not HAS_REQUESTS, reason="requests not installed")
     def test_html_viewer_resolved_and_retried(self, tmp_path):
         from kicad_tools.datasheet.sources import LCSCDatasheetSource
 
@@ -2369,6 +2370,7 @@ class TestLCSCViewerPageResolution:
         urls = [c.args[0] for c in mock_session.return_value.get.call_args_list]
         assert urls == [self.VIEWER_URL, self.VIEWER_URL, self.FILE_URL]
 
+    @pytest.mark.skipif(not HAS_REQUESTS, reason="requests not installed")
     def test_html_viewer_without_link_names_url(self, tmp_path):
         from kicad_tools.datasheet.sources import LCSCDatasheetSource
 
@@ -2387,6 +2389,7 @@ class TestLCSCViewerPageResolution:
         assert "by hand" in str(exc_info.value)
         assert list(tmp_path.iterdir()) == []
 
+    @pytest.mark.skipif(not HAS_REQUESTS, reason="requests not installed")
     def test_resolved_url_also_html_is_not_saved(self, tmp_path):
         from kicad_tools.datasheet.sources import LCSCDatasheetSource
 
@@ -2406,6 +2409,7 @@ class TestLCSCViewerPageResolution:
         assert self.VIEWER_URL in message and self.FILE_URL in message
         assert list(tmp_path.iterdir()) == []
 
+    @pytest.mark.skipif(not HAS_REQUESTS, reason="requests not installed")
     def test_network_error_not_retried(self, tmp_path):
         import requests
 
