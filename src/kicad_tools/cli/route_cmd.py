@@ -1251,7 +1251,7 @@ def _emit_single_pad_net_warning(
     )
 
 
-def _strip_route_blocks(pcb_content: str) -> tuple[str, int, int]:
+def _strip_route_blocks(pcb_content: str, collect: list[str] | None = None) -> tuple[str, int, int]:
     """Strip top-level ``(segment ...)`` and ``(via ...)`` blocks from PCB content.
 
     Issue #2976: When ``_stage_input_for_auto_pour`` aliases ``pcb_path`` to
@@ -1275,6 +1275,10 @@ def _strip_route_blocks(pcb_content: str) -> tuple[str, int, int]:
 
     Args:
         pcb_content: Original PCB file content.
+        collect: Optional list.  When given, the verbatim text of every
+            excised block is appended to it (issue #9599 row 2: the
+            existing-copper replacement notice lists the affected nets from
+            these blocks).
 
     Returns:
         Tuple of ``(stripped_content, segments_removed, vias_removed)``.
@@ -1336,6 +1340,8 @@ def _strip_route_blocks(pcb_content: str) -> tuple[str, int, int]:
                     segments_removed += 1
                 else:
                     vias_removed += 1
+                if collect is not None:
+                    collect.append(pcb_content[token_start - 1 : k])
                 # Skip whitespace that was preceding this form (trailing
                 # newline/tab from the previous emission) to keep the
                 # resulting file tidy.
@@ -1355,6 +1361,80 @@ def _strip_route_blocks(pcb_content: str) -> tuple[str, int, int]:
         prev_char = ch
         i += 1
     return "".join(out), segments_removed, vias_removed
+
+
+# Issue #9599 row 2: the net-declaration table ``(net 3 "NAME")`` maps stripped
+# copper's numeric ``(net 3)`` references onto user-visible net names.  Name-
+# only boards (KiCad 10, #4416) carry ``(net "NAME")`` directly on the copper.
+_NET_DECL_RE = re.compile(r'\(net\s+(\d+)\s+"((?:[^"\\]|\\.)*)"\)')
+_BLOCK_NET_RE = re.compile(
+    r'\(net\s+(\d+)(?:\s+"(?:[^"\\]|\\.)*")?\s*\)|\(net\s+"((?:[^"\\]|\\.)+)"\)'
+)
+
+
+def _baseline_copper_nets(pcb_content: str) -> tuple[int, int, list[str]]:
+    """Census the input board's existing routing copper (issue #9599 row 2).
+
+    Returns ``(segments, vias, sorted net names)`` carried by top-level
+    ``(segment ...)`` / ``(via ...)`` blocks -- the copper a plain ``kct
+    route`` run replaces with its own freshly routed paths.  Net id ``0``
+    copper (orphans) is not attributed to any named net.
+    """
+    net_names: dict[int, str] = {}
+    for decl in _NET_DECL_RE.finditer(pcb_content):
+        net_names.setdefault(int(decl.group(1)), decl.group(2))
+    blocks: list[str] = []
+    _, segs, vias = _strip_route_blocks(pcb_content, collect=blocks)
+    names: set[str] = set()
+    for block in blocks:
+        m = _BLOCK_NET_RE.search(block)
+        if m is None:
+            continue
+        if m.group(1) is not None:
+            net_id = int(m.group(1))
+            if net_id != 0:
+                names.add(net_names.get(net_id, f"Net {net_id}"))
+        elif m.group(2):
+            names.add(m.group(2))
+    return segs, vias, sorted(names)
+
+
+def _warn_existing_copper_replacement(pcb_path: Path, args) -> None:
+    """List the existing copper a plain ``kct route`` run will replace (#9599 row 2).
+
+    The save path treats the in-memory router state as authoritative: every
+    ``_write_routed_pcb`` call strips ALL top-level ``(segment ...)`` /
+    ``(via ...)`` blocks and re-inserts only this run's routes (issue #2976).
+    Without ``--preserve-existing`` that silently removes hand-placed copper;
+    this notice names every affected net before routing starts, and points at
+    the flag that locks existing copper (kept verbatim as fixed obstacles and
+    re-emitted unchanged, issue #5788).  Skipped for quiet / dry runs, and
+    whenever the preserve machinery is in effect (--preserve-existing, --nets,
+    --region, --complete -- all of which stamp the preserve path).
+    """
+    if getattr(args, "quiet", False) or getattr(args, "dry_run", False):
+        return
+    if getattr(args, "preserve_existing", False):
+        return
+    try:
+        in_segs, in_vias, nets = _baseline_copper_nets(Path(pcb_path).read_text())
+    except (OSError, UnicodeDecodeError):
+        return
+    if not in_segs and not in_vias:
+        return
+    names = ", ".join(nets) if nets else "(unnamed nets)"
+    print(
+        f"  Note: input board has existing routing copper "
+        f"({in_segs} segment(s), {in_vias} via(s)) on nets: {names}."
+    )
+    print(
+        "        This run replaces existing routing copper with freshly routed "
+        "paths -- hand-placed tracks/vias are NOT carried over."
+    )
+    print(
+        "        Pass --preserve-existing to lock existing copper (kept "
+        "verbatim and routed around)."
+    )
 
 
 # Issue #4416: a KiCad-10 name-only inline net reference is ``(net "SDA")`` --
@@ -23935,6 +24015,12 @@ def _run_main_impl(args, parser, argv) -> int:
             argv,
             grid_explicit=grid_auto_result is None,
         )
+
+    # Issue #9599 row 2: name the existing copper this run is about to
+    # replace.  All preserve-flag coercions (--nets / --region / --complete)
+    # have run above, so a False ``preserve_existing`` here means the run
+    # really will strip the input board's routing copper at its first write.
+    _warn_existing_copper_replacement(pcb_path, args)
 
     # Issue #3352 (P_AS3): --auto-pcb-size wraps the layer escalation path
     # with an outer size-escalation loop.  Q5 decision: --auto-pcb-size
