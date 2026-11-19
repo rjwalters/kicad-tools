@@ -236,7 +236,11 @@ def _is_smd_part(fp) -> bool:
 
 
 def _populated_sides(pcb) -> list[str]:
-    """Sides carrying at least one SMD BOM part (Issue #9472).
+    """Sides carrying at least one placed SMD BOM part (Issues #9472, #9480).
+
+    A part counts when it is SMD, BOM-included, not ``board_only`` and not
+    DNP: a do-not-populate part is never machine-placed, so it needs no
+    fiducial even when it is still listed in the BOM.
 
     Shared by ``--sides populated`` and the ``fiducials_missing`` /
     ``board_id_missing`` rules so check and fix agree.
@@ -249,6 +253,7 @@ def _populated_sides(pcb) -> list[str]:
                 fp.layer == layer
                 and not fp.exclude_from_bom
                 and "board_only" not in flags
+                and not fp.dnp
                 and _is_smd_part(fp)
             ):
                 sides.append(side)

@@ -16,6 +16,18 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-19
 
+- **PR #9513**: test: correct exact-cap gr_circle docstring and relax strip-side pin
+- **Issue #9511** (closed): test_mask_copper_reinforce_9444: exact-cap docstring names the wrong mechanism, and the pin rests on an 8e-6 overlay margin
+- **PR #9506**: fix: ignore DNP SMD parts when deciding which sides need fiducials
+- **Issue #9480** (closed): _populated_sides ignores dnp, and the fiducials rule docstring still states the pre-#9472 definition
+- **PR #9505**: fix: consider every fragment run in a chain, not just the first
+- **PR #9500**: test: bound pr-only audit-marker check to the job's own ci.yml body
+- **PR #9442**: fix: honour (justify ...) in silk text bounding boxes
+- **Issue #9497** (closed): test_ci_merge_group_invariants: audit-marker block bound never matches, so the marker check spans to EOF
+- **Issue #9433** (closed): Silkscreen checks report findings on left-justified board text that KiCad's DRC accepts (0.29.0)
+- **Issue #9133** (closed): board04 merge_fragment_runs: only the chain's FIRST sub-threshold run is considered, so an earlier stray short segment hard-fails the recipe
+- **Issue #8948** (closed): kct's own managed .kicad_dru makes mask_to_copper incomplete: admit physical_hole_clearance, text_thickness and text_height to the native context allowlist
+- **Issue #8939** (closed): mask_to_copper cannot run on a KiCad 10 board on macOS: /usr/bin/python3 has no pcbnew, Gerber reader rejects KiCad's zero-size aperture and fill regions
 - **PR #9494**: fix: prune dead-end stubs before parallel-group reduction in current paths
 - **PR #9493**: test: pin the mid-run gr_circle size envelope in mask_to_copper
 - **PR #9487**: fix: give every child of a placed library footprint a fresh uuid

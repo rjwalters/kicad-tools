@@ -1446,12 +1446,34 @@ def _resolve_check_scope(args: argparse.Namespace, parser: argparse.ArgumentPars
     return scope
 
 
+def _inactive_input_driven_rules(checker: Any) -> frozenset[str]:
+    """Rules that could not produce findings this run for lack of input.
+
+    Mirrors :func:`kicad_tools.validate.coverage.precheck`: ``ampacity`` needs
+    a net-class-map carrying ``target_ampacity`` entries, ``path_ampacity``
+    needs ``--current-paths`` specs.  ``--migrate-waivers`` uses this so an
+    orphan whose rule never ran is reported as such instead of implying the
+    key changed (issue #9504).  ``--only``/``--skip`` cannot combine with
+    ``--migrate-waivers``, so input absence is the only way a rule goes
+    unevaluated there.
+    """
+    from kicad_tools.validate.coverage import _declares_ampacity
+
+    inactive: set[str] = set()
+    if not _declares_ampacity(getattr(checker, "net_class_map", None)):
+        inactive.add("ampacity")
+    if not getattr(checker, "current_path_specs", None):
+        inactive.add("path_ampacity")
+    return frozenset(inactive)
+
+
 def _run_waiver_migration(
     results: Any,
     pcb: Any,
     waivers_path: Path | None,
     *,
     write: bool,
+    inactive_rules: frozenset[str] = frozenset(),
 ) -> int:
     """Run ``--migrate-waivers`` (Issue #9454) and print its report."""
     from kicad_tools import __version__
@@ -1469,6 +1491,7 @@ def _run_waiver_migration(
             EvidenceContext(pcb, recipe=PRIOR_EVIDENCE_HASH_VERSION),
             write=write,
             tool_version=__version__,
+            inactive_rules=inactive_rules,
         )
     except (OSError, ValueError) as e:
         print(f"Error: cannot migrate waivers in {waivers_path}: {e}", file=sys.stderr)
@@ -2835,7 +2858,13 @@ def main(argv: list[str] | None = None) -> int:
     # Issue #9454: ``--migrate-waivers`` re-binds ev3 waivers to ev4 (previewing
     # unless ``--write``) and stops; a normal check never rewrites a waiver.
     if args.migrate_waivers:
-        return _run_waiver_migration(results, pcb, gw_path, write=args.migrate_write)
+        return _run_waiver_migration(
+            results,
+            pcb,
+            gw_path,
+            write=args.migrate_write,
+            inactive_rules=_inactive_input_driven_rules(checker),
+        )
 
     # Issue #5946: ``--waive KEY`` records reviewed, evidence-bound waivers for
     # the current findings with that key, then applies them below.
