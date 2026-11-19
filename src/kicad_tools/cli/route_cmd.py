@@ -4577,6 +4577,24 @@ def _fallback_receipt_fields(router: Any) -> dict[str, Any]:
     return fields
 
 
+def _grid_arrays_released(router: Any) -> bool:
+    """True once the routing grid's per-cell occupancy arrays are freed.
+
+    ``_release_routing_engine_state`` (issue #4292) swaps every dense plane
+    for a zero-length array before the CLI tail; anything that still indexes
+    them fails with a numpy "index 0 is out of bounds for axis 0 with size 0"
+    instead of a real answer.  The post-release partial save (#9579) must
+    serialise the already-finalized copper without touching the grid, so it
+    needs to know.  Structural on purpose: the freed-and-rebuilt cycle of an
+    escalation flow un-releases the grid, and a stale marker would not.
+    """
+    blocked = getattr(getattr(router, "grid", None), "_blocked", None)
+    shape = getattr(blocked, "shape", None)
+    if not shape:
+        return False
+    return bool(shape[0] == 0)
+
+
 def _save_partial_results() -> bool:
     """Save partial routing results if interrupted.
 
@@ -4663,14 +4681,24 @@ def _save_partial_results() -> bool:
         # Issue #8270: collapse per-grid-cell segments (on a copy) so the
         # ``_partial`` board is editable.  ``cleanup_artifacts`` is what
         # ``router.to_sexp`` runs first; keep it, then serialise merged routes.
+        # Issue #9579: on a released grid (#4292 tail) ``cleanup_artifacts``
+        # dies in the acute-foldback validation -- it indexes the freed
+        # per-cell arrays -- and the ``to_sexp`` fallback then repeats the
+        # same cleanup, so both attempts abort before anything is written.
+        # The released-grid callers run strictly after ``_finalize_routes``,
+        # whose cleanup already ran on the live grid, so the copper here is
+        # final: serialise it without querying the grid at all.  The live
+        # interrupt path (grid still allocated) keeps the full cleanup.
+        released = _grid_arrays_released(router)
         try:
-            router.cleanup_artifacts()
+            if not released:
+                router.cleanup_artifacts()
             route_sexp = "\n\t".join(
                 r.to_sexp(name_only=name_only)
                 for r in _merge_checkpoint_routes(router.routes, router)
             )
         except Exception:  # noqa: BLE001 - fall back to the raw serialisation
-            route_sexp = router.to_sexp(name_only=name_only)
+            route_sexp = router.to_sexp(name_only=name_only, skip_cleanup=released)
         try:
             # Issue #8270: name the partially routed nets for the timeout report.
             info["partial_net_stubs"] = _partial_net_stubs(router)
