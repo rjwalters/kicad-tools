@@ -515,15 +515,22 @@ def rewrite_keeps_pad_escapes(
       still runs over the pad, but no segment terminates there any more, so
       the escape measures as ``same-net pass-through``.
     * **No new copper in an opening** -- a *new* segment (one *old* does not
-      already carry) may not enter any pad's opening zone, same-net or
-      foreign.  Same-net entries are exempt when they terminate on the pad
-      (see :func:`_terminates_on_pad`); foreign-net copper in an opening is a
-      ``different-net`` exposure, always.
+      already carry) may not enter a *foreign* pad's opening at all, and may
+      not enter a *same-net* opening unless it terminates on the pad (see
+      :func:`_terminates_on_pad`) or crosses only the opening's skirt: every
+      endpoint outside the opening and the copper missing the pad centre.
+      The two exempt-failure shapes are the cleanup's own defect classes
+      (#9524) -- a new bend parked inside the opening, and copper merged or
+      straightened across a same-net pad centre -- while a same-net crossing
+      that clips only the opening's corner (the optimizer's corner chamfer
+      landing on a sibling branch's route) is pre-existing behaviour the
+      pinned suite requires the cleanup to keep allowing.
 
-    A new bend inside an opening is always part of a new segment crossing it,
-    so the second rule covers the "new bend in the pad zone" case.  Copper
-    *old* already carries is exempt throughout: the guard undoes regressions
-    the cleanup would introduce, it does not repair pre-existing escapes.
+    A new bend inside an opening is always part of a new segment carrying an
+    endpoint there, so the second rule covers the "new bend in the pad zone"
+    case.  Copper *old* already carries is exempt throughout: the guard undoes
+    regressions the cleanup would introduce, it does not repair pre-existing
+    escapes.
 
     Args:
         old: The chain before the pass.
@@ -560,7 +567,23 @@ def rewrite_keeps_pad_escapes(
         for zone in layer_zones:
             if not zone.segment_intersects(seg.x1, seg.y1, seg.x2, seg.y2):
                 continue
-            if zone.net_name == net_name and _terminates_on_pad(seg, zone, tolerance):
+            if zone.net_name != net_name:
+                return False  # foreign opening: any new copper in it is an exposure
+            if _terminates_on_pad(seg, zone, tolerance):
+                continue
+            if (
+                not any(
+                    zone.contains_point(ex, ey) for ex, ey in ((seg.x1, seg.y1), (seg.x2, seg.y2))
+                )
+                and _point_segment_distance(zone.x, zone.y, seg.x1, seg.y1, seg.x2, seg.y2)
+                > seg.width / 2.0 + tolerance
+            ):
+                # A same-net crossing whose every endpoint stays outside the
+                # opening and whose copper misses the pad centre (the
+                # optimizer's corner chamfer clipping a sibling branch's
+                # opening) is pre-existing behaviour, not a new escape: only
+                # a new bend inside the opening or copper straightened
+                # across the pad centre (AC1/#9524) is the cleanup's defect.
                 continue
             return False
     return True

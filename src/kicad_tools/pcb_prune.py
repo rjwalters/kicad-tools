@@ -1057,21 +1057,23 @@ def _try_snap(
     )
     if ok and zones:
         # Issue #9524: nodes are in their moved state here; ``old`` holds the
-        # pre-snap geometry the guard compares against.
+        # pre-snap geometry.  The guard's ``moves`` tuples take the OLD
+        # geometry first (the already-crossed -> exempt side), then the moved
+        # one -- the order the veto branch is written against.
         from kicad_tools.router.optimizer.geometry import snap_preserves_pad_zones
 
         ok = snap_preserves_pad_zones(
             zones,
             [
                 (
-                    model.nodes[k].a[0],
-                    model.nodes[k].a[1],
-                    model.nodes[k].b[0],
-                    model.nodes[k].b[1],
                     old[k][0][0],
                     old[k][0][1],
                     old[k][1][0],
                     old[k][1][1],
+                    model.nodes[k].a[0],
+                    model.nodes[k].a[1],
+                    model.nodes[k].b[0],
+                    model.nodes[k].b[1],
                     model.nodes[k].layers[0],
                     getattr(model.nodes[k].ref, "net_name", "") or "",
                 )
@@ -1136,14 +1138,14 @@ def _try_reanchor(
                 zones,
                 [
                     (
-                        n.a[0],
-                        n.a[1],
-                        n.b[0],
-                        n.b[1],
                         old[0][0],
                         old[0][1],
                         old[1][0],
                         old[1][1],
+                        n.a[0],
+                        n.a[1],
+                        n.b[0],
+                        n.b[1],
                         n.layers[0],
                         getattr(n.ref, "net_name", "") or "",
                     )

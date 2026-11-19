@@ -263,6 +263,25 @@ class TestRewriteKeepsPadEscapes:
         new = [_seg(90.0, 50.0, 110.0, 50.0, layer=Layer.B_CU)]
         assert not rewrite_keeps_pad_escapes(old, new, zones, TOL)
 
+    def test_same_net_skirt_crossing_is_allowed(self):
+        """The boundary the Kelvin suite pins (Issue #9524 AC4): new same-net
+        copper may clip an opening's corner when every endpoint stays outside
+        it and the copper misses the pad centre -- the optimizer's corner
+        chamfer landing on a sibling branch's route, pre-existing behaviour."""
+        zones = [_zone(100.0, 50.0)]
+        old = [_seg(95.0, 56.5, 105.0, 46.5)]  # misses the opening entirely
+        new = [_seg(95.0, 56.0, 105.0, 46.0)]  # clips the corner, misses centre
+        assert rewrite_keeps_pad_escapes(old, new, zones, TOL)
+
+    def test_same_net_straightened_across_pad_centre_is_vetoed(self):
+        """The SMD shape of AC1: straightened copper across a same-net pad
+        centre is the cleanup's own defect even with both ends far outside
+        the opening (the through-hole test above is the ``*.Cu`` variant)."""
+        zones = [_zone(100.0, 50.0)]
+        old = [_seg(90.0, 50.0, 98.0, 50.0)]
+        new = [_seg(90.0, 50.0, 110.0, 50.0)]
+        assert not rewrite_keeps_pad_escapes(old, new, zones, TOL)
+
     def test_via_in_pad_terminating_entry_is_allowed(self):
         zones = [_zone(*PAD)]
         old = [_seg(98.0, 52.0, 100.0, 50.0)]
@@ -577,3 +596,134 @@ class TestCleanupChainKeepsPadEscapes:
         assert ((99.0, 50.0), (100.0, 50.0)) in by_ends
         assert ((100.0, 50.0), (101.0, 50.0)) in by_ends
         assert ((99.0, 50.0), (101.0, 50.0)) not in by_ends
+
+
+# ---------------------------------------------------------------------------
+# Wiring: the prune snap guard must see (old, new) in the documented order
+# ---------------------------------------------------------------------------
+
+
+_SNAP_BOARD = """\
+(kicad_pcb
+\t(version 20240108)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(general (thickness 1.6) (legacy_teardrops no))
+\t(paper "A4")
+\t(layers
+\t\t(0 "F.Cu" signal)
+\t\t(31 "B.Cu" signal)
+\t\t(44 "Edge.Cuts" user)
+\t)
+\t(setup (pad_to_mask_clearance 0))
+\t(net 0 "")
+\t(net 1 "N1")
+\t(net 2 "N2")
+\t(gr_rect (start 90 30) (end 160 80)
+\t\t(stroke (width 0.1) (type default))
+\t\t(fill none) (layer "Edge.Cuts") (uuid "edge-rect"))
+\t(footprint "P1"
+\t\t(layer "F.Cu") (uuid "fp-p1") (at 100 50)
+\t\t(property "Reference" "P1" (at 0 -1.5) (layer "F.SilkS") (uuid "ref-p1"))
+\t\t(property "Value" "X" (at 0 1.5) (layer "F.Fab") (uuid "val-p1"))
+\t\t(pad "1" smd rect (at 0 0) (size 1.2 0.9) (layers "F.Cu" "F.Paste" "F.Mask")
+\t\t\t(net 1 "N1")))
+\t{p3}
+\t(footprint "P2"
+\t\t(layer "F.Cu") (uuid "fp-p2") (at {p2x} {p2y})
+\t\t(property "Reference" "P2" (at 0 -1.5) (layer "F.SilkS") (uuid "ref-p2"))
+\t\t(property "Value" "X" (at 0 1.5) (layer "F.Fab") (uuid "val-p2"))
+\t\t(pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu" "F.Paste" "F.Mask")
+\t\t\t(net 2 "N2")))
+\t{extra}(segment (start {ax} {ay}) (end 112 48) (width 0.25) (layer "F.Cu") (net 1)
+\t\t(uuid "seg-n1"))
+)
+"""
+
+_P3_PAD = """\
+\t(footprint "P3"
+\t\t(layer "F.Cu") (uuid "fp-p3") (at 112 48)
+\t\t(property "Reference" "P3" (at 0 -1.5) (layer "F.SilkS") (uuid "ref-p3"))
+\t\t(property "Value" "X" (at 0 1.5) (layer "F.Fab") (uuid "val-p3"))
+\t\t(pad "1" smd rect (at 0 0) (size 1.2 0.9) (layers "F.Cu" "F.Paste" "F.Mask")
+\t\t\t(net 1 "N1")))
+"""
+
+# For the reanchor shape: the moved segment's far end T-lands on this free
+# track's centreline (a modelled join that is not a terminal), so P1 stays
+# the net's only terminal and the re-anchor cannot change the partition.
+_LAND_TRACK = """\
+\t(segment (start 107 43) (end 117 53) (width 0.25) (layer "F.Cu") (net 1)
+\t\t(uuid "seg-land"))
+"""
+
+# P2's opening [102.95, 103.45] x [49.15, 49.65] sits between the two aim
+# lines onto P1's centre (100, 50) from (100.5, 50.3) / (100.7, 50.3): the
+# re-aimed body crosses it, the pre-snap bodies pass clear above it.
+_P2_IN_SWEEP = (103.2, 49.4)
+_P2_CLEAR = (150.0, 70.0)
+
+
+class TestPruneSnapGuardWiring:
+    """Board-level regression tests for the ``_try_snap`` / ``_try_reanchor``
+    call sites (issue #9524 review): a snap whose re-aimed body crosses a
+    foreign pad's opening that the pre-snap body avoided must be refused --
+    asserted through ``plan_prune`` itself, so an inverted ``(old, new)``
+    argument order at a call site cannot pass unnoticed.  Each veto case has
+    a control board (P2 out of the sweep) proving the same snap lands when
+    no opening is crossed, so the refusal is the guard's, not some other
+    precondition's."""
+
+    def _run(self, tmp_path: Path, a: tuple[float, float], p2: tuple[float, float], *, reanchor):
+        from kicad_tools.pcb_prune import apply_plans, plan_prune
+        from kicad_tools.schema.pcb import PCB
+
+        src = tmp_path / "board.kicad_pcb"
+        src.write_text(
+            _SNAP_BOARD.format(
+                ax=a[0],
+                ay=a[1],
+                p2x=p2[0],
+                p2y=p2[1],
+                p3="" if reanchor else _P3_PAD,
+                extra=_LAND_TRACK if reanchor else "",
+            )
+        )
+        pcb = PCB.load(str(src))
+        plans = plan_prune(pcb)
+        targets = [point for plan in plans for _idx, _which, point in plan.snaps]
+        stats = apply_plans(pcb, plans)
+        out = tmp_path / "board-out.kicad_pcb"
+        pcb.save(str(out))
+        n1 = [s for s in parse_segments(out.read_text())["N1"] if (s.x1, s.y1) != (107.0, 43.0)]
+        moved = [((s.x1, s.y1), (s.x2, s.y2)) for s in n1 if (s.x2, s.y2) == (112.0, 48.0)]
+        return targets, stats, moved
+
+    def test_snap_re_aim_through_foreign_opening_is_refused(self, tmp_path):
+        # End anchored inside P1 at (100.5, 50.3); the snap onto P1's centre
+        # (100, 50) re-aims the body down through P2's opening.
+        targets, stats, moved = self._run(tmp_path, (100.5, 50.3), _P2_IN_SWEEP, reanchor=False)
+        # Board-relative target of P1's centre: sheet (100, 50), origin (90, 30).
+        assert (10.0, 20.0) not in targets
+        assert stats["ends_snapped"] == 0
+        assert moved == [((100.5, 50.3), (112.0, 48.0))]
+
+    def test_snap_without_foreign_opening_lands(self, tmp_path):
+        targets, stats, moved = self._run(tmp_path, (100.5, 50.3), _P2_CLEAR, reanchor=False)
+        assert (10.0, 20.0) in targets
+        assert stats["ends_snapped"] == 1
+        assert moved == [((100.0, 50.0), (112.0, 48.0))]
+
+    def test_reanchor_re_aim_through_foreign_opening_is_refused(self, tmp_path):
+        # Overlap-held end outside P1 at (100.7, 50.3) (capsule contact only,
+        # issue #8259); centring it on P1 re-aims the body through P2's opening.
+        targets, stats, moved = self._run(tmp_path, (100.7, 50.3), _P2_IN_SWEEP, reanchor=True)
+        assert (10.0, 20.0) not in targets
+        assert stats["ends_snapped"] == 0
+        assert moved == [((100.7, 50.3), (112.0, 48.0))]
+
+    def test_reanchor_without_foreign_opening_lands(self, tmp_path):
+        targets, stats, moved = self._run(tmp_path, (100.7, 50.3), _P2_CLEAR, reanchor=True)
+        assert (10.0, 20.0) in targets
+        assert stats["ends_snapped"] == 1
+        assert moved == [((100.0, 50.0), (112.0, 48.0))]
