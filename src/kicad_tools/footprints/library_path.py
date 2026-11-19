@@ -115,8 +115,9 @@ class _ReadScope:
 
     ``reads`` records each consumed file (deduplicated per ``(root, path)``
     in first-seen order); ``snapshots`` keeps the bytes each read returned so
-    ``PCB.add_footprint_from_file`` parses exactly what the digest describes,
-    however many times the same footprint is placed (Issue #9526 review).
+    the standard-library funnel in ``PCB.add_footprint`` parses exactly what
+    the digest describes, however many times the same footprint is placed
+    (Issue #9526 review).
     """
 
     reads: dict[tuple[str, str], LibraryRead] = field(default_factory=dict)
@@ -175,10 +176,12 @@ def recorded_library_reads() -> tuple[LibraryRead, ...]:
 def recorded_footprint_bytes(path: str | Path) -> bytes | None:
     """The bytes the active scope recorded for *path*, if it has.
 
-    ``PCB.add_footprint_from_file`` parses from this snapshot instead of
-    reopening the file, so the geometry it places is always the bytes the
+    The standard-library funnel in ``PCB.add_footprint`` hands this snapshot
+    to the parser, so a standard placement's geometry is always the bytes the
     provenance digest describes -- across repeated placements of one
-    footprint and across a mid-run library edit (Issue #9526 review)."""
+    footprint and across a mid-run library edit.  Explicit-path loads
+    (direct ``add_footprint_from_file`` calls, project ``fp-lib-table``
+    entries) read the file as it stands instead (Issue #9526 review)."""
     scope = _active_scope()
     if scope is None:
         return None

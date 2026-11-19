@@ -899,14 +899,29 @@ def _check(mounts: list[Path]) -> int:
     print(f"Pinned library tables: {library_tables_dir()}")
     print(f"Docker fallback      : {'on' if docker_fallback_enabled() else 'off'}")
     try:
-        with evidence_toolchain(mounts) as toolchain:
+        # Enter exactly as a footprint-producing run does (board 09 passes
+        # pin_host_footprints=True): under the Docker route the image's
+        # standard footprint library is extracted and pinned, so the line
+        # below names the library a producer's host reads resolve to, not
+        # the host's own (Issue #9526 review).  Without Docker the flag is a
+        # no-op.
+        with evidence_toolchain(mounts, pin_host_footprints=True) as toolchain:
             print(f"kicad-cli            : {toolchain.kicad_cli} ({toolchain.version})")
             library = toolchain.footprint_library
-            print(
-                f"Footprint library    : "
-                f"{library.root if library and library.root else 'not found'}"
-                f" ({library.source if library else '?'})"
-            )
+            if toolchain.docker_image is not None:
+                # The extracted root is a per-run scratch copy that vanishes
+                # with the context; the image is the durable identity of the
+                # library footprint-producing runs read.
+                print(
+                    f"Footprint library    : pinned image {toolchain.docker_image}"
+                    f" ({library.source if library else '?'})"
+                )
+            else:
+                print(
+                    f"Footprint library    : "
+                    f"{library.root if library and library.root else 'not found'}"
+                    f" ({library.source if library else '?'})"
+                )
             problems = check_config_home(toolchain.config_home)
             if problems:
                 raise KiCadEnvironmentError("; ".join(problems))

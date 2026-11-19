@@ -230,6 +230,46 @@ def test_repeated_placements_use_the_recorded_bytes(host_with_pinned_kicad, monk
     assert identity["sha256"] == hashlib.sha256(f"{FP_NAME}\0{consumed}\n".encode()).hexdigest()
 
 
+def test_explicit_file_load_reads_the_file_not_the_snapshot(
+    host_with_pinned_kicad, monkeypatch, tmp_path
+):
+    """A mixed run: standard placements reuse recorded bytes, explicit do not.
+
+    ``add_footprint_from_file`` used to consume the recorded snapshot for
+    every caller, so after a standard placement and a library edit a direct
+    explicit-file load placed the stale (recorded) geometry instead of the
+    file's current bytes.  Only the standard-library funnel passes its
+    recorded bytes now; explicit paths -- direct calls and project
+    ``fp-lib-table`` entries, which delegate with no snapshot -- read the
+    file as it stands (Issue #9526 review)."""
+    from kicad_tools.schema.pcb import PCB
+
+    root = make_library(tmp_path / "lib")
+    monkeypatch.setenv(kicad_toolchain.KICAD_FOOTPRINT_DIR_ENV, str(root))
+    fp = root / FP_NAME
+    with kicad_toolchain.evidence_toolchain():
+        board = PCB.create(width=25, height=25)
+        standard = board.add_footprint(
+            "Capacitor_SMD:C_0805_2012Metric", reference="C1", x=5.0, y=5.0
+        )
+        # A geometry change lands in the library between the placements.
+        fp.write_text(FP_TEXT.replace("-0.9375", "-2.5"))
+        repeat = board.add_footprint(
+            "Capacitor_SMD:C_0805_2012Metric", reference="C2", x=12.0, y=5.0
+        )
+        explicit = board.add_footprint_from_file(fp, reference="C3", x=5.0, y=12.0)
+    # Standard placements (first and repeated) use the recorded bytes; the
+    # explicit load of the same path reads the edited file.
+    recorded_pads = [(-0.9375, 0.0), (0.9375, 0.0)]
+    assert sorted(p.position for p in standard.pads) == recorded_pads
+    assert sorted(p.position for p in repeat.pads) == recorded_pads
+    assert sorted(p.position for p in explicit.pads) == [(-2.5, 0.0), (0.9375, 0.0)]
+    # Outside the evidence scope nothing is recorded; the same explicit load
+    # still reads the file as it stands.
+    after = board.add_footprint_from_file(fp, reference="C4", x=12.0, y=12.0)
+    assert sorted(p.position for p in after.pads) == [(-2.5, 0.0), (0.9375, 0.0)]
+
+
 def test_lookup_without_a_scope_does_not_read_the_file(monkeypatch, tmp_path):
     """Path resolution outside an evidence run performs no provenance read.
 
@@ -336,6 +376,45 @@ def test_docker_mode_records_the_image_library_identity(monkeypatch, tmp_path, e
     # The extracted root is a per-run scratch directory; it is gone with the
     # context, and only the source + digest (stable) go into evidence.
     assert not resolution.root.exists()
+
+
+def test_check_reports_the_image_library_for_producer_runs(
+    monkeypatch, tmp_path, extracting_docker, capsys
+):
+    """``--check`` names the library a footprint-producing run pins.
+
+    It used to enter the context with the default ``pin_host_footprints``
+    (False), so under the Docker route it printed the *host's* library while
+    a pinning producer (board 09) reads the image's extracted copy.  The
+    check now enters pinned and reports the image as the library source
+    (Issue #9526 review)."""
+    host_root = make_library(tmp_path / "host-footprints", pad1_x="-1.5")
+    monkeypatch.setenv(kicad_toolchain.KICAD_FOOTPRINT_DIR_ENV, str(host_root))
+    monkeypatch.setenv(kicad_toolchain.KICAD_DOCKER_ENV, "1")
+    assert kicad_toolchain.main(["--check"]) == 0
+    out = capsys.readouterr().out
+    assert "Evidence toolchain   : ok" in out
+    (line,) = [ln for ln in out.splitlines() if ln.startswith("Footprint library")]
+    assert "pinned image" in line
+    assert kicad_toolchain.docker_image() in line
+    # The host library -- a different one -- must not be named.
+    assert str(host_root) not in line
+
+
+def test_check_reports_the_host_library_without_docker(
+    host_with_pinned_kicad, monkeypatch, tmp_path, capsys
+):
+    """Without the Docker route the pinned entry resolves like an unpinned
+    one: the host root is the library, named as such (Issue #9526 review)."""
+    host_root = make_library(tmp_path / "host-footprints")
+    monkeypatch.setenv(kicad_toolchain.KICAD_FOOTPRINT_DIR_ENV, str(host_root))
+    assert kicad_toolchain.main(["--check"]) == 0
+    out = capsys.readouterr().out
+    assert "Evidence toolchain   : ok" in out
+    (line,) = [ln for ln in out.splitlines() if ln.startswith("Footprint library")]
+    assert str(host_root) in line
+    assert "(env)" in line
+    assert "pinned image" not in line
 
 
 def _load_generator(monkeypatch):
