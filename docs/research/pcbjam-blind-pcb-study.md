@@ -18,9 +18,13 @@ stripped (and, in placement runs, the free parts moved off the board), and has
 to place and route it inside a network-isolated Docker sandbox that cannot
 reach the original design. **21 runs over 9 human-routed boards** (as of
 `b5a047f3`, 2026-11-19), from a 2-layer macropad to a 6-layer ECP5 + DDR3
-board, in three tooling conditions: no agent tooling beyond `pcbnew`/`kicad-cli`,
-a KiCad MCP server, and `bt` — a stateless board-geometry CLI that PCBJam
-built while the runs were going, shaped by what earlier agents asked for.
+board. The runs came in five batches: bare `pcbnew`/`kicad-cli` (where the
+agents wrote their own tooling, up to a self-written A* router on H4E2),
+post-run interviews about what tooling would have helped, autorouters the
+agents found and installed themselves (both Arduino Mega agents fetched
+Freerouting through the proxy), a KiCad MCP server, and `bt` — a stateless
+board-geometry CLI that PCBJam built while the runs were going, shaped by
+what earlier agents asked for.
 Everything the agents saw and produced is published: briefs, full transcripts,
 scoring reports and renders. Scoring is KiCad 10 DRC with zones refilled, plus
 open-item counts per net and track/via metrics. Upstream's own caveat, which
@@ -31,9 +35,13 @@ error bars.
 
 Read from raw.githubusercontent.com on 2026-11-19, at the commit pinned above:
 the repo README, `boards/README.md`, `runs/INDEX.md`, each run's `SUMMARY.md`,
-`brief.md` and `work/BT-REVIEW.md`. No board file was opened and nothing was
-run — that is #9595's job. Quotations below are from the MIT-licensed repo and
-are attributed to their run. `bt` itself is **not published**; what we know of
+`brief.md` and `work/BT-REVIEW.md` — plus PCBJam's public write-up of the
+study ([pcbjam.com/blog/fable-blind-pcb-layout](https://www.pcbjam.com/blog/fable-blind-pcb-layout),
+read 2026-11-19) for the study's own "finished" definition, its per-board
+commentary and its account of the tooling batches. No board file was opened
+and nothing was run — that is #9595's job. Quotations below are from the
+MIT-licensed repo and are attributed to their run. `bt` itself is **not
+published**; what we know of
 it comes only from its public command description (`sandbox/briefs/tools-bt.md`)
 and the agents' reviews in each run's `work/BT-REVIEW.md` — ideas only.
 Nothing from the GPL-3.0 `PCBJam/pcbjam` repository is copied; that repo
@@ -44,16 +52,37 @@ contributes two facts to us (what it is; its licence), stated in our own words.
 Per-run scores cited below are from `runs/INDEX.md` and each run's `SUMMARY.md`
 at the pinned commit. "Clean" = 0 DRC errors and 0 open items on the saved board.
 
-### 1. Small and sparse boards finish — 11 of 21 runs, unaided
+### 1. Boards that aren't dense finish — small or large
 
-Every run on the sparse 2-layer boards and on the passive M.2 adapter came back
-clean: both macropads and all three macropad variants, both H4E2 keypad runs,
+By the raw INDEX scores, 11 of 21 runs came back literally clean (0 DRC, 0
+open): both macropads and all three macropad variants, both H4E2 keypad runs,
 the M.2 PCIe adapter (0:22, $6.93 — the cheapest run), and all three ESP32-P4
-RedBoard runs (0 DRC, 0 open, including place+route in 4:44). The 2-layer
-Arduino Mega place+route run reached 0 open items too (4 DRC left, under a
-board whose input already shows clearance errors under KiCad 10 rules). None
-of these needed exotic planning — the agents fanned out, routed short nets
-first, poured, and finished inside 1–3 hours of wall time.
+RedBoard runs (0 DRC, 0 open, including place+route in 4:44). That raw count
+mixes tooling conditions — none of it was "unaided" in a strong sense: five of
+the eleven ran with `bt` (a macropad, the M.2 adapter, all three RedBoards),
+one with the KiCad MCP server, and five with no tools given, where the agents
+wrote their own scripts (on H4E2, their own A* router). Our raw bar is also
+stricter than the study's own: the write-up defines "finished" as 0 DRC errors
+that weren't already in the input and nothing unconnected, and by that
+definition **16 of 21 runs finished** — the raw-clean eleven plus both Arduino
+Mega runs, the Glasgow route-only run, and both CM4 NAS runs. None of the
+finished runs needed exotic planning — the agents fanned out, routed short
+nets first, poured, and finished inside 1–3 hours of wall time.
+
+The CM4 NVMe NAS is what kills the "only small boards finish" reading, and it
+was the study's real test: a 298-footprint, 4-layer Raspberry Pi CM4 carrier —
+ASMedia PCIe switch feeding four M.2 NVMe slots, Gigabit Ethernet, two USB-C
+ports, six buck regulators — and "no hint at all that the pairs are special:
+one default net class, no differential-pair rules" (write-up). The study's
+largest board by footprints, track length and outline, and both of its runs
+finished (route-only 2:51 / $34.64, place+route 2:55 / $33.95; the 17 DRC on
+each are input `footprint_type_mismatch` findings, and the route-only run's
+one open item is the USB-C shield pads the netlist leaves unconnected on
+purpose). Of the place+route result the write-up says: "this is the best PCIe
+in the study, the human's included" — switch moved next to the sockets, ports
+1–3 at 26–52 mm against the human's 76–101 mm, all 15 pairs on the top layer
+over solid ground. Sparse, not small, is what predicts finishing; the dense
+failures are finding 2.
 
 ### 2. Dense BGA boards run out of room
 
@@ -68,14 +97,20 @@ finding in an instructive way: **route-only completed** (0 open, 4 DRC), while
 **place+route hit the 4-hour time limit with 73 items in 22 nets still open**
 (glasgow-place run, exit 124). Blind placement before routing, not the BGA
 escape itself, is where the dense boards die. The 4-layer ESP32-PoE-ISO (dense
-but no BGA) also stayed incomplete in both conditions (48 and 43 open items).
+but no BGA) also stayed incomplete in all three of its runs (48, 43 and 39
+open items).
 
 ### 3. The slow nets get autorouter treatment — and cut the planes
 
 Across runs the agents converge on the same workflow: hand-compute the
 critical geometry (diff pairs, USB, PoE, PHY fan-out, BGA escapes, DDR buses),
 check it with a probe, apply it — then hand the remaining bulk to the router.
-That bulk is where planes die. The ESP32-PoE-ISO route-only agent allowed an
+Sometimes "the router" is literally an external autorouter: the mega-route
+agent fetched Freerouting through the sandbox proxy (GitHub blocked, so via
+JitPack and Maven Central) and routed most of the board through it in stages —
+its own verdict, "The signal routing is autorouter quality, not hand quality"
+(mega-route run, NOTES.md). That bulk is where planes die. The
+ESP32-PoE-ISO route-only agent allowed an
 inner layer as overflow "without shove" and got **~450 mm of GPIO tracks run
 through the +3.3 V and GND zones**; after refill the +3.3 V net was in 11
 pieces and "one track cut the regulator off from the ESP32" (esp32-route run,
@@ -94,7 +129,12 @@ occurrence in that run's `brief.md`), yet its review reports: "About a third
 of the board's copper (all controlled-impedance pairs, the QFN escape, buses,
 regulator areas) is hand-computed and bt-checked" (redboard-route-bt-a run).
 The ESP32-PoE-ISO agent likewise hand-computed Ethernet pairs, USB and RMII
-lanes against isolation rules without being asked to care. Given a board and
+lanes against isolation rules without being asked to care. The CM4 NAS is the
+clearest case of all: its project carries one default net class and no
+differential-pair rules, yet the route-only agent changed the stack-up on its
+own — "outer layers 0.21 mm above their planes, which is what makes ~90 Ω
+pairs possible at a sane width" (write-up) — added a differential-pair net
+class, and kept In1 as unbroken ground under the pairs. Given a board and
 its net classes, the model treats high-speed pairs as controlled-impedance
 problems unprompted — it plans topology, lanes and skew itself and wants the
 tool to check geometry, not to make design decisions.

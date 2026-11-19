@@ -1456,7 +1456,9 @@ bindings, runtime shims and Playwright tests, published as pcbjam.com. A \
 GPL-3.0 KiCad derivative, so it is subject to the clean-room policy (issue \
 #9589): ideas only, nothing copied in either direction. What we actually \
 learned from the PCBJam team comes from its MIT-licensed sibling study \
-repo: `kct ecosystem show pcbjam-blind-pcb-runs`.\
+repo: `kct ecosystem show pcbjam-blind-pcb-runs`. The licence split's \
+third row, their `bt` agent CLI, is unpublished -- ideas only as well; \
+what we know of it is recorded in the linked study note.\
 """
 reeval_trigger = """
 If the WASM build exposes a stable JavaScript API for reading or checking a \
