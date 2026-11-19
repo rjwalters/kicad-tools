@@ -51,6 +51,9 @@ PR_ONLY_JOBS: dict[str, str] = {
     ),
 }
 
+# The comment marker each PR-only job must carry in ci.yml.
+AUDIT_MARKER = "merge-group-audit: pr-only"
+
 # --- a tiny GitHub-expression evaluator ------------------------------------
 #
 # Enough of the expression language for ci.yml's `if:` / `concurrency:` fields:
@@ -295,6 +298,29 @@ def _concurrency_violations(workflow: dict[str, Any]) -> list[str]:
     return problems
 
 
+def _pr_only_job_block(raw: str, name: str) -> str:
+    """Slice one PR-only job's own body out of ci.yml's raw text.
+
+    The block runs from the ``\\n  <name>:\\n`` job header to the next
+    2-space-indented key (i.e. the next job) or EOF. Bounding on a
+    ``runs-on:`` line would not work: keys *inside* a job are indented four
+    spaces in ci.yml, so a 2-space ``runs-on`` never occurs and the slice
+    would silently run to EOF (#9497), letting a marker anywhere later in
+    the file satisfy the check for every PR-only job.
+    """
+    tail = raw.split(f"\n  {name}:\n", 1)[1]
+    return re.split(r"\n  [A-Za-z0-9_-]+:\n", tail, maxsplit=1)[0]
+
+
+def _pr_only_marker_problems(raw: str) -> list[str]:
+    """PR-only jobs whose own ci.yml body lost the audit marker."""
+    return [
+        f"{name} lost its audit marker"
+        for name in PR_ONLY_JOBS
+        if AUDIT_MARKER not in _pr_only_job_block(raw, name)
+    ]
+
+
 # --- the tests -------------------------------------------------------------
 
 
@@ -320,11 +346,35 @@ def test_gate_check_is_not_vacuous() -> None:
 
 
 def test_pr_only_jobs_exist_and_carry_the_audit_marker() -> None:
-    raw = CI_WORKFLOW_PATH.read_text()
     for name in PR_ONLY_JOBS:
         assert name in WORKFLOW["jobs"], f"stale PR_ONLY_JOBS entry {name!r}"
-        block = raw.split(f"\n  {name}:\n", 1)[1].split("\n  runs-on:", 1)[0]
-        assert "merge-group-audit: pr-only" in block, f"{name} lost its audit marker"
+    assert _pr_only_marker_problems(CI_WORKFLOW_PATH.read_text()) == []
+
+
+def test_pr_only_job_block_is_bounded_to_the_jobs_own_body() -> None:
+    # Shapes the real file must keep handling: a job whose first key is not
+    # `runs-on` (the old bound hung off that literal), and the last job in
+    # the file, where no following key exists and the block runs to EOF.
+    text = "\n  first:\n    needs: setup\n  last:\n    runs-on: ubuntu-latest\n"
+    assert _pr_only_job_block(text, "first") == "    needs: setup"
+    assert _pr_only_job_block(text, "last") == "    runs-on: ubuntu-latest\n"
+
+
+def test_audit_marker_moved_to_another_job_is_detected() -> None:
+    # Regression test for #9497: the block used to be sliced at a 2-space
+    # `"\n  runs-on:"`, which never matches ci.yml (job keys sit at four
+    # spaces), so `block` ran to EOF and a marker anywhere later in the file
+    # satisfied the check for *every* PR-only job. Move the marker from
+    # `changes` to `site`: the sliced block must notice the loss.
+    raw = CI_WORKFLOW_PATH.read_text()
+    assert raw.count(AUDIT_MARKER) == 1
+    mutated = raw.replace(AUDIT_MARKER, "merge-group-audit: moved", 1)
+    site_header = "\n  site:\n"
+    assert site_header in mutated
+    mutated = mutated.replace(
+        site_header, f"{site_header}    # {AUDIT_MARKER} -- decoy in another job\n", 1
+    )
+    assert _pr_only_marker_problems(mutated) == ["changes lost its audit marker"]
 
 
 def test_dropping_the_merge_group_disjunct_is_detected() -> None:
