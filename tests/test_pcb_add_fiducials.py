@@ -216,3 +216,84 @@ def test_project_library_fiducials_are_idempotent(tmp_path):
     before = len(_fids(path))
     run_add_fiducials(path, sides="front")
     assert len(_fids(path)) == before
+
+
+_THT_BACK_PART = """(footprint "Connector_PinHeader_2.54mm:PinHeader_1x02"
+    (layer "B.Cu")
+    (uuid "fp-j1")
+    (at 10 10)
+    (property "Reference" "J1" (at 0 -1.5 0) (layer "B.SilkS"))
+    (property "Value" "hdr" (at 0 1.5 0) (layer "B.Fab"))
+    (pad "1" thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 0 ""))
+    (pad "2" thru_hole circle (at 0 2.54) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 0 "")))"""
+
+
+def test_populated_skips_side_with_only_through_hole_parts(tmp_path):
+    p = _write(tmp_path, _board(extra=_THT_BACK_PART))
+    assert run_add_fiducials(p, sides="populated") == 0
+    fids = _fids(p)
+    assert len(fids) == 3
+    assert {f.layer for f in fids} == {"F.Cu"}
+
+
+def test_populated_counts_smd_pads_without_attr_token(tmp_path):
+    # ``_board`` footprints carry no ``(attr ...)`` token, only SMD pads.
+    p = _write(tmp_path, _board(back_part=True))
+    assert run_add_fiducials(p, sides="populated") == 0
+    assert {f.layer for f in _fids(p)} == {"B.Cu"}
+
+
+def test_populated_counts_attr_smd_without_smd_pads(tmp_path):
+    part = """(footprint "X:Y" (layer "B.Cu") (uuid "fp-x") (at 10 10) (attr smd)
+    (property "Reference" "U9" (at 0 0 0) (layer "B.SilkS"))
+    (property "Value" "x" (at 0 0 0) (layer "B.Fab")))"""
+    p = _write(tmp_path, _board(extra=part))
+    assert run_add_fiducials(p, sides="populated") == 0
+    assert {f.layer for f in _fids(p)} == {"F.Cu", "B.Cu"}
+
+
+def test_populated_ignores_dnp_style_smd_on_back(tmp_path):
+    part = """(footprint "Resistor_SMD:R_0402" (layer "B.Cu") (uuid "fp-r9") (at 10 10)
+    (attr smd exclude_from_bom)
+    (property "Reference" "R9" (at 0 0 0) (layer "B.SilkS"))
+    (property "Value" "x" (at 0 0 0) (layer "B.Fab"))
+    (pad "1" smd roundrect (at 0 0) (size 0.5 0.5) (layers "B.Cu") (net 0 "")))"""
+    p = _write(tmp_path, _board(extra=part))
+    assert run_add_fiducials(p, sides="populated") == 0
+    assert {f.layer for f in _fids(p)} == {"F.Cu"}
+
+
+_DNP_BACK_PART = """(footprint "Resistor_SMD:R_0402" (layer "B.Cu") (uuid "fp-r8") (at 10 10)
+    (attr smd {attrs})
+    (property "Reference" "R8" (at 0 0 0) (layer "B.SilkS"))
+    (property "Value" "x" (at 0 0 0) (layer "B.Fab"))
+    (pad "1" smd roundrect (at 0 0) (size 0.5 0.5) (layers "B.Cu") (net 0 "")))"""
+
+
+@pytest.mark.parametrize("attrs", ["dnp", "dnp exclude_from_bom"])
+def test_populated_ignores_bom_included_dnp_smd_on_back(tmp_path, attrs):
+    """Issue #9480: an SMD+DNP part is not placed, so it populates no side."""
+    p = _write(tmp_path, _board(extra=_DNP_BACK_PART.format(attrs=attrs)))
+    assert run_add_fiducials(p, sides="populated") == 0
+    fids = _fids(p)
+    assert len(fids) == 3
+    assert {f.layer for f in fids} == {"F.Cu"}
+
+
+def test_populated_dnp_part_does_not_unpopulate_side_with_live_part(tmp_path):
+    """Issue #9480: a second, non-DNP SMD part still populates the face."""
+    live = _DNP_BACK_PART.format(attrs="").replace('"fp-r8"', '"fp-r7"').replace("R8", "R7")
+    p = _write(tmp_path, _board(extra=_DNP_BACK_PART.format(attrs="dnp") + live))
+    assert run_add_fiducials(p, sides="populated") == 0
+    assert {f.layer for f in _fids(p)} == {"F.Cu", "B.Cu"}
+
+
+def test_populated_through_hole_only_board_has_no_populated_side(tmp_path, capsys):
+    body = (
+        _board()
+        .replace("Resistor_SMD:R_0402", "Resistor_THT:R_Axial")
+        .replace("smd roundrect", "thru_hole circle")
+    )
+    p = _write(tmp_path, body)
+    assert run_add_fiducials(p, sides="populated") != 0
+    assert _fids(p) == []

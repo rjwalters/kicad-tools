@@ -40,6 +40,7 @@ path can fail loud rather than silently degrade.
 from __future__ import annotations
 
 import math
+import re
 from functools import lru_cache
 from typing import Any
 
@@ -101,26 +102,59 @@ def pad_outline_is_exact(pad: Any) -> bool:
     return not (shape == "roundrect" and _pad_has_chamfer(pad))
 
 
-def custom_pad_board_outline(pad: Any, center: tuple[float, float]) -> Any | None:
-    """Board-frame copper of a ``custom`` pad: its anchor plus filled polygons.
+# The refusal half of ``custom_pad_outline_detail``: the router's ValueError
+# reads "Cannot preserve placement-excluded custom pad REF.PIN: <detail>; only
+# filled zero-width gr_poly primitives ...".  The detail is the part a check
+# finding wants (it names the primitive kind, e.g. "unsupported primitive
+# 'gr_circle'"); the wrapper sentence is routing-speak, and the pad identity
+# is added by the calling rule, which knows the footprint reference.
+_CUSTOM_REFUSAL_DETAIL = re.compile(r"^[^:]+: (.*?); only filled", re.DOTALL)
 
-    Issue #9468.  The schema pad only carries the anchor's nominal ``(size)``;
+
+def custom_pad_outline_detail(
+    pad: Any, center: tuple[float, float]
+) -> tuple[Any | None, str | None]:
+    """Board-frame copper of a ``custom`` pad and, on refusal, the reason.
+
+    Issue #9498.  The schema pad only carries the anchor's nominal ``(size)``;
     the primitives (SOT-89's tab, for one) live in the retained source node, so
     this reuses :func:`kicad_tools.router.fixed_copper.custom_pad_copper` -- the
-    outline the DSN export and router already honour (#5376, #7525) -- rather
-    than a second reading of the same S-expression.
+    outline the DSN export, router and connectivity already honour (#5376,
+    #7525, #9468) -- rather than a second reading of the same S-expression.
 
     ``center`` is the pad *anchor* in board coordinates; the pad's ABSOLUTE
     angle is applied exactly once inside ``custom_pad_copper``.  Returns
-    ``None`` when the pad is not ``custom``, has no source node, or its copper
-    is something that routine refuses (unsupported primitive, layer-specific
-    padstack): callers then keep their nominal-box fallback.
+    ``(geometry, None)`` when the builder produced the anchor-plus-primitives
+    union, ``(None, detail)`` when it refused (unsupported primitive kind,
+    stroked ``gr_poly``, layer-specific padstack, ...), and ``(None, None)``
+    when the pad is not ``custom``, has no source node, or shapely is
+    unavailable.  The ``detail`` names the primitive kind where the refusal is
+    about one.
+
+    Memoised on the pad object (keyed by the centre and the pad's ABSOLUTE
+    rotation, each rounded to nm): one pad is asked for its outline by several
+    rules per ``kct check`` run, and the builder re-parses the pad's
+    S-expression and unions shapely geometry each time.  The rotation is part
+    of the key because it is the other mutable input ``custom_pad_copper``
+    reads: an in-place rotate (``recovery.applicator.
+    _apply_rotate_component``) leaves ``fp.position`` -- and with it a pad at
+    the footprint anchor's board centre -- untouched while advancing the pad's
+    absolute angle, so a centre-only key would hand back the pre-rotation
+    outline.
     """
     if (getattr(pad, "shape", "") or "").lower() != "custom":
-        return None
+        return None, None
     node = getattr(pad, "_sexp_node", None)
     if node is None or not _has_shapely():
-        return None
+        return None, None
+    cache_key = (
+        round(center[0], 9),
+        round(center[1], 9),
+        round(float(getattr(pad, "rotation", 0.0) or 0.0), 9),
+    )
+    cached = pad.__dict__.get("_custom_outline_detail")
+    if cached is not None and cached[0] == cache_key:
+        return cached[1], cached[2]
     from kicad_tools.router.fixed_copper import custom_pad_copper
 
     try:
@@ -134,10 +168,30 @@ def custom_pad_board_outline(pad: Any, center: tuple[float, float]) -> Any | Non
             source_net="",
             source_net_id=0,
         )
-    except ValueError:
-        return None
+    except ValueError as exc:
+        match = _CUSTOM_REFUSAL_DETAIL.match(str(exc))
+        detail = match.group(1) if match is not None else str(exc)
+        pad.__dict__["_custom_outline_detail"] = (cache_key, None, detail)
+        return None, detail
     geometry = copper.geometry
-    return None if geometry.is_empty else geometry
+    if geometry.is_empty:
+        pad.__dict__["_custom_outline_detail"] = (cache_key, None, "primitives enclose no copper")
+        return None, "primitives enclose no copper"
+    pad.__dict__["_custom_outline_detail"] = (cache_key, geometry, None)
+    return geometry, None
+
+
+def custom_pad_board_outline(pad: Any, center: tuple[float, float]) -> Any | None:
+    """Board-frame copper of a ``custom`` pad: its anchor plus filled polygons.
+
+    Thin wrapper over :func:`custom_pad_outline_detail` for callers that only
+    need the geometry: ``None`` when the pad is not ``custom``, has no source
+    node, or its copper is something the builder refuses (see the detail
+    variant for the named reason, Issue #9498); callers then keep their
+    nominal-box fallback.
+    """
+    geometry, _refusal = custom_pad_outline_detail(pad, center)
+    return geometry
 
 
 def pad_board_center(
@@ -216,10 +270,8 @@ def pad_copper_outline(
     (#6453) and was load-bearing only because the box's corners grazed
     foreign pours.
 
-    A ``custom`` pad uses its real anchor-plus-filled-polygon copper (Issue
-    #9468, :func:`custom_pad_board_outline`).  Shapes not modelled exactly
-    (``trapezoid``, chamfered ``roundrect``, and a ``custom`` pad whose copper
-    that helper refuses) fall back to the size box eroded by
+    Shapes not modelled exactly (``trapezoid``, chamfered ``roundrect``,
+    ``custom``) fall back to the size box eroded by
     :data:`PAD_FALLBACK_ERODE` (un-eroded if the erosion empties it), which
     can only under-report contact.  A pad with a non-positive size is its
     bare anchor point.  Returns ``None`` when shapely is unavailable.
@@ -227,9 +279,6 @@ def pad_copper_outline(
     if not _has_shapely():
         return None
     cx, cy = pad_board_center(pad, fp_position, fp_rotation)
-    custom = custom_pad_board_outline(pad, (cx, cy))
-    if custom is not None:
-        return custom
     w, h = pad.size
     if w <= 0 or h <= 0:
         return _ShapelyPoint((cx, cy))

@@ -75,10 +75,39 @@ EXPECTED_STALE: dict[str, str] = {
         "(wedge fix + #8532 fiducials/board-ID) is ahead of the committed "
         "copper too; the gate-pass rebuild owns the re-pin."
     ),
+    # Issue #9097 (PR #9131) adds recipe passes to board 04's
+    # ``generate_design.py`` (fragment merge, silk-over-drill clip,
+    # staircase compression), which changes the file ``readiness.json``
+    # pins.  Regenerating + re-pinning the committed artifact in the same PR
+    # turned 22 tests red (pinned reviewed-escape geometry, the #5744 "routing
+    # never touches footprint silk" invariant, remap identity, strict XPASS on
+    # the DRU), each needing an owner decision, so the regen was backed out.
+    # Issue #9455 owns the regen + re-pin; remove the entry when it lands.
+    "04-stm32-devboard": (
+        "Issue #9455: board 04's recipe moved in #9097 (PR #9131) ahead of the "
+        "committed copper and readiness evidence; the regen + re-pin (and the "
+        "#5744 silk-invariant decision) is owned by #9455."
+    ),
     "07-matchgroup-test": (
         "Issue #8399: the #8602 copper prune changed board 07's authored/reviewed "
         "sources; `refresh_readiness.py` refuses to re-pin while redundant_copper_* "
         "warnings remain (kct check allowance is 0). The last child of #8399 owns the re-pin."
+    ),
+    # PR #9502 (issue #9495) moved board 09's two producers under
+    # run_on_evidence_toolchain without regenerating the committed output:
+    # both files are recorded input hashes of the receipt (check_design.py
+    # AND generate_design.py), so read_readiness() fails closed on two
+    # stale inputs. The staleness is the known consequence of that scope
+    # decision; #9519 tracks the receipt refresh, which regenerates output
+    # the way #9469 did (pinned Docker toolchain, scratch
+    # KICAD_CONFIG_HOME). Remove the entry when that re-pin lands (strict
+    # xfail turns an unexpected pass into a failure).
+    "09-usbc-pd-power": (
+        "Issue #9495: PR #9502 put board 09's producers (check_design.py, "
+        "generate_design.py -- both recorded receipt inputs) under "
+        "run_on_evidence_toolchain without regenerating output; the re-pin "
+        "tracked in #9519 regenerates via the #9469 pinned-toolchain "
+        "workflow. Remove when #9519 lands."
     ),
 }
 

@@ -2190,6 +2190,13 @@ def _staircase_clear_path(
     return None, width, net
 
 
+def _reviewed_design_rules() -> Any:
+    """The reviewed paid-drill ``DesignRules`` the board's own gate checks against."""
+    return runpy.run_path(str(Path(__file__).with_name("manufacturing_process.py")))[
+        "process_rules"
+    ]()
+
+
 def compress_staircases(routed_path: Path) -> bool:
     """Collapse every ``redundant_copper_staircase`` chain in the copper (#8844).
 
@@ -2224,11 +2231,18 @@ def compress_staircases(routed_path: Path) -> bool:
     print("Compressing track staircases (issue #8844)...")
     print("=" * 60)
 
+    # Issue #9097: judge the chains with the SAME clearance the reviewed gate
+    # (``check_manufacturing.make_checker``) hands the rule -- the paid
+    # process's ``min_clearance_mm``.  A bare ``check(pcb, None)`` falls back to
+    # the rule's 0.2 mm default, under which the [OSC_IN] chain has no clear
+    # replacement, so the reviewed gate kept flagging a chain this pass never saw.
+    reviewed_rules = _reviewed_design_rules()
+
     collapsed = 0
     for round_number in range(1, _STAIRCASE_MAX_ROUNDS + 1):
         pcb = PCB.load(routed_path)
         rule = _FlaggedChains()
-        rule.check(pcb, None)
+        rule.check(pcb, reviewed_rules)
         if not rule.flagged:
             print(f"   No staircase findings ({collapsed} chain(s) collapsed)")
             return True
@@ -2255,6 +2269,192 @@ def compress_staircases(routed_path: Path) -> bool:
 
     print("\n   FAILED: staircase findings remain after compression")
     return False
+
+
+def _line_intersection(
+    p: tuple[float, float],
+    d: tuple[float, float],
+    q: tuple[float, float],
+    e: tuple[float, float],
+) -> tuple[float, float, float, float] | None:
+    """Intersect ``p + t*d`` with ``q + u*e``: ``(x, y, t, u)``; None if parallel."""
+    det = d[0] * e[1] - d[1] * e[0]
+    if abs(det) < 1e-9:
+        return None
+    t = ((q[0] - p[0]) * e[1] - (q[1] - p[1]) * e[0]) / det
+    u = ((q[0] - p[0]) * d[1] - (q[1] - p[1]) * d[0]) / det
+    return p[0] + t * d[0], p[1] + t * d[1], t, u
+
+
+def merge_fragment_runs(routed_path: Path) -> bool:
+    """Replace every ``redundant_copper_fragments`` run with one clean corner (#9097).
+
+    The router leaves a sub-0.1 mm jog where an escape leaves a fine-pitch pad
+    (board 04's [BOOT0] at U2.44: ``0.05 mm`` of lateral shift spread over
+    three sub-0.1 mm segments).  ``cleanup_copper`` (#8399) cannot merge them
+    because that would bend the track off the 0/45/90/135 grid.
+
+    The fix keeps the grid by construction: the segment before the run and the
+    segment after it are each *extended along their own direction* to where the
+    two lines meet, and that corner replaces the jog.  Both neighbours keep
+    their angle and their far end, so every node outside the run is unchanged;
+    the new corner is validated with the rule's own clearance oracle (the one
+    that decided the finding was reportable) before any copper is touched.  A
+    run it cannot merge that way (no neighbour on a side, parallel neighbours,
+    a via inside the run, or no clear corner) is reported and fails the recipe,
+    rather than guessed at.
+    """
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.redundant_copper import (
+        FRAGMENT_MAX_MM,
+        FRAGMENT_RUN_MIN,
+        RedundantCopperRule,
+    )
+
+    class _Chains(RedundantCopperRule):
+        """The rule, plus every chain that carries a fragment run."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.flagged: list[tuple[list[Any], str]] = []
+
+        def _report_chain(self, chain, results):  # type: ignore[no-untyped-def]
+            before = sum(v.rule_id == "redundant_copper_fragments" for v in results.violations)
+            super()._report_chain(chain, results)
+            after = sum(v.rule_id == "redundant_copper_fragments" for v in results.violations)
+            if after > before:
+                self.flagged.append((chain, chain[0][0].layer))
+
+    print("\n" + "=" * 60)
+    print("Merging fragment runs (issue #9097)...")
+    print("=" * 60)
+
+    reviewed_rules = _reviewed_design_rules()
+    merged = 0
+    for round_number in range(1, _STAIRCASE_MAX_ROUNDS + 1):
+        pcb = PCB.load(routed_path)
+        rule = _Chains()
+        rule.check(pcb, reviewed_rules)
+        if not rule.flagged:
+            print(f"   No fragment runs ({merged} merged)")
+            return True
+
+        vias = [v.position for v in pcb.vias]
+        changed = False
+        for chain, layer in rule.flagged:
+            lengths = [math.dist(step[0].start, step[0].end) for step in chain]
+            # Every maximal run of sub-threshold segments, not just the first:
+            # a stray short segment elsewhere in the chain must not hide the
+            # flagged run (#9133).
+            runs: list[tuple[int, int]] = []
+            i = 0
+            while i < len(chain):
+                if lengths[i] >= FRAGMENT_MAX_MM:
+                    i += 1
+                    continue
+                stop = i
+                while stop + 1 < len(chain) and lengths[stop + 1] < FRAGMENT_MAX_MM:
+                    stop += 1
+                runs.append((i, stop))
+                i = stop + 1
+            for start, stop in runs:
+                if stop - start + 1 < FRAGMENT_RUN_MIN:
+                    print(
+                        f"   run of {stop - start + 1} in chain on {layer}: "
+                        f"shorter than the {FRAGMENT_RUN_MIN}-segment run minimum; not merged"
+                    )
+                    continue
+                if start == 0:
+                    print(
+                        f"   run in chain on {layer}: no neighbour before the run "
+                        f"(chain start); not merged"
+                    )
+                    continue
+                if stop == len(chain) - 1:
+                    print(
+                        f"   run in chain on {layer}: no neighbour after the run "
+                        f"(chain end); not merged"
+                    )
+                    continue
+                before_seg, _bf, before_to = chain[start - 1]
+                after_seg, after_from, _at = chain[stop + 1]
+                a_from = chain[start - 1][1]
+                b_to = chain[stop + 1][2]
+                interior = [step[1] for step in chain[start : stop + 1]] + [after_from]
+                if any(math.dist(node, via) < 1e-3 for node in interior for via in vias):
+                    print(f"   run in chain on {layer}: a via sits inside the run; not merged")
+                    continue
+                d_a = (before_to[0] - a_from[0], before_to[1] - a_from[1])
+                d_b = (b_to[0] - after_from[0], b_to[1] - after_from[1])
+                hit = _line_intersection(a_from, d_a, after_from, d_b)
+                if hit is None:
+                    print(f"   run in chain on {layer}: neighbours are parallel; not merged")
+                    continue
+                corner, t, u = (hit[0], hit[1]), hit[2], hit[3]
+                if t <= 1e-6 or u >= 1.0 - 1e-6:
+                    print(f"   run in chain on {layer}: corner falls outside the neighbours")
+                    continue
+                width = max(step[0].width for step in chain[start - 1 : stop + 2])
+                net = before_seg.net_number
+                legs = [(a_from, corner), (corner, b_to)]
+                if not rule._path_clear(legs, net, layer, width):
+                    print(f"   run in chain on {layer}: no clear corner at {corner}")
+                    continue
+                pcb.remove_segments([step[0] for step in chain[start - 1 : stop + 2]])
+                for point_a, point_b in legs:
+                    pcb.add_trace(point_a, point_b, width=width, layer=layer, net=net)
+                print(
+                    f"   run of {stop - start + 1} on {layer}: {stop - start + 3} segments -> "
+                    f"2 meeting at corner ({corner[0]:.4f}, {corner[1]:.4f}) at {width} mm"
+                )
+                merged += 1
+                changed = True
+                break
+            else:
+                continue  # no run in this chain merged; the next chain is still valid
+            break  # chains are stale after an edit; re-flag
+        if not changed:
+            break
+        pcb.save(routed_path)
+
+    print("\n   FAILED: fragment runs remain after merging")
+    return False
+
+
+def clip_silk_to_holes(routed_path: Path) -> bool:
+    """Clip footprint silk off every drilled hole (``silk_hole_overlap``, #9097).
+
+    A via is placed by the router/stitcher, so a fixed silk edit (the #8844
+    U2 arm) only fixes the one via it was written for; a fresh regen can put
+    another via under another silk line (J1's right edge, via (174.85, 96.35)).
+    ``SilkscreenRepairer.repair_hole_clearance`` (#9054) is the library pass for
+    this: it measures with the rule's own hole set and threshold, and removes
+    only the ink that has to go.  It never touches copper, so it can run before
+    the final re-pour.  Returns False when a finding is left on a graphic.
+    """
+    from kicad_tools.drc.repair_silkscreen import SilkscreenRepairer
+
+    print("\n" + "=" * 60)
+    print("Clipping silkscreen off drilled holes (issue #9097)...")
+    print("=" * 60)
+
+    repairer = SilkscreenRepairer(routed_path)
+    result = repairer.repair_hole_clearance()
+    for fix in result.fixes:
+        print(
+            f"   {fix.footprint_ref} {fix.element_type} {fix.action} "
+            f"(crossed {', '.join(fix.holes)})"
+        )
+    if result.fixes:
+        repairer.save()
+    print(f"   {len(result.fixes)} silk graphic(s) clipped")
+    if result.marker_lost:
+        print(f"   FAILED: clipping removed the pin-1 marker of {result.marker_lost}")
+        return False
+    if result.residual or result.text_residual:
+        print(f"   FAILED: silk still over a hole: {result.residual + result.text_residual}")
+        return False
+    return True
 
 
 #: How far (in segments) a ``sharp_trace_corner`` repair may walk along the
@@ -3048,6 +3248,16 @@ def main() -> int:
         staircase_success = compress_staircases(routed_path)
         if not staircase_success:
             raise RuntimeError("compress_staircases did not pass (#8844)")
+
+        # Issue #9097: the zero-warning reviewed gate also flags the router's
+        # sub-0.1 mm jog at a fine-pitch escape (``redundant_copper_fragments``)
+        # and silk over a via drill (``silk_hole_overlap``).  Both are fixed
+        # from the rule's own verdict, so a fresh re-route that moves a via or
+        # a track does not need a hand-edited artifact.
+        if not merge_fragment_runs(routed_path):
+            raise RuntimeError("merge_fragment_runs did not pass (#9097)")
+        if not clip_silk_to_holes(routed_path):
+            raise RuntimeError("clip_silk_to_holes did not pass (#9097)")
 
         fill_success = fill_zones(routed_path)
 
