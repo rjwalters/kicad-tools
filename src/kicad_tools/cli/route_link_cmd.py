@@ -376,8 +376,9 @@ def _rules_for_link(args: argparse.Namespace, pcb: Any, base: Any, spec: LinkSpe
         from kicad_tools.placement.hv_domains import build_required_by_domain_pair
         from kicad_tools.router.pairwise_clearance import _norm_net_key
 
-        threshold = getattr(args, "hv_threshold", 30.0)
         pair_bounds = getattr(args, "_pairwise_pair_bounds", None)
+        intervals = getattr(args, "_pairwise_intervals", None) or {}
+        selected = _census_selected_nets(args, pcb)
         me = _norm_net_key(spec.net)
         for name, num in names.items():
             other = _norm_net_key(name)
@@ -391,29 +392,37 @@ def _rules_for_link(args: argparse.Namespace, pcb: Any, base: Any, spec: LinkSpe
                 # (compute_creepage_census); fail closed on the same pair the gate
                 # checks instead of silently falling back to --clearance (#8546).
                 # An authored _pair_bounds cap names this pair the same way the
-                # census sees it, so it must bound |ΔV| here too (#9644).  The
-                # census gates HV membership on the pair's *uncapped* magnitude
-                # (resolve_hv_nets) but then scores the pair at the capped ΔV
-                # with no threshold of its own, so the sub-threshold pre-check
-                # runs on the uncapped ΔV and only the lookup voltage is capped:
-                # a 300 V pair capped at 25 V keeps its 0.500 mm floor instead
-                # of dropping back to --clearance, and a bound-named pair the
-                # preloaded table omitted (cap below --hv-threshold, explicit
-                # ``"SIG": 0`` included) is re-derived here the same way.
-                dv = abs(voltages.get(me, 0.0) - voltages.get(other, 0.0))
-                if dv == 0.0 or dv < threshold:
+                # census sees it, so it must bound |ΔV| here too (#9644).
+                # Census agreement (#9644 review): the gate audits a pair only
+                # when it selected at least one of the two nets (resolve_hv_nets:
+                # class, name, or worst-case |V| vs the board edge) and then
+                # scores the selected pair at the capped, interval-aware ΔV
+                # (max(|a.hi-b.lo|, |b.hi-a.lo|), unmapped nets degenerate at
+                # 0 V) with no threshold of its own.  Replicating exactly that:
+                # a cap on two low-voltage nets the census never selected must
+                # not raise their floor, while a class/name-selected
+                # sub-threshold net still gets its census floor against an
+                # omitted neighbour.
+                if me not in selected and other not in selected:
                     continue
+                va = voltages.get(me, 0.0)
+                vb = voltages.get(other, 0.0)
+                lo_a, hi_a = intervals.get(me, (va, va))
+                lo_b, hi_b = intervals.get(other, (vb, vb))
+                dv = max(abs(hi_a - lo_b), abs(hi_b - lo_a))
                 if bound is not None:
                     dv = min(dv, bound[0])
+                if dv == 0.0:
+                    continue
                 try:
                     mm = build_required_by_domain_pair(
-                        {me: voltages.get(me, 0.0), other: voltages.get(other, 0.0)},
+                        {me: va, other: vb},
                         standard_id=getattr(args, "creepage_standard", "iec60664"),
                         pollution_degree=getattr(args, "pollution_degree", 2),
                         material_group=getattr(args, "material_group", "IIIa"),
-                        hv_threshold=0.0 if bound is not None else threshold,
+                        hv_threshold=0.0,
                         pair_bounds=pair_bounds,
-                        domain_intervals=getattr(args, "_pairwise_intervals", None),
+                        domain_intervals=intervals or None,
                     ).get(pair)
                 except StandardLookupError as exc:
                     raise LinkSpecError(
@@ -660,6 +669,31 @@ def _hv_nets_for(pcb: Any, pcb_path: Path, args: argparse.Namespace) -> Any:
         edge_voltage=mi["edge_voltage"],
         census_threshold=getattr(args, "hv_threshold", 30.0),
     )
+
+
+def _census_selected_nets(args: argparse.Namespace, pcb: Any) -> frozenset[str]:
+    """Normalized names of the nets the per-link creepage gate's census audits.
+
+    The omitted-net/cap fallback in :func:`_rules_for_link` must restore a
+    missing floor only for pairs this selection actually audits (#9644): the
+    census records rows per selected net, so a pair with neither net selected
+    is never scored and must keep its ``--clearance``/authored floor.  Cached
+    on ``args`` -- the map file and the board's net names/classes do not change
+    within one run.
+    """
+    cached: frozenset[str] | None = getattr(args, "_census_selected", None)
+    if cached is not None:
+        return cached
+    from kicad_tools.router.pairwise_clearance import _norm_net_key
+
+    selected: frozenset[str] = frozenset()
+    pcb_path = getattr(args, "pcb", None)
+    if pcb_path:
+        selected = frozenset(
+            _norm_net_key(name) for name in _hv_nets_for(pcb, Path(pcb_path), args).values()
+        )
+    args._census_selected = selected
+    return selected
 
 
 def _gate_enabled(args: argparse.Namespace) -> bool:

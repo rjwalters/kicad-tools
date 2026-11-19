@@ -24,7 +24,7 @@ from kicad_tools.router.link_router import (  # noqa: E402
 )
 from kicad_tools.schema.pcb import PCB  # noqa: E402
 
-_HEAD = """(kicad_pcb
+_HEAD_PRE = """(kicad_pcb
   (version 20240108)
   (generator "test")
   (general (thickness 1.6))
@@ -32,18 +32,16 @@ _HEAD = """(kicad_pcb
   (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
   (setup (pad_to_mask_clearance 0))
   (net 0 "")
-  (net 1 "SIG")
-  (net 2 "HV")
-  (net 3 "LV")
-  (gr_rect (start 100 100) (end 130 120) (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))
 """
+_HEAD_EDGE = '  (gr_rect (start 100 100) (end 130 120) (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))\n'
+_HEAD = _HEAD_PRE + '  (net 1 "SIG")\n  (net 2 "HV")\n  (net 3 "LV")\n' + _HEAD_EDGE
 
 
-def _pad(n: int, x: float, y: float, net: int, name: str) -> str:
+def _pad(n: int, x: float, y: float, net: int, name: str, size: float = 0.8) -> str:
     return (
         f'  (footprint "R" (layer "F.Cu") (uuid "00000000-0000-0000-0000-00000000000{n}") (at {x} {y})\n'
         f'    (fp_text reference "R{n}" (at 0 -1.5) (layer "F.SilkS"))\n'
-        f'    (pad "1" smd rect (at 0 0) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") '
+        f'    (pad "1" smd rect (at 0 0) (size {size} {size}) (layers "F.Cu" "F.Paste" "F.Mask") '
         f'(net {net} "{name}")))\n'
     )
 
@@ -58,6 +56,15 @@ def _seg(n: int, x1, y1, x2, y2, net: int) -> str:
 def _write(tmp_path: Path, body: str) -> Path:
     p = tmp_path / "b.kicad_pcb"
     p.write_text(_HEAD + body + ")\n")
+    return p
+
+
+def _write_nets(tmp_path: Path, nets: list[str], body: str) -> Path:
+    """Board whose declared nets are ``nets`` (numbered from 1) -- for fixtures
+    that need other/more nets than ``_HEAD``'s SIG/HV/LV trio (#9644 review)."""
+    decls = "".join(f'  (net {i} "{n}")\n' for i, n in enumerate(nets, start=1))
+    p = tmp_path / "b.kicad_pcb"
+    p.write_text(_HEAD_PRE + decls + _HEAD_EDGE + body + ")\n")
     return p
 
 
@@ -321,11 +328,19 @@ class TestUnmappedNetPairCaps:
         """The #9656 review repro: HV copper 0.55 mm off the straight line, 25 V
         device cap.  A dropped floor routed copper the census (0.500 mm at the
         capped 25 V) rejects; the capped floor must keep the committed link."""
+        import contextlib
         from collections import Counter
 
-        from kicad_tools.cli import route_link_cmd
+        from kicad_tools.cli import kicad_toolchain, route_link_cmd
 
         monkeypatch.setattr(route_link_cmd, "_drc_finding_counts", lambda path: Counter())
+        # Keep the gate host-release-independent (#9644 review): the run enters
+        # evidence_toolchain for the commit gate, which refuses a kicad-cli
+        # other than the pinned image release.  Stubbed here (as in
+        # TestCollapseKeepsMapFloor) so the real creepage census gate runs.
+        monkeypatch.setattr(
+            kicad_toolchain, "evidence_toolchain", lambda *a, **k: contextlib.nullcontext()
+        )
         body = (
             _pad(1, 105, 110, 1, "SIG")
             + _pad(2, 125, 110, 1, "SIG")
@@ -357,25 +372,7 @@ class TestUnmappedNetPairCaps:
         Wired exactly as route-link's gate (``_census_failures``): the census
         is the expected result the fallback floor must reproduce (#9644).
         """
-        from kicad_tools.cli.route_link_cmd import _hv_nets_for, _map_inputs
-        from kicad_tools.creepage.engine import compute_creepage_census
-
-        mi = _map_inputs(a)
-        report = compute_creepage_census(
-            pcb,
-            _hv_nets_for(pcb, Path(a.pcb), a),
-            None,
-            standard=getattr(a, "creepage_standard", "iec60664"),
-            pollution_degree=getattr(a, "pollution_degree", 2),
-            material_group=getattr(a, "material_group", "IIIa"),
-            voltage_map=mi["voltage_map"],
-            standard_obj=mi["standard_obj"],
-            edge_voltage=mi["edge_voltage"],
-            pair_bounds=mi["pair_bounds"],
-        )
-        return max(
-            p.required_creepage_mm for p in report.pairs if {p.net_a, p.net_b} == {"HV", "SIG"}
-        )
+        return _census_pair_required_mm(a, pcb, {"HV", "SIG"})
 
     def test_cap_naming_other_pair_keeps_full_floor(self, tmp_path):
         """Without a cap naming the omitted-net pair the fallback still enforces
@@ -426,6 +423,141 @@ class TestUnmappedNetPairCaps:
             "vm",
         )
         assert "TIPO" in capsys.readouterr().err
+
+
+def _census_pair_required_mm(a, pcb, pair: set[str]) -> float:
+    """The creepage census's own required creepage for ``pair``.
+
+    Wired exactly as route-link's gate (``_census_failures``): the census is
+    the expected result the fallback floor must reproduce (#9644).
+    """
+    from kicad_tools.cli.route_link_cmd import _hv_nets_for, _map_inputs
+    from kicad_tools.creepage.engine import compute_creepage_census
+
+    mi = _map_inputs(a)
+    report = compute_creepage_census(
+        pcb,
+        _hv_nets_for(pcb, Path(a.pcb), a),
+        None,
+        standard=getattr(a, "creepage_standard", "iec60664"),
+        pollution_degree=getattr(a, "pollution_degree", 2),
+        material_group=getattr(a, "material_group", "IIIa"),
+        voltage_map=mi["voltage_map"],
+        standard_obj=mi["standard_obj"],
+        edge_voltage=mi["edge_voltage"],
+        pair_bounds=mi["pair_bounds"],
+    )
+    return max(p.required_creepage_mm for p in report.pairs if {p.net_a, p.net_b} == pair)
+
+
+class TestFallbackCensusSelection:
+    """#9644 review: the omitted-net/cap fallback must gate on the census's own
+    net selection (resolve_hv_nets) and score selected pairs with the capped,
+    interval-aware lookup -- the scalar voltage-difference pre-check is gone."""
+
+    BODY = (
+        _pad(1, 105, 110, 1, "SIG", size=0.3)
+        + _pad(2, 125, 110, 1, "SIG", size=0.3)
+        + _seg(2, 100.4, 109.45, 129.6, 109.45, 2)  # BANK_N flanking the line
+        + _seg(2, 100.4, 110.55, 129.6, 110.55, 2)
+        + _seg(3, 103, 116, 127, 116, 3)  # HV_AUX well below the corridor
+    )
+
+    def _args(self, tmp_path, vm_dict, nets, body, name="vm"):
+        from kicad_tools.cli.route_cmd import _preload_voltage_map
+
+        vm = tmp_path / f"{name}.json"
+        vm.write_text(json.dumps(vm_dict))
+        p = _write_nets(tmp_path, nets, body)
+        pcb = PCB.load(str(p))
+        a = _parse(str(p), "--voltage-map", str(vm), "--link", "SIG R1.1 R2.1")
+        assert _preload_voltage_map(a) == 0
+        return a, pcb
+
+    def _floor(self, a, pcb, net: int) -> float:
+        return _rules_for_link(a, pcb, _rules_from_args(a, pcb), a.links[0]).clearance_for(net)
+
+    def test_cap_on_pair_outside_census_keeps_floor(self, tmp_path):
+        """The review's corridor repro: SIG +20 V / BANK_N -20 V capped at 25 V
+        with an active 300 V HV_AUX net.  The census selects only HV_AUX, so
+        the SIG/BANK_N pair is never audited and the cap must not raise
+        BANK_N's floor above --clearance."""
+        a, pcb = self._args(
+            tmp_path,
+            {
+                "SIG": 20,
+                "BANK_N": -20,
+                "HV_AUX": 300,
+                "_pair_bounds": [{"nets": ["SIG", "BANK_N"], "max_dv": 25, "why": "device limit"}],
+            },
+            ["SIG", "BANK_N", "HV_AUX"],
+            self.BODY,
+        )
+        base = _rules_from_args(a, pcb)
+        assert self._floor(a, pcb, 2) == base.clearance
+        # HV_AUX is selected and 280 V off SIG: its table floor still applies.
+        assert self._floor(a, pcb, 3) > base.clearance
+
+    def test_cap_on_pair_outside_census_keeps_corridor_routable(self, tmp_path, capsys):
+        """End-to-end: the same board routes through the 0.9 mm BANK_N corridor
+        (unroutable while the cap wrongly imposed the 0.500 mm census floor)."""
+        a, _ = self._args(
+            tmp_path,
+            {
+                "SIG": 20,
+                "BANK_N": -20,
+                "HV_AUX": 300,
+                "_pair_bounds": [{"nets": ["SIG", "BANK_N"], "max_dv": 25, "why": "device limit"}],
+            },
+            ["SIG", "BANK_N", "HV_AUX"],
+            self.BODY,
+            name="vm-probe",
+        )
+        rc = main(
+            ["route-link", "--format", "json", "--probe", str(a.pcb), "--link", "SIG R1.1 R2.1",
+             "--link-layers", "F.Cu", "--voltage-map", str(a.voltage_map)]
+        )  # fmt: skip
+        assert rc == 0
+        link = json.loads(capsys.readouterr().out)["links"][0]
+        assert link["routable"]
+        assert 19.0 < link["length_mm"] < 20.5
+
+    def test_name_selected_omitted_pair_gets_census_floor(self, tmp_path):
+        """HV at 25 V is below --hv-threshold but its name selects it for the
+        census; the omitted SIG must still get the capped census floor (the
+        scalar pre-check used to skip it and the gate rolled the link back)."""
+        a, pcb = self._args(
+            tmp_path,
+            {
+                "HV": 25,
+                "_pair_bounds": [{"nets": ["HV", "SIG"], "max_dv": 20, "why": "device limit"}],
+            },
+            ["SIG", "HV", "LV"],
+            TestVoltageMapFloors.BODY,
+        )
+        assert self._floor(a, pcb, 2) == pytest.approx(
+            _census_pair_required_mm(a, pcb, {"HV", "SIG"})
+        )
+        assert self._floor(a, pcb, 2) == pytest.approx(0.48)
+
+    def test_interval_pair_cap_uses_interval_dv(self, tmp_path):
+        """Both nets spanning -150..+150 V with a 25 V cap: the scalar collapse
+        differences the pair to 0 V, but the census (and now the fallback) see
+        the 300 V interval stress capped to 25 V -> 0.500 mm."""
+        a, pcb = self._args(
+            tmp_path,
+            {
+                "SIG": {"min": -150, "max": 150},
+                "HV": {"min": -150, "max": 150},
+                "_pair_bounds": [{"nets": ["SIG", "HV"], "max_dv": 25, "why": "device limit"}],
+            },
+            ["SIG", "HV", "LV"],
+            TestVoltageMapFloors.BODY,
+        )
+        assert self._floor(a, pcb, 2) == pytest.approx(
+            _census_pair_required_mm(a, pcb, {"SIG", "HV"})
+        )
+        assert self._floor(a, pcb, 2) == pytest.approx(0.5)
 
 
 class TestCorridorBound:
