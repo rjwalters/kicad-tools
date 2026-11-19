@@ -24,7 +24,7 @@ WIDTH = (
     SIZE[0] * sum(silk._TEXT_CHAR_ADVANCE_QUANTA[c] for c in TEXT) / 21.0
     + THICK
     + silk._TEXT_WIDTH_GUARD_MM
-    + silk._TEXT_END_TRIM_MM  # 'ABCD' ends in 'D', a wide-ink-end glyph
+    + silk._TEXT_END_TRIM_MM  # 'ABCD' ends in 'D', a short-ink-end glyph
 )
 HEIGHT = SIZE[1] + THICK
 

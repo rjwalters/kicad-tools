@@ -92,8 +92,11 @@ ASSOCIATION_MARGIN_MM = 0.4
 #: of text length (Issue #8628).  Since #9515 the box itself covers plotted
 #: ink (measured advance table, 10.0.6 gerber scan), so the slack now
 #: compensates only the DRC extent inflation: re-derived from the same
-#: probes, "C22" still needs 0.120 mm over the new box and "LED4" needs none,
-#: so 0.13 mm keeps the measured worst case with margin.  Planner-only;
+#: ``pcb drc`` probe-board measurements -- the 0.120 mm is a DRC-extent gap,
+#: not a gerber-ink gap, and comes from the DRC probes rather than the
+#: plotted-ink scan that measured the advance table -- "C22" still needs
+#: 0.120 mm over the new box and "LED4" needs none, so 0.13 mm keeps the
+#: measured worst case with margin.  Planner-only;
 #: ``kct check`` semantics are unchanged (Issues #8628, #9515).
 KICAD_TEXT_EXTENT_SLACK_MM = 0.13
 

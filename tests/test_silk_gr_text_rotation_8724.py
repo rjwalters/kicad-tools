@@ -79,7 +79,7 @@ def test_gr_text_bbox_extents_follow_rotation(tmp_path, angle):
         sum(silk._TEXT_CHAR_ADVANCE_QUANTA[c] for c in "ABCD") / 21.0
         + 0.15
         + silk._TEXT_WIDTH_GUARD_MM
-        + silk._TEXT_END_TRIM_MM  # 'ABCD' ends in 'D', a wide-ink-end glyph
+        + silk._TEXT_END_TRIM_MM  # 'ABCD' ends in 'D', a short-ink-end glyph
     )
     short = 1.15
     if angle in (90, 270):

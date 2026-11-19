@@ -97,11 +97,16 @@ from kicad_tools.silkscreen._silk_defaults import (  # noqa: E402
 # F.SilkS with kicad-cli 10.0.6 (the pinned CI image) and scanning the gerber
 # stroke vertices plus the round aperture diameter: for every probed glyph the
 # plotted ink width of a repeated-glyph string is exactly
-# ``(n - 1) * advance + ink``, and all advances are integer quanta.  178 probe
-# strings (A-Z, a-z, 0-9, 12 symbols, space; lengths 1-10; sizes 0.8/1.0/2.0;
-# thicknesses 0.12/0.15/0.3; centred/left/right, 0/90 deg) are covered by the
-# model below -- advance sum, plus aperture/guard terms, minus the capped
-# end trim -- with zero violations: it is an over-approximation of plotted
+# ``(n - 1) * advance + ink``, and all advances are integer quanta.  A
+# string's coverage therefore reduces to its LAST glyph's ``b = ink_1 -
+# advance``, which the single-glyph probes in
+# ``tests/test_silk_text_width_9515.py`` pin for all 74 ink-bearing glyphs
+# (space has no ink of its own).  Against those measured values the model
+# below -- advance sum, plus aperture/guard terms, minus the capped end trim
+# -- covers every glyph at every probed size (0.8/1.0/2.0 mm) with zero
+# violations, including the original 178 probe strings (A-Z, a-z, 0-9,
+# 12 symbols, space; lengths 1-10; thicknesses 0.12/0.15/0.3;
+# centred/left/right, 0/90 deg): it is an over-approximation of plotted
 # ink, which is the direction the box-based silk rules need (over-coverage
 # can only cost a hairline intersection, suppressed by the
 # ``_MIN_*_OVERLAP_AREA*`` gates; under-coverage drops real findings).
@@ -219,12 +224,37 @@ _TEXT_WIDTH_GUARD_MM = 0.01
 #: own end pads by ~0.14 mm, but an untrimmed advance-sum box reached them,
 #: Issue #9515).  The trim is capped at 0.10 mm: deeper trims would spend the
 #: coverage headroom (``font_thickness`` + guard must absorb the <=0.15 mm
-#: string-position wander measured across mixed strings).  Glyphs whose ink
-#: ends within 0.10 mm of the advance ('A' 'T' 'V' 'Y' 'f' 't' 'j' '/' '_',
-#: space) get no trim -- underscore ink reaches its full advance plus the
-#: aperture, so trimming it would under-cover.
+#: string-position wander measured across mixed strings).
+#:
+#: The trim decision is pinned per glyph by measurement, not by prose: the
+#: single-glyph gerber probes in ``tests/test_silk_text_width_9515.py``
+#: measure each glyph's plotted ink ``b = ink_1 - advance`` (at the 1.0 mm /
+#: 0.15 mm probe size), and a glyph is trimmed iff ``b < -0.10 mm`` -- i.e.
+#: its ink ends more than 0.10 mm short of its advance.  Measured ``b`` sits
+#: on the 1/21 mm grid: -0.1357 mm or deeper for every trimmed glyph
+#: (shallowest: ``W X Z v w x y z``) and -0.0881 mm or shallower for every
+#: untrimmed one (shallowest: ``j``), so the -0.10 mm threshold separates the
+#: sets with margin on both sides.  ``t`` (-0.0405) and ``e`` (-0.2310) are
+#: the pair that exposed the original defect: the frozenset exempted ``e``
+#: where ``t`` was meant (Issue #9515 review), trimming ``t`` ink that ends
+#: within 0.04 mm of its advance.  The untrimmed set is exactly the measured
+#: one -- '/' 'A' 'T' 'V' 'Y' 'f' 't' 'j' '_' and space -- underscore ink
+#: reaches its full advance plus the aperture, so trimming it would
+#: under-cover; ``_TEXT_SHORT_INK_END`` below holds the complement (the
+#: trimmed glyphs, whose ink ends *short* of the advance).
+#:
+#: Small-size limit: the trim is a fixed -0.10 mm, but a glyph's
+#: (advance - ink) gap scales with font size.  A single-glyph string's
+#: coverage margin is ``-b_model * size + guard + trim`` (``b_model`` = ``b``
+#: minus the aperture term; ``font_thickness`` cancels), which stays positive
+#: at every probed size (0.8 / 1.0 / 2.0 mm) but reaches break-even around
+#: ~0.32 mm font size for the shallowest trimmed glyph -- unverified below
+#: the smallest pinned probe (0.8 mm).  (KiCad also clamps the plotted
+#: stroke aperture -- a size 1.0 / 0.30 mm thickness probe plots with a
+#: 0.25 mm aperture -- so the ``+ font_thickness`` term can only over-cover
+#: clamped text, never under.)
 _TEXT_END_TRIM_MM = -0.10
-_TEXT_WIDE_INK_END = frozenset("BCDEFGHIJKLMNOPQRSUWXZ0123456789abcdghiklmnopqrstuvwxyz!%'()+-.:?")
+_TEXT_SHORT_INK_END = frozenset("BCDEFGHIJKLMNOPQRSUWXZ0123456789abcdeghiklmnopqrsuvwxyz!%'()+-.:?")
 
 # Floating-point tolerance for clearance comparisons (0.1 micron), matching
 # ``edge.py``'s ``_CLEARANCE_EPSILON_MM``.
@@ -823,7 +853,7 @@ def _text_bbox_geometry(
         / 21.0
         + font_thickness
         + _TEXT_WIDTH_GUARD_MM
-        + (_TEXT_END_TRIM_MM if text[-1] in _TEXT_WIDE_INK_END else 0.0)
+        + (_TEXT_END_TRIM_MM if text[-1] in _TEXT_SHORT_INK_END else 0.0)
     )
     height = font_size[1] + font_thickness
     cx, cy = center
