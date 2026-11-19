@@ -225,7 +225,7 @@ from kicad_tools.core.geometry import point_to_segment_distance, segments_inters
 from kicad_tools.core.layers import COPPER_LAYER_ORDER, via_spans_layer
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
     from kicad_tools.manufacturers import DesignRules
     from kicad_tools.schema.pcb import PCB, Footprint, Net, Pad, Segment, Via, Zone
@@ -1561,6 +1561,18 @@ class _CopperGraph:
     adjacency: dict[_Node, list[tuple[_Node, _GraphEdge]]] = field(default_factory=dict)
     pads: dict[tuple[str, str, int], _Node] = field(default_factory=dict)
     internal: dict[_Node, list[Segment]] = field(default_factory=dict)
+    # For each external edge landing on a pad hub, the physical points where
+    # its copper meets pad copper, per hub (#9647). Needed to tell a wholly
+    # pad-internal segment the route continues along from one a branch
+    # merely shares the pad with.
+    attachments: dict[_GraphEdge, list[tuple[_Node, tuple[float, float]]]] = field(
+        default_factory=dict
+    )
+    # Pad centres per hub, in the same terms as ``attachments`` points: the
+    # current's pad-side terminal. A wholly pad-internal segment that only
+    # touches route copper AT the centre is a branch hanging off the
+    # terminal, not copper the declared current rides (#9647).
+    pad_centres: dict[_Node, set[tuple[float, float]]] = field(default_factory=dict)
 
 
 def _copper_node(point: tuple[float, float], layer: str) -> _Node:
@@ -1648,9 +1660,12 @@ def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGra
             node = parents[node]
         return node
 
+    from kicad_tools.core.geometry import rotate_pad_offset
     from kicad_tools.schema.physical_identity import footprint_keys
 
+    graph = _CopperGraph()
     pad_contacts: dict[tuple[str, str, int], list[_Node]] = {}
+    pad_nodes: set[_Node] = set()
     internal_edges: set[_GraphEdge] = set()
     wholly_internal_ids: set[int] = set()
     for component_id, fp in zip(footprint_keys(pcb.footprints), pcb.footprints, strict=True):
@@ -1687,9 +1702,19 @@ def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGra
                     hub = root(group[0])
                     for node in group[1:]:
                         parents[root(node)] = hub
+                    offset = rotate_pad_offset(pad.position[0], pad.position[1], fp.rotation)
+                    graph.pad_centres.setdefault(hub, set()).add(
+                        (fp.position[0] + offset[0], fp.position[1] + offset[1])
+                    )
             pad_contacts[(component_id, pad.number, occurrence)] = nodes
+            pad_nodes.update(nodes)
 
-    graph = _CopperGraph()
+    # A later overlapping pad can contract an earlier group's hub; re-key the
+    # centres to the final roots the rest of the graph is keyed by.
+    for hub in list(graph.pad_centres):
+        centres = graph.pad_centres.pop(hub)
+        graph.pad_centres.setdefault(root(hub), set()).update(centres)
+
     for key, nodes in pad_contacts.items():
         hubs = {root(node) for node in nodes}
         if len(hubs) == 1:
@@ -1705,6 +1730,9 @@ def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGra
             if edge.segment is not None and id(edge.segment) in wholly_internal_ids:
                 graph.internal.setdefault(ra, []).append(edge.segment)
             continue
+        for node, hub in ((a, ra), (b, rb)):
+            if node in pad_nodes:
+                graph.attachments.setdefault(edge, []).append((hub, node[:2]))
         graph.adjacency[ra].append((rb, edge))
         graph.adjacency[rb].append((ra, edge))
     return graph
@@ -1726,13 +1754,57 @@ def _bfs_path(graph: _CopperGraph, start: _Node, goal: _Node) -> list[Segment] |
                 queue.append(nxt)
     if goal not in visited:
         return None
-    evidence = list(graph.internal.get(goal, []))
+    route_edges: list[_GraphEdge] = []
+    node = goal
+    while node != start:
+        prev, edge = parent[node]
+        route_edges.append(edge)
+        node = prev
+    on_route = set(route_edges)
+
+    def hub_attachments(hub: _Node, edges: Iterable[_GraphEdge]) -> list[tuple[float, float]]:
+        return [
+            point
+            for edge in edges
+            for attach_hub, point in graph.attachments.get(edge, [])
+            if attach_hub == hub
+        ]
+
+    def internal_evidence(hub: _Node) -> list[Segment]:
+        # Wholly pad-internal copper is evidence only where the route rides
+        # it beyond the pad centre -- the current's pad-side terminal. A
+        # segment whose span only meets route copper at the centre itself is
+        # a branch hanging off the terminal (a Kelvin/sense tap whose first
+        # segment starts wholly inside a large endpoint pad, #9647), while a
+        # segment reached at a non-centre attachment point is in series with
+        # the route: a trunk piece buried in the pad, or a stub to a via
+        # dropped inside it.
+        internal = graph.internal.get(hub)
+        if not internal:
+            return []
+        boarded = [
+            point
+            for point in hub_attachments(hub, on_route)
+            if not any(
+                math.dist(point, centre) <= _PAD_EPS for centre in graph.pad_centres.get(hub, ())
+            )
+        ]
+        return [
+            seg
+            for seg in internal
+            if any(
+                point_to_segment_distance(*point, *seg.start, *seg.end) <= _PAD_EPS
+                for point in boarded
+            )
+        ]
+
+    evidence = internal_evidence(goal)
     node = goal
     while node != start:
         prev, edge = parent[node]
         if edge.segment is not None:
             evidence.append(edge.segment)
-        evidence.extend(graph.internal.get(prev, []))
+        evidence.extend(internal_evidence(prev))
         node = prev
     # A via may split an original segment into several traversed graph edges.
     # Audit/ampacity/reinforcement still operate on whole original segments.
