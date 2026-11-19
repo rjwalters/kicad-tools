@@ -3773,6 +3773,20 @@ def build_check_rule_set(
     )
 
     copper_outer, copper_inner = stackup_copper_oz(pcb)
+    # Issue #9590: resolve the fab-view passes (net-agnostic copper gap,
+    # tht_smd_spacing, pad mask bridge) exactly like the CLI's flag-free
+    # default path, so a rule set built here agrees with ``kct check``
+    # instead of silently skipping them.
+    fab_view_gap_policy = None
+    if effective_mfr == "jlcpcb":
+        fab_view_gap_policy = _resolve_fab_gap_policy(
+            effective_mfr,
+            layers,
+            copper_outer,
+            copper_inner,
+            copper_outer if copper_outer is not None else 1.0,
+            len(pcb.copper_layers),
+        )
     checker = DRCChecker(
         pcb,
         manufacturer=effective_mfr,
@@ -3780,6 +3794,9 @@ def build_check_rule_set(
         copper_oz=copper_outer if copper_outer is not None else 1.0,
         copper_oz_outer=copper_outer,
         copper_oz_inner=copper_inner,
+        fab_view=effective_mfr == "jlcpcb",
+        fab_view_copper_oz=copper_outer,
+        fab_view_gap_policy=fab_view_gap_policy,
         net_class_map=net_class_map,
         authored_min_clearance_mm=_authored_min_clearance_mm(project_pcb_path),
         declared_reference_height_mm=resolve_declared_reference_height_for_pcb(project_pcb_path),

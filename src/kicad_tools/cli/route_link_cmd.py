@@ -413,6 +413,7 @@ def _rules_for_link(args: argparse.Namespace, pcb: Any, base: Any, spec: LinkSpe
                         material_group=getattr(args, "material_group", "IIIa"),
                         hv_threshold=0.0 if bound is not None else threshold,
                         pair_bounds=pair_bounds,
+                        domain_intervals=getattr(args, "_pairwise_intervals", None),
                     ).get(pair)
                 except StandardLookupError as exc:
                     raise LinkSpecError(
