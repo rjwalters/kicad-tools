@@ -16,6 +16,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-19
 
+- **PR #9488**: fix(tht-smd-spacing): print distance at 4 decimals to avoid 'x < x' at band edge
+- **PR #9131**: fix(board04): clear fragment, silk-over-drill and staircase findings from the fresh regen
+- **Issue #9483** (closed): tht_smd_spacing: message rounds the measured distance into the limit at the band edge (and a 103-char docstring line)
+- **Issue #9097** (closed): Board 04 fresh regen: raw route carries 13 advisory warnings (pour_slot x10, staircase, fragments, silk_hole_overlap) - reviewed gate leg 3 red
 - **PR #9486**: test: compare design-source parity by sha256 so drift names the file
 - **PR #9479**: fix: treat only SMD-bearing faces as populated for add-fiducials
 - **PR #9458**: fix: probe concrete copper layers in the DRU loosening gate for split-floor profiles
