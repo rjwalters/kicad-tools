@@ -65,6 +65,7 @@ import re
 import shutil
 import signal
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -22420,13 +22421,15 @@ _CHAIN_COMPLETE_ACCEPT_EXITS = frozenset({0, 8})
 # negotiation that ends near the deadline cannot turn into a timeout.
 _CHAIN_COMPLETE_MIN_BUDGET_S = 90.0
 
-# Issue #9620: the budget-only coarser retry runs only on the partial-routing
-# exit -- a batch that routed something but ended below --min-completion.
-# Exit 1 (fatal, nothing routed), 3/4 (dirty copper -- coarsening does not fix
-# shorts), 5 (interrupted), 9 (pre-route gate) and 10 (unverified success) all
-# keep their own verdicts; a batch that met its threshold (0) succeeded by
-# contract and is never re-run.
-_BUDGET_RETRY_EXIT = 2
+# Issue #9620: the budget-only coarser retry runs on the partial-routing exit
+# -- a batch that routed something but ended below --min-completion -- and on
+# the zero-routed exit (1) when THIS invocation saved the board (see the
+# freshness gate in _chain_budget_coarser_pass) and every open net's last
+# recorded search failure is budget-labelled.  3/4 (dirty copper --
+# coarsening does not fix shorts), 5 (interrupted), 9 (pre-route gate) and 10
+# (unverified success) all keep their own verdicts; a batch that met its
+# threshold (0) succeeded by contract and is never re-run.
+_BUDGET_RETRY_TRIGGER_EXITS = frozenset({1, 2})
 # Inner-pass exits whose staged board may be promoted: clean (0), still-partial
 # (2 -- the inner exit ladder has already cleared it of seg-seg / short /
 # pairwise / stranded-pour violations by the time it returns 2) and UNVERIFIED
@@ -22436,6 +22439,83 @@ _BUDGET_RETRY_ACCEPT_EXITS = frozenset({0, 2, EXIT_UNVERIFIED})
 # Like the chained completion pass: under ``--timeout`` the retry is skipped
 # below this much remaining budget so it cannot turn into a deadline timeout.
 _BUDGET_RETRY_MIN_BUDGET_S = 90.0
+# The exit-1 (zero routed nets) freshness gate tolerates this much timestamp
+# skew between the invocation start and the output board's mtime.
+_BUDGET_RETRY_FRESH_EPSILON_S = 1.0
+
+# Issue #9620 review: when the coarser-grid retry runs under ``--format json``,
+# the INNER _main_impl holds its JSON document back into this list instead of
+# writing it (a nested json guard would otherwise land it on stderr), so the
+# outer run can publish exactly one document -- the selected result's.
+_route_json_capture: list[str] | None = None
+
+
+def _budget_retry_static_eligible(args) -> bool:
+    """Static (pre-route) eligibility shared by the retry gate and its JSON hold.
+
+    Everything here is knowable before routing starts; the dynamic gates
+    (trigger exit code, ``_grid_selection == "auto"``, budget-only labels,
+    a readable connectivity report) are decided after the run.  ``--format
+    json`` is deliberately NOT an exclusion (Issue #9620 review): the retry
+    applies the same routing decision under JSON, and ``_main_impl`` holds the
+    document so stdout still carries exactly one, describing the selected
+    board.  The chained completion pass keeps its own (unchanged) gate.
+    """
+    return not (
+        getattr(args, "dry_run", False)
+        or getattr(args, "complete", False)
+        or getattr(args, "resume", None)
+        or getattr(args, "checkpoint", None)
+        or getattr(args, "nets", None)
+        or getattr(args, "skip_nets", None)
+        or getattr(args, "region", None)
+        or _resolve_route_engine(args) != "grid"
+        or _interrupt_pending()
+    )
+
+
+def _fresh_staging_dir(output: Path, kind: str) -> Path:
+    """Private per-invocation staging dir for a chained pass (Issue #9620 review).
+
+    ``kind`` ("chain" / "coarser") selects the dot-prefixed prefix beside
+    ``output``.  Staging in a unique private directory -- instead of globbing
+    ``<stem>.<kind>*`` siblings -- guarantees the pass can only ever touch
+    files it created: an input named ``board.coarser.kicad_pcb`` or an
+    unrelated ``board.coarser-notes.txt`` next to ``-o board.kicad_pcb`` is
+    never deleted, overwritten or promoted by mistake.
+    """
+    import shutil as _shutil
+
+    prefix = f".{output.stem}.{kind}-"
+    for stale in output.parent.glob(glob.escape(prefix) + "*"):
+        if stale.is_dir():
+            _shutil.rmtree(stale, ignore_errors=True)
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=str(output.parent)))
+
+
+def _promote_staging_dir(stage_dir: Path, output: Path, staged: Path) -> None:
+    """Promote a staged board and its sidecars over ``output`` (Issue #9620 review).
+
+    Everything the inner run wrote into *stage_dir* moves next to ``output``
+    under its own (already final) name, except the receipt / constraint
+    companions (``.route.json``, ``.kicad_pro`` / ``.kicad_dru`` /
+    ``.kicad_prl``), which the outer run re-derives.  The board moves last so
+    ``-o`` only changes once the rest is in place.
+    """
+    for f in sorted(stage_dir.iterdir()):
+        if f == staged:
+            continue
+        if f.suffix in {".kicad_pro", ".kicad_dru", ".kicad_prl"} or f.name.endswith(".route.json"):
+            continue
+        os.replace(f, output.with_name(f.name))
+    os.replace(staged, output)
+
+
+def _discard_staging_dir(stage_dir: Path) -> None:
+    """Remove a staging directory and everything it owns; never raises."""
+    import shutil as _shutil
+
+    _shutil.rmtree(stage_dir, ignore_errors=True)
 
 
 def _restore_supervisor_control(control: str, snapshot: str) -> None:
@@ -22732,6 +22812,7 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
                 manufacturer=manufacturer,
                 excluded_nets=excluded,
                 include_unrouted=True,
+                strict=True,
             )
         )
 
@@ -22767,20 +22848,16 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
             f"\n--- Chained completion pass: {len(before)} signal net(s) still open "
             f"({', '.join(before)}); disable with --no-chain-complete ---"
         )
-    stage_stem = output.stem + ".chain"
-    staged = output.with_name(stage_stem + output.suffix)
+    # Issue #9620 review: staging lives in a private per-invocation directory
+    # (unique, dot-prefixed), never in ``<stem>.chain*`` siblings -- a glob
+    # there matched unrelated files (an input named ``board.chain.kicad_pcb``,
+    # notes files) and could delete or promote them.
+    stage_dir = _fresh_staging_dir(output, "chain")
+    staged = stage_dir / output.name
     chain_argv = _chain_complete_argv(args, argv, output, staged, excluded)
 
-    def _staged_files() -> list[Path]:
-        import glob
-
-        return sorted(
-            Path(f) for f in glob.glob(glob.escape(str(output.with_name(stage_stem))) + "*")
-        )
-
     def _discard() -> None:
-        for f in _staged_files():
-            f.unlink(missing_ok=True)
+        _discard_staging_dir(stage_dir)
 
     # The inner pass republishes the supervisor's output identity (its staged
     # path); put the real one back so a later timeout quarantines ``-o``.
@@ -22798,14 +22875,19 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
 
     outer_invocation = route_receipt._current.get()
 
-    _discard()
     chain_rc: int | None = None
-    after = before
+    after: list[str] | None = before
     try:
         try:
             chain_rc = _main_impl(chain_argv)
             if staged.is_file():
-                after = _open_nets(staged)
+                try:
+                    after = _open_nets(staged)
+                except Exception:
+                    # Issue #9620 review: an unreadable connectivity report
+                    # means the open-net count is unknown, never zero -- never
+                    # promote an unassessed board over the negotiated one.
+                    after = None
         except Exception as exc:
             print(f"  Chained completion pass failed ({exc}); keeping negotiated output")
             chain_rc, after = None, before
@@ -22815,6 +22897,7 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
                 _restore_supervisor_control(control, control_snapshot)
         if (
             chain_rc not in _CHAIN_COMPLETE_ACCEPT_EXITS
+            or after is None
             or len(after) >= len(before)
             or not staged.is_file()
         ):
@@ -22891,23 +22974,12 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
                     "negotiated output kept"
                 )
                 return result
-        # Sidecars first, the board last, so -o only changes once the rest is in place.
-        # The receipt and constraint sidecars (.kicad_pro/.kicad_dru/.kicad_prl)
-        # are not promoted: the outer run republishes the receipt for -o, and the
-        # constraints are derived from the same rules it already wrote.
-        for f in _staged_files():
-            if (
-                f != staged
-                and f.suffix not in {".kicad_pro", ".kicad_dru", ".kicad_prl"}
-                and not f.name.endswith(".route.json")
-            ):
-                os.replace(
-                    f,
-                    output.with_name(
-                        output.name[: -len(output.suffix)] + f.name[len(stage_stem) :]
-                    ),
-                )
-        os.replace(staged, output)
+        # Issue #9620 review: promotion moves only what the inner run wrote
+        # into the private staging directory; the receipt and constraint
+        # sidecars (.kicad_pro/.kicad_dru/.kicad_prl) are not promoted -- the
+        # outer run republishes the receipt for -o, and the constraints are
+        # derived from the same rules it already wrote.
+        _promote_staging_dir(stage_dir, output, staged)
     finally:
         # Also runs on RouteDeadlineExpired / KeyboardInterrupt (BaseException):
         # -o was never written before promotion, so only staging needs removing.
@@ -22920,13 +22992,18 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
     return chain_rc if not after and chain_rc == 0 else result
 
 
-def _budget_retry_argv(argv: list[str] | None, grid_mm: float, staged: Path) -> list[str]:
+def _budget_retry_argv(
+    argv: list[str] | None,
+    grid_mm: float,
+    staged: Path,
+    report_map: dict[str, Path] | None = None,
+) -> list[str]:
     """Argv for the one-shot coarser-grid retry (Issue #9620).
 
     The operator's own argv is reused verbatim -- every copper-affecting flag
     (``--seed``, ``--manufacturer``, escalation selectors, budgets, ...) reaches
     the retry unchanged because it is the same command line -- with exactly
-    three edits:
+    these edits:
 
     * ``--grid`` is replaced with the coarser numeric pitch, so the inner run
       takes the explicit-grid path (no auto selection, no multi-resolution
@@ -22937,12 +23014,26 @@ def _budget_retry_argv(argv: list[str] | None, grid_mm: float, staged: Path) -> 
     * ``--lint-gate`` / ``--lint-gate-waivers`` / ``--lint-gate-strict`` are
       dropped: the OUTER run's gate (which finishes after this pass) judges
       whatever board ends up at ``--output``, promoted or not.
+    * ``--export-failed-nets PATH`` is redirected into the staging directory
+      (Issue #9620 review): the inner run must not overwrite the caller's
+      report while the first result is still the selected one.  When
+      *report_map* is given, the original argv value is recorded in it, mapped
+      to the staged path, so promotion can move the winner's report into place
+      (and reconcile its absence) -- a discarded retry leaves the caller's
+      report describing the board that is still at ``-o``.
     """
     base = list(sys.argv[1:]) if argv is None else list(argv)
     out: list[str] = []
     grid_set = False
     output_set = False
     i = 0
+
+    def _staged_report(original: str) -> Path:
+        staged_path = staged.parent / f"export-failed-nets{Path(original).suffix or '.txt'}"
+        if report_map is not None:
+            report_map[original] = staged_path
+        return staged_path
+
     while i < len(base):
         tok = base[i]
         if tok == "--grid":
@@ -22960,6 +23051,14 @@ def _budget_retry_argv(argv: list[str] | None, grid_mm: float, staged: Path) -> 
         elif tok.startswith("--output="):
             out.append(f"--output={staged}")
             output_set = True
+            i += 1
+        elif tok == "--export-failed-nets":
+            original = base[i + 1] if i + 1 < len(base) else ""
+            out.extend(["--export-failed-nets", str(_staged_report(original))])
+            i += 2
+        elif tok.startswith("--export-failed-nets="):
+            original = tok.split("=", 1)[1]
+            out.append(f"--export-failed-nets={_staged_report(original)}")
             i += 1
         elif tok in ("--lint-gate", "--lint-gate-strict"):
             i += 1
@@ -22998,24 +23097,25 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
     do not coarsen a board that is genuinely blocked), when an open net has no
     recorded reason, or under the same ineligibility set as the chained
     completion pass (``--complete``, ``--resume``/``--checkpoint``,
-    ``--nets``/``--skip-nets``/``--region``, non-grid engines, ``--format
-    json``, an interrupt).  The staged board is promoted over ``-o`` only when
-    the retry routes strictly more nets; a retry that routes fewer (or equal)
-    keeps the first result, per the issue's acceptance criteria.
+    ``--nets``/``--skip-nets``/``--region``, non-grid engines, an interrupt).
+    ``--format json`` is not an exclusion (Issue #9620 review): the same
+    routing decision runs, and ``_main_impl`` publishes one JSON document
+    describing the selected result.  The retry also fires on the zero-routed
+    exit (1) when this invocation saved ``-o`` (mtime freshness) -- every
+    attempted net burning its whole budget is the issue's failure mode even
+    when nothing routed, while a setup failure or a stale ``-o`` left by an
+    earlier run must not be re-run.  The staged board is promoted over ``-o``
+    only when the retry routes strictly more nets; a retry that routes fewer
+    (or equal), or whose own connectivity report is unreadable, keeps the
+    first result, per the issue's acceptance criteria.  Promotion promotes
+    the retry's diagnostics with its board (sidecars and ``--export-failed-nets``
+    reports are staged per run and reconciled), and returns the retry's own
+    exit code -- the promoted board's threshold verdict.
     """
     if (
-        result != _BUDGET_RETRY_EXIT
+        result not in _BUDGET_RETRY_TRIGGER_EXITS
         or getattr(args, "_grid_selection", None) != "auto"
-        or getattr(args, "dry_run", False)
-        or getattr(args, "complete", False)
-        or getattr(args, "resume", None)
-        or getattr(args, "checkpoint", None)
-        or getattr(args, "nets", None)
-        or getattr(args, "skip_nets", None)
-        or getattr(args, "region", None)
-        or _resolve_route_engine(args) != "grid"
-        or getattr(args, "format", "text") == "json"
-        or _interrupt_pending()
+        or not _budget_retry_static_eligible(args)
     ):
         return result
     pcb = Path(args.pcb)
@@ -23024,6 +23124,27 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
     )
     if not output.is_file():
         return result
+    quiet = bool(getattr(args, "quiet", False))
+    if result == 1:
+        # Zero routed nets is only retryable when THIS invocation saved the
+        # board: a setup failure that never wrote anything leaves a stale -o
+        # (or an old output from an earlier run) whose labels describe a board
+        # this run never produced.  Fail closed without a timestamp.
+        started = getattr(args, "_route_wall_started", None)
+        try:
+            fresh = (
+                started is not None
+                and output.stat().st_mtime >= started - _BUDGET_RETRY_FRESH_EPSILON_S
+            )
+        except OSError:
+            fresh = False
+        if not fresh:
+            if not quiet:
+                print(
+                    "\n--- Coarser-grid retry skipped: exit 1 with an output "
+                    "board not written by this run ---"
+                )
+            return result
     try:
         first_grid = float(args.grid)
         clearance = float(args.clearance)
@@ -23036,13 +23157,13 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
 
     from kicad_tools.router.partial_rescue import partially_connected_signal_nets
     from kicad_tools.router.stuck_classifier import (
+        _search_failures_sidecar_path,
         is_budget_search_failure,
         load_search_failures_sidecar,
     )
 
     from .route_deadline import CONTROL_ENV, DEADLINE_ENV
 
-    quiet = bool(getattr(args, "quiet", False))
     manufacturer = getattr(args, "manufacturer", "jlcpcb") or "jlcpcb"
     excluded = frozenset(
         n.strip()
@@ -23065,6 +23186,7 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
                 manufacturer=manufacturer,
                 excluded_nets=excluded,
                 include_unrouted=True,
+                strict=True,
             )
         )
 
@@ -23111,20 +23233,17 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
             f"retrying the batch once on a {retry_grid:g}mm grid "
             f"({first_grid:g}mm x2{capped}) ---"
         )
-    stage_stem = output.stem + ".coarser"
-    staged = output.with_name(stage_stem + output.suffix)
-    retry_argv = _budget_retry_argv(argv, retry_grid, staged)
-
-    def _staged_files() -> list[Path]:
-        import glob
-
-        return sorted(
-            Path(f) for f in glob.glob(glob.escape(str(output.with_name(stage_stem))) + "*")
-        )
+    # Issue #9620 review: staging lives in a private per-invocation directory
+    # (unique, dot-prefixed) -- a ``<stem>.coarser*`` glob next to -o matched
+    # unrelated files (an input named ``board.coarser.kicad_pcb`` was deleted
+    # before the retry could read it; a ``board.coarser-notes.txt`` was lost).
+    stage_dir = _fresh_staging_dir(output, "coarser")
+    staged = stage_dir / output.name
+    staged_reports: dict[str, Path] = {}
+    retry_argv = _budget_retry_argv(argv, retry_grid, staged, staged_reports)
 
     def _discard() -> None:
-        for f in _staged_files():
-            f.unlink(missing_ok=True)
+        _discard_staging_dir(stage_dir)
 
     # Same supervisor / receipt restoration contract as the chained completion
     # pass: the inner run republishes the output identity and receipt context;
@@ -23141,14 +23260,24 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
 
     outer_invocation = route_receipt._current.get()
 
-    _discard()
+    global _route_json_capture
+    json_format = getattr(args, "format", "text") == "json"
+    json_capture: list[str] | None = [] if json_format else None
     retry_rc: int | None = None
-    after = before
+    after: list[str] | None = before
     try:
         try:
+            if json_capture is not None:
+                _route_json_capture = json_capture
             retry_rc = _main_impl(retry_argv)
             if staged.is_file():
-                after = _open_nets(staged)
+                try:
+                    after = _open_nets(staged)
+                except Exception:
+                    # Issue #9620 review: an unreadable connectivity report
+                    # means the open-net count is unknown, never zero -- an
+                    # unassessed board must not replace the first result.
+                    after = None
         except Exception as exc:
             # Exception only: RouteDeadlineExpired and KeyboardInterrupt
             # subclass BaseException on purpose (route_deadline.py) and must
@@ -23161,37 +23290,61 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
                 )
             retry_rc, after = None, before
         finally:
+            if json_capture is not None:
+                _route_json_capture = None
             route_receipt._current.set(outer_invocation)
             if control and control_snapshot is not None:
                 _restore_supervisor_control(control, control_snapshot)
         if (
             retry_rc not in _BUDGET_RETRY_ACCEPT_EXITS
             or not staged.is_file()
+            or after is None
             or len(after) >= len(before)
         ):
             if not quiet:
+                why = (
+                    "open-net count unknown (unreadable connectivity report)"
+                    if after is None
+                    else f"{len(after)} open vs {len(before)}"
+                )
                 print(
                     "  Coarser-grid retry did not route more nets "
-                    f"(exit {retry_rc}, {len(after)} open vs {len(before)}); "
-                    "first result kept"
+                    f"(exit {retry_rc}, {why}); first result kept"
                 )
             return result
-        # Sidecars first, the board last (same promotion set as the chained
-        # completion pass: the receipt and constraint sidecars are re-derived
-        # by the outer run).
-        for f in _staged_files():
-            if (
-                f != staged
-                and f.suffix not in {".kicad_pro", ".kicad_dru", ".kicad_prl"}
-                and not f.name.endswith(".route.json")
+        # Promotion: the retry's diagnostics travel with its board.  Sidecars
+        # first, the board last (same exclusions as the chained completion
+        # pass: the receipt and constraint sidecars are re-derived by the
+        # outer run); the mapped --export-failed-nets reports move separately
+        # to the caller's own paths.
+        # Reconcile presence: a first-pass sidecar whose staged twin the retry
+        # did not write describes a board no longer at -o (an empty failure map
+        # removes the sidecar by contract) -- remove it.
+        had_staged_sidecar = _search_failures_sidecar_path(staged).is_file()
+        report_paths = set(staged_reports.values())
+        for f in sorted(stage_dir.iterdir()):
+            if f == staged or f in report_paths:
+                continue
+            if f.suffix in {".kicad_pro", ".kicad_dru", ".kicad_prl"} or f.name.endswith(
+                ".route.json"
             ):
-                os.replace(
-                    f,
-                    output.with_name(
-                        output.name[: -len(output.suffix)] + f.name[len(stage_stem) :]
-                    ),
-                )
+                continue
+            os.replace(f, output.with_name(f.name))
+        if not had_staged_sidecar:
+            _search_failures_sidecar_path(output).unlink(missing_ok=True)
         os.replace(staged, output)
+        for original, staged_report in staged_reports.items():
+            target = Path(original)
+            if staged_report.is_file():
+                os.replace(staged_report, target)
+            else:
+                # The retry produced no report (e.g. it routed everything); the
+                # first pass's report would describe the discarded board.
+                target.unlink(missing_ok=True)
+        if json_capture is not None and json_capture:
+            # _main_impl publishes exactly one JSON document describing the
+            # selected result -- here, the promoted retry's own document.
+            args._budget_retry_json_document = json_capture[0]
     finally:
         # Also runs on RouteDeadlineExpired / KeyboardInterrupt: -o was never
         # touched before promotion, so only staging needs removing.
@@ -23201,7 +23354,10 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
             f"  Coarser-grid retry routed {len(before) - len(after)} more net(s) "
             f"on the {retry_grid:g}mm grid; promoted"
         )
-    return retry_rc if not after and retry_rc != 2 else result
+    # The selected board is the retry's, so its own threshold verdict (0, 2,
+    # or UNVERIFIED 10) is the run's -- not the first pass's exit, and not
+    # gated on 100% connectivity (Issue #9620 review).
+    return retry_rc
 
 
 def _main_impl(argv: list[str] | None = None) -> int:
@@ -23254,62 +23410,83 @@ def _main_impl(argv: list[str] | None = None) -> int:
                     return 1
             capture = (
                 json_stream.capture()
-                if gate is not None and json_stream is not None
+                if json_stream is not None
+                and (
+                    gate is not None
+                    or _route_json_capture is not None
+                    or _budget_retry_static_eligible(args)
+                )
                 else contextlib.nullcontext(None)
             )
             with capture as held:
                 try:
-                    if gate is not None:
-                        # Issue #6090: route into a staging file next to
-                        # --output and promote it only once judged, so no kill
-                        # -- SIGTERM, SIGKILL -- can leave an unjudged board at
-                        # --output.  Staged inside the guard: a SIGTERM right
-                        # after the handler is installed still cleans up.
-                        staged = gate.stage()
-                        if staged is not None:
-                            args._lint_gate_output = str(gate.output)
-                            args.output = str(staged)
-                    result = _run_main_impl(args, parser, argv)
-                    # Issue #9620: the budget-only coarser retry re-routes the
-                    # whole batch before the chained completion pass, so its
-                    # classification reads the grid pass's own give-up labels
-                    # (a completion pass would overwrite them with lattice
-                    # declines), and a promoted fully-routed board makes the
-                    # completion pass a no-op.
-                    result = _chain_budget_coarser_pass(args, argv, result)
-                    result = _chain_complete_pass(args, argv, result)
-                except BaseException:
-                    if gate is not None:
-                        # Never leave an unjudged board at --output.
-                        gate.abort()
-                        _lint_gate_unstage_args(args, gate, requested_output)
-                    raise
-                outcome = None
-                if gate is not None:
                     try:
-                        outcome = gate.finish()
-                    finally:
-                        _lint_gate_unstage_args(args, gate, requested_output)
-                    result = outcome.exit_code(result)
-                exit_code = finish(args, result)
-                if json_stream is not None and not json_stream.written:
-                    # The layer/rule-escalation paths (the default) never reached
-                    # the direct-route JSON emitter; publish the same document
-                    # for the final router so --format json always yields one.
-                    _emit_route_json_fallback(args, exit_code)
-            if (
-                held is not None
-                and json_stream is not None
-                and outcome is not None
-                and gate is not None
-            ):
-                from .route_lint_gate import merge_into_json_document
+                        if gate is not None:
+                            # Issue #6090: route into a staging file next to
+                            # --output and promote it only once judged, so no kill
+                            # -- SIGTERM, SIGKILL -- can leave an unjudged board at
+                            # --output.  Staged inside the guard: a SIGTERM right
+                            # after the handler is installed still cleans up.
+                            staged = gate.stage()
+                            if staged is not None:
+                                args._lint_gate_output = str(gate.output)
+                                args.output = str(staged)
+                        # Issue #9620 review: the coarser retry's zero-routed
+                        # (exit 1) trigger must distinguish a board this run
+                        # wrote from a stale -o left by an earlier run.
+                        args._route_wall_started = time.time()
+                        result = _run_main_impl(args, parser, argv)
+                        # Issue #9620: the budget-only coarser retry re-routes the
+                        # whole batch before the chained completion pass, so its
+                        # classification reads the grid pass's own give-up labels
+                        # (a completion pass would overwrite them with lattice
+                        # declines), and a promoted fully-routed board makes the
+                        # completion pass a no-op.
+                        result = _chain_budget_coarser_pass(args, argv, result)
+                        result = _chain_complete_pass(args, argv, result)
+                    except BaseException:
+                        if gate is not None:
+                            # Never leave an unjudged board at --output.
+                            gate.abort()
+                            _lint_gate_unstage_args(args, gate, requested_output)
+                        raise
+                    outcome = None
+                    if gate is not None:
+                        try:
+                            outcome = gate.finish()
+                        finally:
+                            _lint_gate_unstage_args(args, gate, requested_output)
+                        result = outcome.exit_code(result)
+                    exit_code = finish(args, result)
+                    if json_stream is not None and not json_stream.written:
+                        # The layer/rule-escalation paths (the default) never reached
+                        # the direct-route JSON emitter; publish the same document
+                        # for the final router so --format json always yields one.
+                        _emit_route_json_fallback(args, exit_code)
+                finally:
+                    if _route_json_capture is not None and held is not None:
+                        # Issue #9620 review: an inner (retry) run held its
+                        # JSON document back for the outer run to select.
+                        _route_json_capture.append(held.getvalue())
+            retry_json = getattr(args, "_budget_retry_json_document", None)
+            if held is not None and json_stream is not None:
+                if gate is not None and outcome is not None:
+                    from .route_lint_gate import merge_into_json_document
 
-                json_stream.write(
-                    merge_into_json_document(
-                        held.getvalue(), outcome, exit_code, relocate=gate.relocate
+                    json_stream.write(
+                        merge_into_json_document(
+                            retry_json if retry_json else held.getvalue(),
+                            outcome,
+                            exit_code,
+                            relocate=gate.relocate,
+                        )
                     )
-                )
+                elif retry_json:
+                    # The coarser retry promoted its board (Issue #9620): its
+                    # document, not the first pass's, describes -o now.
+                    json_stream.write(retry_json)
+                else:
+                    json_stream.write(held.getvalue())
                 json_stream.flush()
             return exit_code
     except DRCConstraintPropagationError as exc:
