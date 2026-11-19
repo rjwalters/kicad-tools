@@ -93,6 +93,22 @@ EXPECTED_STALE: dict[str, str] = {
         "sources; `refresh_readiness.py` refuses to re-pin while redundant_copper_* "
         "warnings remain (kct check allowance is 0). The last child of #8399 owns the re-pin."
     ),
+    # PR #9502 (issue #9495) moved board 09's two producers under
+    # run_on_evidence_toolchain without regenerating the committed output:
+    # both files are recorded input hashes of the receipt (check_design.py
+    # AND generate_design.py), so read_readiness() fails closed on two
+    # stale inputs. The staleness is the known consequence of that scope
+    # decision; #9519 tracks the receipt refresh, which regenerates output
+    # the way #9469 did (pinned Docker toolchain, scratch
+    # KICAD_CONFIG_HOME). Remove the entry when that re-pin lands (strict
+    # xfail turns an unexpected pass into a failure).
+    "09-usbc-pd-power": (
+        "Issue #9495: PR #9502 put board 09's producers (check_design.py, "
+        "generate_design.py -- both recorded receipt inputs) under "
+        "run_on_evidence_toolchain without regenerating output; the re-pin "
+        "tracked in #9519 regenerates via the #9469 pinned-toolchain "
+        "workflow. Remove when #9519 lands."
+    ),
 }
 
 BOARDS = sorted(p.parent.parent for p in BOARDS_DIR.glob("*/output/readiness.json"))
