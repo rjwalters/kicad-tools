@@ -300,6 +300,12 @@ class MetaCheckResult:
     # name list, never the reason for ``overall`` -- ``compute_overall``
     # reads only ``coverage_incomplete``.
     incomplete_categories: tuple[str, ...] = ()
+    # Issue #9637: which schematic ERC/LVS/netlist sync ran against and how it
+    # was found (``--schematic``, ``project.kct``, ``sibling``,
+    # ``.kicad_pro pairing`` or ``sole schematic``).  Both ``None`` when no
+    # schematic was discovered (see ``schematic_missing``).
+    schematic_path: str | None = None
+    schematic_source: str | None = None
 
     def _subs(self) -> tuple[SubCheckResult, ...]:
         return (self.drc, self.erc, self.lvs, self.manifest)
@@ -345,6 +351,8 @@ class MetaCheckResult:
             # FAILED).  The ``coverage_incomplete`` flag itself stays
             # unserialized: machine consumers read ``overall``.
             "incomplete_categories": list(self.incomplete_categories),
+            # Issue #9637: additive -- the schematic ERC/LVS compared against.
+            "schematic": {"path": self.schematic_path, "source": self.schematic_source},
         }
 
 
@@ -1069,6 +1077,18 @@ def _manifest_subcheck(pcb_path: Path) -> SubCheckResult:
     )
 
 
+def _resolve_check_schematic_with_source(
+    schematic: str | None, pcb_path: Path
+) -> tuple[Path | None, str | None]:
+    """:func:`_resolve_check_schematic` plus how the schematic was found (issue #9637)."""
+    from kicad_tools.sync.discover import resolve_schematic_with_source
+
+    if schematic is not None:
+        candidate = Path(schematic).resolve()
+        return (candidate, "--schematic") if candidate.exists() else (None, None)
+    return resolve_schematic_with_source(pcb_path)
+
+
 def _resolve_check_schematic(schematic: str | None, pcb_path: Path) -> Path | None:
     """Resolve the schematic used by schematic-aware checks.
 
@@ -1078,14 +1098,10 @@ def _resolve_check_schematic(schematic: str | None, pcb_path: Path) -> Path | No
     override path resolves to ``None``), otherwise sibling discovery via
     :func:`kicad_tools.sync.discover.resolve_schematic_for_pcb` (which
     handles ``project.kct artifacts.schematic`` and the ``_routed``-style
-    stage-suffix strip).
+    stage-suffix strip).  ``project.kct artifacts.schematic`` is used only
+    when the PCB is the board that spec names (issue #9637).
     """
-    from kicad_tools.sync.discover import resolve_schematic_for_pcb
-
-    if schematic is not None:
-        candidate = Path(schematic).resolve()
-        return candidate if candidate.exists() else None
-    return resolve_schematic_for_pcb(pcb_path)
+    return _resolve_check_schematic_with_source(schematic, pcb_path)[0]
 
 
 def run_meta_checks(
@@ -1128,7 +1144,7 @@ def run_meta_checks(
             wider than ``coverage_incomplete`` (see
             :attr:`MetaCheckResult.incomplete_categories`).
     """
-    resolved_sch = _resolve_check_schematic(schematic, pcb_path)
+    resolved_sch, schematic_source = _resolve_check_schematic_with_source(schematic, pcb_path)
 
     erc = _erc_subcheck(resolved_sch, strict)
     lvs = _lvs_subcheck(resolved_sch, pcb_path)
@@ -1156,6 +1172,8 @@ def run_meta_checks(
         schematic_missing=schematic_missing,
         coverage_incomplete=coverage_incomplete,
         incomplete_categories=incomplete_categories,
+        schematic_path=str(resolved_sch) if resolved_sch is not None else None,
+        schematic_source=schematic_source,
     )
     result.compute_overall()
     return result
@@ -1234,6 +1252,10 @@ def print_meta_check_stanza(result: MetaCheckResult, verbose: bool = False) -> N
     if verbose:
         _print_lvs_verbose_expansion(result.lvs)
     print(_format_meta_status_line("Manifest", result.manifest))
+    if result.schematic_path is not None:
+        # Issue #9637: say which schematic ERC/LVS used and how it was found,
+        # so a wrong-revision comparison is never silent.
+        print(f"{'Schematic:':10} {result.schematic_path} (found via {result.schematic_source})")
     if result.overall == "INCOMPLETE" and result.incomplete_categories:
         print(f"{'Overall:':10} {result.overall} ({', '.join(result.incomplete_categories)})")
     else:

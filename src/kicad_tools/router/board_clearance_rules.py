@@ -62,8 +62,13 @@ these item properties:
   ``'NPTH, mechanical'``) -- the fleet's JLCPCB ``.kicad_dru`` keys its hole
   rules on it;
 * ``A.hasNetclass('X')``, ``A.isPlated()``, ``A.memberOfFootprint('REF')``
-  (one string argument, matched like every other string comparison --
-  case-insensitive with ``*`` / ``?`` wildcards; #9578).
+  (one string argument each; #9578).  ``hasNetclass`` matches like every
+  other string comparison -- case-insensitive with ``*`` / ``?``
+  wildcards.  ``memberOfFootprint`` is the one exception, as KiCad itself
+  behaves (#9588 review): case-**sensitive** with ``*`` / ``?`` wildcards
+  (``'J*'`` selects reference ``J3``, ``'j3'`` and ``'j?'`` do not), and
+  an exact library ID argument (``'Conn:Hdr'``) matches too -- a wildcard
+  against a library ID is unknown.
 * ``A.Layer`` of a track: its layer, compared **case-sensitively** with
   ``*`` / ``?`` wildcards (``'F.*'`` and ``'*.Cu'`` match ``F.Cu``,
   ``'f.cu'`` does not).  A via's ``Layer`` is KiCad's null.  A pad's

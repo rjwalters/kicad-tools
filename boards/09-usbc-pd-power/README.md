@@ -44,7 +44,7 @@ Manufacturing remains blocked. The manufacturer check reports 52 ampacity
 errors requiring branch-current and thermal review, and 22 component MPNs
 remain unselected. Strict KiCad-tools net status now agrees with native KiCad
 (32/32 nets complete; resolved by
-[#5061](https://github.com/rjwalters/kicad-tools/issues/5061)), and
+[#5061](https://github.com/2AMLogic/kicad-tools/issues/5061)), and
 `check_design.py` recomputes that agreement on every run. Physical copper LVS does not independently prove plane connectivity.
 
 The fleet 45-degree angle census
@@ -53,7 +53,7 @@ independently of its filename (it does not carry a `_routed` suffix), but the
 board's 59 off-angle segments out of 320 are an explicit, hash-pinned
 exemption pending a source-emitter repair -- not a silent skip and not a
 manufacturing-readiness claim. See issue
-[#5084](https://github.com/rjwalters/kicad-tools/issues/5084).
+[#5084](https://github.com/2AMLogic/kicad-tools/issues/5084).
 
 From the repository root:
 
