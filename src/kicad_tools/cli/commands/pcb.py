@@ -2077,12 +2077,13 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                         "from_layer": c.from_layer,
                         "to_layer": c.to_layer,
                         "via_count": c.count,
+                        "tie_via_count": len(c.tie_vias),
                         "drill_mm": c.drill,
                         "pad_diameter_mm": c.pad_diameter,
                         "capacity_a": round(c.current_capacity_a(), 4),
                         "vias": [
                             {"position": _sheet(v[0]), "drill_mm": v[1], "pad_diameter_mm": v[2]}
-                            for v in c.vias
+                            for v in (*c.vias, *c.tie_vias)
                         ],
                     }
                     for c in r.layer_changes
