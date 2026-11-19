@@ -517,3 +517,193 @@ class TestArcElementHelpers:
         assert not poly.contains(Point(130, 139))  # 2 mm above the apex
         geom = _element_to_shapely_geom(elem)  # raised ValueError before the fix
         assert geom is not None and geom.contains(Point(130, 137))
+
+
+# ---------------------------------------------------------------------------
+# Regression (PR #9678 second review): the probe's check board must measure a
+# proposed arc with the SAME exemptions as the authored node.  Arcs were
+# appended as chords only, so an internal tessellation chord joint borrowed
+# the via-endpoint colocation exemption (a via plated onto mid-arc copper
+# read clean) and the chords were eligible for the straight-segment
+# differential-pair skip (a short across a coupled pair read clean) --
+# both written by ``kct apply --checked`` and immediately reported by
+# ``kct check`` on the saved board.
+# ---------------------------------------------------------------------------
+
+_SHALLOW_ARC_ITEM = {
+    "type": "arc",
+    "net": "GND",
+    "layer": "B.Cu",
+    "width": 0.3,
+    "start": [110, 112],
+    "mid": [114, 112.09],
+    "end": [118, 112],
+}
+
+
+def _via_item(x: float, y: float) -> dict:
+    return {
+        "type": "via",
+        "net": "VCC",
+        "at": [x, y],
+        "size": 0.6,
+        "drill": 0.3,
+        "layers": ["F.Cu", "B.Cu"],
+    }
+
+
+_USB_BOARD = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "USB_D+")
+  (net 2 "USB_D-")
+  (gr_rect (start 100 100) (end 160 160) (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))
+  (segment (start 110 110) (end 120 110) (width 0.3) (layer "B.Cu") (net 1 "USB_D+"))
+  (segment (start 110 110.5) (end 120 110.5) (width 0.3) (layer "B.Cu") (net 2 "USB_D-"))
+  (segment (start 130 134) (end 130 140) (width 0.3) (layer "B.Cu") (net 2 "USB_D-"))
+)
+"""
+
+_USB_ARC_ITEM = {
+    "type": "arc",
+    "net": "USB_D+",
+    "layer": "B.Cu",
+    "width": 0.3,
+    "start": [128, 135],
+    "mid": [130, 137],
+    "end": [132, 135],
+}
+
+
+def _internal_chord_joint() -> tuple[float, float]:
+    """A strictly-interior tessellation joint of ``_SHALLOW_ARC_ITEM``.
+
+    ``Arc.centerline_points`` places vertices at uniform angular steps, so a
+    joint must be computed, not assumed (only start/end are guaranteed).
+    The sweep-middle joint of this symmetric arc is the false-accept site:
+    both chords meeting there END at it, so the chord view lent it the
+    via-endpoint exemption while the authored arc has no endpoint there.
+    """
+    from kicad_tools.schema.pcb import Arc as SchemaArc
+
+    points = SchemaArc(
+        start=(110.0, 112.0),
+        mid=(114.0, 112.09),
+        end=(118.0, 112.0),
+        width=0.3,
+        layer="B.Cu",
+        net_number=0,
+    ).centerline_points(max_error_mm=0.001)
+    joint = points[len(points) // 2]
+    assert joint != points[0] and joint != points[-1]
+    return joint
+
+
+class TestCheckedApplyArcExemptions:
+    def test_via_at_internal_chord_joint_refuses_and_preserves_bytes(self, tmp_path, capsys):
+        # False accept 1: the via lands on an internal chord joint (mid-arc
+        # copper), not an authored endpoint -- the saved board's own check
+        # reports clearance_arc_via, so the probe must refuse the write.
+        joint = _internal_chord_joint()
+        board = tmp_path / "joint.kicad_pcb"
+        board.write_text(_CLI_BOARD)
+        before = hashlib.md5(board.read_bytes()).hexdigest()
+
+        rc, doc = _run(
+            capsys,
+            "probe",
+            str(board),
+            str(_items_file(tmp_path, _SHALLOW_ARC_ITEM, _via_item(*joint))),
+            "--format",
+            "json",
+        )
+        assert rc == 1 and doc["ok"] is False
+        shorts = [p for p in doc["problems"] if p["rule_id"] == "clearance_arc_via"]
+        assert len(shorts) == 1
+        assert shorts[0]["proposed_item"] == 1
+        assert set(shorts[0]["nets"]) == {"GND", "VCC"}
+
+        rc, doc = _run(
+            capsys,
+            "apply",
+            str(board),
+            str(_items_file(tmp_path, _SHALLOW_ARC_ITEM, _via_item(*joint))),
+            "--checked",
+            "--format",
+            "json",
+        )
+        assert rc == 1 and doc["written"] is None
+        assert hashlib.md5(board.read_bytes()).hexdigest() == before
+
+    def test_arc_shorting_coupled_diffpair_segment_refuses(self, tmp_path, capsys):
+        # False accept 2: USB_D+/USB_D- are a name-inferred pair corroborated
+        # by the parallel coupling tracks, so segment-segment edges between
+        # them are delegated to the intra-pair rule -- but an ARC of the pair
+        # crossing the other net's segment is a real short the pairwise rule
+        # must report (the diff-pair skip is segment-segment only).
+        board = tmp_path / "usb.kicad_pcb"
+        board.write_text(_USB_BOARD)
+        before = hashlib.md5(board.read_bytes()).hexdigest()
+
+        rc, doc = _run(
+            capsys,
+            "probe",
+            str(board),
+            str(_items_file(tmp_path, _USB_ARC_ITEM)),
+            "--format",
+            "json",
+        )
+        assert rc == 1 and doc["ok"] is False
+        shorts = [p for p in doc["problems"] if p["rule_id"] == "clearance_arc_segment"]
+        assert len(shorts) == 1
+        assert shorts[0]["proposed_item"] == 1
+        assert set(shorts[0]["nets"]) == {"USB_D+", "USB_D-"}
+
+        rc, doc = _run(
+            capsys,
+            "apply",
+            str(board),
+            str(_items_file(tmp_path, _USB_ARC_ITEM)),
+            "--checked",
+            "--format",
+            "json",
+        )
+        assert rc == 1 and doc["written"] is None
+        assert hashlib.md5(board.read_bytes()).hexdigest() == before
+
+    def test_via_at_arc_authored_endpoint_is_accepted(self, tmp_path, capsys):
+        # Endpoint control: copper ENDING at a foreign via centre is the
+        # escape-join artifact (Issue #2706), so the arc+via batch is clean
+        # and the checked apply writes it -- matching the authored-arc
+        # behaviour the chord view got wrong in the other direction (four
+        # false clearance_segment_via findings at the semicircle's start).
+        board = tmp_path / "endpoint.kicad_pcb"
+        board.write_text(_CLI_BOARD)
+
+        rc, doc = _run(
+            capsys,
+            "probe",
+            str(board),
+            str(_items_file(tmp_path, _ARC_ITEM, _via_item(128, 135))),
+            "--format",
+            "json",
+        )
+        assert rc == 0 and doc["ok"] is True
+
+        rc, doc = _run(
+            capsys,
+            "apply",
+            str(board),
+            str(_items_file(tmp_path, _ARC_ITEM, _via_item(128, 135))),
+            "--checked",
+            "--format",
+            "json",
+        )
+        assert rc == 0 and doc["written"] is not None
+        reloaded = _load(board)
+        assert len(reloaded.arcs) == 1 and len(reloaded.vias) == 1

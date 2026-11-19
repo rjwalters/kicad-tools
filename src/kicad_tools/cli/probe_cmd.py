@@ -44,15 +44,25 @@ are out of scope on purpose: ``sharp_trace_corner``, ``dangling_copper``,
 warning severity, so excluding them cannot produce the probe-clean /
 check-failed disagreement this command exists to prevent, and
 ``netclass_floor`` grades the declared net-class sidecar rather than written
-copper.  Arcs are checked through a 1 um-sagitta tessellation appended for
-the check pass only (with the check width inflated by twice the sagitta
-bound so the tessellated copper always covers the arc the board would
-carry); the board itself is written with a real ``(arc ...)`` node.  The
-pairwise clearance rule now measures authored ``(arc ...)`` nodes through
-the SAME policy (``ARC_COPPER_SAGITTA_MM``, Issue #9673), so a probed arc
-and the node ``kct check`` sees after ``apply`` answer identically; the
-tessellated append stays because the other probe categories still walk
-straight segments.
+copper.  Arcs are checked in two representations, each scoped to the rules
+that can see it (Issue #9673 review).  Every category that walks straight
+segments (fab-view copper gap, slivers, zones, edge, dimensions, holes)
+runs on a check board where each proposed arc is appended as a 1 um-sagitta
+tessellation of straight segments with the check width inflated by twice
+the sagitta bound, so the tessellated copper always covers the arc the
+board would carry.  The pairwise clearance categories (``clearance``,
+``netclass_clearance_copper``) instead run on a second check board that
+carries the arcs as real ``(arc ...)`` nodes -- exactly what ``kct apply``
+would write -- because their exemptions distinguish an arc from its
+chords: the differential-pair skip applies to segment-segment pairs only,
+and the via-endpoint colocation exemption fires at a track's authored
+endpoints, never at an internal chord joint.  Measuring the chords there
+let a checked apply accept a via plated down onto mid-arc copper and a
+short across a coupled differential pair -- shorts the saved board's own
+``kct check`` immediately reports.  Both boards measure the same copper
+(the chord tessellation IS the pairwise rule's own arc model), so the
+split changes no verdict except those two exemptions, which now match the
+authored board exactly.
 
 Exit codes (both commands): ``0`` clean; ``1`` problems found, bad input, or
 nothing to do; ``2`` refused -- the board changed under us, or a KiCad lock
@@ -108,6 +118,19 @@ PROBE_CHECK_CATEGORIES: tuple[str, ...] = (
     "zero_length_segment",
     "tht_smd_spacing",
 )
+
+#: Categories whose rules distinguish an authored ``(arc ...)`` node from
+#: its chord tessellation, so they must measure the arc as authored (Issue
+#: #9673 review).  In ``clearance`` the differential-pair skip applies to
+#: segment-segment pairs only and the via-endpoint colocation exemption
+#: (shared with the net-0 bridge contact test and netclass copper
+#: clearance) fires at a track's ENDPOINTS -- an arc's authored start/end,
+#: never an internal tessellation chord joint.  When a batch proposes
+#: arcs, these categories run on a second check board carrying the arcs as
+#: real ``(arc ...)`` nodes (the write representation), so the probe's
+#: verdict matches the saved board's own ``kct check``; every other
+#: category keeps the covering chord tessellation.
+_PAIRWISE_ARC_CATEGORIES: frozenset[str] = frozenset({"clearance", "netclass_clearance_copper"})
 
 #: Sagitta bound for the check-pass tessellation of proposed arcs, shared
 #: with the pairwise clearance rule's own arc tessellation
@@ -336,20 +359,32 @@ def _net_number(pcb: PCB, name: str) -> int:
     return 0
 
 
-def _append_for_check(pcb: Any, items: list[ProbeItem]) -> dict[str, set[int]]:
+def _append_for_check(
+    pcb: Any, items: list[ProbeItem], *, arcs_as_nodes: bool = False
+) -> dict[str, set[int]]:
     """Append every item to *pcb* for the check pass; returns descriptor -> item indices.
 
-    Arcs are appended as a sagitta-bounded tessellation of straight segments
-    whose check width is inflated by twice the sagitta bound, so the
-    tessellated copper always *covers* the arc the board would carry (the
-    probe can only be stricter than ``kct check``, never looser -- Issue
-    #9590 review).  The pairwise clearance rule measures authored
-    ``(arc ...)`` nodes through the same shared policy (Issue #9673), but
-    the other probe categories still walk straight segments, so a real arc
-    node would leave its copper invisible to them -- hence chords here, and
-    one arc node per item at write time (``_append_for_write``), never both
-    representations at once.  Everything goes through the public
-    ``PCB.add_trace`` / ``add_via`` APIs.
+    Arcs are appended in one of two representations (Issue #9673 review):
+
+    * ``arcs_as_nodes=False`` (default) -- a sagitta-bounded tessellation of
+      straight segments whose check width is inflated by twice the sagitta
+      bound, so the tessellated copper always *covers* the arc the board
+      would carry (the probe can only be stricter than ``kct check``,
+      never looser -- Issue #9590 review).  The probe categories that walk
+      straight segments (fab-view gap, slivers, zones, edge, dimensions,
+      holes) cannot see a real arc node, so this is the representation
+      they run on.
+    * ``arcs_as_nodes=True`` -- one real ``(arc ...)`` node per arc item,
+      exactly what ``_append_for_write`` lands on disk, for the pairwise
+      clearance categories (``_PAIRWISE_ARC_CATEGORIES``): their
+      differential-pair and via-endpoint exemptions distinguish an arc
+      from its chords, so the chords would wrongly exempt an internal
+      chord joint (a via plated onto mid-arc copper) and a chord of a
+      coupled differential pair -- shorts the saved board's own
+      ``kct check`` reports.
+
+    Everything goes through the public ``PCB.add_trace`` / ``add_via`` /
+    ``add_arc`` APIs.
     """
     from kicad_tools.schema.pcb import Arc, Segment, Via
     from kicad_tools.validate.copper_refs import segment_ref, via_ref
@@ -375,6 +410,17 @@ def _append_for_check(pcb: Any, items: list[ProbeItem]) -> dict[str, set[int]]:
                 net_name=item.net,
             )
             descriptors.setdefault(via_ref(scratch, origin), set()).add(item.index)
+        elif item.kind == "arc" and arcs_as_nodes:
+            assert item.mid is not None
+            arc = pcb.add_arc(
+                rel(item.start),
+                rel(item.mid),
+                rel(item.end),
+                width=item.width,
+                layer=item.layer,
+                net=item.net,
+            )
+            descriptors.setdefault(segment_ref(arc, origin), set()).add(item.index)
         elif item.kind == "arc":
             assert item.mid is not None
             arc = Arc(
@@ -478,12 +524,12 @@ def _run_rule_set(pcb_path: Path, pcb: Any, manufacturer: str | None) -> Any:
     return build_check_rule_set(pcb_path, manufacturer=manufacturer, pcb=pcb)
 
 
-def _selected_findings(ruleset: Any, pcb_path: Path) -> Any:
+def _selected_findings(ruleset: Any, pcb_path: Path, categories: set[str] | None = None) -> Any:
     from .check_cmd import run_selected_checks
 
     results = run_selected_checks(
         ruleset.checker,
-        set(PROBE_CHECK_CATEGORIES),
+        set(PROBE_CHECK_CATEGORIES) if categories is None else categories,
         set(),
         pcb_path=pcb_path,
         layers=ruleset.layers,
@@ -536,6 +582,19 @@ def probe_items(
 
     merged = PCB.load(str(pcb_path))
     descriptors = _append_for_check(merged, items)
+    # Arcs carry two check representations (Issue #9673 review): the covering
+    # chord tessellation above for the categories that walk straight
+    # segments, and a second board with real ``(arc ...)`` nodes for the
+    # pairwise clearance categories whose exemptions (differential-pair
+    # skip, via-endpoint colocation) distinguish an arc from its chords.
+    # Arc-free batches keep the single-board path unchanged.
+    pairwise_categories = set(_PAIRWISE_ARC_CATEGORIES)
+    has_arcs = any(item.kind == "arc" for item in items)
+    authored = PCB.load(str(pcb_path)) if has_arcs else None
+    if authored is not None:
+        authored_descriptors = _append_for_check(authored, items, arcs_as_nodes=True)
+        for ref, indices in authored_descriptors.items():
+            descriptors.setdefault(ref, set()).update(indices)
     net_fallback: dict[str, set[int]] = {}
     for item in items:
         net_fallback.setdefault(item.net, set()).add(item.index)
@@ -547,7 +606,16 @@ def probe_items(
     baseline_rs = _run_rule_set(pcb_path, board, manufacturer)
     merged_rs = _run_rule_set(pcb_path, merged, manufacturer)
     baseline = _selected_findings(baseline_rs, pcb_path)
-    added = _selected_findings(merged_rs, pcb_path)
+    if authored is not None:
+        chord_findings = _selected_findings(
+            merged_rs, pcb_path, categories=set(PROBE_CHECK_CATEGORIES) - pairwise_categories
+        )
+        authored_rs = _run_rule_set(pcb_path, authored, manufacturer)
+        arc_findings = _selected_findings(authored_rs, pcb_path, categories=pairwise_categories)
+        added_violations = [*chord_findings.violations, *arc_findings.violations]
+    else:
+        added = _selected_findings(merged_rs, pcb_path)
+        added_violations = added.violations
 
     # Findings the batch adds: a merged finding whose (key, location) is not
     # consumed by a baseline finding.  Counting (not set-diff) so a key that
@@ -555,7 +623,7 @@ def probe_items(
     # reports the one new occurrence.
     remaining = Counter((v.key, v.location) for v in baseline.violations)
     new = []
-    for v in added.violations:
+    for v in added_violations:
         marker = (v.key, v.location)
         if remaining.get(marker, 0) > 0:
             remaining[marker] -= 1
