@@ -136,6 +136,8 @@ class TestBoard02PartialRouteFastFail:
         monkeypatch.setattr(
             "kicad_tools.cli.pcb_add_board_info.run_add_board_info", lambda *a, **k: 0
         )
+        # The silk-over-hole clean-up (#9467) also edits the routed PCB.
+        monkeypatch.setattr(module, "clear_silk_over_holes", lambda *a, **k: None)
         monkeypatch.setattr(module, "write_lvs_report", _fake_lvs)
         monkeypatch.setattr(module, "export_manufacturing_bundle", lambda *a, **k: True)
         monkeypatch.setattr(module.sys, "argv", ["generate_design.py", str(tmp_path / "out")])

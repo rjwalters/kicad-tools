@@ -7,6 +7,7 @@ native DRC; unmatched coordinates never silently certify a different board.
 """
 
 import json
+import math
 import shutil
 import subprocess
 import sys
@@ -110,6 +111,334 @@ def _relocate_pad_edge(path):
         raise ValueError(f"Board02 pad-edge vias left in the dam zone: {result}")
     if result.changed:
         pcb.save(path)
+
+
+#: Centre-line distance a pad escape may bend from the pad it serves.  Closer,
+#: the bend's copper sits under the mask opening beside the pad
+#: (``mask_to_copper`` own-pad-entry / pass-through errors, issue #9467).
+_ESCAPE_BEND_MM = 0.4
+#: Clearance a re-routed escape keeps from other-net copper (netclass floor +
+#: margin); native DRC re-verifies everything this module writes.
+_ESCAPE_CLEARANCE_MM = 0.16
+#: A via ring closer than this to its own pad is slid out (ring overlap).
+_RING_GAP_MM = 0.05
+#: Ring-to-pad gap a slid via is given.
+_RING_SLIDE_GAP_MM = 0.3
+_TOL = 0.01
+
+
+def _bbox_distance(pt, bbox):
+    """Distance from ``pt`` to an axis-aligned ``(x0, y0, x1, y1)`` box (0 inside)."""
+    x0, y0, x1, y1 = bbox
+    return math.hypot(max(x0 - pt[0], 0.0, pt[0] - x1), max(y0 - pt[1], 0.0, pt[1] - y1))
+
+
+def _near(a, b, tol=_TOL):
+    return abs(a[0] - b[0]) <= tol and abs(a[1] - b[1]) <= tol
+
+
+def _pad_layers(pad):
+    layers = set()
+    for name in pad.layers:
+        if name in ("F.Cu", "B.Cu"):
+            layers.add(name)
+        elif name == "*.Cu":
+            layers.update(("F.Cu", "B.Cu"))
+    return sorted(layers)
+
+
+def _escape_candidates(pad_xy, target):
+    """Routes from a pad centre to ``target``: axis-aligned first leg, then 90 or 45 deg.
+
+    Legality (bend distance, clearance) is judged by the caller.  Candidates are
+    point lists ordered by preference on a length tie: the 45-degree finish
+    first, then the two L routes.
+    """
+    px, py = pad_xy
+    tx, ty = target
+    dx, dy = tx - px, ty - py
+    out = []
+    if abs(dx) < _TOL or abs(dy) < _TOL:
+        return [[(px, py), (tx, ty)]]
+    if abs(dy) > abs(dx):
+        out.append([(px, py), (px, ty - math.copysign(abs(dx), dy)), (tx, ty)])
+    elif abs(dx) > abs(dy):
+        out.append([(px, py), (tx - math.copysign(abs(dy), dx), py), (tx, ty)])
+    out.append([(px, py), (px, ty), (tx, ty)])
+    out.append([(px, py), (tx, py), (tx, ty)])
+    return out
+
+
+def _route_length(points):
+    return sum(math.dist(a, b) for a, b in zip(points, points[1:], strict=False))
+
+
+def _turn_degrees(a, b, c):
+    """Heading change at ``b`` going a -> b -> c (0 = straight)."""
+    h1 = math.atan2(b[1] - a[1], b[0] - a[0])
+    h2 = math.atan2(c[1] - b[1], c[0] - b[0])
+    turn = abs(math.degrees(h2 - h1)) % 360
+    return 360 - turn if turn > 180 else turn
+
+
+class _EscapeContext:
+    """Copper of one PCB snapshot, indexed for escape re-routing."""
+
+    def __init__(self, pcb):
+        from shapely.geometry import Point
+
+        from kicad_tools.validate.rules.via_pad_geometry import pad_absolute_bbox
+
+        self.pcb = pcb
+        self.pads = []  # (ref, pad, bbox, centre, layers)
+        for fp in pcb.footprints:
+            for pad in fp.pads:
+                x0, y0, x1, y1 = pad_absolute_bbox(pad, fp)
+                self.pads.append(
+                    (fp.reference, pad, (x0, y0, x1, y1), ((x0 + x1) / 2, (y0 + y1) / 2))
+                )
+        self.point = Point
+
+    def obstacles(self, layer, net_number):
+        """Shapely shapes of every other-net copper item that exists on ``layer``."""
+        from shapely.geometry import LineString, box
+
+        point = self.point
+        line_string = LineString
+        shapes = []
+        for seg in self.pcb.segments:
+            if seg.layer == layer and seg.net_number != net_number:
+                shapes.append(line_string([seg.start, seg.end]).buffer(seg.width / 2))
+        for via in self.pcb.vias:
+            if via.net_number != net_number:
+                shapes.append(point(via.position).buffer(via.size / 2))
+        for _ref, pad, bbox, _centre in self.pads:
+            if pad.net_number != net_number and layer in _pad_layers(pad):
+                shapes.append(box(*bbox))
+        return shapes
+
+
+def _is_node_hard(ctx, node, own_pad, layer):
+    """A vertex a track chain must not be re-routed through (via, other pad)."""
+    if any(_near(v.position, node) for v in ctx.pcb.vias):
+        return True
+    for _ref, pad, _bbox, centre in ctx.pads:
+        if pad is not own_pad and _near(centre, node) and layer in _pad_layers(pad):
+            return True
+    return False
+
+
+def _slide_ring_vias(pcb):
+    """Slide same-net vias whose ring overlaps (or all but touches) their own pad.
+
+    The ring then sits under the pad's mask opening (``mask_to_copper`` via
+    pass-through).  The via moves radially away from the pad until the ring is
+    ``_RING_SLIDE_GAP_MM`` clear; its tracks follow it and are re-squared by
+    ``_square_pad_escapes``.  A slide that would crowd other-net copper is
+    skipped and reported.
+    """
+    ctx = _EscapeContext(pcb)
+    moved = 0
+    for ref, pad, bbox, _centre in ctx.pads:
+        if not pad.net_number or pad.type == "np_thru_hole":
+            continue
+        for via in list(pcb.vias):
+            if via.net_number != pad.net_number:
+                continue
+            radius = via.size / 2
+            cx, cy = via.position
+            qx = min(max(cx, bbox[0]), bbox[2])
+            qy = min(max(cy, bbox[1]), bbox[3])
+            dist = math.hypot(cx - qx, cy - qy)
+            if dist < _TOL or dist - radius >= _RING_GAP_MM:
+                continue
+            reach = radius + _RING_SLIDE_GAP_MM
+            new = (qx + (cx - qx) / dist * reach, qy + (cy - qy) / dist * reach)
+            new = (round(new[0], 4), round(new[1], 4))
+            ring = ctx.point(new).buffer(radius + _ESCAPE_CLEARANCE_MM)
+            blocked = any(
+                ring.intersects(shape)
+                for layer in ("F.Cu", "B.Cu")
+                for shape in ctx.obstacles(layer, via.net_number)
+            )
+            if blocked:
+                print(f"Board02: via at {via.position} left beside {ref}.{pad.number}: no room")
+                continue
+            attached = [
+                seg
+                for seg in pcb.segments
+                if seg.net_number == via.net_number
+                and (_near(seg.start, via.position) or _near(seg.end, via.position))
+            ]
+            for seg in attached:
+                start = new if _near(seg.start, via.position) else seg.start
+                end = new if _near(seg.end, via.position) else seg.end
+                pcb.remove_segments([seg])
+                pcb.add_trace(
+                    start, end, width=seg.width, layer=seg.layer, net=seg.net_number, dedupe=False
+                )
+            pcb.relocate_via(via, new)
+            moved += 1
+            ctx = _EscapeContext(pcb)
+    return moved
+
+
+def _square_pad_escapes(pcb):
+    """Re-route pad escapes that bend inside the pad's mask-opening zone.
+
+    ``mask_to_copper`` (issue #8858) grades copper that stays under the mask
+    beside a pad opening.  A track that leaves its pad straight and clean is
+    excused; a stair-stepped or diagonal exit whose bends sit within
+    ``_ESCAPE_BEND_MM`` of the pad is not (issue #9467).  The seed-42 route
+    leaves exactly those dog-legs where ``_relocate_escapes`` moved a via, so
+    the repair belongs to the recipe: every chain of plain track vertices that
+    starts at a pad centre and bends inside the zone is replaced by an
+    axis-aligned exit plus a 90- or 45-degree finish to the first vertex
+    beyond the zone (or to the via it ends at).  Chains with no legal
+    replacement are left untouched and reported -- never waived.
+    """
+    from shapely.geometry import LineString  # type: ignore[import-untyped]
+
+    rerouted = 0
+    unresolved = []
+    for ref, pad_num in _escape_pads(pcb):
+        ctx = _EscapeContext(pcb)
+        entry = next(
+            (e for e in ctx.pads if e[0] == ref and e[1].number == pad_num),
+            None,
+        )
+        if entry is None:
+            continue
+        _ref, pad, bbox, centre = entry
+        if not pad.net_number:
+            continue
+        for layer in _pad_layers(pad):
+            same = [s for s in pcb.segments if s.layer == layer and s.net_number == pad.net_number]
+            for spoke in [s for s in same if _near(s.start, centre) or _near(s.end, centre)]:
+                if spoke not in pcb.segments:
+                    continue
+                result = _reroute_spoke(pcb, ctx, pad, bbox, centre, layer, spoke, LineString)
+                if result is True:
+                    rerouted += 1
+                    ctx = _EscapeContext(pcb)
+                elif result is not None:
+                    unresolved.append((ref, pad_num, result))
+    for ref, pad_num, why in unresolved:
+        print(f"Board02: pad {ref}.{pad_num} escape left as routed: {why}")
+    return rerouted
+
+
+def _escape_pads(pcb):
+    """``(ref, pad number)`` of every netted pad, in a deterministic order."""
+    return sorted(
+        (fp.reference, pad.number)
+        for fp in pcb.footprints
+        for pad in fp.pads
+        if pad.net_number and pad.type != "np_thru_hole"
+    )
+
+
+def _reroute_spoke(pcb, ctx, pad, bbox, centre, layer, spoke, line_string):
+    """Re-route one track chain leaving ``centre``; ``True`` if changed, ``None`` if clean."""
+    net = pad.net_number
+    same = [s for s in pcb.segments if s.layer == layer and s.net_number == net]
+
+    def other_end(seg, node):
+        return seg.end if _near(seg.start, node) else seg.start
+
+    chain = [centre]
+    used = [spoke]
+    current = spoke
+    node = other_end(spoke, centre)
+    while True:
+        chain.append(node)
+        reaches = _bbox_distance(node, bbox) >= _ESCAPE_BEND_MM - 1e-6
+        if reaches or _is_node_hard(ctx, node, pad, layer) or len(chain) > 8:
+            break
+        onward = [s for s in same if s is not current and s not in used and _touches(s, node)]
+        if len(onward) != 1:
+            break
+        current = onward[0]
+        used.append(current)
+        node = other_end(current, node)
+    if len(chain) < 3:
+        return None
+    interior = chain[1:-1]
+    if all(_bbox_distance(v, bbox) >= _ESCAPE_BEND_MM - 1e-6 for v in interior):
+        return None  # already clean
+    vertex = chain[-1]
+    last_from = chain[-2]
+    span = math.dist(last_from, vertex)
+    # A short last leg is re-joined at its far vertex; a long one (a track that
+    # runs on beyond the zone) is split at the first point that lets the exit
+    # bend clear of the pad, so the unchanged remainder keeps its geometry.
+    options = [(vertex, None)]
+    if span > 1.0 and _bbox_distance(vertex, bbox) >= _ESCAPE_BEND_MM - 1e-6:
+        options = []
+        for i in range(1, int(span / 0.05)):
+            f = i * 0.05 / span
+            probe = (
+                round(last_from[0] + (vertex[0] - last_from[0]) * f, 4),
+                round(last_from[1] + (vertex[1] - last_from[1]) * f, 4),
+            )
+            if _bbox_distance(probe, bbox) >= _ESCAPE_BEND_MM - 1e-6:
+                options.append((probe, (probe, vertex)))
+        options.append((vertex, None))
+    obstacles = ctx.obstacles(layer, net)
+    width = spoke.width
+    best = None
+    for target, remainder in options:
+        onward_ref = remainder[1] if remainder else None
+        if onward_ref is None and not _is_node_hard(ctx, target, pad, layer):
+            after = [s for s in same if s not in used and _touches(s, target)]
+            if len(after) == 1:
+                onward_ref = other_end(after[0], target)
+        for route in _escape_candidates(centre, target):
+            if any(_bbox_distance(v, bbox) < _ESCAPE_BEND_MM - 1e-6 for v in route[1:-1]):
+                continue
+            if onward_ref is not None and _turn_degrees(route[-2], target, onward_ref) > 91:
+                continue
+            shape = line_string(route).buffer(width / 2 + _ESCAPE_CLEARANCE_MM)
+            if any(shape.intersects(o) for o in obstacles):
+                continue
+            length = _route_length(route)
+            if best is None or length < best[0] - 1e-9:
+                best = (length, route, remainder)
+        if best is not None:
+            break  # nearest legal split wins; later splits only lengthen the exit
+    if best is None:
+        return f"no clear axis-aligned exit to {tuple(round(c, 3) for c in vertex)}"
+    remainder = best[2]
+    route = best[1]
+    pcb.remove_segments(used)
+    pcb.add_trace(
+        route[0],
+        route[-1],
+        width=width,
+        layer=layer,
+        net=net,
+        waypoints=[tuple(round(c, 4) for c in v) for v in route[1:-1]] or None,
+        dedupe=False,
+    )
+    if remainder is not None:
+        pcb.add_trace(remainder[0], remainder[1], width=width, layer=layer, net=net, dedupe=False)
+    return True
+
+
+def _touches(seg, node):
+    return _near(seg.start, node) or _near(seg.end, node)
+
+
+def _square_escapes_file(path):
+    """Load ``path``, slide ring-overlapping vias, re-square pad escapes, save."""
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.load(path)
+    slid = _slide_ring_vias(pcb)
+    squared = _square_pad_escapes(pcb)
+    if slid or squared:
+        pcb.save(path)
+    return slid, squared
 
 
 def _net_vias(path):
@@ -235,6 +564,7 @@ def _finalize_candidate(path, schematic):
     path.write_text(serialize_sexp(pcb))
     quantize_pcb_file(path)
     _relocate_pad_edge(path)
+    _square_escapes_file(path)
     subprocess.run(
         [
             sys.executable,
