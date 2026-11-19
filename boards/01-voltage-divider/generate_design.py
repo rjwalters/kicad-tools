@@ -651,6 +651,261 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     return success
 
 
+# Same-net via / pad-opening repair constants (issue #9058).
+# ``_PAD_MASK_EXPANSION_MM`` is NOT the board's mask expansion: board 01
+# sets ``(pad_to_mask_clearance 0)`` (``.kicad_pro``
+# ``solder_mask_clearance`` 0.0), its signal pads carry no per-pad
+# ``solder_mask_margin`` (only the net-less fiducials do, and they land
+# after this repair and are skipped by it), and its vias are tented, so
+# the real pad aperture is exactly the pad copper.  0.1 mm per side is a
+# deliberate conservative over-estimate of that aperture: it can only
+# push a via further out, never leave one inside the real opening.  The
+# relocated via must clear the pad aperture by ``_VIA_OPENING_CLEARANCE_MM``
+# measured between the two over-estimated apertures (via land + expansion
+# vs pad copper + expansion).
+_PAD_MASK_EXPANSION_MM = 0.1
+_VIA_OPENING_CLEARANCE_MM = 0.25
+
+
+def _snapshot_board_uuids(pcb_path: Path) -> set[str]:
+    """Every ``(uuid ...)`` value currently in the board file (lowercased)."""
+    import re
+
+    text = pcb_path.read_text()
+    return {m.group(1).lower() for m in re.finditer(r'\(uuid "([^"]+)"\)', text)}
+
+
+def refill_zones_native(routed_path: Path) -> bool:
+    """Re-fill all zones with the native kicad-cli filler.
+
+    ``kct route`` fills zones natively after routing, so the saved fill
+    polygons carve around the routed copper.  Any post-route copper edit
+    must re-fill; this shells out to ``python -m kicad_tools.cli zones
+    fill`` (``kct zones fill``, the kicad-cli filler exposed as a
+    command; idempotent for already-filled boards).
+    """
+    print("\n   Re-filling zones (native kicad-cli filler)...")
+    result = subprocess.run(
+        [sys.executable, "-m", "kicad_tools.cli", "zones", "fill", str(routed_path)],
+        capture_output=True,
+        text=True,
+    )
+    if result.stdout:
+        for line in result.stdout.strip().split("\n")[-5:]:
+            print(f"   {line}")
+    if result.returncode != 0:
+        print(f"\n   ERROR: zone fill failed (rc={result.returncode})", file=sys.stderr)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+        return False
+    return True
+
+
+def repair_same_net_via_opening_overlaps(routed_path: Path) -> list[str]:
+    """Slide same-net vias out of their pad's mask aperture (issue #9058).
+
+    The negotiated router treats same-net pads as free real estate: it may
+    leave a via whose mask aperture overlaps its own pad's aperture even
+    though the drill stays outside the pad copper.  Under the corrected
+    ``mask_to_copper`` rule (#8858/#9108) that via ring inside the pad
+    aperture is a real ``same-net pass-through`` error -- the fab sees
+    exposed via copper inside an aperture nominally owned by the pad.
+
+    Repair: relocate each offending via along its attached-trace axis,
+    away from the pad, far enough that the two apertures clear each other
+    by ``_VIA_OPENING_CLEARANCE_MM``; the attached segments' endpoints
+    follow the via so no new copper appears beside the aperture (the pad
+    keeps exactly one straight entry per side -- an own-pad entry, which
+    the rule assesses as info -- instead of a stub with no endpoint in
+    the pad, which it would judge a ``same-net pass-through``).  The
+    native zone refill that follows recomputes the pour carve-outs
+    around the final copper.
+
+    Fails closed on apertures only: a via whose attachment geometry the
+    slide cannot prove safe (no attached segment, an attached segment not
+    aligned with the slide axis, a target that still touches an aperture
+    or crosses a different-net one) raises instead of shipping suspect
+    copper.  The target is NOT checked against other-net tracks, vias or
+    zone clearance here; the Step 6 DRC is the backstop for those.
+
+    Returns a list of human-readable move descriptions (empty when the
+    router left nothing to repair).
+    """
+    from kicad_tools.schema.pcb import PCB as PCBModel
+    from kicad_tools.validate.rules.via_pad_geometry import pad_absolute_bbox
+
+    def _move_segment_endpoint(pcb, seg, which: str, new_pos) -> bool:
+        """Persist a segment endpoint move on its backing S-exp node.
+
+        Mirrors :meth:`PCB.relocate_via`: match the ``(segment ...)``
+        node by UUID and rewrite ``(start ...)``/``(end ...)`` so the
+        move persists through ``save()``; direct dataclass assignment
+        would not.
+        """
+        ox, oy = pcb._board_origin
+        for child in pcb._sexp.children:
+            if child.is_atom or child.name != "segment":
+                continue
+            uuid_node = child.find("uuid")
+            if not uuid_node or (uuid_node.get_string(0) or "") != seg.uuid:
+                continue
+            pt = child.find(which)
+            if pt is None:
+                return False
+            pt.set_value(0, new_pos[0] + ox)
+            pt.set_value(1, new_pos[1] + oy)
+            if which == "start":
+                seg.start = new_pos
+            else:
+                seg.end = new_pos
+            return True
+        return False
+
+    expansion = _PAD_MASK_EXPANSION_MM
+    pcb = PCBModel.load(str(routed_path))
+
+    # Pad apertures: absolute copper AABB grown by the mask expansion.
+    apertures = []  # (refdes, pad_no, net_number, (x0, y0, x1, y1))
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if pad.net_number == 0:
+                continue
+            x0, y0, x1, y1 = pad_absolute_bbox(pad, fp)
+            apertures.append(
+                (
+                    fp.reference,
+                    pad.number,
+                    pad.net_number,
+                    (x0 - expansion, y0 - expansion, x1 + expansion, y1 + expansion),
+                )
+            )
+
+    def _circle_hits(via_pos: tuple[float, float], radius: float, box) -> bool:
+        vx, vy = via_pos
+        x0, y0, x1, y1 = box
+        dx = max(x0 - vx, 0.0, vx - x1)
+        dy = max(y0 - vy, 0.0, vy - y1)
+        return dx * dx + dy * dy < radius * radius
+
+    moves: list[str] = []
+    for via in pcb.vias:
+        r = via.size / 2.0
+        hit = next(
+            (
+                a
+                for a in apertures
+                if a[2] == via.net_number and _circle_hits(via.position, r, a[3])
+            ),
+            None,
+        )
+        if hit is None:
+            continue
+        ref, pad_no, _net, box = hit
+        x0, y0, x1, y1 = box
+        cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+        vx, vy = via.position
+
+        # Slide axis: the cardinal direction away from the pad centre in
+        # which the via already sits.
+        dx, dy = vx - cx, vy - cy
+        if abs(dx) >= abs(dy):
+            axis, sign, pad_half = 0, (1.0 if dx >= 0 else -1.0), (x1 - x0) / 2.0
+        else:
+            axis, sign, pad_half = 1, (1.0 if dy >= 0 else -1.0), (y1 - y0) / 2.0
+
+        distance = pad_half + r + expansion + _VIA_OPENING_CLEARANCE_MM
+        target = list(via.position)
+        target[axis] = (cx if axis == 0 else cy) + sign * distance
+        target = (round(target[0], 4), round(target[1], 4))
+
+        # Attached segments at the old position prove the via stays
+        # connected after the slide: each spans the slide axis and is
+        # extended to follow the via.
+        attached = [
+            s
+            for s in pcb.segments_in_net(via.net_number)
+            if any(abs(p[0] - vx) < 1e-6 and abs(p[1] - vy) < 1e-6 for p in (s.start, s.end))
+        ]
+        if not attached:
+            raise RuntimeError(
+                f"via at ({vx}, {vy}) overlaps same-net pad aperture "
+                f"{ref}/{pad_no} but has no attached segment to slide along"
+            )
+        for seg in attached:
+            seg_axis = 0 if abs(seg.end[0] - seg.start[0]) >= abs(seg.end[1] - seg.start[1]) else 1
+            if seg_axis != axis:
+                raise RuntimeError(
+                    f"via at ({vx}, {vy}) has attached segment "
+                    f"{seg.uuid} not aligned with the slide axis; refusing "
+                    "to slide -- reroute or move this via by hand"
+                )
+        attached_layers = sorted({s.layer for s in attached})
+        missing = [l for l in via.layers if l not in attached_layers]
+        if missing:
+            raise RuntimeError(
+                f"via at ({vx}, {vy}) has no attached segment on {missing}; "
+                "sliding it would sever that layer's connection"
+            )
+
+        # The target must clear every aperture; the widened copper at the
+        # relocation site must not reach a different-net aperture.
+        widen_r = r + max(s.width for s in attached) / 2.0
+        for oref, _opad, onet, obox in apertures:
+            if _circle_hits(target, r, obox):
+                raise RuntimeError(
+                    f"slide target ({target[0]}, {target[1]}) for the via at "
+                    f"({vx}, {vy}) still touches pad aperture {oref}/{_opad}"
+                )
+            if onet != via.net_number and _circle_hits(target, widen_r, obox):
+                raise RuntimeError(
+                    f"slide target ({target[0]}, {target[1]}) for the via at "
+                    f"({vx}, {vy}) would put copper on different-net pad "
+                    f"aperture {oref}/{_opad}"
+                )
+
+        old_position = via.position
+        if not pcb.relocate_via(via, target):
+            raise RuntimeError(f"could not persist the relocation of the via at ({vx}, {vy})")
+        for seg in attached:
+            if (
+                abs(seg.start[0] - old_position[0]) < 1e-6
+                and abs(seg.start[1] - old_position[1]) < 1e-6
+            ):
+                which = "start"
+            else:
+                which = "end"
+            if not _move_segment_endpoint(pcb, seg, which, target):
+                raise RuntimeError(
+                    f"could not persist the {which} move of attached segment "
+                    f"{seg.uuid} for the via at ({vx}, {vy})"
+                )
+        moves.append(
+            f"via at ({old_position[0]}, {old_position[1]}) slid out of pad "
+            f"{ref}/{pad_no}'s mask aperture to ({target[0]}, {target[1]}) "
+            f"({len(attached)} attached segment(s) extended)"
+        )
+
+    if not moves:
+        return []
+
+    pcb.save(str(routed_path))
+
+    # Re-open the saved file and assert the repair is complete -- a move
+    # that left (or created) any via/aperture overlap is a bug, not a
+    # warning.
+    recheck = PCBModel.load(str(routed_path))
+    for via in recheck.vias:
+        r = via.size / 2.0
+        for ref, pad_no, net, box in apertures:
+            if _circle_hits(via.position, r, box):
+                raise RuntimeError(
+                    f"after repair, via at ({via.position[0]}, "
+                    f"{via.position[1]}) still overlaps pad aperture "
+                    f"{ref}/{pad_no}"
+                )
+    return moves
+
+
 def run_erc(sch_path: Path) -> bool:
     """
     Run ERC on the schematic.
@@ -910,6 +1165,17 @@ def main() -> int:
                 "route_pcb() if this recurs on an unloaded host."
             )
 
+        # Step 5.55: same-net via / pad-opening repair (#9058) -- the
+        # negotiated router may leave a via whose mask aperture overlaps
+        # its own pad's aperture (a real same-net ``mask_to_copper``
+        # error under the corrected rule).  Slide such vias out with
+        # connectivity-preserving segment extensions.  The zone refill
+        # that carves around the final copper runs at Step 5.65, after
+        # the fiducials land.
+        via_moves = repair_same_net_via_opening_overlaps(routed_path)
+        for line in via_moves:
+            print(f"   via repair: {line}")
+
         # Step 5.6: Issue #8532 / #8598 -- every board carries global
         # fiducials and a board-ID silkscreen (default-on ``fiducials_missing``
         # / ``board_id_missing`` rules).  Added after routing and before DRC,
@@ -921,6 +1187,32 @@ def main() -> int:
             raise RuntimeError("pcb add-fiducials failed")
         if run_add_board_info(routed_path, auto=True) != 0:
             raise RuntimeError("pcb add-board-info failed")
+
+        # Step 5.65: final native zone refill.  The fill ``kct route``
+        # wrote pre-dates the fiducials above (added post-fill), so the
+        # pour polygons do not carve around the fiducial pads and the
+        # GND pour spills across their 2 mm mask apertures -- real
+        # ``mask_to_copper`` errors on the exported board.  The via
+        # repair at Step 5.55 moved copper too.  Re-run the native
+        # kicad-cli fill now, as the LAST copper-touching step, so the
+        # saved pour is carved around the final copper (via positions,
+        # fiducial pads).  Unconditional: a refill of an already-filled
+        # board is idempotent apart from those carve-outs.
+        #
+        # kicad-cli's board save re-mints the UUIDs it invents on load
+        # (footprint property nodes get fresh random uuid4s), which
+        # would make the routed board differ byte-for-byte between
+        # otherwise identical runs and trip the manifest gate on every
+        # re-run.  Snapshot the pre-refill UUIDs and re-canonicalize
+        # afterwards -- the same discipline ``kct route`` applies after
+        # its own native fill (Issue #6052): kept UUIDs are preserved,
+        # KiCad-invented ones become uuid5 of the file structure.
+        from kicad_tools.core.canonical_uuids import canonicalize_pcb_file_uuids
+
+        keep = _snapshot_board_uuids(routed_path)
+        if not refill_zones_native(routed_path):
+            raise RuntimeError("final native zone refill failed")
+        canonicalize_pcb_file_uuids(str(routed_path), keep=keep)
 
         # Step 6: Run DRC
         drc_success = run_drc(routed_path)

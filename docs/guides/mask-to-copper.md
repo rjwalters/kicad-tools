@@ -5,6 +5,11 @@ individually identified copper objects. It supplements the existing solder-mask
 expansion, pad-size and annular-ring checks. See [mask geometry](mask-geometry.md)
 for the underlying geometry inspection APIs.
 
+To repair a track that enters its own pad off-centre (the `same-net own-pad
+entry` relation) instead of only flagging it, run the `fix-drc` repair pass:
+`kct fix-drc board.kicad_pcb --only mask-copper` — see the
+[CLI reference](../reference/cli.md#fix-drc).
+
 Supply a process-specific clearance requirement with its source, process and
 revision. A manufacturer profile, mask expansion or minimum mask-web width does
 not supply this requirement. The example below uses a **fictional test policy**;
@@ -119,24 +124,30 @@ copper 0 mm²; beside owner excess 0 mm²; ...; opening pad:R1/1; exposed copper
 segment (net VOUT); same-net own-pad entry
 ```
 
-The class is granted for what the copper does, not for touching the pad. All of
-these must hold, otherwise the measurement keeps its verdict:
+The class is granted for what the copper does, not for touching the pad. The
+copper must first be on the pad's identified net — the net pcbnew loads: a
+floating stub touching only one pad loads with that pad's net; a pad with no
+net never qualifies. On same-net copper, all five numbered conditions must
+hold, otherwise the measurement keeps its verdict (these are the conditions
+the `within_own_pad_failed_condition` field names):
 
-- the opening has one owner, a plain `rect`, `roundrect`, `circle` or `oval` pad
-  with a mask margin of 0 or more (custom, padstack, chamfered and
-  solder-mask-defined pads keep their verdict);
-- the copper is on the pad's identified net. That is the net pcbnew loads: a
-  floating stub touching only one pad loads with that pad's net. A pad with no
-  net never qualifies.
-- the copper overlaps the pad's copper by more than the construction budget `u`;
-- **nothing beyond the pad is exposed**. `u` is tolerated once at the pad edge,
-  so a track crossing any positive expansion ring wider than `u` (about 10 µm)
-  stays an error;
-- **nothing beside the pad beyond one clean entry**. The copper under mask within
-  the policy clearance (0.09 mm) of the opening may not exceed what one straight
-  crossing at 45° or steeper puts there (1.45 × track width × clearance). Only a
-  straight segment with exactly one end inside the pad gets that allowance. A
-  segment lying wholly on the pad gets none.
+1. the opening has one owner, a plain `rect`, `roundrect`, `circle` or `oval`
+   pad with a mask margin of 0 or more (custom, padstack, chamfered and
+   solder-mask-defined pads keep their verdict);
+2. direct connection: the copper overlaps the pad's copper by more than the
+   construction budget `u` (both shrunk by `u`);
+3. **nothing beyond the pad is exposed**. `u` is tolerated once at the pad
+   edge, so a track crossing any positive expansion ring wider than `u`
+   (about 10 µm) stays an error;
+4. **nothing beside the pad beyond one clean entry**. The copper under mask
+   within the policy clearance (0.09 mm) of the opening may not exceed what
+   one straight crossing at 45° or steeper puts there (1.45 × track width ×
+   clearance). Only a straight segment with an authored end inside the pad
+   gets that allowance (the other end may exit, sit on the edge or be inside
+   too). A segment with no end inside — lying wholly on it, straddling or
+   passing through — gets none;
+5. for a via, its authored drill lies wholly outside the opening (a via ring
+   touching the pad leaves copper beside the opening).
 
 So these stay errors:
 
@@ -157,17 +168,104 @@ So these stay errors:
 - an entry shallower than about 45°;
 - arcs;
 - vias touching the pad, because their ring leaves copper beside the opening;
-- pours under and around the pad (a reviewed pour can be declared instead, see
-  below).
+- pours under and around the pad, unless they are the pad's own pour joined by
+  thermal spokes (`own_pour_thermal`, below); a reviewed pour can also be
+  declared instead, see below.
 
 Same-net copper *beside* a pad without touching it is still measured at the
 policy clearance. Each measurement records `exposed_beyond_owner_mm2` (copper
 exposed beyond the pad) and `beside_owner_excess_mm2` (copper beside it in excess
-of one clean entry), so a verdict can be audited. The trailing `same-net own-pad
+of one clean entry), so a verdict can be audited. It also records
+`within_own_pad_failed_condition` (issue #9305): the number (1-5) of the
+first numbered condition above that kept a same-net, single-pad-owner
+measurement from downgrading to `within_own_pad` — None when the class
+qualified or was not attempted, e.g. for different-net copper or a merged
+opening. The field names why the downgrade was missed, not the finding's
+final disposition: another classification may still take over afterwards —
+a pad tied to its own pour by thermal spokes fails condition 4 (pour ring
+beside the opening) yet reads `own_pour_thermal` at info. The trailing `same-net own-pad
 entry` / `same-net pass-through` label is triage text from the copper outline
 and can differ from the class for very wide or very short tracks. The class uses
 the track's authored ends. Evidence and per-board counts:
 [mask-to-copper-own-pad-8858](../research/mask-to-copper-own-pad-8858.md).
+
+### Pads of one footprint: `within_own_footprint`
+
+A footprint can put a rectangular ground pad under circular ground pads
+(`RF_Module:ESP32-C3-WROOM-02`), so each circular opening exposes the rectangular
+pad. When the opening is a single-pad opening (not a merged region), the
+relation is `overlap`, and the conductor and the opening's owner are pads of
+**one** footprint on one identical non-empty net, the measurement reads
+`within_own_footprint` at **info** (issue #9420), so the evidence stays listed.
+Merged openings, copper beside an opening, pads of different footprints or nets,
+and any track, via or pour keep their measured verdict. The fab's own DFM view
+cannot see footprints or nets, so this changes how kct reports the finding, not
+whether the fab accepts the board.
+
+The same pair rule applies to the 2 oz pad mask-bridge check inside
+`physical_copper_gap` (`Pad mask bridge ... < 0.2000mm`): two pads of one
+footprint on one identical non-empty net read at **info**, still listed. There
+the fab evidence is located: JLCDFM measured the module's two 0.19 mm pad pairs
+and rated them Good under pad spacing, with an empty Soldermask bridge row. The
+rest of `physical_copper_gap` (pads of different footprints, different or
+missing nets, pad-to-track/via/zone gaps) is unchanged.
+
+### A pad's own pour joined by thermal spokes: `own_pour_thermal`
+
+A pad inside its own same-net pour, joined to it by thermal spokes, has spoke
+copper crossing the pad edge under mask. JLCDFM listed nothing for the four such
+pads on board 01 (relief gaps 0.2 and 0.3 mm, 0 mm expansion; issue #8858): they
+were absent from its "Solder mask opening exposing trace" list, not rated Good,
+while different-net pour around the next pads was listed. Such a measurement
+reads `own_pour_thermal` at **info** (issue #9284):
+
+```text
+Mask-to-copper overlap: own_pour_thermal; exposed area 0.6 mm²; beyond owner pad
+copper 0 mm²; ...; opening pad:R2/2; exposed copper zone (net GND); same-net;
+4 thermal spokes (declared spoke 0.3 mm, relief gap 0.2 mm)
+```
+
+All of these must hold, otherwise the measurement keeps its verdict:
+
+- the opening has one owner, a plain `rect`, `roundrect`, `circle` or `oval` pad
+  with a mask margin of 0 or more, on the zone's identified net;
+- **pcbnew declares thermal relief** between the pad and this zone. The pad's own
+  zone-connection override wins, then its footprint's, then the zone's setting;
+  "thermal relief for through-hole pads only" counts only on a plated
+  through-hole pad. The relief gap and spoke width are the pad's overrides when
+  set, otherwise the zone's. A solid, "none" or unreadable connection never
+  qualifies, and a custom `zone_connection` DRC rule already makes the native run
+  incomplete;
+- **the fill shows the spokes**: it overlaps the pad by more than `u`;
+- **nothing beyond the pad is exposed**, exactly as for `within_own_pad`, so pour
+  or spoke copper in any positive expansion ring wider than `u` stays an error;
+- **within the examined band only spokes**. The band is the policy's warning
+  clearance (0.15 mm for JLCPCB), or its danger clearance when it has no warning
+  tier. Every connected piece of fill under mask within that band of the opening
+  must touch the pad, run out to the band's outer edge, meet each edge of the
+  band along at most 1.45 × spoke width, not wrap around the pad, and hold at
+  most 1.45 × spoke width × band. There are 1 to 4 such spokes and nothing else.
+
+So the copper this class excuses is the spokes and only the spokes: each spoke's
+crossing of the pad edge out to 0.15 mm. The pour body must lie at least 0.15 mm
+from the opening. These stay errors:
+
+- a solid pad-to-pour connection (untested by the fab), whatever the fill looks
+  like, and a thermal declaration whose fill is solid around the pad;
+- a same-net pour not connected to the pad, a separate same-net zone or island
+  beside the opening, or extra copper of the same zone in the band;
+- a pour body inside 0.15 mm of the opening, even with spokes. The fab result
+  covers relief gaps of 0.2 and 0.3 mm only; board 04's 0.1 mm relief gaps stay
+  errors;
+- spokes wider than declared, or more than four pieces in the band;
+- pour copper exposed through a positive expansion;
+- different-net pour, which keeps its measured verdict (a pour 0.13 mm from a
+  different-net opening is a warning, as JLCDFM rates it).
+
+The measurement records `pour_spokes`, `pour_relief_gap_mm` and
+`pour_spoke_width_mm`; for this class `beside_owner_excess_mm2` is the non-spoke
+copper found in the band (0). A solid-connection fab result would be the evidence
+to revisit the class.
 
 ## Declare a particular connected escape
 
@@ -234,8 +332,8 @@ owner. A single-pad escape declaration does not waive a merged-region finding.
 Measurements record location in millimetres, mask side, copper layer, opening and
 conductor UUIDs, clearance in millimetres and exposed area in square millimetres.
 Exposure area is not penetration depth. Relations are `disjoint`, `touching` or
-`overlap`; dispositions are `violation`, `uncertain`, `warning`, `intentional` or
-`within_own_pad`.
+`overlap`; dispositions are `violation`, `uncertain`, `warning`, `intentional`,
+`within_own_pad` or `own_pour_thermal`.
 
 The comparison uses a recorded numerical construction budget, including native
 polygon approximation and Gerber reconstruction. A result at the threshold,

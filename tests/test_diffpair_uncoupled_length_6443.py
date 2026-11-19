@@ -747,8 +747,9 @@ def test_kct_equals_kicad_on_committed_copper(tmp_path) -> None:
 
     These are the real-copper cases the synthetic PINNED probes were distilled
     from: board 03's USB_D / USB_MCU_D and each board 06 LVDS pair.  KiCad
-    reads 9.325 / 0.955 mm and 1.541 mm (board 03 re-derived from a fresh
+    reads 9.325 / 0.955 mm and 1.416 mm (board 03 re-derived from a fresh
     lattice route in #6394, again in #7713, MCU launch re-derived in #7256;
+    board 06 re-derived from the #9548 pad-mask-escape repair;
     kicad-cli 10.0.6); the projection-overlap model
     the black-box probes replaced read 7.212 / 1.055 / 1.216 mm, because it
     coupled the short stubs buried in pads that KiCad does not pair.
@@ -759,10 +760,10 @@ def test_kct_equals_kicad_on_committed_copper(tmp_path) -> None:
     expected = {
         "USB_D": 9.3249,
         "USB_MCU_D": 0.9553,
-        "LVDS1": 1.5412,
-        "LVDS2": 1.5412,
-        "LVDS3": 1.5412,
-        "LVDS4": 1.5412,
+        "LVDS1": 1.4162,
+        "LVDS2": 1.4162,
+        "LVDS3": 1.4162,
+        "LVDS4": 1.4162,
     }
     for pcb_rel, _ in COMMITTED:
         src = REPO / pcb_rel

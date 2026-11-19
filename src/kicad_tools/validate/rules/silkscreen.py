@@ -30,7 +30,7 @@ convention difference to explain away.  See #4612 for the measured parity table.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -205,6 +205,7 @@ def check_silkscreen_line_width(
     min_width = design_rules.min_silkscreen_width_mm
 
     # Check board-level graphics (never suppressed -- no footprint context)
+    to_board = _board_frame_shift(pcb)
     for graphic in pcb.graphics:
         if not is_silkscreen_layer(graphic.layer):
             continue
@@ -217,7 +218,7 @@ def check_silkscreen_line_width(
                         f"Silkscreen line width {graphic.stroke_width:.2f}mm "
                         f"< minimum {min_width:.2f}mm"
                     ),
-                    location=graphic.start,
+                    location=to_board(_graphic_anchor(graphic)),
                     layer=graphic.layer,
                     actual_value=graphic.stroke_width,
                     required_value=min_width,
@@ -271,6 +272,11 @@ def check_silkscreen_text_height(
     - Board-level text (gr_text) on silkscreen layers
     - Footprint text (fp_text) on silkscreen layers
 
+    Reference designators are held to
+    ``design_rules.min_silkscreen_reference_height_mm`` -- the fab floor unless
+    the project declared a smaller designator height (Issue #9448).  Every
+    other text keeps the fab floor.
+
     Args:
         pcb: The PCB to check
         design_rules: Design rules with min_silkscreen_height_mm
@@ -282,6 +288,7 @@ def check_silkscreen_text_height(
     """
     results = DRCResults(rules_checked=1)
     min_height = design_rules.min_silkscreen_height_mm
+    min_reference_height = design_rules.min_silkscreen_reference_height_mm
 
     # Check board-level text (never suppressed -- no footprint context)
     for text in pcb.texts:
@@ -315,7 +322,8 @@ def check_silkscreen_text_height(
                     continue
                 if fp_text.hidden:
                     continue
-                if fp_text.font_height < min_height:
+                floor = min_reference_height if fp_text.text_type == "reference" else min_height
+                if fp_text.font_height < floor:
                     results.suppressed_count += 1
             continue
 
@@ -324,7 +332,8 @@ def check_silkscreen_text_height(
                 continue
             if fp_text.hidden:
                 continue
-            if fp_text.font_height < min_height:
+            floor = min_reference_height if fp_text.text_type == "reference" else min_height
+            if fp_text.font_height < floor:
                 # Build descriptive item name
                 if fp_text.text_type == "reference":
                     item_name = f"{footprint.reference} (reference)"
@@ -339,12 +348,12 @@ def check_silkscreen_text_height(
                         severity="warning",
                         message=(
                             f"Silkscreen text height {fp_text.font_height:.2f}mm "
-                            f"< minimum {min_height:.2f}mm on {footprint.reference}"
+                            f"< minimum {floor:.2f}mm on {footprint.reference}"
                         ),
                         location=footprint.position,
                         layer=fp_text.layer,
                         actual_value=fp_text.font_height,
-                        required_value=min_height,
+                        required_value=floor,
                         items=(item_name,),
                     )
                 )
@@ -623,17 +632,41 @@ def _fp_transform(footprint: Footprint) -> _Transform:
     return transform
 
 
+def _footprint_text_drawn_angle(angle: float, keep_upright: bool) -> float:
+    """Angle KiCad actually draws a footprint text at (Issue #9433).
+
+    Footprint text without ``(unlocked yes)`` is kept upright: for a stored
+    absolute angle in (90, 270] KiCad draws it turned by 180 degrees while
+    keeping the ``justify`` tokens as written, so the ink lands on the other
+    side of the anchor.  Unlocked text, and every angle outside that range,
+    is drawn as stored.  Board ``gr_text`` is not affected -- do not use this
+    for it.
+    """
+    if keep_upright and 90.0 < (angle % 360.0) <= 270.0:
+        return angle - 180.0
+    return angle
+
+
 def _text_bbox_geometry(
     text: str,
     font_size: tuple[float, float],
     font_thickness: float,
     center: tuple[float, float],
     angle: float = 0.0,
+    justify: Sequence[str] = (),
 ) -> _Geometry | None:
     """Build a shapely box approximating a stroked-text bounding box.
 
-    The box is centered on ``center`` (board coordinates).  Justification is
-    modeled only to first order (centered).  ``angle`` is the absolute
+    ``center`` is the text *anchor* in board coordinates -- the box centre for
+    the default (centred) justification.  ``justify`` is the text's
+    ``(justify ...)`` tokens (Issue #9433): ``left`` starts the box at the
+    anchor and extends it along the text direction, ``right`` ends it at the
+    anchor, ``top`` hangs it below the anchor and ``bottom`` stands it above.
+    The offset is applied in the text's own (unrotated) frame and the box is
+    then rotated about the anchor, so rotated justified text lands correctly.
+    ``mirror`` (back-side text) reverses the horizontal direction -- verified
+    against KiCad's plotted output: ``left`` behaves as unmirrored ``right``
+    and vice versa.  ``top``/``bottom`` are unaffected.  ``angle`` is the absolute
     board-frame text angle in KiCad degrees (positive turns toward negative
     board y); the default ``0`` yields the axis-aligned box.  Returns ``None``
     for empty text.
@@ -647,6 +680,19 @@ def _text_bbox_geometry(
     width = font_size[0] * n * _TEXT_CHAR_WIDTH_FACTOR + font_thickness
     height = font_size[1] + font_thickness
     cx, cy = center
+    # Mirrored text swaps left/right (verified against KiCad plots).
+    h_left, h_right = "left", "right"
+    if "mirror" in justify:
+        h_left, h_right = h_right, h_left
+    if h_left in justify:
+        cx += width / 2.0
+    elif h_right in justify:
+        cx -= width / 2.0
+    # Board y grows downward: ``top`` anchors the top edge, box extends +y.
+    if "top" in justify:
+        cy += height / 2.0
+    elif "bottom" in justify:
+        cy -= height / 2.0
     geom = box(
         cx - width / 2.0,
         cy - height / 2.0,
@@ -772,6 +818,37 @@ def _arc_geometry(
     return LineString(points).buffer(width / 2.0)
 
 
+def _board_frame_shift(pcb: PCB) -> Callable[[tuple[float, float]], tuple[float, float]]:
+    """Return a function mapping board-level (``gr_*``) file coordinates to the board frame.
+
+    ``PCB.load`` shifts footprints (and so pads) into the board-relative
+    frame and records the shift in ``pcb._board_origin``; board-level
+    graphics keep the file's sheet-absolute coordinates (Issues #8561,
+    #9642).  Rules that compare board-level silk against pads, or report its
+    location, must apply this shift.  Identity on zero-origin boards.
+    """
+    ox, oy = getattr(pcb, "_board_origin", (0.0, 0.0))
+
+    def to_board(p: tuple[float, float]) -> tuple[float, float]:
+        return (p[0] - ox, p[1] - oy)
+
+    return to_board
+
+
+def _graphic_anchor(graphic: FootprintGraphic | BoardGraphic) -> tuple[float, float]:
+    """One representative file-frame point per silk shape, for reported locations.
+
+    A parsed ``gr_circle`` / ``fp_circle`` carries its centre in ``center``
+    and leaves ``start`` at the parse default ``(0, 0)``, so reporting
+    ``graphic.start`` sends users to the file origin instead of the shape
+    (Issue #9642).  Every other shape has a real ``start`` -- a poly's is
+    seeded from its first vertex at parse time.
+    """
+    if graphic.graphic_type == "circle" and graphic.center is not None:
+        return graphic.center
+    return graphic.start
+
+
 def _stroke_geometry(
     graphic: FootprintGraphic | BoardGraphic,
     transform: _Transform | None,
@@ -849,6 +926,20 @@ def _pad_aperture_geometry(
     """
     from shapely.affinity import rotate
     from shapely.geometry import box
+
+    # A custom pad's aperture follows its real copper -- the anchor plus
+    # filled primitives (Issue #9498) -- not the nominal anchor ``size`` box;
+    # KiCad masks the whole custom shape.  When the builder refuses, the
+    # anchor box below remains the aperture and ``check_silk_over_copper``
+    # emits the matching ``silk_over_copper_incomplete`` finding.
+    from kicad_tools.geometry.copper import custom_pad_board_outline
+
+    custom = custom_pad_board_outline(pad, pad_pos)
+    if custom is not None:
+        margin = (
+            pad.solder_mask_margin if pad.solder_mask_margin is not None else min_mask_clearance
+        )
+        return custom.buffer(margin) if margin else custom
 
     margin = pad.solder_mask_margin if pad.solder_mask_margin is not None else min_mask_clearance
     w = pad.size[0] + 2.0 * margin
@@ -1004,7 +1095,8 @@ def _iter_silk_elements(
                 fp_text.font_size,
                 fp_text.font_thickness,
                 center,
-                fp_text.rotation,
+                _footprint_text_drawn_angle(fp_text.rotation, fp_text.keep_upright),
+                fp_text.justify,
             )
             if geom is None:
                 continue
@@ -1037,7 +1129,12 @@ def _iter_silk_elements(
             continue
         center = to_board(text.position)
         geom = _text_bbox_geometry(
-            text.text, text.font_size, text.font_thickness, center, text.rotation
+            text.text,
+            text.font_size,
+            text.font_thickness,
+            center,
+            text.rotation,
+            text.justify,
         )
         if geom is None:
             continue
@@ -1056,7 +1153,7 @@ def _iter_silk_elements(
             side,
             geom,
             label,
-            to_board(board_graphic.start),
+            to_board(_graphic_anchor(board_graphic)),
             board_graphic.layer,
             board_graphic.uuid,
             _graphic_descriptor("gr", board_graphic),
@@ -1094,6 +1191,7 @@ def iter_unmodeled_silk_graphics(
                 graphic.uuid,
             )
 
+    to_board = _board_frame_shift(pcb)
     for board_graphic in pcb.graphics:
         if _silk_side(board_graphic.layer) is None:
             continue
@@ -1102,7 +1200,7 @@ def iter_unmodeled_silk_graphics(
         yield (
             f"gr_{board_graphic.graphic_type}",
             board_graphic.graphic_type,
-            board_graphic.start,
+            to_board(_graphic_anchor(board_graphic)),
             board_graphic.layer,
             board_graphic.uuid,
         )
@@ -1174,9 +1272,14 @@ def _iter_pad_apertures(
     default).  ``check_silk_over_copper`` chains both iterators into a single
     aperture index.
     """
+    from .clearance import _pad_has_no_copper, _pad_has_no_mask
+
     for footprint in pcb.footprints:
         transform = _fp_transform(footprint)
         for pad in footprint.pads:
+            if _pad_has_no_copper(pad) and _pad_has_no_mask(pad):
+                # Issue #9528: no copper and no mask opening: no aperture.
+                continue
             sides: tuple[str, ...]
             if pad.type == "smd":
                 pad_side = "F" if footprint.layer == "F.Cu" else "B"
@@ -1244,6 +1347,40 @@ def check_silk_over_copper(
     from shapely import STRtree  # type: ignore[import-untyped]
 
     results = DRCResults(rules_checked=1)
+
+    # A custom pad whose aperture degrades to the anchor box (the outline
+    # builder refused its primitives) must be a named finding, never a silent
+    # under-measurement (Issue #9498): silk over that pad's primitive copper
+    # would read as clean.
+    from kicad_tools.geometry.copper import custom_pad_outline_detail
+
+    from .clearance import _pad_has_no_copper, _pad_has_no_mask
+
+    for footprint in pcb.footprints:
+        for pad in footprint.pads:
+            if (pad.shape or "").lower() != "custom":
+                continue
+            if pad.type not in {"smd", "thru_hole"}:
+                continue
+            if _pad_has_no_copper(pad) and _pad_has_no_mask(pad):
+                # Issue #9528: neither copper nor a mask opening to smear silk onto.
+                continue
+            geometry, refusal = custom_pad_outline_detail(
+                pad, _fp_transform(footprint)(pad.position)
+            )
+            if geometry is not None:
+                continue
+            detail = refusal or "source pad node unavailable"
+            results.add(
+                DRCViolation(
+                    "silk_over_copper_incomplete",
+                    "info",
+                    f"Silk-over-copper coverage incomplete: custom pad "
+                    f"{footprint.reference} pad {pad.number} aperture was measured "
+                    f"by its anchor only ({detail}); silk over its primitive copper "
+                    f"is unjudged, not cleared",
+                )
+            )
 
     min_mask = design_rules.min_solder_mask_clearance_mm
 
@@ -1875,7 +2012,12 @@ def _iter_board_frame_texts(
                 continue
             center = transform(fp_text.position)
             geom = _text_bbox_geometry(
-                fp_text.text, fp_text.font_size, fp_text.font_thickness, center
+                fp_text.text,
+                fp_text.font_size,
+                fp_text.font_thickness,
+                center,
+                _footprint_text_drawn_angle(fp_text.rotation, fp_text.keep_upright),
+                fp_text.justify,
             )
             if geom is None:
                 continue
@@ -1886,7 +2028,12 @@ def _iter_board_frame_texts(
             continue
         center = (text.position[0] - ox, text.position[1] - oy)
         geom = _text_bbox_geometry(
-            text.text, text.font_size, text.font_thickness, center, text.rotation
+            text.text,
+            text.font_size,
+            text.font_thickness,
+            center,
+            text.rotation,
+            text.justify,
         )
         if geom is None:
             continue
@@ -2000,6 +2147,48 @@ def check_silk_edge_clearance(
     return results
 
 
+def _has_replacement_silk_text(
+    pcb: PCB,
+    footprint: Any,
+    layer: str,
+    Polygon: Any,
+) -> bool:
+    """True if a visible board silk text on ``layer``'s side is centred in the courtyard (#9435).
+
+    ``gr_text`` positions are sheet-absolute while footprints are already
+    shifted by the board origin, so the text centre is shifted here, as in
+    :func:`_iter_board_frame_texts`.  Returns ``False`` when the footprint has
+    no resolvable courtyard on that side -- nothing to prove, so keep flagging.
+    """
+    from shapely.geometry import Point
+
+    from kicad_tools.geometry.courtyard import _courtyard_polygon, _side_has_geometry
+
+    side = _silk_side(layer)
+    if side is None or not _side_has_geometry(footprint, side):
+        return False
+    courtyard = _courtyard_polygon(footprint, side, Polygon)
+    if courtyard is None:
+        return False
+    courtyard = courtyard.buffer(_CLEARANCE_EPSILON_MM)
+    ox, oy = getattr(pcb, "_board_origin", (0.0, 0.0))
+    for text in pcb.texts:
+        if text.hidden or not text.text or _silk_side(text.layer) != side:
+            continue
+        center = (text.position[0] - ox, text.position[1] - oy)
+        geom = _text_bbox_geometry(
+            text.text,
+            text.font_size,
+            text.font_thickness,
+            center,
+            text.rotation,
+            text.justify,
+        )
+        if geom is not None and courtyard.contains(Point(geom.centroid.x, geom.centroid.y)):
+            return True
+    return False
+
+
 def check_silk_ref_obscured(
     pcb: PCB,
     design_rules: DesignRules,
@@ -2012,6 +2201,15 @@ def check_silk_ref_obscured(
     containment test is the one ``kct place-silk-refs`` plans against
     (:func:`~kicad_tools.silkscreen.place_refs._courtyard_polygon`), so the
     fix it offers clears this finding.
+
+    A hidden reference is **not** reported when the board replaces it with a
+    visible board-level silkscreen text (``gr_text``, e.g. a function label such
+    as "PWR") on the same side whose box centre lies inside the footprint's
+    courtyard (#9435).  The designator is then hidden on purpose and something
+    readable sits where it was.  The test is deliberately geometric and cheap:
+    any unrelated visible silk text centred inside the courtyard also exempts
+    the footprint.  A hidden reference with no such text, and a visible
+    reference inside its own courtyard, are still flagged.
     """
     del design_rules  # no manufacturer threshold
     require_shapely("silk-ref-obscured geometry")
@@ -2038,6 +2236,8 @@ def check_silk_ref_obscured(
         if ref_text.hidden:
             if is_fiducial_footprint(footprint):
                 continue  # hiding fiducial references is the convention (#8540)
+            if _has_replacement_silk_text(pcb, footprint, ref_text.layer, Polygon):
+                continue  # hidden on purpose, replaced by a function label (#9435)
             results.add(
                 DRCViolation(
                     rule_id="silk_ref_obscured",
@@ -2057,9 +2257,17 @@ def check_silk_ref_obscured(
             continue
         center = _fp_transform(footprint)(ref_text.position)
         ref_node = _find_reference_node(footprint)
-        angle = _read_text_angle(ref_node) if ref_node is not None else 0.0
+        angle = _footprint_text_drawn_angle(
+            _read_text_angle(ref_node) if ref_node is not None else 0.0,
+            ref_text.keep_upright,
+        )
         geom = _oriented_text_geometry(
-            ref_text.text, ref_text.font_size, ref_text.font_thickness, center, angle
+            ref_text.text,
+            ref_text.font_size,
+            ref_text.font_thickness,
+            center,
+            angle,
+            ref_text.justify,
         )
         if geom is None:
             continue

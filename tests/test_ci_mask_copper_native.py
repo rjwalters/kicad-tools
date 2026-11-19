@@ -158,10 +158,19 @@ def test_workflow_runs_full_gate_once_and_retains_diagnostics():
     steps = workflow["jobs"]["test"]["steps"]
     gate = next(s for s in steps if s.get("name") == "Run native mask-to-copper gate")
     assert json.loads(gate["env"]["KCT_MASK_NATIVE_PYTHON"]) == ["/usr/bin/python3"]
-    assert "check_mask_copper_native.py" in gate["run"]
     assert not gate.get("continue-on-error")
+    # Issue #9340: the gate command lives in the shared test job script the
+    # step calls (2am#7561 ruling); the workflow forwards the diagnostics
+    # artifact directory.
+    assert "bash scripts/ci/jobs/test.sh mask-copper" in gate["run"]
+    assert "--artifacts" in gate["run"]
+    test_script = (ROOT / "scripts/ci/jobs/test.sh").read_text()
+    assert "check_mask_copper_native.py" in test_script
     general = next(s for s in steps if s.get("name") == "Run tests")
-    assert "--ignore=tests/test_mask_copper_native.py" in general["run"]
+    assert "bash scripts/ci/jobs/test.sh bulk" in general["run"]
+    # The bulk sub-command must keep ignoring the module the dedicated gate
+    # step above runs, so the suite never runs it twice.
+    assert "--ignore=tests/test_mask_copper_native.py" in test_script
     artifact = next(s for s in steps if s.get("name") == "Retain native mask diagnostics")
     assert "failure()" in artifact["if"]
     assert "mask-copper-native/" in artifact["with"]["path"]

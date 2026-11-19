@@ -14,8 +14,8 @@ carry into one SARIF ``run``:
   Issue #5946) is the ``partialFingerprints`` entry ``kctFindingKey/v1``:
   it survives small edits, so a CI system tracks one alert across commits.
   The ``evidence_hash`` is the result ``fingerprints`` entry
-  ``kctEvidence/<version>`` (``kctEvidence/ev3`` for ``kct check``,
-  ``kctEvidence/ev3.m1`` for ``kct detect-mistakes``): it changes exactly when
+  ``kctEvidence/<version>`` (``kctEvidence/ev4`` for ``kct check``,
+  ``kctEvidence/ev4.m1`` for ``kct detect-mistakes``): it changes exactly when
   the local evidence does, and its name changes with the evidence recipe.
 * **Locations.**  SARIF regions are text positions, so each result points at
   the board file and, when a finding names a footprint (or a net), at the
@@ -45,7 +45,7 @@ SARIF_VERSION = "2.1.0"
 SARIF_SCHEMA_URI = (
     "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json"
 )
-INFORMATION_URI = "https://github.com/rjwalters/kicad-tools"
+INFORMATION_URI = "https://github.com/2AMLogic/kicad-tools"
 
 KEY_FINGERPRINT = "kctFindingKey/v1"
 

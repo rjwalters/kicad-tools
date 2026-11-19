@@ -31,11 +31,12 @@ INSTALLER = REPO_ROOT / "scripts" / "install-kct.sh"
 SKILLS_SRC = REPO_ROOT / ".claude" / "commands" / "kct"
 CI_GATES_SRC = REPO_ROOT / "scripts" / "ci"
 
-# The three portable CI gates vendored into the consumer's .kct/ci/ (#4056).
+# The four portable CI gates vendored into the consumer's .kct/ci/ (#4056).
 # Must stay in sync with CI_GATE_FILES in scripts/install-kct.sh.
 VENDORED_CI_GATES = (
     "check_copper_lvs.py",
     "check_routed_drc.py",
+    "identity_allowance.py",
     "net_class_map_resolver.py",
 )
 
@@ -424,7 +425,7 @@ def test_git_mode_writes_git_source(target_repo: Path, fake_uv_env: dict[str, st
     assert '"kicad-tools"' in pyproject
     src = pyproject.split("[tool.uv.sources]", 1)[1]
     assert "git" in src
-    assert "rjwalters/kicad-tools" in src
+    assert "2AMLogic/kicad-tools" in src
     assert "v0.14.0" in src
     meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
     assert meta["source_mode"] == "git"
@@ -436,7 +437,7 @@ def test_git_mode_writes_git_source(target_repo: Path, fake_uv_env: dict[str, st
 def test_ci_gates_vendored_byte_identical_and_executable(
     target_repo: Path, fake_uv_env: dict[str, str]
 ) -> None:
-    """The 3 portable gates land in .kct/ci/, byte-identical + executable."""
+    """The 4 portable gates land in .kct/ci/, byte-identical + executable."""
     result = run_installer(target_repo, "--path", str(REPO_ROOT), env=fake_uv_env)
     assert result.returncode == 0, result.stderr
 
@@ -499,7 +500,7 @@ def test_ci_gates_rerun_idempotent(target_repo: Path, fake_uv_env: dict[str, str
     assert second.returncode == 0, second.stderr
 
     ci_dir = target_repo / ".kct" / "ci"
-    # Still exactly the expected set (3 gates + README), all byte-identical.
+    # Still exactly the expected set (4 gates + README), all byte-identical.
     vendored = sorted(p.name for p in ci_dir.iterdir())
     assert vendored == sorted([*VENDORED_CI_GATES, "README.md"])
     for name in VENDORED_CI_GATES:
@@ -918,7 +919,7 @@ GIT_PINNED_BODY = (
     "]\n"
     "\n"
     "[tool.uv.sources]\n"
-    'kicad-tools = { git = "https://github.com/rjwalters/kicad-tools", rev = "v0.24.0" }\n'
+    'kicad-tools = { git = "https://github.com/2AMLogic/kicad-tools", rev = "v0.24.0" }\n'
 )
 
 
@@ -1137,10 +1138,10 @@ def test_pypi_mode_removes_table_form_sources_entry(
 ) -> None:
     _write_pyproject(
         target_repo,
-        'dependencies = ["kicad-tools[report] @ git+https://github.com/rjwalters/kicad-tools@45744d0a"]\n'
+        'dependencies = ["kicad-tools[report] @ git+https://github.com/2AMLogic/kicad-tools@45744d0a"]\n'
         "\n"
         "[tool.uv.sources.kicad-tools]\n"
-        'git = "https://github.com/rjwalters/kicad-tools"\n'
+        'git = "https://github.com/2AMLogic/kicad-tools"\n'
         'rev = "45744d0a"\n'
         "\n"
         "[tool.ruff]\n"
@@ -1218,7 +1219,7 @@ def test_pin_helper_ignores_comments_and_still_adds_the_dependency(tmp_path: Pat
         "\n"
         "[tool.uv.sources]\n"
         "kicad-tools = [\n"
-        '  { git = "https://github.com/rjwalters/kicad-tools", tag = "v0.24.0" },\n'
+        '  { git = "https://github.com/2AMLogic/kicad-tools", tag = "v0.24.0" },\n'
         "]\n"
     )
     result, data = _pin_apply(tmp_path, text)
@@ -1246,7 +1247,7 @@ def test_pin_helper_adds_main_dependency_when_only_in_a_group(tmp_path: Path) ->
 def test_pin_helper_refuses_a_sources_entry_it_cannot_remove(tmp_path: Path) -> None:
     text = (
         '[project]\nname = "board"\nversion = "0.1.0"\ndependencies = ["numpy"]\n'
-        '\n[tool.uv]\nsources.kicad-tools = { git = "https://github.com/rjwalters/kicad-tools" }\n'
+        '\n[tool.uv]\nsources.kicad-tools = { git = "https://github.com/2AMLogic/kicad-tools" }\n'
     )
     path = tmp_path / "pyproject.toml"
     path.write_text(text)
@@ -1281,7 +1282,7 @@ def test_pin_helper_keeps_crlf_line_endings(tmp_path: Path) -> None:
         "]",
         "",
         "[tool.uv.sources]",
-        'kicad-tools = { git = "https://github.com/rjwalters/kicad-tools", tag = "v0.24.0" }',
+        'kicad-tools = { git = "https://github.com/2AMLogic/kicad-tools", tag = "v0.24.0" }',
         "",
         "[tool.ruff]",
         "line-length = 100",

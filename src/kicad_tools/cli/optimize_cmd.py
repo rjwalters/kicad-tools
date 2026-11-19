@@ -1109,6 +1109,25 @@ Examples:
     )
     optimizer.set_attachment_points(attachments)
 
+    # Issue #9524: a rewrite may not break a pad's mask-clean escape (drop a
+    # terminating end inside a same-net opening, or carry a bend/crossing into
+    # any pad's opening).  Zones come from the schema parse, whose coordinates
+    # are board-relative; the segment text this optimizer edits is
+    # sheet-absolute, so add the board origin back.
+    import dataclasses
+
+    from kicad_tools.router.optimizer.geometry import pad_mask_zones_from_pcb
+    from kicad_tools.schema.pcb import PCB as ZonePCB
+
+    zone_pcb = ZonePCB.load(str(pcb_path))
+    origin_x, origin_y = getattr(zone_pcb, "_board_origin", (0.0, 0.0))
+    optimizer.set_pad_zones(
+        [
+            dataclasses.replace(zone, x=zone.x + origin_x, y=zone.y + origin_y)
+            for zone in pad_mask_zones_from_pcb(zone_pcb)
+        ]
+    )
+
     # ``optimize_pcb`` calls ``self.optimize_segments`` per net; route that
     # through the grid-synced wrapper (see its docstring).  optimize_pcb has no
     # optimize_fn hook, so the instance method is deliberately rebound.

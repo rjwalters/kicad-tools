@@ -67,7 +67,12 @@ from kicad_tools.geometry.package_body import footprint_side, package_body_polyg
 
 from ..violations import DRCResults, DRCViolation
 from .base import DRCRule
-from .silkscreen import _silk_side, _text_bbox_geometry
+from .silkscreen import (
+    _board_frame_shift,
+    _footprint_text_drawn_angle,
+    _silk_side,
+    _text_bbox_geometry,
+)
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers import DesignRules
@@ -321,11 +326,15 @@ class Pin1MarkerRule(DRCRule):
 
         board_silk: dict[str, list[Any]] = {"F": [], "B": []}
         if self.include_board_silk:
+            # Footprints are board-relative; gr_* keep file coordinates (#9642).
+            board_xf = (
+                _board_frame_shift(pcb) if any(getattr(pcb, "_board_origin", (0.0, 0.0))) else None
+            )
             for graphic in pcb.graphics:
                 side = _silk_side(graphic.layer)
                 if side is None:
                     continue
-                geom = _graphic_geometry(graphic, None)
+                geom = _graphic_geometry(graphic, board_xf)
                 if geom is not None and not geom.is_empty:
                     board_silk[side].append(geom)
 
@@ -540,7 +549,12 @@ class Pin1MarkerRule(DRCRule):
             if _silk_side(text.layer) != side:
                 continue
             geom = _text_bbox_geometry(
-                text.text, text.font_size, text.font_thickness, transform(text.position)
+                text.text,
+                text.font_size,
+                text.font_thickness,
+                transform(text.position),
+                _footprint_text_drawn_angle(text.rotation, text.keep_upright),
+                text.justify,
             )
             if geom is not None:
                 yield geom

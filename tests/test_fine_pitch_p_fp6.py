@@ -30,7 +30,7 @@ Six tests covering:
      the architect-requested invariant for the SOP rescue path that
      P_FP6 introduces.
 
-Issue: https://github.com/rjwalters/kicad-tools/issues/3381
+Issue: https://github.com/2AMLogic/kicad-tools/issues/3381
 """
 
 from __future__ import annotations

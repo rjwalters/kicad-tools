@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import contextlib
 import math
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -63,6 +63,7 @@ from kicad_tools.silkscreen._silk_defaults import (
     SILK_EDGE_CLEARANCE_MM,
 )
 from kicad_tools.validate.rules.silkscreen import (
+    _footprint_text_drawn_angle,
     _iter_graphic_mask_apertures,
     _iter_pad_apertures,
     _iter_via_apertures,
@@ -128,13 +129,40 @@ def _iter_drill_obstacles(pcb: PCB):
     :func:`iter_drill_holes`, so the placer and the check share one
     definition; through-via and pad drills pierce the board so both silk
     sides get them, while a blind/micro via reaches only the outer side its
-    layers name and a buried via neither (#9076).
+    layers name and a buried via neither (#9076).  Labels are sheet-absolute
+    like the other aperture sources: pass the board origin so the drill
+    coordinates match the text positions the report prints (#9327).
     """
-    for geom, label, sides in iter_drill_holes(pcb.vias, pcb.footprints):
+    for geom, label, sides in iter_drill_holes(
+        pcb.vias, pcb.footprints, getattr(pcb, "_board_origin", (0.0, 0.0))
+    ):
         label = f"drill {label}"
         for side in ("F", "B"):
             if side in sides:
                 yield side, geom, label
+
+
+def collect_apertures(pcb: PCB, mask_clearance_mm: float) -> dict[str, list[tuple[Any, str]]]:
+    """Every obstacle silk must stay off, as ``{"F"|"B": [(geom, label), ...]}``.
+
+    The one definition shared by :meth:`SilkRefPlacer.plan` and
+    ``kct pcb add-board-info --auto`` so the two cannot drift apart again
+    (Issue #9327): pad and untented-via mask openings, NPTH pads, every
+    drill, tented or not (#9054), and ``gr_*``/``fp_*`` shapes drawn on
+    ``F.Mask``/``B.Mask`` (#8862). Geometry is board-relative; label
+    coordinates are sheet-absolute.
+    """
+    apertures: dict[str, list[tuple[Any, str]]] = {"F": [], "B": []}
+    for iterator_result in (
+        _iter_pad_apertures(pcb, mask_clearance_mm),
+        _iter_via_apertures(pcb, mask_clearance_mm),
+        _iter_npth_apertures(pcb, mask_clearance_mm),
+        _iter_drill_obstacles(pcb),
+        _iter_graphic_mask_apertures(pcb),
+    ):
+        for side, geom, label in iterator_result:
+            apertures[side].append((geom, label))
+    return apertures
 
 
 def references_over_holes(pcb: PCB) -> set[str]:
@@ -219,6 +247,7 @@ def _oriented_text_geometry(
     thickness: float,
     center: tuple[float, float],
     angle: float,
+    justify: Sequence[str] = (),
 ) -> Any:
     """Rotate the complete text envelope, retaining glyph dimensions.
 
@@ -226,7 +255,7 @@ def _oriented_text_geometry(
     the footprint orientation before its position transform). Do not add the
     footprint angle again. KiCad positive angles turn toward negative board y.
     """
-    return _text_bbox_geometry(text, font_size, thickness, center, angle)
+    return _text_bbox_geometry(text, font_size, thickness, center, angle, justify)
 
 
 def _set_text_at(ref_node: SExp, x: float, y: float, angle: float) -> None:
@@ -269,7 +298,8 @@ def _visible_reference(footprint: Footprint):
         ref_text.font_size,
         ref_text.font_thickness,
         center,
-        _read_text_angle(ref_node),
+        _footprint_text_drawn_angle(_read_text_angle(ref_node), ref_text.keep_upright),
+        ref_text.justify,
     )
     if geom is None:
         return None
@@ -324,7 +354,12 @@ def _iter_owned_static_silk(pcb: PCB):
                 continue
             center = transform(fp_text.position)
             geom = _oriented_text_geometry(
-                fp_text.text, fp_text.font_size, fp_text.font_thickness, center, fp_text.rotation
+                fp_text.text,
+                fp_text.font_size,
+                fp_text.font_thickness,
+                center,
+                _footprint_text_drawn_angle(fp_text.rotation, fp_text.keep_upright),
+                fp_text.justify,
             )
             if geom is None:
                 continue
@@ -356,7 +391,12 @@ def _iter_owned_static_silk(pcb: PCB):
         if side is None or text.hidden:
             continue
         geom = _oriented_text_geometry(
-            text.text, text.font_size, text.font_thickness, to_board(text.position), text.rotation
+            text.text,
+            text.font_size,
+            text.font_thickness,
+            to_board(text.position),
+            text.rotation,
+            text.justify,
         )
         if geom is None:
             continue
@@ -588,6 +628,13 @@ class RefPlacement:
     #: "under_component_fallback" (best-effort position still sits on its
     #: own component's courtyard -- reported, never silently accepted).
     status: str
+    #: Why the status is what it is: the obstacle that defeated the last
+    #: candidate tried (``unplaceable`` / ``under_component_fallback``) or
+    #: the association note (``moved`` / ``unchanged``).  Obstacle labels
+    #: quote **sheet-absolute** coordinates -- e.g. ``pad aperture drill
+    #: via at (130.000, 80.000)`` -- unlike ``old_position`` /
+    #: ``new_position``, which are board-relative; add :attr:`origin` to
+    #: map between the two frames (Issue #9364).
     reason: str = ""
     #: Footprint-local coordinates to write into the ``(at ...)`` node.
     #: Populated only for ``status == "moved"``.
@@ -598,10 +645,18 @@ class RefPlacement:
     #: True when no clear candidate reached ``ASSOCIATION_MARGIN_MM`` and the
     #: best-margin clear candidate was used instead (Issue #8628).
     low_association: bool = False
+    #: Sheet origin of the board-relative frame; add it to ``old_position``
+    #: / ``new_position`` to get the sheet coordinates ``reason`` quotes
+    #: when it carries any (Issue #9364, mirroring :class:`FixedTextConflict`).
+    origin: tuple[float, float] = (0.0, 0.0)
 
     @property
     def moved(self) -> bool:
         return self.status == "moved"
+
+    def to_sheet(self, point: tuple[float, float]) -> tuple[float, float]:
+        """Convert a board-relative point to sheet-absolute coordinates."""
+        return (point[0] + self.origin[0], point[1] + self.origin[1])
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -615,6 +670,8 @@ class RefPlacement:
             "reason": self.reason,
             "association_margin_mm": self.association_margin_mm,
             "low_association": self.low_association,
+            "frame": "board-relative",
+            "origin_mm": list(self.origin),
         }
 
 
@@ -627,6 +684,14 @@ class FixedTextConflict:
     position: tuple[float, float]  # board-relative mm
     opening: str
     candidates: list[tuple[float, float]] = field(default_factory=list)
+    #: Sheet origin of the board-relative frame; add it to ``position`` /
+    #: ``candidates`` to get the sheet coordinates ``opening`` is quoted in
+    #: (Issue #9327).
+    origin: tuple[float, float] = (0.0, 0.0)
+
+    def to_sheet(self, point: tuple[float, float]) -> tuple[float, float]:
+        """Convert a board-relative point to sheet-absolute coordinates."""
+        return (point[0] + self.origin[0], point[1] + self.origin[1])
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -635,6 +700,8 @@ class FixedTextConflict:
             "position": list(self.position),
             "opening": self.opening,
             "candidate_positions": [list(c) for c in self.candidates],
+            "frame": "board-relative",
+            "origin_mm": list(self.origin),
         }
 
 
@@ -651,9 +718,14 @@ def _report_fixed_text_over_openings(
 
     Candidate clear positions reuse the ring search of :func:`_candidate_points`
     around the text's own box and are tested against the same aperture set
-    the reference placer uses (Issue #8862).
+    the reference placer uses (Issue #8862), and also against every other
+    static silk item on the side -- which includes the current box of each
+    other board text, conflicting or not (Issue #9327).
     """
     ox, oy = getattr(pcb, "_board_origin", (0.0, 0.0))
+    static_silk: dict[str, list[tuple[Any, str]]] = {"F": [], "B": []}
+    for static_side, static_geom, static_label in _iter_static_silk_obstacles(pcb):
+        static_silk[static_side].append((static_geom, static_label))
     for text in pcb.texts:
         side = _silk_side(text.layer)
         if side is None or text.hidden or not apertures.get(side):
@@ -662,7 +734,7 @@ def _report_fixed_text_over_openings(
 
         def geom_at(point: tuple[float, float], text: Any = text) -> Any:
             return _oriented_text_geometry(
-                text.text, text.font_size, text.font_thickness, point, text.rotation
+                text.text, text.font_size, text.font_thickness, point, text.rotation, text.justify
             )
 
         geom = geom_at(center)
@@ -679,18 +751,23 @@ def _report_fixed_text_over_openings(
             (min_x, min_y, max_x, max_y), max_x - min_x, max_y - min_y, max_offset_mm, step_mm
         )
         points.sort(key=lambda p: math.hypot(p[0] - center[0], p[1] - center[1]))
+        # This text's own silk geometry is in the static set; every other
+        # item there (other texts, graphics, footprint silk) is an obstacle.
+        others = [g for g, _ in static_silk[side] if not g.equals(geom)]
         clear: list[tuple[float, float]] = []
         for point in points:
             cand = geom_at(point)
             if cand is None:
                 continue
             grown = cand.buffer(reach)
-            if not any(grown.intersects(g) for g, _ in apertures[side]):
+            if not any(grown.intersects(g) for g, _ in apertures[side]) and not any(
+                grown.intersects(g) for g in others
+            ):
                 clear.append(point)
                 if len(clear) == 3:
                     break
         result.fixed_text_conflicts.append(
-            FixedTextConflict(text.text, text.layer, center, hit, clear)
+            FixedTextConflict(text.text, text.layer, center, hit, clear, origin=(ox, oy))
         )
 
 
@@ -851,10 +928,19 @@ def _render_svg(
         font_size = ref_text.font_size if ref_text is not None else (1.0, 1.0)
         font_thickness = ref_text.font_thickness if ref_text is not None else 0.15
         text = ref_text.text if ref_text is not None else placement.footprint_ref
+        justify = ref_text.justify if ref_text is not None else ()
 
         if placement.status == "moved":
             old_geom = _oriented_text_geometry(
-                text, font_size, font_thickness, placement.old_position, placement.old_rotation
+                text,
+                font_size,
+                font_thickness,
+                placement.old_position,
+                _footprint_text_drawn_angle(
+                    placement.old_rotation,
+                    ref_text.keep_upright if ref_text is not None else True,
+                ),
+                justify,
             )
             if old_geom is not None:
                 points = " ".join(
@@ -878,7 +964,15 @@ def _render_svg(
             color = "#cc3333"
 
         geom = _oriented_text_geometry(
-            text, font_size, font_thickness, placement.new_position, placement.new_rotation
+            text,
+            font_size,
+            font_thickness,
+            placement.new_position,
+            _footprint_text_drawn_angle(
+                placement.new_rotation,
+                ref_text.keep_upright if ref_text is not None else True,
+            ),
+            justify,
         )
         if geom is not None:
             points = " ".join(f"{x * scale:.2f},{y * scale:.2f}" for x, y in geom.exterior.coords)
@@ -998,23 +1092,15 @@ class SilkRefPlacer:
             seen_refs.add(footprint.reference)
         result = PlaceSilkRefsResult(clearance_mm=clearance_mm)
         self._ref_nodes = {}
+        # Sheet origin of the board-relative frame every RefPlacement
+        # reports positions in; ``reason`` obstacle labels quote the sheet
+        # frame, so placements carry the origin to map between the two
+        # (Issue #9364).  Unavailable outline degrades to (0, 0), where the
+        # frames coincide.
+        placement_origin = tuple(getattr(pcb, "_board_origin", (0.0, 0.0)))
 
         # --- Static obstacles (never move) ---
-        apertures: dict[str, list[tuple[Any, str]]] = {"F": [], "B": []}
-        for aperture_side, geom, label in _iter_pad_apertures(pcb, mask_clearance_mm):
-            apertures[aperture_side].append((geom, label))
-        for aperture_side, geom, label in _iter_via_apertures(pcb, mask_clearance_mm):
-            apertures[aperture_side].append((geom, label))
-        for aperture_side, geom, label in _iter_npth_apertures(pcb, mask_clearance_mm):
-            apertures[aperture_side].append((geom, label))
-        # Every via/PTH/NPTH drill, tented or not -- the set
-        # ``silk_hole_overlap`` measures against (Issue #9054).
-        for aperture_side, geom, label in _iter_drill_obstacles(pcb):
-            apertures[aperture_side].append((geom, label))
-        # gr_*/fp_* shapes on F.Mask/B.Mask open the mask just like pads do
-        # (Issue #8862); same iterator the silk-over-mask validator uses.
-        for aperture_side, geom, label in _iter_graphic_mask_apertures(pcb):
-            apertures[aperture_side].append((geom, label))
+        apertures = collect_apertures(pcb, mask_clearance_mm)
 
         _report_fixed_text_over_openings(
             pcb,
@@ -1146,7 +1232,8 @@ class SilkRefPlacer:
                         ref_text.font_size,
                         ref_text.font_thickness,
                         point,
-                        rotation,
+                        _footprint_text_drawn_angle(rotation, ref_text.keep_upright),
+                        ref_text.justify,
                     )
                     ok, why = clears(geom)
                     if not ok:
@@ -1182,6 +1269,7 @@ class SilkRefPlacer:
                         new_rotation=old_rotation,
                         status=status,
                         reason=last_reason or "no collision-free candidate within search radius",
+                        origin=placement_origin,
                     )
                 )
                 continue
@@ -1215,6 +1303,7 @@ class SilkRefPlacer:
                         new_local_position=local,
                         association_margin_mm=chosen_margin,
                         low_association=low_assoc,
+                        origin=placement_origin,
                     )
                 )
             else:
@@ -1230,6 +1319,7 @@ class SilkRefPlacer:
                         reason=assoc_reason,
                         association_margin_mm=chosen_margin,
                         low_association=low_assoc,
+                        origin=placement_origin,
                     )
                 )
 

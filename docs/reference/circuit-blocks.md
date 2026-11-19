@@ -572,7 +572,7 @@ Common parameters across blocks:
 
 ## See Also
 
-- [End-to-End Example](https://github.com/rjwalters/kicad-tools/tree/main/examples/05-end-to-end)
+- [End-to-End Example](https://github.com/2AMLogic/kicad-tools/tree/main/examples/05-end-to-end)
 - [Schematic Analysis Guide](../guides/schematic-analysis.md)
 - API: `ComposedCircuitBlock` -- `src/kicad_tools/schematic/blocks/base.py`
 - API: `match_ports()` -- `src/kicad_tools/schematic/blocks/validator.py`

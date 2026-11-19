@@ -749,11 +749,29 @@ def generate_dru(
     )
 
     # --- Silkscreen Height ---
-    lines.append(
-        f'(rule "Silkscreen Height{label_suffix}"\n'
-        f"  (condition \"A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')\")\n"
-        f"  (constraint text_height (min {rules.min_silkscreen_height_mm}mm)))"
-    )
+    # Issue #9448: a project that declares a smaller designator height splits
+    # the rule in two.  KiCad 10 identifies a reference field by comparing the
+    # text with its footprint's own reference (``A.Text == A.Reference``; the
+    # negation must be written ``!(...)`` -- ``!=`` is false for board text,
+    # which has no ``Reference``).  Without a declaration the single blanket
+    # rule is emitted byte-for-byte as before.
+    if rules.has_reference_height_deviation:
+        lines.append(
+            f'(rule "Silkscreen Height{label_suffix}"\n'
+            f"  (condition \"A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen') && !(A.Text == A.Reference)\")\n"
+            f"  (constraint text_height (min {rules.min_silkscreen_height_mm}mm)))"
+        )
+        lines.append(
+            f'(rule "Silkscreen Reference Height{label_suffix}"\n'
+            f"  (condition \"A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen') && A.Text == A.Reference\")\n"
+            f"  (constraint text_height (min {rules.min_silkscreen_reference_height_mm}mm)))"
+        )
+    else:
+        lines.append(
+            f'(rule "Silkscreen Height{label_suffix}"\n'
+            f"  (condition \"A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')\")\n"
+            f"  (constraint text_height (min {rules.min_silkscreen_height_mm}mm)))"
+        )
 
     # KiCad does not support a solder_mask_margin custom constraint. Emitting
     # it makes KiCad 10 silently discard all custom rules (#4999). The Python

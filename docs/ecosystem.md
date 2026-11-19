@@ -90,7 +90,7 @@ vocabulary is defined by `LICENSE_COMPAT` in
 |---|---|
 | `mit-clean` | MIT/BSD/ISC. Code may move, with attribution. |
 | `permissive-ideas-only` | Apache-2.0 and similar. One-way compatible in principle; our standing decision is ideas-only, to keep this tree uniformly MIT. |
-| `copyleft-ideas-only` | GPL/AGPL. Capability-level engagement only — **no code in either direction**. |
+| `copyleft-ideas-only` | GPL/AGPL. Capability-level engagement only — **no code in either direction**, with the clean-room exception described below for the sources the ruling names (not automatic for every entry in this category). |
 | `unlicensed` | No `LICENSE` committed. Treat as all-rights-reserved, whatever the README claims. |
 | `cloud-service` | Open client, closed service. The service is the constraint, not the client's license. |
 
@@ -104,6 +104,21 @@ Two consequences worth stating plainly:
 - A README claiming MIT is not a license. `Seeed-Studio/kicad-mcp-server`
   commits no `LICENSE` file, so we copy nothing from it even though its
   offline-parsing approach is the closest peer to `kct mcp serve`.
+
+One exception to "no code in either direction", by operator ruling of
+2026-11-19: the **behaviour** of the sources named in the Scope of
+[clean-room.md](clean-room.md) may be reimplemented through the two-party
+clean-room protocol there — a reader who has studied the GPL/AGPL source
+writes a behaviour spec, a reviewer checks the spec for leaked expression,
+and a writer who never sees the source implements from it. The code itself
+still moves in neither direction, and this applies to KiCad, KiCad's GPL
+derivatives (such as PCBJam's WebAssembly pcbnew port) and AGPL registry
+entries alike. **Other `copyleft-ideas-only` entries — independent copyleft
+projects such as freerouting (GPL-3.0 Java) — are not covered by this
+ruling** and stay ideas-only in both directions unless the operator extends
+it. `unlicensed` neighbours gain nothing from the protocol: with no
+license there is no permission to study the work for reimplementation, so
+they stay all-rights-reserved ideas-only.
 
 ## Honesty rule
 

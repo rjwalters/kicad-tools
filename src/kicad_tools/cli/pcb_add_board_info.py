@@ -117,12 +117,12 @@ def _obstacles(pcb, side: str, mask_clearance_mm: float):
     from kicad_tools.silkscreen.place_refs import (
         _board_material,
         _iter_owned_static_silk,
+        collect_apertures,
     )
-    from kicad_tools.validate.rules.silkscreen import _iter_pad_apertures, _iter_via_apertures
 
-    apertures = [
-        (g, lbl) for s, g, lbl in _iter_pad_apertures(pcb, mask_clearance_mm) if s == side
-    ] + [(g, lbl) for s, g, lbl in _iter_via_apertures(pcb, mask_clearance_mm) if s == side]
+    # Same aperture set as ``kct place-silk-refs`` (pads, vias, NPTH, drills,
+    # graphic mask openings) via one shared helper (Issue #9327).
+    apertures = collect_apertures(pcb, mask_clearance_mm)[side]
     # _iter_owned_static_silk already yields board-level silk in the
     # board-relative frame (#8561); do not shift it again here.
     silk = [(g, lbl) for s, g, lbl, _owner in _iter_owned_static_silk(pcb) if s == side]

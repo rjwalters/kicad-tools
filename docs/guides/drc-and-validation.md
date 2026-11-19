@@ -420,7 +420,7 @@ The command writes a keyed entry, bound to the current hash, to
   "waivers": [
     {
       "key": "courtyards_overlap|C52,U10||F.Cu",
-      "evidence_hash": "ev3:3f0c9a1d2b7e4c55",
+      "evidence_hash": "ev4:3f0c9a1d2b7e4c55",
       "reason": "EE-mandated tight decoupling",
       "reviewer": "rjwalters",
       "date": "2026-10-06"
@@ -437,12 +437,36 @@ When the copper or nets under the finding change, the waiver goes **stale**:
 
 Re-review the finding, and re-run `--waive` only if it is still intentional.
 
-The hash prefix (`ev3:`) names the evidence recipe. When an upgrade changes
+The hash prefix (`ev4:`) names the evidence recipe. When an upgrade changes
 the recipe, every waiver recorded with an older prefix goes stale once, even
 on an unchanged board. Those are reported as `STALE waiver (outdated evidence
 version)`, and the finding's JSON carries
 `"stale_waiver_cause": "outdated_evidence_version"` instead of
-`"evidence_changed"`. Re-waive them once after upgrading.
+`"evidence_changed"`. For the `ev3` -> `ev4` bump you do not have to
+re-record them: `kct check board.kicad_pcb --migrate-waivers` recomputes each
+`ev3` waiver's digest on the current board and, when it still equals the
+recorded one (the evidence the reviewer signed off is provably unchanged),
+re-binds the entry to its `ev4` hash. Reviewer, date, reason and issue are kept
+verbatim, and the entry gains `rebound_at`, `rebound_from` (the old hash) and
+`rebound_by` (the kct version). A waiver whose digest no longer matches stays
+stale (including ev3 waivers already stale from an outline-only edit, since an
+ev3 digest depends on the board origin: the migration does not carry them, so
+re-review and re-record those), and a key that names no current finding is
+reported as `orphan (no current finding)` -- three possible causes: the key
+changed (e.g. per-layer `path_ampacity` keys or geometry-named silk keys), the
+defect is gone, or the rule did not run in this invocation (orphan lines say
+`[rule not evaluated in this run]` when so -- for example `ampacity` without a
+net-class-map sidecar or when `project.kct` declares currents that no net
+class maps, or `path_ampacity` without `--current-paths`; any coverage
+`unknown` whose reason is `needs_input:<X>` counts, since the absent input
+keeps the rule from emitting anything); neither
+is touched. A keyed entry whose hash version predates `ev3` (e.g. an
+`ev2:` entry) cannot be recomputed at all: it is listed by key, with its
+version, and left alone too (Issue #9482). The command previews by default and changes no file; add
+`--write` to apply it. It never runs during a normal check, and it needs the
+full finding set, so do not combine it with `--only`/`--skip`.
+(`kct detect-mistakes` `ev3.m1:` waivers are not migrated.) Otherwise,
+re-waive once after upgrading.
 Re-running `--waive` replaces the old entry. Legacy
 `rule`/`items`/`nets` entries (schema 2) still work, and a schema-3 legacy entry
 may add its own `evidence_hash`. Keyed entries apply to `kct check` and
@@ -472,7 +496,7 @@ does not, and neither does tuning a policy threshold (the 3 mm bypass limit,
 the 0.3 mm power-trace minimum): thresholds are not hashed, because a waiver
 records that someone accepted *this* measurement.
 
-Mistake hashes carry their own compound prefix, `ev3.m1:`: the `kct check`
+Mistake hashes carry their own compound prefix, `ev4.m1:`: the `kct check`
 evidence version plus the measurement recipe version. An upgrade that changes
 either part reports existing mistake waivers as `outdated_evidence_version`;
 an upgrade that changes only the measurement recipe leaves `kct check`
@@ -501,7 +525,7 @@ kct check --diff HEAD~1:b/b.kicad_pcb b/b.kicad_pcb --format sarif > kct-diff.sa
 - **Fingerprints.** The finding `key` is `partialFingerprints["kctFindingKey/v1"]`,
   so one alert is tracked across commits. The `evidence_hash` is
   `fingerprints["kctEvidence/<version>"]`, where `<version>` is the hash's
-  prefix (`ev3` for `kct check`, `ev3.m1` for `kct detect-mistakes`), so the
+  prefix (`ev4` for `kct check`, `ev4.m1` for `kct detect-mistakes`), so the
   name follows the evidence version.
 - **Locations.** Each result points at the board file, at the line of the first
   footprint (or else net) the finding names. The finding's position, in mm in
