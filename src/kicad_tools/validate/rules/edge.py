@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from kicad_tools.core.geometry import point_to_segment_distance as _core_pt_seg_dist
 
 from ..clearance_shapes import ALL_LAYERS, min_gap_to_outline, outline_shapes
+from ..clearance_shapes import inside_filled_outline_region as _kernel_inside_region
 from ..clearance_shapes import make_pad as _kernel_make_pad
 from ..clearance_shapes import pad_center as _kernel_pad_center
 from ..clearance_shapes import segment_shape as _kernel_segment_shape
@@ -20,8 +21,10 @@ from ..violations import DRCResults, DRCViolation
 from .base import DRCRule
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from kicad_tools.manufacturers import DesignRules
-    from kicad_tools.schema.pcb import PCB, Footprint, Pad
+    from kicad_tools.schema.pcb import PCB, FilledOutlineRegion, Footprint, Pad
 
 
 # Floating-point tolerance for edge clearance comparisons (0.1 micron).
@@ -57,6 +60,23 @@ def _pad_kernel_shape(pad: Pad, footprint: Footprint):
         ALL_LAYERS,
         getattr(pad, "drill", 0.0),
     )
+
+
+def _first_point_inside_region(
+    regions: Sequence[FilledOutlineRegion],
+    points: Sequence[tuple[float, float]],
+) -> tuple[FilledOutlineRegion, tuple[float, float]] | None:
+    """The first of ``points`` that lies inside a filled cut-out region.
+
+    Returns the hit region together with the point, so a gap-0 finding can
+    name the cut-out shape that caused it.  ``None`` when no point is
+    inside any region -- the caller keeps its stroke-only gap.
+    """
+    for point in points:
+        region = _kernel_inside_region(regions, point[0], point[1])
+        if region is not None:
+            return region, point
+    return None
 
 
 class EdgeClearanceRule(DRCRule):
@@ -96,7 +116,11 @@ class EdgeClearanceRule(DRCRule):
         # Get board outline segments for distance calculations.
         # These are now in board-relative coordinates.
         outline_segments = pcb.get_board_outline_segments()
-        if not outline_segments:
+        # Filled Edge.Cuts shapes are cut-out regions: copper inside one is
+        # at gap 0 (Issue #9690).  A board whose only Edge.Cuts shape is a
+        # filled circle has no outline *segments* but must still be checked.
+        filled_regions = pcb.get_board_outline_filled_regions()
+        if not outline_segments and not filled_regions:
             # No board outline defined, can't check edge clearances
             return results
 
@@ -106,10 +130,10 @@ class EdgeClearanceRule(DRCRule):
         origin = pcb.board_origin
 
         # Check each type of copper element
-        self._check_segments(pcb, outline_segments, design_rules, results, origin)
-        self._check_vias(pcb, outline_segments, design_rules, results, origin)
-        self._check_pads(pcb, outline_segments, design_rules, results)
-        self._check_zones(pcb, outline_segments, design_rules, results, origin)
+        self._check_segments(pcb, outline_segments, design_rules, results, origin, filled_regions)
+        self._check_vias(pcb, outline_segments, design_rules, results, origin, filled_regions)
+        self._check_pads(pcb, outline_segments, design_rules, results, filled_regions)
+        self._check_zones(pcb, outline_segments, design_rules, results, origin, filled_regions)
 
         return results
 
@@ -120,6 +144,7 @@ class EdgeClearanceRule(DRCRule):
         design_rules: DesignRules,
         results: DRCResults,
         origin: tuple[float, float] = (0.0, 0.0),
+        filled_regions: Sequence[FilledOutlineRegion] = (),
     ) -> None:
         """Check trace segment clearances to board edge.
 
@@ -129,6 +154,11 @@ class EdgeClearanceRule(DRCRule):
         outline, ignore the interior" reading.  That mattered whenever an
         outline *vertex* pokes closest to a point in the middle of a trace --
         invisible to an endpoints-only scan but not to kicad-cli.
+
+        Issue #9690: a filled Edge.Cuts shape is a cut-out region, so a
+        trace whose start, end or midpoint lies inside one is at gap 0 --
+        the interior test runs on those reference points while the stroke
+        gap keeps catching boundary-straddling copper.
 
         ``segment.start`` / ``segment.end`` are board-relative after
         :meth:`PCB.load` (see ``_detect_board_origin`` docstring), so we
@@ -144,7 +174,30 @@ class EdgeClearanceRule(DRCRule):
         for segment in pcb.segments:
             gap = min_gap_to_outline(_kernel_segment_shape(segment), edges)
 
-            if gap < min_clearance - _CLEARANCE_EPSILON_MM:
+            # Reference points for the filled cut-out interior test: the
+            # endpoints plus the midpoint, so a track that passes clean
+            # through a cut-out is still caught even when both endpoints
+            # sit outside it.
+            hit = _first_point_inside_region(
+                filled_regions,
+                (
+                    segment.start,
+                    segment.end,
+                    (
+                        (segment.start[0] + segment.end[0]) / 2.0,
+                        (segment.start[1] + segment.end[1]) / 2.0,
+                    ),
+                ),
+            )
+
+            if hit is not None:
+                gap = 0.0
+                region, point = hit
+                items: tuple[str, ...] = (
+                    f"Net {segment.net_number}",
+                    f"Inside filled {region.shape_type} cut-out",
+                )
+            else:
                 # Report at whichever endpoint sits closer to the outline --
                 # the same witness the old endpoints-only scan would have
                 # picked, so a finding still points near the trouble spot
@@ -152,6 +205,9 @@ class EdgeClearanceRule(DRCRule):
                 dist_start = self._min_distance_to_outline(segment.start, outline_segments)
                 dist_end = self._min_distance_to_outline(segment.end, outline_segments)
                 point = segment.start if dist_start <= dist_end else segment.end
+                items = (f"Net {segment.net_number}",)
+
+            if gap < min_clearance - _CLEARANCE_EPSILON_MM:
                 results.add(
                     DRCViolation(
                         rule_id="edge_clearance_trace",
@@ -163,7 +219,7 @@ class EdgeClearanceRule(DRCRule):
                         layer=segment.layer,
                         actual_value=gap,
                         required_value=min_clearance,
-                        items=(f"Net {segment.net_number}",),
+                        items=items,
                     )
                 )
 
@@ -176,6 +232,7 @@ class EdgeClearanceRule(DRCRule):
         design_rules: DesignRules,
         results: DRCResults,
         origin: tuple[float, float] = (0.0, 0.0),
+        filled_regions: Sequence[FilledOutlineRegion] = (),
     ) -> None:
         """Check via clearances to board edge.
 
@@ -187,6 +244,9 @@ class EdgeClearanceRule(DRCRule):
         reading (a via is already exactly a disc, so there was no
         approximation here to fix), kept on the kernel for the dedup.
 
+        Issue #9690: a via centred inside a filled Edge.Cuts cut-out is at
+        gap 0, tested on the via centre.
+
         ``via.position`` is board-relative after :meth:`PCB.load`; the
         ``origin`` parameter is retained for API stability.
         """
@@ -197,8 +257,18 @@ class EdgeClearanceRule(DRCRule):
 
         for via in pcb.vias:
             gap = min_gap_to_outline(_kernel_via_shape(via), edges)
+            hit = _first_point_inside_region(filled_regions, (via.position,))
+
+            if hit is not None:
+                gap = 0.0
 
             if gap < min_clearance - _CLEARANCE_EPSILON_MM:
+                items: tuple[str, ...] = (f"Net {via.net_number}",)
+                if hit is not None:
+                    items = (
+                        f"Net {via.net_number}",
+                        f"Inside filled {hit[0].shape_type} cut-out",
+                    )
                 results.add(
                     DRCViolation(
                         rule_id="edge_clearance_via",
@@ -208,7 +278,7 @@ class EdgeClearanceRule(DRCRule):
                         layer=via.layers[0] if via.layers else None,
                         actual_value=gap,
                         required_value=min_clearance,
-                        items=(f"Net {via.net_number}",),
+                        items=items,
                     )
                 )
 
@@ -220,6 +290,7 @@ class EdgeClearanceRule(DRCRule):
         outline_segments: list[tuple[tuple[float, float], tuple[float, float]]],
         design_rules: DesignRules,
         results: DRCResults,
+        filled_regions: Sequence[FilledOutlineRegion] = (),
     ) -> None:
         """Check pad clearances to board edge.
 
@@ -238,6 +309,9 @@ class EdgeClearanceRule(DRCRule):
         the SMD and through-hole branches, only switching which rule
         threshold (``min_copper_to_edge_mm`` vs. ``min_hole_to_edge_mm``)
         applies to it.
+
+        Issue #9690: a pad centred inside a filled Edge.Cuts cut-out is at
+        gap 0, tested on the pad centre.
         """
         min_copper_clearance = design_rules.min_copper_to_edge_mm
         min_hole_clearance = design_rules.min_hole_to_edge_mm
@@ -264,6 +338,10 @@ class EdgeClearanceRule(DRCRule):
                 pad_pos = (pad_x, pad_y)
 
                 gap = min_gap_to_outline(_pad_kernel_shape(pad, footprint), edges)
+                hit = _first_point_inside_region(filled_regions, (pad_pos,))
+
+                if hit is not None:
+                    gap = 0.0
 
                 # Select clearance rule based on pad type
                 if pad.type == "thru_hole":
@@ -274,6 +352,13 @@ class EdgeClearanceRule(DRCRule):
                     rule_id = "edge_clearance_pad"
 
                 if gap < min_clearance - _CLEARANCE_EPSILON_MM:
+                    items: tuple[str, ...] = (footprint.reference, f"Pad {pad.number}")
+                    if hit is not None:
+                        items = (
+                            footprint.reference,
+                            f"Pad {pad.number}",
+                            f"Inside filled {hit[0].shape_type} cut-out",
+                        )
                     results.add(
                         DRCViolation(
                             rule_id=rule_id,
@@ -286,7 +371,7 @@ class EdgeClearanceRule(DRCRule):
                             layer=footprint.layer,
                             actual_value=gap,
                             required_value=min_clearance,
-                            items=(footprint.reference, f"Pad {pad.number}"),
+                            items=items,
                         )
                     )
 
@@ -299,10 +384,14 @@ class EdgeClearanceRule(DRCRule):
         design_rules: DesignRules,
         results: DRCResults,
         origin: tuple[float, float] = (0.0, 0.0),
+        filled_regions: Sequence[FilledOutlineRegion] = (),
     ) -> None:
         """Check zone copper clearances to board edge.
 
         Checks the filled polygon vertices of each zone.
+
+        Issue #9690: a zone vertex inside a filled Edge.Cuts cut-out puts
+        that zone copper at gap 0.
 
         Zone polygon vertices are board-relative after :meth:`PCB.load`;
         the ``origin`` parameter is retained for API stability.
@@ -323,8 +412,18 @@ class EdgeClearanceRule(DRCRule):
                     # Zone polygon vertices are already in board-relative space.
                     board_point = point
                     distance = self._min_distance_to_outline(board_point, outline_segments)
+                    hit = _first_point_inside_region(filled_regions, (board_point,))
+
+                    if hit is not None:
+                        distance = 0.0
 
                     if distance < min_clearance - _CLEARANCE_EPSILON_MM:
+                        items: tuple[str, ...] = (zone.net_name or f"Net {zone.net_number}",)
+                        if hit is not None:
+                            items = (
+                                zone.net_name or f"Net {zone.net_number}",
+                                f"Inside filled {hit[0].shape_type} cut-out",
+                            )
                         results.add(
                             DRCViolation(
                                 rule_id="edge_clearance_zone",
@@ -337,7 +436,7 @@ class EdgeClearanceRule(DRCRule):
                                 layer=zone.layer,
                                 actual_value=distance,
                                 required_value=min_clearance,
-                                items=(zone.net_name or f"Net {zone.net_number}",),
+                                items=items,
                             )
                         )
 

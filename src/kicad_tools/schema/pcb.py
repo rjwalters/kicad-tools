@@ -1506,11 +1506,41 @@ class BoardGraphic:
     mid: tuple[float, float] | None = None  # Appended for positional compatibility
     points: list[tuple[float, float]] = field(default_factory=list)
     fill: str = ""  # raw (fill ...) token: yes/no (KiCad 7+), solid/none (legacy)
+    # Top-level ``(width N)`` on pre-KiCad-6 files, when no ``(stroke ...)``
+    # node is present.  ``None`` when the token is absent.  KiCad's legacy
+    # convention ties the *default* fill of a circle/rect to a zero stroke
+    # width (Issue #9690), so the Edge.Cuts fill resolution needs it.
+    legacy_width: float | None = None
 
     @property
     def is_filled(self) -> bool:
         """True when the shape's interior is printed, not just its outline."""
         return _fill_token_is_filled(self.fill)
+
+    @property
+    def is_filled_cutout(self) -> bool:
+        """KiCad's fill resolution of this shape as an Edge.Cuts cut-out.
+
+        Black-box probed against the pinned kicad-cli image (Issue #9690),
+        for the three closed board-level shapes:
+
+        * an explicit ``(fill yes)`` / ``(fill solid)`` token is filled, an
+          explicit ``(fill no)`` / ``(fill none)`` token is not;
+        * with **no** fill token, a ``gr_circle`` / ``gr_rect`` follows
+          KiCad's legacy convention -- filled exactly when the effective
+          stroke width is zero (no stroke node, ``(stroke (width 0) ...)``,
+          or a legacy ``(width 0)``);
+        * with no fill token, a ``gr_poly`` is never filled.
+
+        Only the Edge.Cuts consumers may read this: the silkscreen default
+        for an absent token stays "not filled" (:pyattr:`is_filled`,
+        Issue #5811).
+        """
+        if self.fill.strip():
+            return _fill_token_is_filled(self.fill)
+        if self.graphic_type == "poly":
+            return False
+        return not (self.stroke_width or (self.legacy_width or 0.0))
 
     @classmethod
     def from_sexp(cls, sexp: SExp, graphic_type: str) -> BoardGraphic:
@@ -1529,6 +1559,11 @@ class BoardGraphic:
         if stroke := sexp.find("stroke"):
             if width := stroke.find("width"):
                 graphic.stroke_width = width.get_float(0) or 0.0
+        elif width := sexp.find("width"):
+            # Pre-KiCad-6 legacy stroke width; feeds the Edge.Cuts fill
+            # default above (Issue #9690).  Kept out of ``stroke_width`` so
+            # silk consumers keep seeing today's 0.0 for legacy files.
+            graphic.legacy_width = width.get_float(0)
 
         # Start/end points
         if start := sexp.find("start"):
@@ -2885,6 +2920,25 @@ class EdgeContour:
     @property
     def bbox_height(self) -> float:
         return self.bbox[3] - self.bbox[1]
+
+
+@dataclass(frozen=True)
+class FilledOutlineRegion:
+    """The interior of a filled Edge.Cuts shape -- a cut-out region.
+
+    KiCad treats a filled ``gr_circle`` / ``gr_poly`` / ``gr_rect`` on
+    Edge.Cuts as a cut-out: copper anywhere inside it violates
+    ``copper_edge_clearance`` with actual 0.0 mm (Issue #9690, black-box
+    probed on the pinned kicad-cli image).  A circle region carries its
+    ``center`` and ``radius``; a poly/rect region carries its ``ring`` of
+    vertices.  Coordinates are **board-relative**, matching
+    :meth:`PCB.get_board_outline_segments`.
+    """
+
+    shape_type: str  # "circle" | "poly" | "rect"
+    center: tuple[float, float] | None = None  # circle
+    radius: float | None = None  # circle, in mm
+    ring: tuple[tuple[float, float], ...] = ()  # poly / rect vertices
 
 
 @dataclass
@@ -5379,6 +5433,78 @@ class PCB:
             segments = [((x1 - ox, y1 - oy), (x2 - ox, y2 - oy)) for (x1, y1), (x2, y2) in segments]
 
         return segments
+
+    def get_board_outline_filled_regions(self) -> list[FilledOutlineRegion]:
+        """Filled Edge.Cuts shapes as cut-out regions (Issue #9690).
+
+        KiCad treats a filled ``gr_circle`` / ``gr_poly`` / ``gr_rect`` on
+        Edge.Cuts as a cut-out region rather than a stroke: copper inside it
+        violates ``copper_edge_clearance`` with actual 0.0 mm.  Whether a
+        shape is filled follows KiCad's own resolution -- see
+        :pyattr:`BoardGraphic.is_filled_cutout` for the probed matrix (in
+        short: an explicit filled token always fills; with the token absent
+        only a zero-stroke-width circle/rect fills, never a poly).
+
+        Stroke-only (unfilled) shapes keep exactly the reading they had
+        before this method existed: a rect's four outline segments from
+        :meth:`get_board_outline_segments`, and no interior semantics.
+
+        Returns:
+            List of :class:`FilledOutlineRegion` in **board-relative**
+            coordinates, one per filled closed Edge.Cuts shape.
+        """
+        regions: list[FilledOutlineRegion] = []
+
+        for graphic in self._graphics:
+            if graphic.layer != "Edge.Cuts":
+                continue
+            if graphic.graphic_type not in ("circle", "poly", "rect"):
+                continue
+            if not graphic.is_filled_cutout:
+                continue
+
+            if graphic.graphic_type == "circle":
+                if graphic.center is None:
+                    continue
+                cx, cy = graphic.center
+                # ``end`` is a point on the circumference (#8540).
+                radius = math.hypot(graphic.end[0] - cx, graphic.end[1] - cy)
+                if radius <= 0.0:
+                    continue
+                regions.append(
+                    FilledOutlineRegion(shape_type="circle", center=(cx, cy), radius=radius)
+                )
+            elif graphic.graphic_type == "rect":
+                x1, y1 = graphic.start
+                x2, y2 = graphic.end
+                regions.append(
+                    FilledOutlineRegion(
+                        shape_type="rect",
+                        ring=((x1, y1), (x2, y1), (x2, y2), (x1, y2)),
+                    )
+                )
+            else:  # poly
+                if len(graphic.points) < 3:
+                    continue
+                regions.append(FilledOutlineRegion(shape_type="poly", ring=tuple(graphic.points)))
+
+        # Transform from sheet-absolute to board-relative coordinates, the
+        # same shift get_board_outline_segments applies so that regions,
+        # segments and copper coordinates share one frame.
+        ox, oy = self._board_origin
+        if ox != 0.0 or oy != 0.0:
+            shifted: list[FilledOutlineRegion] = []
+            for region in regions:
+                center = (region.center[0] - ox, region.center[1] - oy) if region.center else None
+                ring = tuple((x - ox, y - oy) for x, y in region.ring)
+                shifted.append(
+                    FilledOutlineRegion(
+                        shape_type=region.shape_type, center=center, radius=region.radius, ring=ring
+                    )
+                )
+            regions = shifted
+
+        return regions
 
     # ------------------------------------------------------------------
     # Edge.Cuts contour analysis and manipulation
