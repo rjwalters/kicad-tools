@@ -969,6 +969,13 @@ def test_native_adopted_records_match_production_records_end_to_end(tmp_path, na
     assert len(adopted) == len(production) == 1
     assert adopted[0]["status"] == "adopted"
     assert adopted[0]["anchors"] == production[0]["anchors"]
+    # The divergence this test exists to neutralise: adopted legs end at the
+    # strip chain's ends, production legs at the track's. Without this the
+    # comparison below could go vacuous unnoticed (#9457).
+    assert (adopted[0]["leg_start"], adopted[0]["leg_end"]) != (
+        production[0]["leg_start"],
+        production[0]["leg_end"],
+    )
 
     def run(label, records):
         options = dict(native_options, artifact_dir=native_options["artifact_dir"] / label)

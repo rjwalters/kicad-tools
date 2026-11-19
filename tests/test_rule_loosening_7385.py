@@ -794,3 +794,155 @@ def test_regenerating_committed_board_dru_never_loosens(dru, tmp_path):
     written = stage.with_suffix(".kicad_dru").read_text(encoding="utf-8")
     managed |= _kct_managed_names(written)
     assert rule_loosenings(before, _dru_state(written, managed=managed)) == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #9422: layer-scoped managed rules over an unscoped authored rule
+# ---------------------------------------------------------------------------
+
+_SPLIT_RAISED_INNER = """(version 1)
+(rule "Clearance (outer)"
+  (layer outer)
+  (constraint clearance (min 0.15mm)))
+(rule "Clearance (inner)"
+  (layer inner)
+  (constraint clearance (min 0.1016mm)))
+(rule "Reviewed clearance - Default"
+  (layer inner)
+  (condition "A.NetClass == 'Default' || B.NetClass == 'Default'")
+  (constraint clearance (min 0.15mm)))
+"""
+_HAND_UNSCOPED = '(rule "Minimum Clearance"\n  (constraint clearance (min 0.127mm)))\n'
+_SPLIT_MANAGED = {"Clearance (outer)", "Clearance (inner)", "Reviewed clearance - Default"}
+_NETCLASS_015 = {"netclasses": {"Default": 0.15}, "zones": []}
+
+
+def test_scoped_managed_block_over_unscoped_authored_rule_is_not_a_loosening():
+    """The unscoped probe used to read the 0.127 hand rule as the whole board."""
+    before = _dru_state(
+        _HAND_UNSCOPED + _FLOOR_ONLY.replace("(version 1)\n", ""),
+        managed={"Clearance - jlcpcb"},
+    )
+    after = _dru_state(
+        _HAND_UNSCOPED + _SPLIT_RAISED_INNER.replace("(version 1)\n", ""),
+        managed=_SPLIT_MANAGED,
+        authored=_NETCLASS_015,
+    )
+    assert rule_loosenings(before, after) == []
+
+
+def test_scoped_managed_rule_below_netclass_on_its_own_layer_still_refuses():
+    """Inner floor 0.1016 is the last match on In1.Cu: still a loosening."""
+    after_text = _HAND_UNSCOPED + _SPLIT_FLOOR.replace("(version 1)\n", "")
+    found = rule_loosenings(
+        _dru_state(_HAND_UNSCOPED),
+        _dru_state(after_text, managed=_SPLIT_MANAGED, authored=_NETCLASS_015),
+    )
+    assert [(item.path, item.after) for item in found] == [("dru.resolved.track_track", 0.1016)]
+
+
+def test_unscoped_hand_rule_that_lowers_a_concrete_layer_still_refuses():
+    """A hand rule that is the last match on a concrete layer is a real loosening."""
+    after_text = _SPLIT_RAISED_INNER + _HAND_UNSCOPED
+    found = rule_loosenings(
+        _dru_state(None),
+        _dru_state(after_text, managed=_SPLIT_MANAGED, authored=_NETCLASS_015),
+    )
+    assert [(item.path, item.after) for item in found] == [("dru.resolved.track_track", 0.127)]
+
+
+@pytest.mark.parametrize("scope", ["outer", "inner"])
+def test_one_scope_class_dru_still_probes_the_other_classes_copper(scope):
+    """A single scoped rule must not hide an unscoped loosening elsewhere.
+
+    ``Hand low`` (0.05) is the last match on the layers the scoped rule does
+    not govern, so those layers really resolve to 0.05: still a loosening.
+    """
+    after_text = (
+        '(rule "Hand low"\n  (constraint clearance (min 0.05mm)))\n'
+        f'(rule "{scope} managed"\n  (layer {scope})\n'
+        "  (constraint clearance (min 0.3mm)))\n"
+    )
+    found = rule_loosenings(
+        _dru_state(None),
+        _dru_state(after_text, managed={f"{scope} managed"}, authored=_NETCLASS_015),
+    )
+    assert [(item.path, item.after) for item in found] == [("dru.resolved.track_track", 0.05)]
+
+
+# ---------------------------------------------------------------------------
+# Issue #9422: router-declared net-class "Reviewed clearance" rules
+# ---------------------------------------------------------------------------
+
+
+def _router_reviewed_split_dru(*, extra: str = "") -> str:
+    """The split-floor block plus kct's own router-class reviewed rules."""
+    from kicad_tools.manufacturers.netclass_dru import netclass_condition
+
+    rules = [_SPLIT_RAISED_INNER]
+    for name in ("Default", "Signal"):
+        condition = netclass_condition(name, router=True)
+        rules.append(
+            f'(rule "Reviewed clearance - {name}"\n  (layer inner)\n'
+            f'  (condition "{condition}")\n'
+            "  (constraint clearance (min 0.15mm)))\n"
+        )
+    return "".join(rules) + extra
+
+
+_SPLIT_ROUTER_MANAGED = _SPLIT_MANAGED | {"Reviewed clearance - Signal"}
+_ROUTER_CLASSES = {"netclasses": {"Default": 0.15, "Signal": 0.15}, "zones": []}
+
+
+def test_router_class_reviewed_rule_resolves_for_the_inner_layer_probe():
+    """The reviewed router-class rule is the last match on In1.Cu: no loosening.
+
+    Unmodelled (``isCoupledDiffPair()`` / ``A.Reference == B.Reference``) the
+    rule dropped out and the probe landed on ``Clearance (inner)`` 0.1016.
+    """
+    found = rule_loosenings(
+        _dru_state(None),
+        _dru_state(
+            _router_reviewed_split_dru(),
+            managed=_SPLIT_ROUTER_MANAGED,
+            authored=_ROUTER_CLASSES,
+        ),
+    )
+    assert found == []
+
+
+def test_router_class_reviewed_rule_does_not_hide_a_hand_rule_loosening():
+    """Modelling the router rule must not turn the gate into a no-op (G1)."""
+    after_text = _router_reviewed_split_dru(
+        extra='(rule "Hand low"\n  (constraint clearance (min 0.05mm)))\n'
+    )
+    found = rule_loosenings(
+        _dru_state(None),
+        _dru_state(after_text, managed=_SPLIT_ROUTER_MANAGED, authored=_ROUTER_CLASSES),
+    )
+    assert [(item.path, item.after) for item in found] == [("dru.resolved.track_track", 0.05)]
+
+
+def test_router_class_rule_below_the_netclass_on_its_layer_still_refuses():
+    """A router-class reviewed rule that is itself too low is still a loosening."""
+    after_text = _router_reviewed_split_dru()
+    low = after_text.rsplit("(min 0.15mm)", 1)
+    after_text = "(min 0.1mm)".join(low)
+    found = rule_loosenings(
+        _dru_state(None),
+        _dru_state(after_text, managed=_SPLIT_ROUTER_MANAGED, authored=_ROUTER_CLASSES),
+    )
+    assert [(item.path, item.after) for item in found] == [("dru.resolved.track_track", 0.1)]
+
+
+def test_unmodelled_function_condition_stays_excluded_from_resolution():
+    """Only ``A.isCoupledDiffPair()`` is modelled; other calls keep the exclusion."""
+    after_text = _SPLIT_RAISED_INNER + (
+        '(rule "Courtyard low"\n  (condition "A.intersectsCourtyard(\'U1\')")\n'
+        "  (constraint clearance (min 0.05mm)))\n"
+    )
+    found = rule_loosenings(
+        _dru_state(None),
+        _dru_state(after_text, managed=_SPLIT_MANAGED, authored=_NETCLASS_015),
+    )
+    assert found == []

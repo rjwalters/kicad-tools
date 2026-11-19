@@ -14,8 +14,35 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-19
+
+- **PR #9478**: test: pin ci.yml merge_group gates and concurrency invariants
+- **Issue #9307** (closed): Declare merge_group in select_routed_pcbs.py and pin the merge-group CI invariants with a test
+- **PR #9496**: docs: note the same-footprint same-net mask-bridge info exemption
+- **Issue #9484** (closed): docs: physical-copper-gap guide omits the same-footprint same-net pad mask-bridge info class
+- **PR #9469**: chore(boards): put board 09 C6 on the 0.1 mm grid; update per-footprint pad_grid docstrings
+- **PR #9446**: fix: attribute mid-run vias and anchor-size holes on a reinforce strip to the run
+- **Issue #9444** (closed): mask_to_copper after #9419: same-net untented vias on a recorded reinforce run are not attributed to it
+- **PR #9462**: fix: report same-footprint same-net pad mask bridges at info
+- **Issue #9420** (closed): Same-net pads inside one library footprint are reported as errors by physical_copper_gap and mask_to_copper (stock RF_Module:ESP32-C3-WROOM-02 ground pad array)
+- **PR #9429**: fix: raise tht_smd_spacing thresholds to 2.032/3.05 mm and record fab DFM values
+- **Issue #9421** (closed): Fab DFM limits that differ from the parity table: tht to smd 2.03/3.05 mm, a separate via-to-pad row, silk-to-hole clearance
+- **PR #9463**: docs: cite located JLCDFM rows in the within_own_footprint parity entry
+- **Issue #9450** (closed): Parity entry for within_own_footprint predates the located fab evidence on #9420
+- **PR #9460**: test: assert adopted vs production leg endpoints diverge in native chain test
+- **Issue #9457** (closed): Pin the adopted-vs-production leg-endpoint divergence the #9443 native chain test exists to cover
+
 ### 2026-11-18
 
+- **PR #9438**: fix: derive pad_grid auto tolerance per footprint, not board-wide
+- **Issue #9434** (closed): pad_grid flags parts that did not move when other parts move onto round coordinates (percentile threshold)
+- **PR #9449**: fix: print sch_field_offset threshold at full precision
+- **Issue #9447** (closed): sch_field_offset message rounds a user-supplied --sch-field-threshold to 1 dp
+- **PR #9445**: test: chain pcb reinforce --adopt records through check_mask_to_copper on a native export
+- **Issue #9443** (closed): No end-to-end test chains `pcb reinforce --adopt` records through `check_mask_to_copper` on a native export
+- **PR #9439**: ci: assert paths-filter steps keep continue-on-error and outcome fallbacks
+- **Issue #9291** (closed): Assert the Detect Changes output fallbacks in verify_changes_filter.mjs
+- **PR #9425**: fix: treat same-net pads of one footprint as info in gap and mask checks
 - **PR #9440**: fix: skip silk_ref_obscured for hidden references replaced by a function label
 - **Issue #9435** (closed): silk_ref_obscured counts designators hidden on purpose and replaced by a function label
 - **PR #9437**: fix: hash footprint positions in sheet coordinates so outline-only edits keep waivers valid
@@ -3585,29 +3612,6 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - **Issue #5555** (closed): router: _reset_for_new_trial drops add_obstacle keepouts, silently reopening the grid
 - **Issue #5552** (closed): chore: resync installed Loom surfaces silently reverted merged fix #5543 (draft-PR fallback exclusion)
 - **Issue #5513** (closed): [Epic #5509] Phase 1a: kicad-cli clearance conformance oracle (report-only) with four adapters and named fixtures
-
-### 2026-09-18
-
-- **PR #5568**: fix(router): sum both edge directions in RoutingPlan edge entries
-- **PR #5565**: test(conformance): wrap five clearance consumers as adapters and populate the conformance table
-- **PR #5554**: perf(router): write segment clearance envelopes with slice assignment
-- **PR #5553**: feat(router): apply declared swap groups via a pad-rebind applicator
-- **PR #5549**: fix(zones): reuse an existing same-net barrel for a pour bridge (#5507)
-- **PR #5548**: feat(board-07): netlist write-back for generator-owned boards (Epic #5511 Phase 2b)
-- **PR #5547**: chore(deps): bump soupsieve from 2.8.4 to 2.9
-- **PR #5546**: chore(deps): bump devalue from 5.8.1 to 5.9.2 in /site
-- **Issue #5544** (closed): RoutingPlan.from_global_result() may disagree with get_total_overflow() on reverse-direction-only overflow
-- **PR #5542**: fix: parse kicad-cli 10 hole-to-hole 'min X mm; actual Y mm' wording
-- **PR #5540**: fix: RegionGraph.get_total_overflow() undercounts reverse-direction edge overflow
-- **Issue #5538** (closed): classify-dependency-block.sh's ref extraction treats a parenthetical epic mention as a second open blocker, wedging phase issues in DEFER forever
-- **Issue #5537** (closed): [Epic #5511] Phase 2b: netlist write-back for generator-owned boards
-- **Issue #5536** (closed): [Epic #5511] Phase 2a: pad-rebind applicator for declared swap groups
-- **Issue #5534** (closed): drc/report.py's clearance extractor doesn't parse kicad-cli 10's hole-to-hole wording
-- **Issue #5533** (closed): [Epic #5509] Phase 1a (2/2): five consumer adapters + populated clearance-conformance table
-- **Issue #5529** (closed): RegionGraph.get_total_overflow() can undercount overflow on reverse-direction edge traversals
-- **PR #5524**: ci: bound native KiCad subprocess concurrency from measured attribution
-- **Issue #5523** (closed): loom-fleet-dispatch auto-relabels draft PRs to loom:review-requested
-- **Issue #5501** (closed): CI: bound remaining native subprocess concurrency after confirmed Test cgroup OOM
 
 ### 2026-07-20 (evening)
 

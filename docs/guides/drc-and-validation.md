@@ -442,7 +442,22 @@ the recipe, every waiver recorded with an older prefix goes stale once, even
 on an unchanged board. Those are reported as `STALE waiver (outdated evidence
 version)`, and the finding's JSON carries
 `"stale_waiver_cause": "outdated_evidence_version"` instead of
-`"evidence_changed"`. Re-waive them once after upgrading.
+`"evidence_changed"`. For the `ev3` -> `ev4` bump you do not have to
+re-record them: `kct check board.kicad_pcb --migrate-waivers` recomputes each
+`ev3` waiver's digest on the current board and, when it still equals the
+recorded one (the evidence the reviewer signed off is provably unchanged),
+re-binds the entry to its `ev4` hash. Reviewer, date, reason and issue are kept
+verbatim, and the entry gains `rebound_at`, `rebound_from` (the old hash) and
+`rebound_by` (the kct version). A waiver whose digest no longer matches stays
+stale (including ev3 waivers already stale from an outline-only edit, since an
+ev3 digest depends on the board origin: the migration does not carry them, so
+re-review and re-record those), and a key that names no current finding is reported as an orphan (the
+key changed, e.g. per-layer `path_ampacity` keys or geometry-named silk keys);
+neither is touched. The command previews by default and changes no file; add
+`--write` to apply it. It never runs during a normal check, and it needs the
+full finding set, so do not combine it with `--only`/`--skip`.
+(`kct detect-mistakes` `ev3.m1:` waivers are not migrated.) Otherwise,
+re-waive once after upgrading.
 Re-running `--waive` replaces the old entry. Legacy
 `rule`/`items`/`nets` entries (schema 2) still work, and a schema-3 legacy entry
 may add its own `evidence_hash`. Keyed entries apply to `kct check` and
