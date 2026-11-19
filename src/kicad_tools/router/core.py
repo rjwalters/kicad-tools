@@ -2020,6 +2020,9 @@ class Autorouter:
         # as ``(key, route, ("REF.PIN", "REF.PIN"))``.  Fixed copper during the
         # negotiation and merged into its output.
         self._lattice_pair_ties: list[tuple[object, Route, tuple[str, str]]] = []
+        # Issue #9636: per-pad start points on each listed net's kept copper
+        # (``--complete``), handed to the lattice pathfinder.
+        self._lattice_kept_anchors: dict[tuple[str, str], list[Any]] = {}
         # Issue #4472 (epic #4465, Phase 2): localized per-link lattice build.
         # When set to a WORLD-coordinate ``(x1, y1, x2, y2)`` box,
         # :meth:`_ensure_lattice_pathfinder` builds the octilinear lattice +
@@ -5602,6 +5605,8 @@ class Autorouter:
                     frozenset(pc.key for pc in pairs if len(pc.key) == 3 and pc.pair_name in taps)
                     - gateway_offer
                 )
+            if hasattr(pf, "kept_anchors"):
+                pf.kept_anchors = dict(self._lattice_kept_anchors)
             routes, stats_ = pf.route_netset(
                 conns,
                 coupled=pairs,
@@ -5932,6 +5937,7 @@ class Autorouter:
         self._lattice_exempt_pair_reservations(coupled)
 
         connections: list[tuple[object, Pad, Pad, object]] = []
+        self._lattice_kept_anchors = {}
         # Issue #6698: generated same-part equivalent-pin ties (rebuilt on
         # every call -- the #6535 tap-chain retry calls this again).
         tied = self._lattice_plan_pair_ties(reserved)
@@ -5991,6 +5997,19 @@ class Autorouter:
                 )
                 for seq, (a, b) in enumerate(island_bridges(pads, labels)):
                     connections.append(((net, seq), a, b, net_class))
+                # Issue #9636: a link may start from the kept copper already
+                # on its pad instead of re-escaping the pad at class width.
+                from .lattice.own_copper import kept_copper_anchors
+
+                layer_stack = self.layer_stack or LayerStack.two_layer()
+
+                def _layer_index(layer: Any, _ls: Any = layer_stack) -> int | None:
+                    try:
+                        return int(_ls.layer_enum_to_index(layer))
+                    except Exception:
+                        return None
+
+                self._lattice_kept_anchors.update(kept_copper_anchors(pads, kept, _layer_index))
                 continue
             anchor, terminals = _star_topology_pads(pads)
             for seq, other in enumerate(terminals):

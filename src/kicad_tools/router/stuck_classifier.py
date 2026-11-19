@@ -519,6 +519,187 @@ class StuckClassifierResult:
 # page-space-vs-board-space fix from #3861.
 
 
+# Issue #9636: a strict net's copper that is merely the OTHER pad of the
+# stranded pad's own part is not a wall -- the gap between a part's two pads is
+# fixed by the part, so it can neither be ripped up nor routed around.
+_SIBLING_TOL_MM = 0.01
+
+_PadRect = tuple[float, float, float, float]  # cx, cy, half-w, half-h
+
+
+def _pad_half_extents(size: tuple[float, float], rotation: float) -> tuple[float, float]:
+    """Axis-aligned half extents of a pad of ``size`` rotated by ``rotation`` degrees."""
+    hw, hh = size[0] / 2.0, size[1] / 2.0
+    quarter = round(rotation / 90.0)
+    if abs(rotation - quarter * 90.0) < 1.0:
+        return (hh, hw) if quarter % 2 else (hw, hh)
+    # An oblique pad: bound it by its rotated rectangle's axis-aligned box.
+    rad = math.radians(rotation)
+    c, sn = abs(math.cos(rad)), abs(math.sin(rad))
+    return hw * c + hh * sn, hw * sn + hh * c
+
+
+def _own_part_pad_rects(pcb: PCB, target_net: int, point: tuple[float, float]) -> list[_PadRect]:
+    """Rect of the OTHER pad of the two-pad part whose *target_net* pad sits at *point*.
+
+    Two-terminal parts only (resistors, capacitors, diodes...): the gap between
+    their pads is the whole of what the part fixes.  On a multi-pin part the
+    track leaving a neighbouring pin runs through the very lane a stranded pin
+    must use, so there it stays an ordinary blocker.
+    """
+    for fp in pcb.footprints:
+        if len(fp.pads) != 2:
+            continue
+        fp_x, fp_y = fp.position
+        angle = math.radians(-fp.rotation)
+        cos_a, sin_a = math.cos(angle), math.sin(angle)
+        placed: list[tuple[Any, float, float]] = []
+        mine = False
+        for pad in fp.pads:
+            px, py = pad.position
+            bx = fp_x + (px * cos_a - py * sin_a)
+            by = fp_y + (px * sin_a + py * cos_a)
+            placed.append((pad, bx, by))
+            if (
+                pad.net_number == target_net
+                and math.hypot(bx - point[0], by - point[1]) <= _SIBLING_TOL_MM
+            ):
+                mine = True
+        if not mine:
+            continue
+        rects: list[_PadRect] = []
+        for pad, bx, by in placed:
+            if math.hypot(bx - point[0], by - point[1]) <= _SIBLING_TOL_MM:
+                continue
+            hw, hh = _pad_half_extents(pad.size, getattr(pad, "rotation", 0.0) or 0.0)
+            rects.append((bx, by, hw, hh))
+        return rects
+    return []
+
+
+def _in_rects(x: float, y: float, rects: list[_PadRect]) -> bool:
+    return any(
+        abs(x - cx) <= hw + _SIBLING_TOL_MM and abs(y - cy) <= hh + _SIBLING_TOL_MM
+        for cx, cy, hw, hh in rects
+    )
+
+
+def _nearest_point_on_segment(
+    px: float, py: float, ax: float, ay: float, bx: float, by: float
+) -> tuple[float, float]:
+    dx, dy = bx - ax, by - ay
+    length2 = dx * dx + dy * dy
+    if length2 <= 0.0:
+        return ax, ay
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length2))
+    return ax + t * dx, ay + t * dy
+
+
+def _is_own_part_copper(
+    siblings: list[_PadRect],
+    px: float,
+    py: float,
+    seg: tuple[float, float, float, float],
+) -> bool:
+    """True when the copper ``seg`` comes nearest to ``(px, py)`` inside a sibling pad."""
+    if not siblings:
+        return False
+    nx, ny = _nearest_point_on_segment(px, py, *seg)
+    return _in_rects(nx, ny, siblings)
+
+
+# Issue #9636: the trace width a stranded pad could actually leave at.
+_WIDTH_PROBE_DIRECTIONS = 24
+_WIDTH_PROBE_LENGTH_MM = 1.5
+_WIDTH_PROBE_STEP_MM = 0.05
+
+
+def _rect_distance(px: float, py: float, rect: _PadRect) -> float:
+    cx, cy, hw, hh = rect
+    dx = max(abs(px - cx) - hw, 0.0)
+    dy = max(abs(py - cy) - hh, 0.0)
+    return math.hypot(dx, dy)
+
+
+def _widest_escape_width_mm(
+    pcb: PCB,
+    target_net: int,
+    pad_points: list[tuple[float, float]],
+    clearance_mm: float,
+) -> float | None:
+    """Widest straight trace that leaves EVERY stranded pad at *clearance_mm*.
+
+    For each stranded pad a centreline is swept outwards in
+    :data:`_WIDTH_PROBE_DIRECTIONS` directions for :data:`_WIDTH_PROBE_LENGTH_MM`;
+    the width a direction allows is twice the smallest gap from that centreline
+    to any foreign pad, track or via, less the clearance.  The best direction
+    is the pad's answer and the narrowest pad is the net's.  Pads and copper of
+    the net itself are not obstacles.  ``None`` when nothing could be measured.
+    """
+    foreign_pads: list[_PadRect] = []
+    for fp in pcb.footprints:
+        fp_x, fp_y = fp.position
+        angle = math.radians(-fp.rotation)
+        cos_a, sin_a = math.cos(angle), math.sin(angle)
+        for pad in fp.pads:
+            if pad.net_number == target_net:
+                continue
+            px, py = pad.position
+            hw, hh = _pad_half_extents(pad.size, getattr(pad, "rotation", 0.0) or 0.0)
+            foreign_pads.append(
+                (fp_x + (px * cos_a - py * sin_a), fp_y + (px * sin_a + py * cos_a), hw, hh)
+            )
+    segs = [(s.start, s.end, s.width / 2.0) for s in pcb.segments if s.net_number != target_net]
+    vias = [(v.position, v.size / 2.0) for v in pcb.vias if v.net_number != target_net]
+
+    steps = int(_WIDTH_PROBE_LENGTH_MM / _WIDTH_PROBE_STEP_MM)
+    narrowest = math.inf
+    for px, py in pad_points:
+        near_pads = [r for r in foreign_pads if math.hypot(r[0] - px, r[1] - py) <= 4.0]
+        near_segs = [
+            g
+            for g in segs
+            if _point_to_segment_distance(px, py, g[0][0], g[0][1], g[1][0], g[1][1]) <= 4.0
+        ]
+        near_vias = [v for v in vias if math.hypot(v[0][0] - px, v[0][1] - py) <= 4.0]
+        best = 0.0
+        for k in range(_WIDTH_PROBE_DIRECTIONS):
+            theta = 2.0 * math.pi * k / _WIDTH_PROBE_DIRECTIONS
+            ux, uy = math.cos(theta), math.sin(theta)
+            gap = math.inf
+            for i in range(steps + 1):
+                qx = px + ux * i * _WIDTH_PROBE_STEP_MM
+                qy = py + uy * i * _WIDTH_PROBE_STEP_MM
+                for r in near_pads:
+                    gap = min(gap, _rect_distance(qx, qy, r))
+                for sa, sb, half in near_segs:
+                    gap = min(
+                        gap, _point_to_segment_distance(qx, qy, sa[0], sa[1], sb[0], sb[1]) - half
+                    )
+                for vp, vr in near_vias:
+                    gap = min(gap, math.hypot(qx - vp[0], qy - vp[1]) - vr)
+            if gap is not math.inf:
+                best = max(best, 2.0 * (gap - clearance_mm))
+            else:
+                best = max(best, math.inf)
+        narrowest = min(narrowest, best)
+    if narrowest is math.inf:
+        return None
+    return max(0.0, narrowest)
+
+
+def _width_note(tried_mm: float | None, fits_mm: float | None, clearance_mm: float) -> str:
+    """Evidence suffix naming the width tried and the widest width that fits (#9636)."""
+    parts: list[str] = []
+    if tried_mm is not None:
+        parts.append(f"width tried {tried_mm:.3f} mm")
+    if fits_mm is not None:
+        parts.append(
+            f"widest trace that leaves the pad {fits_mm:.3f} mm at {clearance_mm:.3f} mm clearance"
+        )
+    return f" ({'; '.join(parts)})" if parts else ""
+
+
 def _find_blocking_strict_nets_from_pcb(
     pcb: PCB,
     target_net: str,
@@ -555,6 +736,11 @@ def _find_blocking_strict_nets_from_pcb(
     if status is None or not status.unconnected_pads:
         return []
     pad_positions = [p.position for p in status.unconnected_pads]
+    target_number = next((nid for nid, net in pcb.nets.items() if net.name == target_net), None)
+    own_part = [
+        _own_part_pad_rects(pcb, target_number, pt) if target_number is not None else []
+        for pt in pad_positions
+    ]
 
     name_by_id = {nid: net.name for nid, net in pcb.nets.items() if net.name}
     strict_set = set(strict_nets)
@@ -570,7 +756,9 @@ def _find_blocking_strict_nets_from_pcb(
             continue
         ax, ay = seg.start
         bx, by = seg.end
-        for tx, ty in pad_positions:
+        for (tx, ty), siblings in zip(pad_positions, own_part, strict=True):
+            if _is_own_part_copper(siblings, tx, ty, (ax, ay, bx, by)):
+                continue
             _update(name, _point_to_segment_distance(tx, ty, ax, ay, bx, by))
 
     for via in pcb.vias:
@@ -578,7 +766,9 @@ def _find_blocking_strict_nets_from_pcb(
         if name not in strict_set:
             continue
         vx, vy = via.position
-        for tx, ty in pad_positions:
+        for (tx, ty), siblings in zip(pad_positions, own_part, strict=True):
+            if _in_rects(vx, vy, siblings):
+                continue
             _update(name, math.hypot(vx - tx, vy - ty))
 
     candidates = sorted(
@@ -1293,6 +1483,18 @@ def classify_stuck_nets_from_pcb(
         search_failure = (
             normalize_search_failure(search_failures.get(net.net_name)) if search_failures else None
         )
+        width_note = ""
+        if search_failure is not None:
+            # Issue #9636: a refusal "for the net's real trace width" names the
+            # width it tried and the widest one the pad can actually leave at.
+            klass = net_class_map.get(net.net_name) if net_class_map else None
+            tried = getattr(klass, "trace_width", None)
+            clearance = getattr(klass, "clearance", None) or escape_clearance_mm
+            width_note = _width_note(
+                tried,
+                _widest_escape_width_mm(pcb, net_number, pad_points, clearance),
+                clearance,
+            )
         diag = _decide(
             net_name=net.net_name,
             net_number=net_number,
@@ -1306,6 +1508,7 @@ def classify_stuck_nets_from_pcb(
             same_group_congestion=same_group_congestion,
             foreign_congestion=foreign_congestion,
             search_failure=search_failure,
+            width_note=width_note,
         )
         diag.search_failure = search_failure
         # Issue #7832: branch 4 is geometry-only and cannot see that a route
@@ -1449,12 +1652,15 @@ def _nearest_blocker_distance(
     strict_set = set(strict_nets)
     window = max(radius_mm * 3.0, 6.0)
     best = math.inf
+    own_part = [_own_part_pad_rects(pcb, target_net, pt) for pt in pad_points]
     for seg in pcb.segments:
         if name_by_id.get(seg.net_number) not in strict_set:
             continue
         ax, ay = seg.start
         ex, ey = seg.end
-        for px, py in pad_points:
+        for (px, py), siblings in zip(pad_points, own_part, strict=True):
+            if _is_own_part_copper(siblings, px, py, (ax, ay, ex, ey)):
+                continue
             d = _point_to_segment_distance(px, py, ax, ay, ex, ey)
             if d <= window and d < best:
                 best = d
@@ -1807,6 +2013,7 @@ def _decide(
     same_group_congestion: int = 0,
     foreign_congestion: int = 0,
     search_failure: str | None = None,
+    width_note: str = "",
 ) -> StuckNetDiagnosis:
     """Apply the decision tree to one net's diagnostics.
 
@@ -1953,7 +2160,7 @@ def _decide(
                 f"({search_failure}) with budget to spare, although the "
                 f"geometry-only probe sees a {open_deg:.0f} deg lane ({nb}); "
                 f"more search budget will not route it -- the pad's escape at the "
-                f"net's real trace width is the constraint"
+                f"net's real trace width is the constraint{width_note}"
             )
         return StuckNetDiagnosis(
             net_name=net_name,

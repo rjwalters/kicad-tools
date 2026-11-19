@@ -70,3 +70,20 @@ def test_complete_budgets_and_reports_the_reduced_count(tmp_path, capsys):
     # /A needs 1 link (kept trace joins two pads), /B needs 2.
     assert "x 3 links" in text
     assert "redundant_copper" not in text
+
+
+def test_kept_copper_anchors_are_collected_for_pathfinder_9636(tmp_path):
+    """The kept /A trace becomes start anchors on its pads (issue #9636)."""
+    router, _net_map = load_pcb_for_routing(
+        str(_board(tmp_path, name_only=False)), load_existing_routes=True
+    )
+    router._preserve_listed_copper = True
+    router._lattice_netset_connections()
+    anchors = router._lattice_kept_anchors
+    # The trace joins U1.1 and U2.1: each sees the other pad's end as an anchor;
+    # the stranded U3.1 and the copper-less /B pads carry none.
+    assert set(anchors) == {("U1", "1"), ("U2", "1")}
+    # Without --complete nothing is kept, so nothing is anchored.
+    router._preserve_listed_copper = False
+    router._lattice_netset_connections()
+    assert router._lattice_kept_anchors == {}
