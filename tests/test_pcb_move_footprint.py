@@ -1137,6 +1137,24 @@ THT_DIODE_PCB = """(kicad_pcb
 """
 
 
+# THT_DIODE_PCB with the D1 footprint duplicated under a distinct UUID: two
+# footprints share reference "D1", as happens when a part is copy-pasted.
+DUPLICATED_REF_PCB = (
+    THT_DIODE_PCB[: THT_DIODE_PCB.rindex(")\n")]
+    + """  (footprint "Diode_THT:D_DO-35"
+    (layer "F.Cu")
+    (uuid "fp-d1-dup")
+    (at 110 100)
+    (property "Reference" "D1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "1N4148" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" thru_hole rect (at 0 0) (size 1.6 1.6) (drill 0.8) (layers "*.Cu" "*.Mask") (net 1 "VCC"))
+    (pad "2" thru_hole circle (at 7.62 0) (size 1.6 1.6) (drill 0.8) (layers "*.Cu" "*.Mask") (net 0 ""))
+  )
+)
+"""
+)
+
+
 class TestSideKey:
     """``--map`` entries may carry ``"side": "front" | "back"`` (Issue #9471)."""
 
@@ -1292,9 +1310,17 @@ class TestSideKey:
         assert (px + ox, py + oy) == pytest.approx((150.0, 100.0))
 
     def test_drag_endpoints_skipped_on_side_change(self, tmp_path, capsys):
+        """Side-only change skips drag; the rotation flag must stay unset."""
         from kicad_tools.cli.pcb_move_footprint import run_move_footprint
 
         pcb = self._write(tmp_path)
+        run_move_footprint(
+            pcb,
+            batch_map={"D1": {"x": 50, "y": 40, "rotation": 0, "side": "back"}},
+            drag_endpoints=True,
+            dry_run=True,
+        )
+        assert "SKIPPED (side changed" in capsys.readouterr().out
         rc = run_move_footprint(
             pcb,
             batch_map={"D1": {"x": 50, "y": 40, "rotation": 0, "side": "back"}},
@@ -1304,3 +1330,70 @@ class TestSideKey:
         assert rc == 0
         move = json.loads(capsys.readouterr().out)["moves"][0]
         assert move["drag_skipped_side"] is True
+        assert move.get("drag_skipped_rotation") is not True
+        assert move["old_rotation"] == pytest.approx(move["new_rotation"])
+
+    def test_drag_endpoints_skipped_on_side_and_rotation_change(self, tmp_path, capsys):
+        """A side change AND an angle change report both skip flags."""
+        from kicad_tools.cli.pcb_move_footprint import run_move_footprint
+
+        pcb = self._write(tmp_path)
+        run_move_footprint(
+            pcb,
+            batch_map={"D1": {"x": 50, "y": 40, "rotation": 90, "side": "back"}},
+            drag_endpoints=True,
+            dry_run=True,
+        )
+        assert "SKIPPED (rotation changed and side changed" in capsys.readouterr().out
+        rc = run_move_footprint(
+            pcb,
+            batch_map={"D1": {"x": 50, "y": 40, "rotation": 90, "side": "back"}},
+            drag_endpoints=True,
+            output_format="json",
+        )
+        assert rc == 0
+        move = json.loads(capsys.readouterr().out)["moves"][0]
+        assert move["drag_skipped_side"] is True
+        assert move["drag_skipped_rotation"] is True
+
+    @pytest.mark.parametrize("side", ["front", "back"])
+    def test_ambiguous_side_reference_rejected_in_preview_and_apply(self, tmp_path, side, capsys):
+        """A ``side`` entry on a duplicated reference fails before anything else.
+
+        The planning lookup took the first match while the flip went through
+        ``StrategyApplicator``, which refuses an ambiguous reference -- so a
+        dry run reported a flip the apply then rejected, and requesting the
+        current side silently moved only the first match.
+        """
+        from kicad_tools.cli.pcb_move_footprint import run_move_footprint
+
+        errors = []
+        for dry_run in (True, False):
+            pcb = tmp_path / f"dup-{side}-{dry_run}.kicad_pcb"
+            pcb.write_text(DUPLICATED_REF_PCB)
+            original = pcb.read_text()
+            rc = run_move_footprint(
+                pcb,
+                batch_map={"D1": {"x": 50, "y": 40, "side": side}},
+                dry_run=dry_run,
+                output_format="json",
+            )
+            assert rc == 1
+            error = json.loads(capsys.readouterr().out)["error"]
+            errors.append(error)
+            assert pcb.read_text() == original
+        assert errors[0] == errors[1]
+        assert "Ambiguous footprint reference 'D1'" in errors[0]
+
+    def test_duplicated_reference_without_side_still_moves_first_match(self, tmp_path):
+        """Entries without ``side`` keep the historical first-match behavior."""
+        from kicad_tools.cli.pcb_move_footprint import run_move_footprint
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = tmp_path / "dup.kicad_pcb"
+        pcb.write_text(DUPLICATED_REF_PCB)
+        assert run_move_footprint(pcb, batch_map={"D1": {"x": 60, "y": 70}}) == 0
+        fps = [fp for fp in PCB.load(pcb).footprints if fp.reference == "D1"]
+        assert len(fps) == 2
+        assert fps[0].position == pytest.approx((60.0, 70.0))
+        assert fps[1].position == pytest.approx((110.0, 100.0))

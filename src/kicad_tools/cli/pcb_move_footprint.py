@@ -24,12 +24,17 @@ A batch entry may carry an optional ``"side": "front" | "back"``.  When the
 footprint is not already on that side it is flipped *first* (the same
 KiCad-verified left/right mirror about the footprint anchor that
 ``pcb-modify flip`` applies), then ``x`` / ``y`` / ``rotation`` are applied.
-``rotation`` is therefore the **stored KiCad footprint angle written after the
-flip** (what KiCad's Properties dialog shows for the back-side part), not an
-angle as seen from the front.  The flip pivots on the footprint anchor, so a
-part whose anchor is pad 1 has pad 2 land on the opposite side of the anchor
-from where the same angle puts it on the front.  A part already on the
-requested side is left alone; an entry without ``side`` never flips.
+``rotation`` is the **stored KiCad footprint angle written after the flip**
+(what KiCad's Properties dialog shows for the back-side part), not an angle
+as seen from the front.  With an explicit ``rotation`` the pads land at the
+same board coordinates that stored angle gives on the front: a two-pad THT
+diode anchored at pad 1 (pad 2 local ``+7.62, 0``) moved to ``(50, 40)``
+with ``"rotation": 0`` has pad 2 at ``(57.62, 40)`` on either face.  With
+``rotation`` omitted the flip rewrites the stored angle ``theta -> 180 -
+theta``, which mirrors the pads about the anchor: the same diode without a
+``rotation`` key lands at a stored ``180`` degrees with pad 2 at
+``(42.38, 40)``.  A part already on the requested side is left alone; an
+entry without ``side`` never flips.
 """
 
 from __future__ import annotations
@@ -103,7 +108,8 @@ def run_move_footprint(
             coincident (within ``drag_tolerance``) with each moved pad by that
             pad's delta, so routed copper follows the footprint instead of being
             stranded.  First slice is translation-only: dragging is skipped (with
-            a warning) for any footprint whose ``rotation`` also changes.
+            a warning) for any footprint whose ``rotation`` changes or whose
+            side changes.
         drag_tolerance: Endpoint-coincidence match radius in mm (default 0.05).
 
     Returns:
@@ -173,6 +179,20 @@ def run_move_footprint(
         if not fp:
             _print_error(f"Footprint {ref} not found in PCB", output_format)
             return 1
+        if ref in sides:
+            # A side flip applies through StrategyApplicator (the single
+            # MIRROR_COMPONENT transform), which refuses an ambiguous authored
+            # reference.  Reject it here -- before any dry-run report or
+            # mutation -- so preview and apply fail identically instead of
+            # previewing a flip that apply then rejects.
+            n_matches = sum(f.reference == ref for f in pcb.footprints)
+            if n_matches > 1:
+                _print_error(
+                    f"Ambiguous footprint reference {ref!r}: {n_matches} footprints "
+                    "share it; 'side' requires a unique reference",
+                    output_format,
+                )
+                return 1
         # fp.position is stored board-relative; report old + new in the same
         # coordinate space the user requested so they are directly comparable.
         old_x, old_y = fp.position
@@ -216,7 +236,7 @@ def run_move_footprint(
             assign_x, assign_y = _assign_coords(x, y)
             fp_old_x, fp_old_y = fp.position
             delta = (assign_x - fp_old_x, assign_y - fp_old_y)
-            rotation_changed = (rot is not None and abs(rot - fp.rotation) > 1e-9) or side_change
+            rotation_changed = rot is not None and abs(rot - fp.rotation) > 1e-9
             pads: list[dict] = []
             for pad in fp.pads:
                 old_pos = pcb.get_pad_position(ref, pad.number)
@@ -234,6 +254,7 @@ def run_move_footprint(
                 {
                     "delta": delta,
                     "rotation_changed": rotation_changed,
+                    "side_changed": side_change,
                     "pads": pads,
                 }
             )
@@ -259,9 +280,12 @@ def run_move_footprint(
     if drag_endpoints:
         total_dragged = 0
         for md, plan in zip(move_details, drag_plans, strict=True):
-            if plan["rotation_changed"]:
-                md["drag_skipped_rotation"] = True
-                if md.get("side_changed"):
+            if plan["rotation_changed"] or plan["side_changed"]:
+                # Report each reason separately so JSON consumers can tell a
+                # side change from an angle change.
+                if plan["rotation_changed"]:
+                    md["drag_skipped_rotation"] = True
+                if plan["side_changed"]:
                     md["drag_skipped_side"] = True
                 md["drag"] = []
                 continue
@@ -355,10 +379,14 @@ def run_move_footprint(
                 print(f"    Side: {md['old_side']} -> {md['new_side']} ({verb})")
             if md["old_rotation"] != md["new_rotation"]:
                 print(f"    Rotation: {md['old_rotation']} -> {md['new_rotation']}")
+            skip_reasons = []
             if md.get("drag_skipped_rotation"):
-                reason = "side changed" if md.get("drag_skipped_side") else "rotation changed"
+                skip_reasons.append("rotation changed")
+            if md.get("drag_skipped_side"):
+                skip_reasons.append("side changed")
+            if skip_reasons:
                 print(
-                    f"    Drag endpoints: SKIPPED ({reason}; "
+                    f"    Drag endpoints: SKIPPED ({' and '.join(skip_reasons)}; "
                     "rotation-aware dragging not supported in this slice)"
                 )
             elif "drag" in md:

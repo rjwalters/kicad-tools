@@ -232,20 +232,25 @@ changes, as for a rotation change.
 `rotation` is the **stored KiCad footprint angle written after the flip**, which
 is what KiCad's Properties dialog shows for the back-side part. It is not an
 angle as seen from the front. The flip mirrors about the footprint anchor, not
-the part's centre, and rewrites the stored angle `theta -> 180 - theta`. So a
-two-pad through-hole part whose anchor is pad 1 (pad 2 at local `+7.62, 0`) has
-pad 2 land on the opposite side of the anchor from where the unflipped part
-puts it, unless you say otherwise:
+the part's centre. With an explicit `rotation` the pads land at the same board
+coordinates that stored angle gives on the front; with `rotation` omitted the
+flip rewrites the stored angle `theta -> 180 - theta`, which mirrors the pads
+about the anchor. For a two-pad through-hole part whose anchor is pad 1
+(pad 2 at local `+7.62, 0`) moved to `(50, 40)`:
 
 ```bash
 # D1: anchor = pad 1, pad 2 at local (7.62, 0); currently on F.Cu at angle 0.
-# rotation omitted -> flip leaves angle 180: pad 1 at (50, 40), pad 2 at (42.38, 40)
+# rotation omitted -> flip rewrites the angle to 180: pad 1 at (50, 40),
+# pad 2 at (42.38, 40), mirrored about the anchor
 kct pcb move-footprint board.kicad_pcb --map '{"D1": {"x": 50, "y": 40, "side": "back"}}'
 # rotation 0 -> pad 1 at (50, 40), pad 2 at (57.62, 40), the same pad layout as on the front
 kct pcb move-footprint board.kicad_pcb --map '{"D1": {"x": 50, "y": 40, "rotation": 0, "side": "back"}}'
 ```
 
-Read pad positions back (`kct pcb footprints`) to confirm a polarised part.
+Confirm a polarised part by reading pad positions back in Python:
+`PCB.load("board.kicad_pcb").get_pad_position("D1", "2")` returns the pad's
+board-relative coordinate (`kct pcb footprints --format json` reports the pad
+count and the footprint anchor, not each pad position).
 
 **`add-zone` output-path behavior:** `-o`/`--output` is optional and
 **defaults to overwriting the input in place** — consistent with `zones add`,
