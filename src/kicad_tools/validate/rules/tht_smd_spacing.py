@@ -2,10 +2,18 @@
 
 JLCDFM flags through-hole pads and vias that sit close to an SMD pad (wave /
 selective-solder and rework clearance). Observed thresholds (epic #8838,
-2026-11-12 -- observed from JLCDFM output, not documented by the fab):
+2026-11-12 -- observed from JLCDFM output, not documented by the fab;
+thresholds moved to 2.032 / 3.05 mm by Issue #9421 after the fab rated two pairs
+at 2.00 / 2.025 mm as danger that the old 2.0 mm floor passed -- 2.032 mm is
+80 mil, the likely real limit, from one board's Alert value panel, not
+confirmed):
 
-* gap < :data:`DANGER_MM` (2.0 mm)  -> ``error``   (JLCDFM "danger")
-* gap < :data:`WARNING_MM` (2.7 mm) -> ``warning``
+* gap < :data:`DANGER_MM` (2.032 mm)  -> ``error``   (JLCDFM "danger")
+* gap < :data:`WARNING_MM` (3.05 mm)  -> ``warning``
+
+Both upper edges are strict and carry no tolerance: exactly 2.032 mm is a
+warning and exactly 3.05 mm is clean. ``TOLERANCE`` only guards overlap
+(distance ~ 0) and via-drill comparison.
 
 Measurement reference (a documented choice -- the epic does not say whether
 JLCDFM measures hole centre, hole edge or copper edge): **copper edge to copper
@@ -67,17 +75,36 @@ gates keep this from becoming the via flood above:
   regardless of what covers its ring. The reporter noted the anchor via of
   their item 1 was untented on both sides, which suggests tenting is part of
   the fab's test, but **the fab's exact test is unverified**.
+* **Same-net anchor↔anchor pairs are exempt** (Issue #9325). ``kct pcb
+  reinforce`` lays consecutive wire legs so their end anchor vias sit ~2.3-2.5
+  mm apart on one net (1.9 mm annuli, 1.3 mm drill); this pairing reported one
+  error per junction -- 7 of the 11 errors on the reporter's board -- and the
+  fab's DFM counted none of them. A same-net ring that is a *fan-out-sized*
+  via is still reported (#8925 item 5, which the fab did count). The
+  exemption needs a *real* shared net: net 0 is the single canonical no-net
+  sentinel every unconnected hole resolves to, not a per-via identity
+  (issue #4127), so a pair colliding on net 0 still reports -- two netless
+  mask-open anchor holes are exactly the bridging hazard this pairing models.
+  **The fab's
+  treatment of same-net anchor↔anchor pairs is evidenced only by this one
+  board** (it counted none); that is an observation, not a general fab-rule
+  confirmation.
 
 No board in this repo's regression set has an anchor-sized via, and every via
 on boards 03 / 05 / 06 / 07 resolves as tented, so this pairing adds nothing to
 their counts (6 / 0 / 0 / 0); its live calibration is unverified. A pair is
 reported **once**, even when it meets on both faces or both vias are anchors
 (each then sits on both sides of the comparison); the message names every
-layer it meets on.
+layer it meets on. A same-net anchor↔anchor pair is not reported at all
+(above); a different-net one is, once -- and so is a net-0 pair (net 0 is the
+no-net sentinel, not a shared net).
 
 A pad whose ``shape`` this rule cannot measure is **reported as unmeasured**
 (``tht_smd_spacing_incomplete``, info) rather than silently dropped: a shape the
-rule cannot judge must not look like a pad it cleared (Issue #8914).
+rule cannot judge must not look like a pad it cleared (Issue #8914).  A
+``custom`` pad is measured by its anchor-plus-primitives copper whenever the
+shared outline builder produces it, and is reported unmeasured -- with the
+refusing primitive kind named -- only when that builder refuses (Issue #9498).
 """
 
 from __future__ import annotations
@@ -87,12 +114,17 @@ from typing import Any
 
 from ..copper_refs import board_origin, via_ref
 from ..violations import DRCResults, DRCViolation
-from .clearance import _pad_on_layer, _pad_polygon
+from .clearance import (
+    _pad_has_no_copper,
+    _pad_on_layer,
+    _pad_polygon,
+    _transform_pad_position,
+)
 from .silkscreen import _via_is_tented
 
 TOLERANCE = 0.001
-DANGER_MM = 2.0
-WARNING_MM = 2.7
+DANGER_MM = 2.032
+WARNING_MM = 3.05
 
 #: Drill diameter (mm) at or above which a via is judged like a THT component
 #: pad.  1.0 mm is just under 18 AWG solid wire (1.02 mm): a hole that takes a
@@ -106,8 +138,11 @@ ANCHOR_DRILL_MM = 1.0
 _MASK_SIDE = {"F.Cu": "F", "B.Cu": "B"}
 
 #: Pad shapes whose true copper outline :func:`_pad_polygon` reproduces.  Any
-#: other shape (``custom``, ``trapezoid``) would be approximated by its
-#: bounding rectangle, so it is reported unmeasured instead of mismeasured.
+#: other shape (``trapezoid``) would be approximated by its bounding
+#: rectangle, so it is reported unmeasured instead of mismeasured.  A
+#: ``custom`` pad is NOT listed because it has its own path (Issue #9498): it
+#: is measured by the shared outline builder's anchor-plus-primitives copper
+#: when that succeeds, and reported unmeasured only when the builder refuses.
 MEASURABLE_SHAPES = frozenset({"circle", "rect", "oval", "obround", "roundrect"})
 
 #: Cap on the pad identities listed in one ``tht_smd_spacing_incomplete``
@@ -126,7 +161,12 @@ def check_tht_smd_spacing(
     """Report THT pads and anchor-sized vias closer than the thresholds to any SMD pad.
 
     Anchor-sized vias are also judged against every *exposed* via annulus
-    (Issue #8925); THT component pads are not.
+    (Issue #8925); THT component pads are not.  A same-net anchor↔anchor pair
+    is exempt (Issue #9325) -- consecutive ``kct pcb reinforce`` wire legs --
+    while a same-net anchor against a fan-out-sized annulus is still reported.
+    The exemption needs a *real* shared net: two unconnected holes both read as
+    net 0 (the single no-net sentinel, issue #4127), and a net-0 anchor pair
+    still reports.
 
     ``via_drill_mm`` is the drill diameter at which a via starts being judged
     like a THT component pad (:data:`ANCHOR_DRILL_MM` by default; see the module
@@ -156,8 +196,23 @@ def check_tht_smd_spacing(
         for index, pad in enumerate(fp.pads):
             if pad.type not in {"smd", "thru_hole"}:
                 continue
+            if _pad_has_no_copper(pad):
+                # Issue #9528: no copper layer, so no copper to space.
+                continue
             identity = pad.uuid or f"{fp.reference}:{pad.number}:pad:{index}"
-            if pad.shape not in MEASURABLE_SHAPES:
+            if pad.shape == "custom":
+                # Issue #9498: a custom pad is measurable whenever the shared
+                # outline builder produced its anchor-plus-primitives copper;
+                # the incomplete finding below is only for pads the builder
+                # refused (the label then names the refusing primitive kind).
+                from kicad_tools.geometry.copper import custom_pad_outline_detail
+
+                geometry, refusal = custom_pad_outline_detail(pad, _transform_pad_position(pad, fp))
+                if geometry is None:
+                    label = f"custom: {refusal or 'source pad node unavailable'}"
+                    unmeasured.setdefault(label, []).append(identity)
+                    continue
+            elif pad.shape not in MEASURABLE_SHAPES:
                 unmeasured.setdefault(pad.shape, []).append(identity)
                 continue
             geom = _pad_polygon(pad, fp)
@@ -176,6 +231,13 @@ def check_tht_smd_spacing(
         listed = ", ".join(identities[:_MAX_LISTED_IDENTITIES])
         if len(identities) > _MAX_LISTED_IDENTITIES:
             listed += f", +{len(identities) - _MAX_LISTED_IDENTITIES} more"
+        if shape.startswith("custom: "):
+            subject = (
+                f"{len(identities)} custom pad(s) the outline builder refused "
+                f"({shape[len('custom: ') :]})"
+            )
+        else:
+            subject = f"{len(identities)} pad(s) of shape {shape!r}"
         results.add(
             DRCViolation(
                 "tht_smd_spacing_incomplete",
@@ -183,9 +245,10 @@ def check_tht_smd_spacing(
                 # shape is missing coverage, not a defect of the board, so it
                 # must not block a board whose other pads are all clean.
                 "info",
-                f"THT/SMD spacing coverage incomplete: {len(identities)} pad(s) of "
-                f"shape {shape!r} were not measured (this rule reproduces only "
-                f"{', '.join(sorted(MEASURABLE_SHAPES))}); spacing around them is "
+                f"THT/SMD spacing coverage incomplete: {subject} were not "
+                f"measured (this rule reproduces only "
+                f"{', '.join(sorted(MEASURABLE_SHAPES))} plus a custom pad's "
+                f"anchor-plus-primitives copper); spacing around them is "
                 f"unjudged, not cleared: {listed}",
             )
         )
@@ -218,16 +281,16 @@ def check_tht_smd_spacing(
 
     def report(layer, identity, geom, net, other_id, other_geom, other_net, what, where=None):
         distance = geom.distance(other_geom)
-        if distance <= TOLERANCE or distance >= warning_mm - TOLERANCE:
+        if distance <= TOLERANCE or distance >= warning_mm:
             return
         a, b = nearest_points(geom, other_geom)
-        is_error = distance < danger_mm - TOLERANCE
+        is_error = distance < danger_mm
         results.add(
             DRCViolation(
                 "tht_smd_spacing",
                 "error" if is_error else "warning",
-                f"THT/via to {what} spacing {distance:.3f}mm < "
-                f"{(danger_mm if is_error else warning_mm):.1f}mm "
+                f"THT/via to {what} spacing {distance:.4f}mm < "
+                f"{(danger_mm if is_error else warning_mm):.3f}mm "
                 f"(copper edge to copper edge) on {where or layer}; closest points "
                 f"({a.x + ox:.6f}, {a.y + oy:.6f}) and ({b.x + ox:.6f}, {b.y + oy:.6f})",
                 location=((a.x + b.x) / 2, (a.y + b.y) / 2),
@@ -257,6 +320,9 @@ def check_tht_smd_spacing(
     # de-duplicate), on the first layer, naming every layer it meets on.
     # pair -> (layers, hole entry, ring entry)
     pairs: dict[tuple[str, str], tuple[list[str], tuple[str, Any, str], tuple[str, Any, str]]] = {}
+    # Identities judged as anchor vias above; a ring whose identity is in here
+    # is itself an anchor-sized via.
+    anchor_ids = {tht[index][1] for index in anchor_vias}
     for layer in sorted({a[0] for a in annuli}):
         rings = [a for a in annuli if a[0] == layer]
         tree = STRtree([r[2] for r in rings])
@@ -267,6 +333,18 @@ def check_tht_smd_spacing(
             for raw in tree.query(geom, predicate="dwithin", distance=warning_mm):
                 _, ring_id, ring_geom, ring_net = rings[int(raw)]
                 if ring_id == identity:
+                    continue
+                # Same-net anchor↔anchor pairs are exempt (Issue #9325):
+                # consecutive ``kct pcb reinforce`` wire legs sit 2.3-2.5 mm
+                # apart on one net, and the fab's DFM counted none of those
+                # pairs.  A same-net ring that is a fan-out-sized via is still
+                # reported (the #8925 item-5 shape the fab did count), and so
+                # is a "same-net" pair colliding on net 0: net 0 is the single
+                # canonical no-net sentinel every unconnected hole resolves to,
+                # not a per-via identity (issue #4127), so two netless
+                # mask-open anchor holes are a real bridging hazard, not a
+                # same-net no-op.
+                if ring_id in anchor_ids and ring_net == net != "0":
                     continue
                 key = (min(identity, ring_id), max(identity, ring_id))
                 entry = pairs.setdefault(

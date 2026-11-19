@@ -19,7 +19,7 @@ from .config import NetOptimizationStats, OptimizationConfig, OptimizationStats
 from .geometry import count_corners, total_length
 
 if TYPE_CHECKING:
-    pass
+    from contextlib import AbstractContextManager
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +109,9 @@ _RE_END = re.compile(r"\(end\s+([\d.eE+-]+)\s+([\d.eE+-]+)\)")
 _RE_WIDTH = re.compile(r"\(width\s+([\d.eE+-]+)\)")
 _RE_LAYER = re.compile(r'\(layer\s+"([^"]+)"\)')
 _RE_NET = re.compile(r"\(net\s+(\d+)\)")
+# Issue #9580: the item uuid KiCad writes on every track and via.  Captured
+# so a re-emitted track/via can keep its input identity.
+_RE_UUID = re.compile(r'\(uuid\s+("(?:\\.|[^"\\])*")\)')
 # Issue #4413: KiCad-10 name-based net dialect -- segments/vias reference
 # their net by quoted name instead of a numeric id, e.g.
 # ``(net "Net-(C11-Pad2)")``.  The numeric ``_RE_NET`` above matches
@@ -187,8 +190,10 @@ def parse_segments(pcb_text: str) -> dict[str, list[Segment]]:
     """Parse segments from PCB file text, grouped by net name.
 
     Uses a balanced-parentheses walker so that fields may appear in any
-    order and extra fields (``uuid``, ``locked``, ``tstamp``, etc.) are
-    silently ignored.
+    order and extra fields (``locked``, ``tstamp``, etc.) are silently
+    ignored.  Issue #9580: the ``(uuid ...)`` field is NOT ignored -- it is
+    captured on each :class:`Segment` so a re-emitted, unchanged track
+    keeps its input identity.
     """
     segments_by_net: dict[str, list[Segment]] = {}
 
@@ -203,6 +208,7 @@ def parse_segments(pcb_text: str) -> dict[str, list[Segment]]:
         m_end = _RE_END.search(block)
         m_width = _RE_WIDTH.search(block)
         m_layer = _RE_LAYER.search(block)
+        m_uuid = _RE_UUID.search(block)
         resolved_net = _resolve_block_net(block, net_names, name_to_id)
         if _is_unresolvable_numeric_ref(block, net_names, name_only_board):
             logger.warning("Leaving segment with unresolvable numeric net ref untouched (#8492)")
@@ -238,6 +244,8 @@ def parse_segments(pcb_text: str) -> dict[str, list[Segment]]:
             layer=layer,
             net=net,
             net_name=net_name,
+            # Issue #9580: keep the input identity for the re-emission.
+            uuid=_decode_net_string(m_uuid.group(1)) if m_uuid else None,
         )
 
         if net_name not in segments_by_net:
@@ -251,7 +259,9 @@ def parse_vias(pcb_text: str) -> dict[str, list[Via]]:
     """Parse vias from PCB file text, grouped by net name.
 
     Parses ``(via ...)`` S-expressions and returns ``Via`` objects keyed
-    by net name, mirroring the structure of ``parse_segments``.
+    by net name, mirroring the structure of ``parse_segments``.  Issue
+    #9580: each via's ``(uuid ...)`` field is captured on the ``Via`` so a
+    re-emitted, unchanged via keeps its input identity.
 
     Args:
         pcb_text: Raw text content of a ``.kicad_pcb`` file.
@@ -300,6 +310,7 @@ def parse_vias(pcb_text: str) -> dict[str, list[Via]]:
         m_size = _re_size.search(block)
         m_drill = _re_drill.search(block)
         m_layers = _re_layers.search(block)
+        m_uuid = _RE_UUID.search(block)
         resolved_net = _resolve_block_net(block, net_names, name_to_id)
         if _is_unresolvable_numeric_ref(block, net_names, name_only_board):
             logger.warning("Leaving via with unresolvable numeric net ref untouched (#8492)")
@@ -354,6 +365,8 @@ def parse_vias(pcb_text: str) -> dict[str, list[Via]]:
             # Issue #6662: a KiCad blind/buried via is drilled only through
             # its span; keep the keyword so the model and re-writes agree.
             span_type=via_type_token if via_type_token in ("blind", "buried") else None,
+            # Issue #9580: keep the input identity for the re-emission.
+            uuid=_decode_net_string(m_uuid.group(1)) if m_uuid else None,
         )
 
         if net_name not in vias_by_net:
@@ -1176,6 +1189,8 @@ def optimize_pcb(
     dry_run: bool = False,
     on_net_optimized: Callable[[str, list[Segment], list[Segment]], None] | None = None,
     net_anchors_by_name: dict[str, list[tuple[float, float, tuple[Layer, ...]]]] | None = None,
+    pad_guard: Callable[[list[Segment], list[Segment]], bool] | None = None,
+    defer_pad_guard: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> OptimizationStats:
     """Optimize traces in a PCB file.
 
@@ -1210,6 +1225,13 @@ def optimize_pcb(
             rather than what ``optimize_fn`` returned (Issue #8214).  The
             ``--drc-aware`` rollback below runs after the loop and does not
             call it; the rollback's DRC re-check backstops that.
+        pad_guard: Optional rewrite check (Issue #9524) re-applied by the
+            Kelvin board gate to branch rewrites it accepts.
+        defer_pad_guard: Optional context-manager factory that suspends the
+            pad guard inside ``optimize_fn`` while the Kelvin board gate
+            vets a branch proposal (its veto is the reportable one); the
+            guard still applies to everything the gate accepts.  Requires
+            ``pad_guard``.
 
     Returns:
         Statistics about the optimization.
@@ -1266,7 +1288,13 @@ def optimize_pcb(
     # Optimize each net
     optimized_segments: dict[str, list[Segment]] = {}
     for net, segs in segments_by_net.items():
-        optimized = kelvin.optimize_net(net, segs, optimize_fn) if kelvin else None
+        optimized = (
+            kelvin.optimize_net(
+                net, segs, optimize_fn, pad_guard=pad_guard, defer_pad_guard=defer_pad_guard
+            )
+            if kelvin
+            else None
+        )
         if optimized is None:
             optimized = optimize_fn(segs)
         # Issue #8299: ``optimize_segments`` hands the chains back in

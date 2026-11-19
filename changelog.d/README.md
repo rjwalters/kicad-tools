@@ -46,7 +46,9 @@ A body that doesn't start with `- ` is made into one bullet.
 ## The per-PR check
 
 `.github/workflows/changelog.yml` runs
-`scripts/changelog_gap_report.py --pr-event ...` on every PR. It judges the PR
+`scripts/changelog_gap_report.py --pr <N>` on every PR; the verdict comes from
+a live `gh pr view` read of the PR, not the triggering event payload
+(`--pr-event ...` remains a supported offline/test mode). It judges the PR
 the way its squash commit will look: type from the **PR title**, issue from the
 PR body's `Closes #N` (then the `feature/issue-<N>` branch, then `Part of #N`).
 A PR passes when any of these hold:
@@ -100,3 +102,61 @@ entry -- e.g. a follow-up fix to a feature that hasn't been released yet and
 is already covered by that feature's fragment. If the change is internal by
 nature, prefer an internal title type or an `INTERNAL_ISSUES` entry with a
 rationale, which stay auditable after the label is gone.
+
+## Merge-queue admission (issue #9413)
+
+The `Changelog` workflow (`.github/workflows/changelog.yml`) has two halves.
+On a `pull_request` the job runs the per-PR gap report against the PR's *live*
+title, body and labels. On a `merge_group` it only validates that the
+**combined** tree's fragments assemble; it cannot see PR metadata. A green
+merge-group run therefore never proves that a member passed the per-PR rule.
+Before a merge queue is enabled, that per-member condition must be enforced
+outside this workflow.
+
+**Supported mechanism.** A required status check on the default branch
+(ruleset or branch protection) whose context is exactly
+`Changelog Fragment Check` (the evaluated `name:` of job `fragment-check`).
+GitHub applies required checks to the PR head before queue entry, so each
+member must have a *successful* check run under that name at its current head.
+Do **not** add this name as a required *merge-queue* check context: the
+merge-group run is tree-only (`loom-daemon merge-group-ci audit --required
+"Changelog Fragment Check"` reports that gap).
+
+**Metadata edits without moving the head.**
+
+- Editing the title or body fires `edited`, which re-runs the job on the same
+  head; the latest run under the name replaces the earlier verdict, so an
+  internal-to-user-visible title edit turns the check red and removes
+  admission, and the reverse restores it.
+- Applying or removing `changelog:skip` fires `labeled`/`unlabeled`, which the
+  job runs on and which also evaluate to `Changelog Fragment Check`.
+- Any other label event is `if:`-skipped and recorded under the unevaluated
+  expression text, never under the required name. A skipped run must not
+  satisfy, or supersede a failure of, the required check; only a `success`
+  under the exact name admits a member.
+
+**Failing member in a mixed group.** The group's combined tree may assemble
+(the merge-group run is green) while one member lacks its fragment. That member
+is stopped by its own failing PR-level required check, so it never enters the
+queue and the group cannot form with it. The read-only replay in
+`tests/test_changelog_merge_queue_admission.py` exercises a passing member, a
+member missing its fragment, and a group containing both.
+
+**Acceptance probe before enabling a queue.** Owner: the repository
+administrator who controls rulesets (an external control, not changed by
+source PRs). Required observable result, recorded in the rollout decision:
+
+1. `gh api repos/<owner>/<repo>/rules/branches/main` lists a
+   `required_status_checks` rule containing context `Changelog Fragment Check`
+   (not only the merge-queue rule).
+2. On a scratch PR with a user-visible title and no fragment, the check run
+   `Changelog Fragment Check` concludes `failure` and the PR reports it
+   unmergeable; toggling `changelog:skip` (no push) flips it to `success`, and
+   removing the label flips it back to `failure`.
+3. Adding an unrelated label (e.g. `loom:reviewing`) to the failing PR leaves
+   the required check `failure`.
+4. `loom-daemon merge-group-ci audit --required "Changelog Fragment Check"`
+   still reports the PR-only arrangement (expected), confirming the check is
+   not relied on inside the merge group.
+
+The existing PR and combined-tree checks are unchanged.

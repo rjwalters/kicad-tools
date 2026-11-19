@@ -7,12 +7,17 @@ IPC-2221 widths mirror ``tests/test_ampacity_check.py``.
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from kicad_tools.manufacturers import DesignRules
+from kicad_tools.pcb.reinforce import reinforce_net
 from kicad_tools.router.current_paths import CurrentPathSpec, PathEndpoint
 from kicad_tools.schema.pcb import PCB, Footprint, Pad
 from kicad_tools.validate.rules.path_ampacity import PathAmpacityRule
+from kicad_tools.validate.rules.reinforcement_incomplete import WiredLeg
+from tests.test_pcb_reinforce import _add_th_pad_footprint
 
 # --------------------------------------------------------------------------
 # Fixtures
@@ -180,6 +185,26 @@ class TestPathAmpacityRule:
         and NOT an error (declaring a path is opt-in, not mandatory)."""
         pcb = _t_network_pcb(trunk_width=6.3, sense_width=0.2)
         rule = PathAmpacityRule(specs=[_trunk_spec(15.0)])  # no sense spec declared
+        results = rule.check(pcb, _design_rules_2oz())
+        assert results.errors == []
+        assert len(results.warnings) == 1
+        assert "uncovered" in results.warnings[0].message.lower() or (
+            "not covered" in results.warnings[0].message.lower()
+        )
+
+    def test_test_point_stub_resolves_with_one_uncovered_warning(self) -> None:
+        """Issue #9492: a 0.4 mm test-point stub off a two-layer power bar is
+        a dead-end branch, not a loop -- no ambiguity error, the bars still
+        sum as a parallel group, and the stub is reported once as uncovered
+        copper (warning)."""
+        pcb = PCB.create(width=100, height=100, center=False)
+        _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+        _add_pad_footprint(pcb, ref="J2", x=32, y=50, net="NET1")
+        _add_pad_footprint(pcb, ref="TP1", x=26, y=61, net="NET1")
+        for layer in ("F.Cu", "B.Cu"):
+            pcb.add_trace((20, 50), (32, 50), width=6.3, layer=layer, net="NET1")
+        pcb.add_trace((26, 50), (26, 61), width=0.4, layer="F.Cu", net="NET1")
+        rule = PathAmpacityRule(specs=[_trunk_spec(15.0)])
         results = rule.check(pcb, _design_rules_2oz())
         assert results.errors == []
         assert len(results.warnings) == 1
@@ -584,6 +609,20 @@ def _doubled_ampacity_pcb(width_b: float, width_f: float) -> PCB:
     return pcb
 
 
+def _same_layer_doubled_ampacity_pcb(width: float, offset: float) -> PCB:
+    """The issue #9542 shape: one straight F.Cu track plus a stepped F.Cu
+    copy ``offset`` mm sideways, overlapping it along the whole run."""
+    pcb = PCB.create(width=100, height=100, center=False)
+    _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+    _add_pad_footprint(pcb, ref="J2", x=32, y=50, net="NET1")
+    y = 50 - offset
+    pcb.add_trace(("J1", "1"), ("J2", "1"), width=width, layer="F.Cu", net="NET1")
+    pcb.add_trace(("J1", "1"), (22, y), width=width, layer="F.Cu", net="NET1")
+    pcb.add_trace((22, y), (30, y), width=width, layer="F.Cu", net="NET1")
+    pcb.add_trace((30, y), ("J2", "1"), width=width, layer="F.Cu", net="NET1")
+    return pcb
+
+
 class TestDoubledCopper:
     def test_doubled_pair_meeting_summed_requirement_passes(self) -> None:
         # 15 A needs ~6.29 mm at 2 oz; 2 x 3.5 mm carries it, 1 x 3.5 mm would not.
@@ -613,6 +652,44 @@ class TestDoubledCopper:
         pcb.add_trace(("J1", "1"), ("J2", "1"), width=3.5, layer="B.Cu", net="NET1")
         rule = PathAmpacityRule(specs=[_trunk_spec(15.0)])
         assert rule.check(pcb, _design_rules_2oz()).errors
+
+
+class TestSameLayerDoubledCopper:
+    """Overlapping same-layer tracks are one conductor of merged width (#9542)."""
+
+    def test_overlapping_pair_passes_at_merged_width(self) -> None:
+        # 15 A needs ~6.29 mm at 2 oz; the merged bar is 3.0 + 2 x 1.75 = 6.5 mm.
+        rule = PathAmpacityRule(specs=[_trunk_spec(15.0)])
+        results = rule.check(_same_layer_doubled_ampacity_pcb(3.5, 3.0), _design_rules_2oz())
+        assert results.errors == []
+
+    def test_overlapping_pair_is_judged_on_merged_not_summed_width(self) -> None:
+        # Merged 1.0 + 2 x 1.75 = 4.5 mm is under the ~6.29 mm requirement,
+        # even though the summed-width reading (2 x 3.5 mm) would pass.
+        rule = PathAmpacityRule(specs=[_trunk_spec(15.0)])
+        results = rule.check(_same_layer_doubled_ampacity_pcb(3.5, 1.0), _design_rules_2oz())
+        assert len(results.errors) == 1
+        message = results.errors[0].message
+        assert "parallel group" in message
+        assert "merged width 4.500mm" in message
+        assert "summed width" not in message
+
+    def test_mixed_group_names_merged_and_summed(self) -> None:
+        """Issue #9560: merged within F.Cu, summed with B.Cu -- say both.
+
+        0.6 + 2 x 1.0 = 2.6 mm of merged F.Cu copper plus 2.0 mm on B.Cu;
+        plain "merged" would read the 4.6 mm figure as one contiguous bar.
+        """
+        pcb = _same_layer_doubled_ampacity_pcb(2.0, 0.6)
+        pcb.add_trace(("J1", "1"), ("J2", "1"), width=2.0, layer="B.Cu", net="NET1")
+        rule = PathAmpacityRule(specs=[_trunk_spec(15.0)])
+        results = rule.check(pcb, _design_rules_2oz())
+        assert len(results.errors) == 1
+        message = results.errors[0].message
+        assert "merged+summed width 4.600mm" in message
+        # Not the plain merged noun: "merged width" is absent (the mixed
+        # wording embeds "summed width", so it cannot double as the negative).
+        assert "merged width" not in message
 
 
 # --------------------------------------------------------------------------
@@ -667,3 +744,390 @@ class TestWidthSwapVia:
         assert (
             PathAmpacityRule(specs=[_trunk_spec(15.0)]).check(pcb, _design_rules_2oz()).errors == []
         )
+
+
+# --------------------------------------------------------------------------
+# Off-centreline tie vias in a layer-change bar (Issue #9561)
+# --------------------------------------------------------------------------
+
+
+def _tie_bar_pcb(*, ties: int = 7, width: float = 5.5, layers: int = 2) -> PCB:
+    """The reporter's shape: a wide two-layer bar changing layer once.
+
+    F.Cu carries the bar from J1 to the change at x=60, B.Cu from there to
+    J2. One via sits exactly on the centreline junction; ``ties`` extra
+    same-net vias are hand-placed inside the bar's copper, off the
+    centreline, spreading to ~2.8 mm from the junction via (the reporter's
+    own board stays within 3.2 mm).
+    """
+    pcb = PCB.create(width=200, height=120, center=False, layers=layers)
+    _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+    _add_pad_footprint(pcb, ref="J2", x=120, y=50, net="NET1")
+    pcb.add_trace(("J1", "1"), (60, 50), width=width, layer="F.Cu", net="NET1")
+    pcb.add_trace((60, 50), ("J2", "1"), width=width, layer="B.Cu", net="NET1")
+    pcb.add_via(60, 50, size=0.6, drill=0.3, net="NET1")
+    offsets = [
+        (0.9, 0.9),
+        (-0.9, 0.9),
+        (0.9, -0.9),
+        (-0.9, -0.9),
+        (1.8, 0.9),
+        (-1.8, -0.9),
+        (2.4, 1.5),
+    ]
+    for dx, dy in offsets[:ties]:
+        pcb.add_via(60 + dx, 50 + dy, size=0.6, drill=0.3, net="NET1")
+    return pcb
+
+
+def _branch_via_pcb() -> PCB:
+    """A same-net via on a thin branch teed off the junction, hanging off
+    the bar's copper on the B.Cu side -- near the change, never parallel."""
+    pcb = _tie_bar_pcb(ties=0)
+    pcb.add_trace((60, 50), (61.2, 53.2), width=0.3, layer="F.Cu", net="NET1")
+    pcb.add_via(61.2, 53.2, size=0.6, drill=0.3, net="NET1")
+    return pcb
+
+
+def _wide_bar_pcb() -> PCB:
+    """An 8 mm bar with a same-net via on both layers' copper but 4.12 mm
+    from the junction via -- past the tie bound, so never counted."""
+    pcb = _tie_bar_pcb(ties=0, width=8.0)
+    pcb.add_via(64.0, 51.0, size=0.6, drill=0.3, net="NET1")
+    return pcb
+
+
+def _blind_via_pcb() -> PCB:
+    """A 4-layer bar with a blind via (F.Cu -> In1.Cu) inside the bar's
+    F.Cu copper: it never reaches the change's B.Cu side."""
+    pcb = _tie_bar_pcb(ties=0, layers=4)
+    pcb.add_via(60.9, 50.9, size=0.6, drill=0.3, layers=("F.Cu", "In1.Cu"), net="NET1")
+    return pcb
+
+
+def _two_hop_pcb() -> PCB:
+    """Two series layer changes 3 mm apart with one off-centre via inside
+    the copper of both hops -- it must join the first change only."""
+    pcb = PCB.create(width=200, height=120, center=False)
+    _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+    _add_pad_footprint(pcb, ref="J2", x=120, y=50, net="NET1")
+    pcb.add_trace(("J1", "1"), (50, 50), width=5.5, layer="F.Cu", net="NET1")
+    pcb.add_trace((50, 50), (53, 50), width=5.5, layer="B.Cu", net="NET1")
+    pcb.add_trace((53, 50), ("J2", "1"), width=5.5, layer="F.Cu", net="NET1")
+    pcb.add_via(50, 50, size=0.6, drill=0.3, net="NET1")
+    pcb.add_via(53, 50, size=0.6, drill=0.3, net="NET1")
+    pcb.add_via(51.5, 50.8, size=0.6, drill=0.3, net="NET1")
+    return pcb
+
+
+class TestTieViasInLayerChangeBar:
+    """Off-centreline tie vias inside the bar's copper count in parallel.
+
+    A same-net via whose pad overlaps the change's copper on both layers,
+    chained to a centreline via within the tie bound, is provably parallel
+    to it, so its barrel capacity joins the change (Issue #9561).
+    """
+
+    def test_tie_vias_join_the_layer_change(self) -> None:
+        from kicad_tools.physics.ampacity import via_barrel_current_capacity
+        from kicad_tools.router.current_paths import resolve_current_path
+
+        res = resolve_current_path(_tie_bar_pcb(ties=7), _trunk_spec())
+        assert res.ok, res.reason
+        (change,) = res.layer_changes
+        assert change.count == 8
+        assert len(change.vias) == 1 and len(change.tie_vias) == 7
+        assert change.current_capacity_a() == pytest.approx(8 * via_barrel_current_capacity(0.3))
+
+    def test_tie_vias_clear_the_warning_at_a_suitable_current(self) -> None:
+        """One 0.3 mm drill barrel carries ~1.6 A: 8 A needs the tie vias.
+        With them the finding is gone; without them it fires."""
+        with_ties = PathAmpacityRule(specs=[_trunk_spec(8.0)]).check(
+            _tie_bar_pcb(ties=7), _design_rules_2oz()
+        )
+        assert with_ties.errors == []
+        assert with_ties.warnings == []
+        without = PathAmpacityRule(specs=[_trunk_spec(8.0)]).check(
+            _tie_bar_pcb(ties=0), _design_rules_2oz()
+        )
+        assert len([e for e in without.errors if "changes layer" in e.message]) == 1
+
+    def test_message_breaks_the_count_down(self) -> None:
+        out = PathAmpacityRule(specs=[_trunk_spec(8.0)]).check(
+            _tie_bar_pcb(ties=2), _design_rules_2oz()
+        )
+        (message,) = [e.message for e in out.errors if "changes layer" in e.message]
+        assert "through 3 via(s) (1 on the centreline, 2 tie vias in the bar)" in message
+        assert "not counted" not in message
+
+    def test_branch_via_off_the_bar_copper_is_excluded_with_reason(self) -> None:
+        out = PathAmpacityRule(specs=[_trunk_spec(8.0)]).check(
+            _branch_via_pcb(), _design_rules_2oz()
+        )
+        (message,) = [e.message for e in out.errors if "changes layer" in e.message]
+        assert "through 1 via(s)" in message
+        assert "1 same-net via(s) not counted: 1 off the bar copper" in message
+
+    def test_on_copper_via_beyond_the_tie_bound_is_excluded_with_reason(self) -> None:
+        out = PathAmpacityRule(specs=[_trunk_spec(8.0)]).check(_wide_bar_pcb(), _design_rules_2oz())
+        (message,) = [e.message for e in out.errors if "changes layer" in e.message]
+        assert "through 1 via(s)" in message
+        assert "1 same-net via(s) not counted: 1 beyond the 3.5mm tie bound" in message
+
+    def test_blind_via_on_one_layer_of_the_pair_is_excluded_with_reason(self) -> None:
+        out = PathAmpacityRule(specs=[_trunk_spec(8.0)]).check(
+            _blind_via_pcb(), _design_rules_2oz()
+        )
+        (message,) = [e.message for e in out.errors if "changes layer" in e.message]
+        assert "through 1 via(s)" in message
+        assert "1 same-net via(s) not counted: 1 not spanning both layers" in message
+
+    def test_via_within_range_of_two_changes_joins_the_first(self) -> None:
+        from kicad_tools.router.current_paths import resolve_current_path
+
+        res = resolve_current_path(_two_hop_pcb(), _trunk_spec())
+        assert res.ok, res.reason
+        assert [c.count for c in res.layer_changes] == [2, 1]
+        assert len(res.layer_changes[0].tie_vias) == 1
+        assert res.layer_changes[1].tie_vias == ()
+
+    def test_off_centre_stitch_beside_an_interior_stitch_stays_benign(self) -> None:
+        """#8916 guard: an off-centre hand via that chains to a benign
+        interior stitch inside doubled copper must not turn that stitch
+        into a series layer change."""
+        from kicad_tools.router.current_paths import resolve_current_path
+
+        pcb = _doubled_ampacity_pcb(3.5, 3.5)
+        pcb.add_via(26, 50, size=0.6, drill=0.3, net="NET1")
+        pcb.add_via(26.9, 50.8, size=0.6, drill=0.3, net="NET1")
+        res = resolve_current_path(pcb, _trunk_spec(15.0))
+        assert res.ok, res.reason
+        assert res.series_layer_changes == ()
+        assert (
+            PathAmpacityRule(specs=[_trunk_spec(15.0)]).check(pcb, _design_rules_2oz()).errors == []
+        )
+
+
+# --------------------------------------------------------------------------
+# Buttress-wire credit on fully wired legs (Issue #9648)
+# --------------------------------------------------------------------------
+
+_WIRE_NET = "FUSED_LINE"
+
+
+def _force_spec(
+    continuous_a: float = 15.0,
+    *,
+    pulsed_a: float | None = None,
+    duty_cycle: float | None = None,
+    pulse_duration_s: float | None = None,
+) -> CurrentPathSpec:
+    return CurrentPathSpec(
+        name="FORCE",
+        net_name=_WIRE_NET,
+        source=PathEndpoint("J1", "1"),
+        sink=PathEndpoint("J2", "1"),
+        continuous_a=continuous_a,
+        pulsed_a=pulsed_a,
+        duty_cycle=duty_cycle,
+        pulse_duration_s=pulse_duration_s,
+        reinforcement_eligible=True,
+    )
+
+
+def _wired_trunk(trace_width: float = 2.0, *, reinforced: bool = True) -> tuple[PCB, list[dict]]:
+    """A straight reinforcement-eligible trunk, with a real placed 16 AWG wire.
+
+    Built with the placer itself (``reinforce_net``) so the credit is judged
+    against what ``kct pcb reinforce`` actually writes: two end anchors, a
+    continuous mask opening and a sidecar wire record.
+    """
+    pcb = PCB.create(width=200, height=100, center=False)
+    pcb.add_trace((20, 50), (120, 50), width=trace_width, layer="F.Cu", net=_WIRE_NET)
+    _add_th_pad_footprint(pcb, ref="J1", x=20.0, y=50.0, net=_WIRE_NET, drill=1.0, size=2.0)
+    _add_th_pad_footprint(pcb, ref="J2", x=120.0, y=50.0, net=_WIRE_NET, drill=1.0, size=2.0)
+    wires: list[dict] = []
+    if reinforced:
+        from kicad_tools.pcb.reinforcement_sidecar import build_wire_records
+
+        outcome = reinforce_net(pcb, _WIRE_NET)
+        wires = build_wire_records(outcome, 0.0, 0.0)
+    return pcb, wires
+
+
+def _wired_legs(pcb: PCB, wires: list[dict], spec: CurrentPathSpec) -> list[WiredLeg]:
+    from kicad_tools.validate.rules.reinforcement_incomplete import ReinforcementIncompleteRule
+
+    return ReinforcementIncompleteRule(specs=[spec], wires=wires).fully_wired_legs(
+        pcb, _design_rules_2oz()
+    )
+
+
+class TestButtressWireCredit:
+    def test_fully_wired_leg_clears_the_underwidth_errors(self) -> None:
+        # 15 A at 2 oz needs ~6.29 mm; the 2.0 mm trace + a 16 AWG wire
+        # (~18.7 mm of extra width at 2 oz) carries it.
+        pcb, wires = _wired_trunk(trace_width=2.0)
+        spec = _force_spec(15.0)
+        rule = PathAmpacityRule(specs=[spec], wired_legs=_wired_legs(pcb, wires, spec))
+        results = rule.check(pcb, _design_rules_2oz())
+        assert results.errors == []
+
+    def test_same_path_without_a_wire_still_fails_identically(self) -> None:
+        pcb, _ = _wired_trunk(trace_width=2.0, reinforced=False)
+        spec = _force_spec(15.0)
+        with_legs = PathAmpacityRule(specs=[spec], wired_legs=_wired_legs(pcb, [], spec)).check(
+            pcb, _design_rules_2oz()
+        )
+        baseline = PathAmpacityRule(specs=[spec]).check(pcb, _design_rules_2oz())
+        assert [v.message for v in with_legs.errors] == [v.message for v in baseline.errors]
+        assert len(with_legs.errors) == 1
+        assert "too narrow" in with_legs.errors[0].message
+
+    def test_incomplete_leg_gets_no_credit(self) -> None:
+        # Remove one end anchor: reinforcement_incomplete rejects the leg, so
+        # path_ampacity must not credit the wire it no longer trusts.
+        pcb, wires = _wired_trunk(trace_width=2.0)
+        anchor = min((v for v in pcb.vias if v.net_name == _WIRE_NET), key=lambda v: v.position[0])
+        pcb.vias.remove(anchor)
+        spec = _force_spec(15.0)
+        rule = PathAmpacityRule(specs=[spec], wired_legs=_wired_legs(pcb, wires, spec))
+        results = rule.check(pcb, _design_rules_2oz())
+        assert len(results.errors) == 1
+        assert "too narrow" in results.errors[0].message
+
+    def test_unwired_neck_on_the_same_path_still_fails(self) -> None:
+        # The wire leg covers only the first stretch; the 0.5 mm neck past
+        # its end is judged at its bare copper width and says so.
+        pcb = PCB.create(width=200, height=100, center=False)
+        pcb.add_trace((20, 50), (70, 50), width=2.4, layer="F.Cu", net=_WIRE_NET)
+        pcb.add_trace((70, 50), (120, 50), width=0.5, layer="F.Cu", net=_WIRE_NET)
+        _add_th_pad_footprint(pcb, ref="J1", x=20.0, y=50.0, net=_WIRE_NET, drill=1.0, size=2.0)
+        _add_th_pad_footprint(pcb, ref="J2", x=120.0, y=50.0, net=_WIRE_NET, drill=1.0, size=2.0)
+        leg = WiredLeg(
+            net=_WIRE_NET,
+            layer="F.Cu",
+            points=((20.0, 50.0), (70.0, 50.0)),
+            width=2.4,
+            gauge=16,
+        )
+        rule = PathAmpacityRule(specs=[_force_spec(13.42)], wired_legs=[leg])
+        results = rule.check(pcb, _design_rules_2oz())
+        underwidth = [v for v in results.errors if "too narrow" in v.message]
+        assert len(underwidth) == 1
+        assert "not covered by a wire leg" in underwidth[0].message
+        assert "width 0.500mm" in underwidth[0].message
+
+    def test_credited_segment_that_still_fails_states_the_wire(self) -> None:
+        # ~224 mm is required at 200 A: even the credited 2.0 + ~18.7 mm
+        # effective width fails, and the message must say what was counted.
+        pcb, wires = _wired_trunk(trace_width=2.0)
+        spec = _force_spec(200.0)
+        rule = PathAmpacityRule(specs=[spec], wired_legs=_wired_legs(pcb, wires, spec))
+        results = rule.check(pcb, _design_rules_2oz())
+        (error,) = [v for v in results.errors if "too narrow" in v.message]
+        assert "width 2.000mm + 16 AWG wire = 20.700mm effective" in error.message
+        assert "not covered" not in error.message
+        assert error.actual_value == pytest.approx(20.7, abs=0.01)
+
+    def test_wire_leg_on_another_layer_does_not_credit(self) -> None:
+        pcb, _ = _wired_trunk(trace_width=2.0, reinforced=False)
+        spec = _force_spec(15.0)
+        leg = WiredLeg(
+            net=_WIRE_NET,
+            layer="B.Cu",
+            points=((20.0, 50.0), (120.0, 50.0)),
+            width=2.0,
+            gauge=16,
+        )
+        results = PathAmpacityRule(specs=[spec], wired_legs=[leg]).check(pcb, _design_rules_2oz())
+        assert len(results.errors) == 1
+        assert "width 2.000mm" in results.errors[0].message
+
+    def test_unsupported_gauge_falls_back_to_no_credit(self) -> None:
+        pcb, _ = _wired_trunk(trace_width=2.0, reinforced=False)
+        spec = _force_spec(15.0)
+        leg = WiredLeg(
+            net=_WIRE_NET,
+            layer="F.Cu",
+            points=((20.0, 50.0), (120.0, 50.0)),
+            width=2.0,
+            gauge=18,
+        )
+        with_leg = PathAmpacityRule(specs=[spec], wired_legs=[leg]).check(pcb, _design_rules_2oz())
+        baseline = PathAmpacityRule(specs=[spec]).check(pcb, _design_rules_2oz())
+        assert [v.message for v in with_leg.errors] == [v.message for v in baseline.errors]
+
+    def test_credit_scales_with_the_layer_copper_thickness(self) -> None:
+        # The same wire over 1 oz foil is worth twice the width (same area,
+        # half the thickness): 2.0 + ~37.4 mm clears 15 A's ~12.6 mm floor.
+        pcb, wires = _wired_trunk(trace_width=2.0)
+        spec = _force_spec(15.0)
+        rules_1oz = dataclasses.replace(_design_rules_2oz(), outer_copper_oz=1.0)
+        from kicad_tools.validate.rules.reinforcement_incomplete import ReinforcementIncompleteRule
+
+        legs = ReinforcementIncompleteRule(specs=[spec], wires=wires).fully_wired_legs(
+            pcb, rules_1oz
+        )
+        rule = PathAmpacityRule(specs=[spec], wired_legs=legs)
+        results = rule.check(pcb, rules_1oz)
+        assert results.errors == []
+
+
+class TestButtressWireFusing:
+    """Onderdonk fusing is judged on the combined section (#9648)."""
+
+    # 6.0 mm of 2 oz copper fuses at ~121 A for a 1 s pulse; + 16 AWG wire
+    # (~18.7 mm credit) raises that to ~499 A. The RMS floor of a 300 A peak
+    # at 0.2% duty (~13.45 A -> ~5.4 mm) stays met by the bare 6.0 mm copper,
+    # so the fusing check is the only thing that moves.
+    _SPEC = {"continuous_a": 1.0, "pulsed_a": 300.0, "duty_cycle": 0.002, "pulse_duration_s": 1.0}
+
+    def test_bare_copper_fuses_but_the_wire_carries_the_pulse(self) -> None:
+        pcb, wires = _wired_trunk(trace_width=6.0)
+        spec = _force_spec(**self._SPEC)
+        bare = PathAmpacityRule(specs=[spec]).check(pcb, _design_rules_2oz())
+        assert any("would fuse" in v.message for v in bare.errors)
+        credited = PathAmpacityRule(specs=[spec], wired_legs=_wired_legs(pcb, wires, spec)).check(
+            pcb, _design_rules_2oz()
+        )
+        assert credited.errors == []
+
+    def test_pulse_above_the_combined_section_names_the_wire(self) -> None:
+        # 600 A for 1 s fuses even the combined ~24.7 mm section.
+        pcb, wires = _wired_trunk(trace_width=6.0)
+        spec = _force_spec(
+            continuous_a=1.0, pulsed_a=600.0, duty_cycle=0.0005, pulse_duration_s=1.0
+        )
+        rule = PathAmpacityRule(specs=[spec], wired_legs=_wired_legs(pcb, wires, spec))
+        results = rule.check(pcb, _design_rules_2oz())
+        fused = [v for v in results.errors if "would fuse" in v.message]
+        assert len(fused) == 1
+        assert "24.700mm effective" in fused[0].message
+        assert "16 AWG wire" in fused[0].message
+
+
+class TestButtressWireCreditThroughChecker:
+    def test_check_path_ampacity_credits_placed_wires(self) -> None:
+        from kicad_tools.validate.checker import DRCChecker
+
+        pcb, wires = _wired_trunk(trace_width=2.0)
+        checker = DRCChecker(pcb, current_path_specs=[_force_spec(15.0)], reinforcement_wires=wires)
+        assert checker.check_path_ampacity().errors == []
+
+        # Break the wire (one end anchor gone): the credit disappears and the
+        # bare-width errors come back on the same board.
+        anchor = min((v for v in pcb.vias if v.net_name == _WIRE_NET), key=lambda v: v.position[0])
+        pcb.vias.remove(anchor)
+        broken = DRCChecker(pcb, current_path_specs=[_force_spec(15.0)], reinforcement_wires=wires)
+        errors = broken.check_path_ampacity().errors
+        assert errors and "too narrow" in errors[0].message
+
+    def test_unreinforced_board_output_is_unchanged(self) -> None:
+        from kicad_tools.validate.checker import DRCChecker
+
+        pcb, _ = _wired_trunk(trace_width=2.0, reinforced=False)
+        checker = DRCChecker(pcb, current_path_specs=[_force_spec(15.0)])
+        errors = checker.check_path_ampacity().errors
+        assert len(errors) == 1
+        assert "too narrow" in errors[0].message

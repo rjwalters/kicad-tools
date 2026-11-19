@@ -153,7 +153,67 @@ const CASES = [
   { path: "random/unknown.xyz", code: true, group: "unknown-extension" },
 ];
 
+// Issue #9291: structural guard for the #9245 false-green trap. A
+// `dorny/paths-filter` step that fails (transient listFiles 5xx) yields an
+// EMPTY output, which a downstream `== 'true'` condition reads as "nothing
+// changed" and skips every job. #9245 prevents that by (a) marking each
+// paths-filter step `continue-on-error: true` and (b) pairing every
+// `steps.<id>.outputs...` reference in a `jobs.changes.outputs.*`
+// expression with a `steps.<id>.outcome == 'failure'` disjunct. This
+// asserts both halves so a future edit cannot silently drop either one.
+// Textual check only -- it does not evaluate the Actions expression.
+function verifyFailureFallbacks() {
+  const raw = fs.readFileSync(CI_YAML_PATH, "utf8");
+  const doc = yaml.load(raw);
+  const changesJob = doc && doc.jobs && doc.jobs.changes;
+  if (!changesJob) {
+    throw new Error(`jobs.changes not found in ${CI_YAML_PATH}`);
+  }
+  const violations = [];
+
+  const filterIds = new Set();
+  for (const step of changesJob.steps || []) {
+    if (typeof step.uses !== "string" || !step.uses.startsWith("dorny/paths-filter")) continue;
+    const label = step.id || step.name || step.uses;
+    if (step.id) filterIds.add(step.id);
+    if (step["continue-on-error"] !== true) {
+      violations.push(
+        `step \`${label}\` (${step.uses}) must set \`continue-on-error: true\` so a transient ` +
+          `paths-filter failure does not fail the job (issue #9245)`,
+      );
+    }
+  }
+
+  for (const [name, expr] of Object.entries(changesJob.outputs || {})) {
+    const text = String(expr);
+    const referenced = new Set();
+    for (const m of text.matchAll(/steps\.([A-Za-z0-9_-]+)\.outputs\b/g)) referenced.add(m[1]);
+    for (const id of referenced) {
+      if (!filterIds.has(id)) continue;
+      // `id` is constrained to [A-Za-z0-9_-]+ by the capture group above, so it
+      // holds no regex metacharacter ("-" is literal outside a character class).
+      const fallback = new RegExp(`steps\\.${id}\\.outcome\\s*==\\s*'failure'`);
+      if (!fallback.test(text)) {
+        violations.push(
+          `output \`${name}\` reads \`steps.${id}.outputs\` but has no ` +
+            `\`steps.${id}.outcome == 'failure'\` disjunct (a failed filter step would read as "nothing changed", issue #9245)`,
+        );
+      }
+    }
+  }
+
+  if (violations.length > 0) {
+    for (const v of violations) console.error(`FAIL: jobs.changes ${v}`);
+    process.exit(1);
+  }
+  console.log(
+    `PASS [failure-fallbacks] ${filterIds.size} paths-filter step(s) continue-on-error; every output pairs outputs with an outcome == 'failure' disjunct`,
+  );
+}
+
 function main() {
+  verifyFailureFallbacks();
+
   const { predicateQuantifier, codePatterns } = loadChangesFilterStep();
 
   const nonNegated = codePatterns.filter((p) => typeof p !== "string" || !p.startsWith("!"));

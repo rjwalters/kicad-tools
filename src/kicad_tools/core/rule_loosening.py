@@ -424,7 +424,8 @@ class _DruConditionParser:
     the same gate still catches a lowered or removed rule of that shape).
     """
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, *, model_router_scope: bool = False) -> None:
+        self._model_router_scope = model_router_scope
         self._tokens = _tokenize_dru_condition(text)
         self._pos = 0
         self._ast = self._parse_or()
@@ -474,12 +475,26 @@ class _DruConditionParser:
         name = tok[1]
         peeked = self._peek()
         if peeked and peeked[0] == "(":
-            # A function call (isCoupledDiffPair, intersectsCourtyard, ...)
-            raise _UnknownCondition(name)
+            # A function call.  Only ``A.isCoupledDiffPair()`` -- the
+            # exemption kct's own router-class rules carry (Issue #9422) --
+            # is modelled; any other (intersectsCourtyard, hasNetclass, ...)
+            # leaves the rule's scope unknowable.
+            if name != "A.isCoupledDiffPair" or not self._model_router_scope:
+                raise _UnknownCondition(name)
+            self._next()
+            if self._next()[0] != ")":
+                raise _UnknownCondition(name)
+            return ("coupled",)
         nxt = self._peek()
         if nxt and nxt[0] == "cmp":
             op = self._next()[1]
             value = self._next()
+            if value[0] == "ident":
+                if not self._model_router_scope:
+                    raise _UnknownCondition(name)
+                # Field-to-field comparison (``A.Reference == B.Reference``
+                # in kct's same-footprint pad exemption).
+                return ("cmpf", name, op, value[1])
             if value[0] != "str":
                 raise _UnknownCondition(name)
             return ("cmp", name, op, value[1])
@@ -487,6 +502,14 @@ class _DruConditionParser:
 
     def matches(self, a: Mapping[str, str], b: Mapping[str, str]) -> bool:
         return self._eval(self._ast, a, b)
+
+    @staticmethod
+    def _field(name: str, a: Mapping[str, str], b: Mapping[str, str]) -> str:
+        side, _, field = name.partition(".")
+        item = a if side == "A" else b
+        if side not in ("A", "B") or field not in item:
+            raise _UnknownCondition(name)
+        return item[field]
 
     def _eval(self, node, a: Mapping[str, str], b: Mapping[str, str]) -> bool:
         kind = node[0]
@@ -496,6 +519,16 @@ class _DruConditionParser:
             return all(self._eval(term, a, b) for term in node[1])
         if kind == "not":
             return not self._eval(node[1], a, b)
+        if kind == "coupled":
+            # The probe pairs are synthetic ordinary copper (``__net_<class>``
+            # tracks, zone/pad/via contexts); none is the P/N half of a
+            # coupled differential pair, so the exemption never applies.
+            return False
+        if kind == "cmpf":
+            _, left_name, op, right_name = node
+            left = self._field(left_name, a, b)
+            right = self._field(right_name, a, b)
+            return bool(left == right) if op == "==" else bool(left != right)
         _, name, op, value = node
         side, _, field = name.partition(".")
         if field.lower() == "type":
@@ -532,7 +565,13 @@ def _rule_matches_layer(rule: Mapping[str, Any], layer: str | None) -> bool:
     return bool(scope == layer)
 
 
-def _rule_matches_pair(rule: Mapping[str, Any], a: Mapping[str, str], b: Mapping[str, str]) -> bool:
+def _rule_matches_pair(
+    rule: Mapping[str, Any],
+    a: Mapping[str, str],
+    b: Mapping[str, str],
+    *,
+    model_router_scope: bool = False,
+) -> bool:
     """Whether a rule's condition admits the ordered pair ``(a, b)``.
 
     KiCad evaluates a rule with the items in both orders, so both are tried.
@@ -549,17 +588,26 @@ def _rule_matches_pair(rule: Mapping[str, Any], a: Mapping[str, str], b: Mapping
     if condition is None:
         return True
     try:
-        parser = _DruConditionParser(condition)
+        parser = _DruConditionParser(condition, model_router_scope=model_router_scope)
         return parser.matches(a, b) or parser.matches(b, a)
     except _UnknownCondition:
         return False
 
 
-def _resolved_clearance(rules: list[Mapping[str, Any]], layer: str | None, a, b) -> float | None:
+def _resolved_clearance(
+    rules: list[Mapping[str, Any]],
+    layer: str | None,
+    a,
+    b,
+    *,
+    model_router_scope: bool = False,
+) -> float | None:
     """Last-match-wins clearance for one ordered pair, or ``None``."""
     resolved: float | None = None
     for rule in rules:
-        if _rule_matches_layer(rule, layer) and _rule_matches_pair(rule, a, b):
+        if _rule_matches_layer(rule, layer) and _rule_matches_pair(
+            rule, a, b, model_router_scope=model_router_scope
+        ):
             value = rule.get("clearance_mm")
             if value is not None:
                 resolved = value
@@ -602,13 +650,17 @@ def _worst_resolved_for_pair(
     sides_a: list[dict],
     sides_b: list[dict],
     layers: list[str | None],
+    *,
+    model_router_scope: bool = False,
 ) -> float | None:
     """The smallest last-match resolution over every probed combination."""
     worst: float | None = None
     for layer in layers:
         for a in sides_a:
             for b in sides_b:
-                value = _resolved_clearance(rules, layer, a, b)
+                value = _resolved_clearance(
+                    rules, layer, a, b, model_router_scope=model_router_scope
+                )
                 if value is not None and (worst is None or value < worst):
                     worst = value
     return worst
@@ -699,6 +751,7 @@ def _dru_loosenings(before: Mapping[str, Any], after: Mapping[str, Any]) -> list
     weakest_class = min(classes.values()) if classes else None
     class_names = sorted(classes)
     scopes: set[str] = set()
+    has_outer = has_inner = False
     for rule in after_rules + before_rules:
         scope = rule.get("layer")
         # Probe concrete copper layers only: an ``(layer outer)`` /
@@ -706,9 +759,40 @@ def _dru_loosenings(before: Mapping[str, Any], after: Mapping[str, Any]) -> list
         # and as a probe it can never exercise the rule that carries it.
         if isinstance(scope, str) and scope.endswith(".Cu"):
             scopes.add(scope)
+        elif scope == "outer":
+            has_outer = True
+        elif scope == "inner":
+            has_inner = True
     for layer, _net, _value in zones:
         scopes.add(layer)
-    probe_layers: list[str | None] = [None, *sorted(scopes)]
+    probe_layers: list[str | None]
+    if has_outer or has_inner:
+        # A split-floor profile (Issue #9422: 2 oz outer / 0.5 oz inner) is
+        # emitted as ``outer`` / ``inner``-scoped rules only.  The unscoped
+        # ``None`` probe would match nothing but a hand-written unscoped rule
+        # (say 0.127 mm) and report it as the board's track-track resolution,
+        # although every real track lives on a concrete layer where the
+        # managed scoped rules come later and win.  Probe one representative
+        # concrete layer per scope class instead.  All three are probed
+        # whenever *any* scoped rule exists: a one-class DRU still leaves the
+        # other class's copper governed by the unscoped rules the ``None``
+        # probe used to model, so dropping it without a stand-in would hide a
+        # real loosening there.
+        #
+        # ``In1.Cu`` alone can be masked by a hand rule scoped to it
+        # (Issue #9499): the rule raises the probed representative while the
+        # other inner layers resolve lower and go unprobed.  Also probe the
+        # smallest inner layer no rule names, so no ``(layer "In<N>.Cu")``
+        # rule can stand in for it -- ``In1.Cu`` itself when none is named,
+        # otherwise the first gap in the named chain (one bounded extra
+        # probe; probing every ``In*.Cu`` would be unbounded).
+        k = 1
+        while f"In{k}.Cu" in scopes:
+            k += 1
+        scopes.update(("F.Cu", "B.Cu", "In1.Cu", f"In{k}.Cu"))
+        probe_layers = [*sorted(scopes)]
+    else:
+        probe_layers = [None, *sorted(scopes)]
 
     def track_contexts() -> list[dict[str, str]]:
         return [
@@ -722,10 +806,15 @@ def _dru_loosenings(before: Mapping[str, Any], after: Mapping[str, Any]) -> list
         sides_b,
         baseline: float | None,
         pair_layers: list[str | None] | None = None,
+        model_router_scope: bool = False,
     ) -> None:
         probe = pair_layers if pair_layers is not None else probe_layers
-        before_value = _worst_resolved_for_pair(before_rules, sides_a, sides_b, probe)
-        after_value = _worst_resolved_for_pair(after_rules, sides_a, sides_b, probe)
+        before_value = _worst_resolved_for_pair(
+            before_rules, sides_a, sides_b, probe, model_router_scope=model_router_scope
+        )
+        after_value = _worst_resolved_for_pair(
+            after_rules, sides_a, sides_b, probe, model_router_scope=model_router_scope
+        )
         floor = baseline if baseline is not None else 0.0
         reference = before_value if before_value is not None else None
         limit = max(reference, floor) if reference is not None else floor
@@ -734,7 +823,15 @@ def _dru_loosenings(before: Mapping[str, Any], after: Mapping[str, Any]) -> list
 
     if class_names:
         tracks = track_contexts()
-        check_pair("track_track", tracks, tracks, weakest_class)
+        # Track pairs resolve the router-class "Reviewed clearance" rules kct
+        # emits (``netclass_condition(router=True)``: an ``isCoupledDiffPair()``
+        # call and an ``A.Reference == B.Reference`` comparison).  Left
+        # unmodelled they drop out and an inner-layer probe lands on the
+        # lower ``Clearance (inner)`` fab floor (Issue #9422).  Zone/via pairs
+        # keep the conservative exclusion: modelling the rule there would
+        # surface a pre-existing zone ``connect_pads`` vs router-class gap in
+        # committed boards that this gate has never judged.
+        check_pair("track_track", tracks, tracks, weakest_class, model_router_scope=True)
     for layer, net, zone_value in zones:
         # A zone's net class comes from the project; when unknown, the
         # weakest authored class is the native floor for its pairs.

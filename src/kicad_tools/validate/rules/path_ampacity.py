@@ -73,6 +73,7 @@ than leaving the reader to infer it from the ambiguous-status error alone.
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 from kicad_tools.physics.ampacity import (
@@ -80,9 +81,12 @@ from kicad_tools.physics.ampacity import (
     adiabatic_fusing_current,
     width_for_current,
 )
+from kicad_tools.physics.constants import copper_thickness_from_oz
+from kicad_tools.physics.wire_gauge import bare_copper_diameter_mm
 
 from ..violations import DRCResults, DRCViolation
 from .base import DRCRule
+from .reinforcement_incomplete import ANCHOR_ON_LEG_SLACK_MM, WiredLeg
 
 # NOTE: ``kicad_tools.router.current_paths`` is intentionally NOT imported at
 # module scope here. ``kicad_tools.router`` (via ``router/core.py`` and
@@ -114,6 +118,21 @@ if TYPE_CHECKING:
 _EXTERNAL_LAYERS = ("F.Cu", "B.Cu")
 
 
+def _dist_to_polyline(points: Sequence[tuple[float, float]], p: tuple[float, float]) -> float:
+    """Distance from ``p`` to the nearest point of a polyline."""
+    best = math.inf
+    for (x0, y0), (x1, y1) in zip(points, points[1:], strict=False):
+        dx, dy = x1 - x0, y1 - y0
+        seg2 = dx * dx + dy * dy
+        u = (
+            0.0
+            if seg2 < 1e-18
+            else max(0.0, min(1.0, ((p[0] - x0) * dx + (p[1] - y0) * dy) / seg2))
+        )
+        best = min(best, math.hypot(p[0] - (x0 + u * dx), p[1] - (y0 + u * dy)))
+    return best
+
+
 class PathAmpacityRule(DRCRule):
     """DRC rule verifying declared per-branch current paths.
 
@@ -130,15 +149,28 @@ class PathAmpacityRule(DRCRule):
         "and meet IPC-2221 width for their own declared current"
     )
 
-    def __init__(self, specs: Sequence[CurrentPathSpec] | None = None) -> None:
+    def __init__(
+        self,
+        specs: Sequence[CurrentPathSpec] | None = None,
+        wired_legs: Sequence[WiredLeg] | None = None,
+    ) -> None:
         """Initialize the rule.
 
         Args:
             specs: Declared current-path intents. ``None`` or empty means
                 no path is checked (clean no-op) -- matching the
                 sidecar-optional contract established by ``AmpacityRule``.
+            wired_legs: Buttress-wire legs judged fully wired by
+                :meth:`~kicad_tools.validate.rules.reinforcement_incomplete
+                .ReinforcementIncompleteRule.fully_wired_legs` (Issue
+                #9648). A segment whose centreline lies on such a leg is
+                credited the wire's copper cross-section as extra trace
+                width in both the IPC-2221 and Onderdonk fusing checks.
+                ``None``/empty keeps every judgement at bare copper width
+                (the pre-#9648 behaviour).
         """
         self.specs: list[CurrentPathSpec] = list(specs) if specs else []
+        self.wired_legs: list[WiredLeg] = list(wired_legs) if wired_legs else []
 
     @staticmethod
     def _is_external_layer(layer: str) -> bool:
@@ -192,6 +224,19 @@ class PathAmpacityRule(DRCRule):
         audit = audit_current_paths(pcb, self.specs, design_rules=design_rules)
         origin: tuple[float, float] = getattr(pcb, "board_origin", None) or (0.0, 0.0)
 
+        # Buttress-wire credit (Issue #9648): a fully wired leg's wire
+        # contributes its copper cross-section as extra trace width at the
+        # layer's foil thickness -- the same summed-section reading doubled
+        # copper already gets (#8790). A gauge this build cannot size is no
+        # credit at all.
+        wire_areas: list[tuple[WiredLeg, float]] = []
+        for leg in self.wired_legs:
+            try:
+                diameter_mm = bare_copper_diameter_mm(leg.gauge)
+            except ValueError:
+                continue
+            wire_areas.append((leg, math.pi * diameter_mm * diameter_mm / 4.0))
+
         for resolution in audit.resolutions:
             if resolution.status in (STATUS_UNRESOLVED, STATUS_AMBIGUOUS):
                 results.add(self._unresolved_violation(resolution, origin))
@@ -215,6 +260,7 @@ class PathAmpacityRule(DRCRule):
             grouped_ids = {
                 id(seg) for group in resolution.parallel_groups for seg in group.segments
             }
+            net_has_wired_leg = any(leg.net == spec.net_name for leg, _ in wire_areas)
             for group in resolution.parallel_groups:
                 violation = self._parallel_group_violation(
                     spec, thermal, group, design_rules, required_cache
@@ -233,9 +279,21 @@ class PathAmpacityRule(DRCRule):
                     )
                     required_cache[external] = required_width_mm
 
+                credit = self._segment_wire_credit(
+                    spec,
+                    segment,
+                    layer,
+                    external=external,
+                    design_rules=design_rules,
+                    wire_areas=wire_areas,
+                )
+                credit_leg = credit[0] if credit is not None else None
+                credit_mm = credit[1] if credit is not None else 0.0
+                effective_width_mm = actual_width_mm + credit_mm
+
                 # Doubled copper is judged on its summed cross-section above,
                 # not branch by branch (issue #8790).
-                if actual_width_mm < required_width_mm and id(segment) not in grouped_ids:
+                if effective_width_mm < required_width_mm and id(segment) not in grouped_ids:
                     results.add(
                         self._underwidth_violation(
                             spec=spec,
@@ -244,8 +302,11 @@ class PathAmpacityRule(DRCRule):
                             layer=layer,
                             external=external,
                             actual_width_mm=actual_width_mm,
+                            effective_width_mm=effective_width_mm,
                             required_width_mm=required_width_mm,
                             design_rules=design_rules,
+                            credit_leg=credit_leg,
+                            net_has_wired_leg=net_has_wired_leg,
                         )
                     )
 
@@ -254,8 +315,9 @@ class PathAmpacityRule(DRCRule):
                     segment=segment,
                     layer=layer,
                     external=external,
-                    actual_width_mm=actual_width_mm,
+                    actual_width_mm=effective_width_mm,
                     design_rules=design_rules,
+                    credit_leg=credit_leg,
                 )
                 if fusing is not None:
                     results.add(fusing)
@@ -278,39 +340,38 @@ class PathAmpacityRule(DRCRule):
         design_rules: DesignRules,
         required_cache: dict[bool, float],
     ) -> DRCViolation | None:
-        """Judge a doubled-copper group on its summed cross-section (issue #8790).
+        """Judge doubled copper on its effective cross-section (issues #8790, #9542).
 
-        Each branch contributes ``width / required_width`` for its layer class
-        (its narrowest segment, so a pinch point limits the branch), which
-        weights outer vs inner copper correctly; the group passes when the
-        contributions sum to at least 1.  Current is not split by resistance.
+        Each copper layer contributes its :meth:`ParallelGroup.layer_widths`
+        share over that layer class's requirement: distinct-layer branches
+        each contribute their narrowest width (so a pinch point limits its
+        branch), while branches sharing a layer count once at their merged
+        union extent -- two overlapping 1.0 mm F.Cu tracks offset 0.6 mm are
+        1.6 mm of copper, not 2.0 mm. The group passes when the
+        contributions sum to at least 1. Current is not split by resistance.
         """
         capacity = 0.0
-        widths = []
-        for branch in group.branches:
-            ratios = []
-            for segment in branch:
-                external = self._is_external_layer(segment.layer)
-                required = required_cache.get(external)
-                if required is None:
-                    required = self._required_width_mm(
-                        thermal.current_a, design_rules, external=external
-                    )
-                    required_cache[external] = required
-                ratios.append(segment.width / required if required > 0 else float("inf"))
-            capacity += min(ratios)
-            widths.append(min(seg.width for seg in branch))
+        for layer, width in group.layer_widths().items():
+            external = self._is_external_layer(layer)
+            required = required_cache.get(external)
+            if required is None:
+                required = self._required_width_mm(
+                    thermal.current_a, design_rules, external=external
+                )
+                required_cache[external] = required
+            capacity += width / required if required > 0 else float("inf")
         if capacity >= 1.0:
             return None
         first = group.branches[0][0]
         loc_x, loc_y = self._segment_midpoint(first)
+        noun = f"{group.shape} width"
         return DRCViolation(
             rule_id=self.rule_id,
             severity="error",
             message=(
                 f"Current path {spec.name!r} ({spec.source.label()} -> "
                 f"{spec.sink.label()}) {group.describe()} too narrow for "
-                f"{thermal.description}: summed width {sum(widths):.3f}mm provides "
+                f"{thermal.description}: {noun} {group.width_mm:.3f}mm provides "
                 f"{capacity:.0%} of the IPC-2221 requirement"
             ),
             location=(loc_x, loc_y),
@@ -331,19 +392,33 @@ class PathAmpacityRule(DRCRule):
 
         Error when the path is ``reinforcement_eligible`` (a force path),
         warning otherwise. Waivable via ``.kct_waivers.json`` like any other
-        ``path_ampacity`` finding.
+        ``path_ampacity`` finding. The count is broken down into centreline
+        and tie vias when the change grew through the #9561 pass, and nearby
+        same-net vias it rejected are named with a reason so the reader can
+        see why their stitching did not clear the finding.
         """
+        via_clause = f"{change.count} via(s)"
+        if change.tie_vias:
+            via_clause += (
+                f" ({change.centreline_count} on the centreline, "
+                f"{len(change.tie_vias)} tie vias in the bar)"
+            )
+        excluded_clause = ""
+        if change.excluded_tie_vias:
+            detail = ", ".join(f"{n} {reason}" for reason, n in change.excluded_tie_vias)
+            total = sum(n for _, n in change.excluded_tie_vias)
+            excluded_clause = f"; {total} same-net via(s) not counted: {detail}"
         return DRCViolation(
             rule_id=self.rule_id,
             severity="error" if spec.reinforcement_eligible else "warning",
             message=(
                 f"Current path {spec.name!r} ({spec.source.label()} -> "
                 f"{spec.sink.label()}) changes layer {change.from_layer} -> "
-                f"{change.to_layer} through {change.count} via(s) "
+                f"{change.to_layer} through {via_clause} "
                 f"(drill {change.drill:.3f}mm, pad {change.pad_diameter:.3f}mm) with "
                 f"combined capacity {capacity_a:.2f}A, below {thermal.description} "
                 f"(barrel model: {VIA_PLATING_THICKNESS_MM * 1000:.0f}um plating, "
-                "IPC-2221 external, 10C rise)"
+                f"IPC-2221 external, 10C rise){excluded_clause}"
             ),
             location=change.position,
             layer=change.from_layer,
@@ -389,6 +464,42 @@ class PathAmpacityRule(DRCRule):
             round((start[1] + end[1]) / 2.0, 3),
         )
 
+    def _segment_wire_credit(
+        self,
+        spec: CurrentPathSpec,
+        segment: Segment,
+        layer: str,
+        *,
+        external: bool,
+        design_rules: DesignRules,
+        wire_areas: Sequence[tuple[WiredLeg, float]],
+    ) -> tuple[WiredLeg, float] | None:
+        """The wired leg covering ``segment`` and its width credit (Issue #9648).
+
+        A segment is covered when its centreline midpoint lies within the
+        leg's polyline at the anchor-on-leg tolerance
+        (:data:`~kicad_tools.validate.rules.reinforcement_incomplete
+        .ANCHOR_ON_LEG_SLACK_MM` beyond the leg's half-width) on the same
+        layer and net. The credit is the wire's copper cross-section
+        expressed as extra trace width at the layer's foil thickness, so
+        adding it to the copper width sums the two sections -- exactly how
+        ``width_for_current`` derives width from required area. ``None``
+        when no wired leg covers the segment.
+        """
+        midpoint = self._segment_midpoint(segment)
+        for leg, area_mm2 in wire_areas:
+            if leg.net != spec.net_name or leg.layer != layer:
+                continue
+            if _dist_to_polyline(leg.points, midpoint) > (leg.width / 2.0 + ANCHOR_ON_LEG_SLACK_MM):
+                continue
+            thickness_mm = copper_thickness_from_oz(
+                self._copper_weight_oz(design_rules, external=external)
+            )
+            if thickness_mm <= 0:
+                return None
+            return leg, area_mm2 / thickness_mm
+        return None
+
     @staticmethod
     def _copper_weight_oz(design_rules: DesignRules, *, external: bool) -> float:
         return design_rules.outer_copper_oz if external else design_rules.inner_copper_oz
@@ -402,12 +513,29 @@ class PathAmpacityRule(DRCRule):
         layer: str,
         external: bool,
         actual_width_mm: float,
+        effective_width_mm: float,
         required_width_mm: float,
         design_rules: DesignRules,
+        credit_leg: WiredLeg | None = None,
+        net_has_wired_leg: bool = False,
     ) -> DRCViolation:
         layer_class = "external" if external else "internal"
         copper_weight_oz = self._copper_weight_oz(design_rules, external=external)
         loc_x, loc_y = self._segment_midpoint(segment)
+
+        if credit_leg is not None:
+            width_clause = (
+                f"width {actual_width_mm:.3f}mm + {credit_leg.gauge} AWG wire "
+                f"= {effective_width_mm:.3f}mm effective"
+            )
+            actual_value: float | None = effective_width_mm
+        else:
+            width_clause = f"width {actual_width_mm:.3f}mm"
+            actual_value = actual_width_mm
+            if net_has_wired_leg:
+                # This stretch is judged at bare copper on a net whose wire
+                # legs exist elsewhere: say which stretch failed (#9648).
+                width_clause += "; this stretch is not covered by a wire leg"
 
         return DRCViolation(
             rule_id=self.rule_id,
@@ -415,12 +543,12 @@ class PathAmpacityRule(DRCRule):
             message=(
                 f"Current path {spec.name!r} ({spec.source.label()} -> "
                 f"{spec.sink.label()}) trace on {layer} too narrow for "
-                f"{thermal.description}: width {actual_width_mm:.3f}mm, requires "
+                f"{thermal.description}: {width_clause}, requires "
                 f"{required_width_mm:.3f}mm (IPC-2221, {copper_weight_oz}oz {layer_class})"
             ),
             location=(loc_x, loc_y),
             layer=layer,
-            actual_value=actual_width_mm,
+            actual_value=actual_value,
             required_value=required_width_mm,
             items=(spec.name, spec.net_name),
         )
@@ -434,13 +562,16 @@ class PathAmpacityRule(DRCRule):
         external: bool,
         actual_width_mm: float,
         design_rules: DesignRules,
+        credit_leg: WiredLeg | None = None,
     ) -> DRCViolation | None:
         """Onderdonk adiabatic fusing check for one segment of a pulsed path.
 
         Returns ``None`` when the path declares no pulse duration (the
         check cannot be performed -- reported once per path by
         :meth:`_unchecked_fusing_violation` instead), or when the segment
-        survives the declared pulse.
+        survives the declared pulse. ``actual_width_mm`` is the credited
+        effective width when a buttress wire covers the segment, so the
+        fusing current is that of the combined section (Issue #9648).
         """
         if spec.pulsed_a is None or spec.pulse_duration_s is None:
             return None
@@ -456,6 +587,14 @@ class PathAmpacityRule(DRCRule):
         if spec.pulsed_a < fusing_a:
             return None
 
+        if credit_leg is not None:
+            section_clause = (
+                f"{actual_width_mm:.3f}mm effective of {copper_weight_oz}oz copper "
+                f"+ {credit_leg.gauge} AWG wire"
+            )
+        else:
+            section_clause = f"{actual_width_mm:.3f}mm of {copper_weight_oz}oz copper"
+
         loc_x, loc_y = self._segment_midpoint(segment)
         return DRCViolation(
             rule_id=self.rule_id,
@@ -465,7 +604,7 @@ class PathAmpacityRule(DRCRule):
                 f"{spec.sink.label()}) trace on {layer} would fuse: declared "
                 f"{spec.pulsed_a:.4g}A pulse for {spec.pulse_duration_s:.4g}s meets or "
                 f"exceeds the {fusing_a:.4g}A adiabatic fusing current of "
-                f"{actual_width_mm:.3f}mm of {copper_weight_oz}oz copper (Onderdonk)"
+                f"{section_clause} (Onderdonk)"
             ),
             location=(loc_x, loc_y),
             layer=layer,

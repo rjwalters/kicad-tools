@@ -29,6 +29,7 @@ from ..footprints.library_path import (
     detect_kicad_library_path,
     guess_standard_library,
     parse_library_id,
+    recorded_footprint_bytes,
 )
 
 if TYPE_CHECKING:
@@ -1165,6 +1166,22 @@ class Pad:
         return pad
 
 
+_JUSTIFY_TOKENS = frozenset({"left", "right", "top", "bottom", "mirror"})
+
+
+def _read_justify(effects: SExp) -> tuple[str, ...]:
+    """Return the ``(justify ...)`` tokens of a text ``effects`` node (Issue #9433).
+
+    Only the tokens KiCad defines are kept (``left``/``right``/``top``/
+    ``bottom``/``mirror``), in file order.  An absent ``justify`` node means
+    centred, which is the empty tuple.
+    """
+    node = effects.find("justify")
+    if node is None:
+        return ()
+    return tuple(str(a) for a in node.get_atoms() if str(a) in _JUSTIFY_TOKENS)
+
+
 @dataclass
 class FootprintText:
     """Text element within a footprint (fp_text).
@@ -1186,6 +1203,9 @@ class FootprintText:
     # KiCad's "keep upright" flag (absent ``(unlocked yes)``): an interactive
     # rotate or a left/right flip turns such a text back upright (Issue #6126).
     keep_upright: bool = field(default=True, compare=False)
+    # ``(justify ...)`` tokens (``left``/``right``/``top``/``bottom``/``mirror``);
+    # empty means centred on the anchor (Issue #9433).
+    justify: tuple[str, ...] = ()
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> FootprintText:
@@ -1222,6 +1242,7 @@ class FootprintText:
         if effects := sexp.find("effects"):
             if effects.find("hide"):
                 fp_text.hidden = True
+            fp_text.justify = _read_justify(effects)
             if font := effects.find("font"):
                 if size := font.find("size"):
                     w = size.get_float(0) or 1.0
@@ -1275,6 +1296,7 @@ class FootprintText:
         if effects := sexp.find("effects"):
             if effects.find("hide"):
                 fp_text.hidden = True
+            fp_text.justify = _read_justify(effects)
             if font := effects.find("font"):
                 if size := font.find("size"):
                     w = size.get_float(0) or 1.0
@@ -1410,6 +1432,8 @@ class GraphicText:
     hidden: bool = False
     # Board text position and serialized angle are both board-frame.
     rotation: float = 0.0
+    # ``(justify ...)`` tokens; empty means centred on the anchor (Issue #9433).
+    justify: tuple[str, ...] = ()
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> GraphicText:
@@ -1441,6 +1465,7 @@ class GraphicText:
         if effects := sexp.find("effects"):
             if effects.find("hide"):
                 gr_text.hidden = True
+            gr_text.justify = _read_justify(effects)
             if font := effects.find("font"):
                 if size := font.find("size"):
                     w = size.get_float(0) or 1.0
@@ -6471,6 +6496,7 @@ class PCB:
         layer: str = "F.Cu",
         value: str = "",
         library_id: str | None = None,
+        _recorded_bytes: bytes | None = None,
     ) -> Footprint:
         """
         Add a footprint from a .kicad_mod file to the PCB.
@@ -6514,8 +6540,19 @@ class PCB:
             ...     value="LM317"
             ... )
         """
-        # Load the footprint from file
-        fp_sexp = load_footprint(kicad_mod_path)
+        # Load the footprint from file.  An explicit-path load (a direct
+        # call, or the project fp-lib-table branch of add_footprint) reads
+        # the file as it stands; only the standard-library funnel passes the
+        # bytes it recorded (_recorded_bytes), so a library edit between a
+        # standard placement and an explicit load is not silently served the
+        # stale snapshot (Issue #9526 review).
+        if _recorded_bytes is not None:
+            # Repeated standard placements parse the exact bytes the record
+            # digested, so the placed geometry is always the recorded
+            # identity, even across a mid-run library edit.
+            fp_sexp = load_footprint(kicad_mod_path, text=_recorded_bytes.decode("utf-8"))
+        else:
+            fp_sexp = load_footprint(kicad_mod_path)
 
         # Keep the Library:Footprint lib ID so kicad-cli's schematic-parity
         # check can match it against the symbol's Footprint field (#7213).
@@ -6536,16 +6573,53 @@ class PCB:
         # Library pad identities are not placed-instance identities. Persist
         # fresh IDs even when the library omits them, so native DRC findings
         # can be correlated with the saved board instead of transient IDs.
+        remap: dict[str, str] = {}
         for pad_index, pad_node in enumerate(fp_sexp.find_all("pad")):
             pad_id = self.mint_uuid("pad", new_uuid, pad_index)
             pad_uuid = pad_node.find_child("uuid")
             if pad_uuid is not None:
+                old = pad_uuid.get_first_atom()
                 pad_uuid.set_value(0, pad_id)
+                if old is not None:
+                    remap[str(old)] = pad_id
             else:
                 pad_node.append(SExp.list("uuid", pad_id))
             legacy_stamp = pad_node.find_child("tstamp")
             if legacy_stamp is not None:
                 pad_node.remove(legacy_stamp)
+
+        # Stock library footprints may ship ``(uuid ...)`` / legacy
+        # ``(tstamp ...)`` on graphic children (fp_line, fp_circle, fp_poly,
+        # fp_text, property, ...). Copied verbatim, N placements repeat the
+        # same value N times, which kicad-cli never does and which makes
+        # ``mask_to_copper`` abort on a duplicate source UUID (#9485). Mint a
+        # fresh deterministic value for each remaining one; nodes without an
+        # identity are left alone. The footprint's own uuid and the pad uuids
+        # above are already fresh, so skip them.
+        handled = {id(n) for n in fp_sexp.children if not n.is_atom and n.name == "uuid"}
+        handled.update(
+            id(n)
+            for pad_node in fp_sexp.find_all("pad")
+            for n in pad_node.children
+            if not n.is_atom and n.name == "uuid"
+        )
+        child_index = 0
+        for node in fp_sexp.iter_all():
+            if node is fp_sexp or node.is_atom or node.name not in ("uuid", "tstamp"):
+                continue
+            if id(node) in handled or node.get_first_atom() is None:
+                continue
+            minted = self.mint_uuid("child", new_uuid, child_index)
+            remap[str(node.get_first_atom())] = minted
+            node.set_value(0, minted)
+            child_index += 1
+        # A (group ...) references its children by uuid value in a
+        # (members ...) atom list, not via a (uuid ...) node, so follow the
+        # renames above or KiCad drops the group on load (PR #9487 review).
+        for members_node in fp_sexp.find_all("members"):
+            for atom in members_node.children:
+                if atom.is_atom and str(atom.value) in remap:
+                    atom.value = remap[str(atom.value)]
 
         # Update layer first (at node must come after layer)
         layer_node = fp_sexp.find("layer")
@@ -6806,6 +6880,9 @@ class PCB:
                         continue
                     candidate = entry.resolved_path / fp_filename
                     if candidate.is_file():
+                        # A project-table load is an explicit-path load: the
+                        # file is read as it stands, never a recorded
+                        # standard-library snapshot (Issue #9526 review).
                         return self.add_footprint_from_file(
                             kicad_mod_path=candidate,
                             reference=reference,
@@ -6835,7 +6912,11 @@ class PCB:
                 f"(also searched all available libraries as fallback)"
             )
 
-        # Delegate to add_footprint_from_file
+        # Delegate to add_footprint_from_file, handing it the bytes this
+        # funnel just recorded (repeated placements reuse them; a mid-run
+        # library edit cannot desync placed geometry from the recorded
+        # digest).  Outside an evidence scope there is no recording and the
+        # load is an ordinary read.
         return self.add_footprint_from_file(
             kicad_mod_path=fp_path,
             reference=reference,
@@ -6845,6 +6926,7 @@ class PCB:
             layer=layer,
             value=value,
             library_id=f"{library_name}:{footprint_name.removesuffix('.kicad_mod')}",
+            _recorded_bytes=recorded_footprint_bytes(fp_path),
         )
 
     def add_net(self, net_name: str) -> Net:
@@ -7223,6 +7305,45 @@ class PCB:
         self._sexp.append(via.to_sexp(offset=(ox, oy)))
 
         return via
+
+    def add_arc(
+        self,
+        start: tuple[float, float],
+        mid: tuple[float, float],
+        end: tuple[float, float],
+        width: float = 0.25,
+        layer: str = "F.Cu",
+        net: str | int | None = None,
+    ) -> Arc:
+        """Add one circular copper track arc (``kct probe`` / ``kct apply``, #9590).
+
+        Inputs are board-relative millimetres, like :meth:`add_trace` /
+        :meth:`add_via`; the origin offset is added back on serialization.
+        Invalid circular geometry (collinear or coincident points) raises
+        ``ValueError`` from :meth:`Arc.circular_geometry` before anything is
+        appended, so a malformed arc never lands on the board.
+
+        Returns:
+            The :class:`Arc` object that was created.
+        """
+        net_number, net_name = self._resolve_copper_net_ref(net, "add_arc") if net else (0, "")
+        arc = Arc(
+            start=(float(start[0]), float(start[1])),
+            mid=(float(mid[0]), float(mid[1])),
+            end=(float(end[0]), float(end[1])),
+            width=width,
+            layer=layer,
+            net_number=net_number,
+            net_name=net_name,
+            # Issue #4416: match the board's net-reference dialect (see add_trace).
+            net_name_only=self._net_name_only_dialect and bool(net),
+            uuid=self.mint_uuid("arc", net_number, layer, *start, *mid, *end, width),
+        )
+        arc.circular_geometry()  # Validate before appending anything.
+        self._arcs.append(arc)
+        ox, oy = self._board_origin
+        self._sexp.append(arc.to_sexp(offset=(ox, oy)))
+        return arc
 
     def has_graphic_line(
         self,

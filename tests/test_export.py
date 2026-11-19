@@ -119,9 +119,10 @@ class TestJLCPCBBOMFormatter:
         reader = csv.reader(io.StringIO(output))
         rows = list(reader)
 
-        # Header + 4 rows (R1+R2 still share key, C1, U1)
-        # Note: Items with identical (value, footprint, lcsc) still get one row
-        assert len(rows) == 4
+        # Header + 4 rows: one per item, identical fields no longer collapse
+        # (issue #9382 -- colliding designators were silently dropped).
+        assert len(rows) == 5
+        assert {row[1] for row in rows[1:]} == {"R1", "R2", "C1", "U1"}
 
     def test_filter_dnp(self, items):
         items.append(MockBOMItem("R3", "1k", "0402", dnp=True))
@@ -136,6 +137,63 @@ class TestJLCPCBBOMFormatter:
         formatter = JLCPCBBOMFormatter(config)
         output = formatter.format(items)
         assert "R3" in output
+
+    def test_format_merges_groups_sharing_lcsc(self):
+        # JLCPCB leaves every BOM line matched to the same part unticked, so
+        # groups that differ only in Value must share one line (issue #9323).
+        items = [
+            MockBOMItem("D1", "Green", "LED_0603", lcsc="C229417"),
+            MockBOMItem("D2", "Green", "LED_0603", lcsc="C229417"),
+            MockBOMItem("D3", "LED green", "LED_0603", lcsc="C229417"),
+            MockBOMItem("D4", "Red", "LED_0603", lcsc="C229418"),
+            MockBOMItem("D5", "LED red", "LED_0603", lcsc="C229418"),
+        ]
+        formatter = JLCPCBBOMFormatter()
+        output = formatter.format(items)
+
+        rows = list(csv.reader(io.StringIO(output)))
+        # Header + 2 merged rows (C229417: D1-D3, C229418: D4+D5)
+        assert len(rows) == 3
+
+        green = next(r for r in rows[1:] if r[3] == "C229417")
+        assert green[0] == "Green; LED green"
+        assert green[1] == "D1,D2,D3"
+        assert green[2] == "LED_0603"
+
+        red = next(r for r in rows[1:] if r[3] == "C229418")
+        assert red[0] == "LED red; Red"
+        assert red[1] == "D4,D5"
+
+        # No designator lost or duplicated across the merged lines
+        refs = sorted(d.strip() for r in rows[1:] for d in r[1].split(","))
+        assert refs == ["D1", "D2", "D3", "D4", "D5"]
+
+    def test_format_empty_lcsc_rows_stay_grouped_by_value(self):
+        items = [
+            MockBOMItem("R1", "10k", "0402"),
+            MockBOMItem("R2", "10k", "0402"),
+            MockBOMItem("R3", "1k", "0402"),
+        ]
+        formatter = JLCPCBBOMFormatter()
+        output = formatter.format(items)
+
+        rows = list(csv.reader(io.StringIO(output)))
+        assert len(rows) == 3  # header + 10k row + 1k row
+
+        assert next(r for r in rows[1:] if r[0] == "10k")[1] == "R1,R2"
+        assert next(r for r in rows[1:] if r[0] == "1k")[1] == "R3"
+
+    def test_format_same_lcsc_different_footprints_stay_separate(self):
+        items = [
+            MockBOMItem("R1", "10k", "0402", lcsc="C123456"),
+            MockBOMItem("R2", "10k", "0603", lcsc="C123456"),
+        ]
+        formatter = JLCPCBBOMFormatter()
+        output = formatter.format(items)
+
+        rows = list(csv.reader(io.StringIO(output)))
+        assert len(rows) == 3  # header + one row per footprint
+        assert {r[2] for r in rows[1:]} == {"0402", "0603"}
 
 
 class TestPCBWayBOMFormatter:

@@ -24,6 +24,16 @@ makes the library configuration part of the pinned toolchain instead:
   refuses any ``kicad-cli`` whose version is not :data:`PINNED_KICAD_VERSION`
   -- a host build of another release would silently record a different
   ``kicad_version`` and a different library snapshot.
+* **Footprint-library identity.**  The version gate constrains only the
+  *CLI* binary: KiCad ships its footprint libraries separately
+  (``kicad``/``kicad-footprints`` packages upgrade independently, and
+  ``KICAD_FOOTPRINT_DIR`` can point anywhere), so native-mode geometry is
+  still host-sourced (Issue #9526).  The context records where host-side
+  reads resolve (:attr:`EvidenceToolchain.footprint_library`) and
+  :func:`evidence_provenance` turns the consumed ``.kicad_mod`` files
+  (recorded by ``kicad_tools.footprints.library_path``) into a
+  ``kicad_version`` + content-hash record producers commit alongside their
+  evidence -- recorded, not gated: no pinned library reference exists yet.
 * **Fail closed.**  :func:`require_library_environment` turns a
   ``lib_footprint_issues`` finding into :class:`KiCadEnvironmentError`, so a
   missing library table stops the producer instead of becoming a warning.
@@ -43,6 +53,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -81,6 +92,13 @@ KICAD_CONFIG_HOME_ENV = "KICAD_CONFIG_HOME"
 KICAD_DOCKER_ENV = "KCT_KICAD_DOCKER"
 #: Env var overriding the container fallback's image.
 KICAD_DOCKER_IMAGE_ENV = "KCT_KICAD_DOCKER_IMAGE"
+#: Env var ``PCB.add_footprint`` (and friends) resolve standard footprint
+#: libraries from; the Docker route exports the image's copy through it so
+#: host-side library reads embed pinned geometry (Issue #9495).
+KICAD_FOOTPRINT_DIR_ENV = "KICAD_FOOTPRINT_DIR"
+#: The standard footprint-library directory inside the pinned image; the copy
+#: ``pin_host_footprints`` extracts for ``KICAD_FOOTPRINT_DIR`` comes from here.
+IMAGE_FOOTPRINTS_DIR = "/usr/share/kicad/footprints"
 #: Mirrors ``runner.KICAD_CLI_PROBE_TIMEOUT_ENV``: a container start is slower
 #: than a native launch, so the Docker shim raises the discovery probe budget.
 _PROBE_TIMEOUT_ENV = "KCT_KICAD_CLI_PROBE_TIMEOUT"
@@ -401,6 +419,51 @@ def write_docker_shim(directory: Path, mounts: Iterable[Path], config_home: Path
 _DOCKER_SHIM_MARKER = b"# kct evidence toolchain (Issue #6962)"
 
 
+def _docker_cp_from_image(image: str, container_dir: str, dest: Path) -> None:
+    """Copy *container_dir* out of *image* to host *dest* without starting it.
+
+    ``docker create`` materializes the container filesystem without running
+    anything, ``docker cp`` copies the directory out, and the container is
+    removed again even when the copy fails.
+    """
+    created = subprocess.run(
+        ["docker", "create", image], capture_output=True, text=True, timeout=600
+    )
+    if created.returncode != 0:
+        raise KiCadEnvironmentError(
+            f"docker create {image} failed: {(created.stderr or created.stdout).strip()}"
+        )
+    cid = created.stdout.strip()
+    try:
+        copied = subprocess.run(
+            ["docker", "cp", f"{cid}:{container_dir}", str(dest)],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        if copied.returncode != 0:
+            raise KiCadEnvironmentError(
+                f"docker cp {container_dir} out of {image} failed: "
+                f"{(copied.stderr or copied.stdout).strip()}"
+            )
+    finally:
+        subprocess.run(["docker", "rm", "-f", cid], capture_output=True, text=True, timeout=600)
+
+
+def _extracted_library_root(dest: Path) -> Path | None:
+    """The footprint-library root inside *dest* (``docker cp`` nesting varies).
+
+    Depending on the docker version, ``docker cp cid:/usr/share/kicad/footprints
+    <dest>`` either fills *dest* with the library root itself or nests it as
+    *dest* ``/footprints``; both hold ``<Library>.pretty`` directories.
+    """
+    leaf = Path(IMAGE_FOOTPRINTS_DIR).name
+    for candidate in (dest, dest / leaf):
+        if candidate.is_dir() and any(candidate.glob("*.pretty")):
+            return candidate
+    return None
+
+
 def is_docker_shim(path: str | os.PathLike[str]) -> bool:
     """True when *path* is a kicad-cli shim written by :func:`write_docker_shim`.
 
@@ -445,6 +508,21 @@ def _locate_kicad_cli() -> str | None:
 
 
 @dataclass(frozen=True)
+class FootprintLibraryResolution:
+    """Where host-side footprint reads resolve (entry state, Issue #9526).
+
+    Recorded at :func:`evidence_toolchain` entry -- after Docker mode has
+    pinned ``KICAD_FOOTPRINT_DIR`` to the extracted image libraries -- so the
+    evidence record names the library root provenance the producer's
+    ``PCB.add_footprint`` calls actually used.  ``root`` is ``None`` when the
+    host has no usable library (``add_footprint`` would fail later on its own).
+    """
+
+    root: Path | None
+    source: str
+
+
+@dataclass(frozen=True)
 class EvidenceToolchain:
     """The KiCad toolchain an evidence producer is running on."""
 
@@ -452,6 +530,110 @@ class EvidenceToolchain:
     version: str
     config_home: Path
     docker_image: str | None
+    footprint_library: FootprintLibraryResolution | None = None
+    """Resolution of the standard footprint-library root host reads use.
+
+    ``None`` only when ``kicad_tools.footprints`` is not importable (the
+    standalone CI-init load of this module).
+    """
+
+
+#: The innermost running :func:`evidence_toolchain` context.  Producers that
+#: emit evidence (and cannot take the context object as a parameter -- the
+#: ``run_on_evidence_toolchain(main)`` wrapper shape) read it back through
+#: :func:`active_evidence_toolchain` / :func:`evidence_provenance`.
+_ACTIVE_TOOLCHAIN: list[EvidenceToolchain] = []
+
+
+def active_evidence_toolchain() -> EvidenceToolchain | None:
+    """The running :func:`evidence_toolchain` context, or ``None`` outside one."""
+    return _ACTIVE_TOOLCHAIN[-1] if _ACTIVE_TOOLCHAIN else None
+
+
+def _resolve_footprint_library() -> FootprintLibraryResolution | None:
+    try:
+        from kicad_tools.footprints.library_path import detect_kicad_library_path
+    except ImportError:  # pragma: no cover - standalone (CI init) use
+        return None
+    paths = detect_kicad_library_path()
+    return FootprintLibraryResolution(paths.footprints_path, paths.source)
+
+
+@contextlib.contextmanager
+def _footprint_read_scope() -> Iterator[None]:
+    """Isolate this context's footprint reads (Issue #9526 review).
+
+    A no-op when ``kicad_tools.footprints`` is not importable (the standalone
+    CI-init load of this module).
+    """
+    try:
+        from kicad_tools.footprints.library_path import library_read_scope
+    except ImportError:  # pragma: no cover - standalone (CI init) use
+        yield
+        return
+    with library_read_scope():
+        yield
+
+
+def footprint_library_identity() -> dict[str, Any] | None:
+    """Content identity of the standard-library footprints the producer read.
+
+    A SHA-256 over the ``.kicad_mod`` files recorded by
+    ``kicad_tools.footprints.library_path`` in *this* evidence run (the reads
+    ``PCB.add_footprint`` sources from the detected standard library), each
+    named relative to its library root, plus that root's resolution ``source``
+    as the lookup reported it.  Both the per-file digests and the source are
+    the ones captured when the file was consumed -- reopening the path or
+    re-detecting the source at evidence time would let a later library edit or
+    environment change rewrite the record (Issue #9526 review).  Because KiCad
+    ships no library version file, this digest *is* the library identity a
+    library-driven geometry change shows up in (Issue #9526) -- recorded, not
+    gated.  ``None`` when the producer read no standard-library footprints.
+    """
+    try:
+        from kicad_tools.footprints.library_path import recorded_library_reads
+    except ImportError:  # pragma: no cover - standalone (CI init) use
+        return None
+    reads = recorded_library_reads()
+    if not reads:
+        return None
+    entries: list[tuple[str, str]] = []
+    for read in reads:
+        try:
+            name = read.path.relative_to(read.root).as_posix()
+        except ValueError:  # pragma: no cover - defensive; funnel paths are under root
+            name = read.path.as_posix()
+        entries.append((name, read.sha256))
+    entries.sort()
+    combined = hashlib.sha256()
+    for name, digest in entries:
+        combined.update(f"{name}\0{digest}\n".encode())
+    sources = {read.source for read in reads}
+    source = sources.pop() if len(sources) == 1 else "+".join(sorted(sources))
+    return {
+        "source": source,
+        "sha256": combined.hexdigest(),
+        "files": [name for name, _ in entries],
+    }
+
+
+def evidence_provenance() -> dict[str, Any] | None:
+    """The ``kicad_version`` + footprint-library identity of the active context.
+
+    ``{"kicad_version": ..., "footprint_library": ...}`` for the innermost
+    running :func:`evidence_toolchain`; ``None`` outside one, so producers
+    running unwrapped (tests, direct ``generate()`` calls) simply omit the
+    record.  Producers merge this into their emitted evidence so a
+    library-driven geometry change is attributable after the fact (Issue
+    #9526).
+    """
+    chain = active_evidence_toolchain()
+    if chain is None:
+        return None
+    return {
+        "kicad_version": chain.version,
+        "footprint_library": footprint_library_identity(),
+    }
 
 
 @contextlib.contextmanager
@@ -459,6 +641,7 @@ def evidence_toolchain(
     mounts: Iterable[Path] = (),
     *,
     required_version: str | None = PINNED_KICAD_VERSION,
+    pin_host_footprints: bool = False,
 ) -> Iterator[EvidenceToolchain]:
     """Run the enclosed block on the pinned evidence toolchain.
 
@@ -466,11 +649,24 @@ def evidence_toolchain(
     holding only the pinned tables (inherited by every subprocess), and with
     ``KCT_KICAD_DOCKER=1`` a ``kicad-cli`` shim at the front of ``PATH`` runs
     the pinned image with *mounts*, the working directory and the temporary
-    directory bound at their own paths.  Raises :class:`KiCadEnvironmentError`
-    when no kicad-cli answers or its version is not *required_version*.
+    directory bound at their own paths.  With *pin_host_footprints* the Docker
+    route also extracts the image's standard footprint libraries to the scratch
+    directory and exports them as ``KICAD_FOOTPRINT_DIR``, so host-side library
+    reads (``PCB.add_footprint``) embed the image's geometry instead of the
+    host's; without Docker mode the flag is a no-op (the version gate has
+    already required the pinned native install).  Raises
+    :class:`KiCadEnvironmentError` when no kicad-cli answers, its version is
+    not *required_version*, or the requested image extraction fails.
+
+    The yielded chain also records where host-side footprint reads resolve
+    (:attr:`EvidenceToolchain.footprint_library`, after any Docker pinning) and
+    is retrievable inside the block via :func:`active_evidence_toolchain` /
+    :func:`evidence_provenance`, so producers can commit the
+    ``kicad_version`` + footprint-library identity record (Issue #9526).
     """
     saved = {
-        name: os.environ.get(name) for name in (KICAD_CONFIG_HOME_ENV, "PATH", _PROBE_TIMEOUT_ENV)
+        name: os.environ.get(name)
+        for name in (KICAD_CONFIG_HOME_ENV, "PATH", _PROBE_TIMEOUT_ENV, KICAD_FOOTPRINT_DIR_ENV)
     }
     with tempfile.TemporaryDirectory(prefix="kct-kicad-toolchain-") as tmp:
         scratch = Path(tmp)
@@ -517,7 +713,24 @@ def evidence_toolchain(
                     "route kicad-cli through that image, or install KiCad "
                     f"{required_version}."
                 )
-            yield EvidenceToolchain(binary, version, home, image)
+            if image is not None and pin_host_footprints:
+                extracted = scratch / "image-footprints"
+                _docker_cp_from_image(image, IMAGE_FOOTPRINTS_DIR, extracted)
+                library_root = _extracted_library_root(extracted)
+                if library_root is None:
+                    raise KiCadEnvironmentError(
+                        f"{image}:{IMAGE_FOOTPRINTS_DIR} does not contain KiCad "
+                        "footprint libraries (*.pretty); host-side footprint "
+                        "geometry cannot be pinned"
+                    )
+                os.environ[KICAD_FOOTPRINT_DIR_ENV] = str(library_root)
+            chain = EvidenceToolchain(binary, version, home, image, _resolve_footprint_library())
+            _ACTIVE_TOOLCHAIN.append(chain)
+            try:
+                with _footprint_read_scope():
+                    yield chain
+            finally:
+                _ACTIVE_TOOLCHAIN.pop()
         finally:
             for name, value in saved.items():
                 if value is None:
@@ -546,14 +759,22 @@ def run_pinned_if_docker(main: Callable[[], int], mounts: Iterable[Path] = ()) -
         return 1
 
 
-def run_on_evidence_toolchain(main: Callable[[], int | None], mounts: Iterable[Path] = ()) -> int:
+def run_on_evidence_toolchain(
+    main: Callable[[], int | None],
+    mounts: Iterable[Path] = (),
+    *,
+    pin_host_footprints: bool = False,
+) -> int:
     """Run an evidence script's ``main`` inside :func:`evidence_toolchain`.
 
     An environment refusal prints why and returns 2 (nothing written past the
-    refusal point); otherwise ``main``'s own exit status is returned.
+    refusal point); otherwise ``main``'s own exit status is returned.  Pass
+    *pin_host_footprints* when *main* reads standard footprint libraries with
+    host Python (e.g. ``PCB.add_footprint``) so the Docker route sources them
+    from the pinned image.
     """
     try:
-        with evidence_toolchain(mounts):
+        with evidence_toolchain(mounts, pin_host_footprints=pin_host_footprints):
             return int(main() or 0)
     except KiCadEnvironmentError as exc:
         print(f"REFUSED (KiCad environment, Issue #6962): {exc}", file=sys.stderr)
@@ -678,8 +899,29 @@ def _check(mounts: list[Path]) -> int:
     print(f"Pinned library tables: {library_tables_dir()}")
     print(f"Docker fallback      : {'on' if docker_fallback_enabled() else 'off'}")
     try:
-        with evidence_toolchain(mounts) as toolchain:
+        # Enter exactly as a footprint-producing run does (board 09 passes
+        # pin_host_footprints=True): under the Docker route the image's
+        # standard footprint library is extracted and pinned, so the line
+        # below names the library a producer's host reads resolve to, not
+        # the host's own (Issue #9526 review).  Without Docker the flag is a
+        # no-op.
+        with evidence_toolchain(mounts, pin_host_footprints=True) as toolchain:
             print(f"kicad-cli            : {toolchain.kicad_cli} ({toolchain.version})")
+            library = toolchain.footprint_library
+            if toolchain.docker_image is not None:
+                # The extracted root is a per-run scratch copy that vanishes
+                # with the context; the image is the durable identity of the
+                # library footprint-producing runs read.
+                print(
+                    f"Footprint library    : pinned image {toolchain.docker_image}"
+                    f" ({library.source if library else '?'})"
+                )
+            else:
+                print(
+                    f"Footprint library    : "
+                    f"{library.root if library and library.root else 'not found'}"
+                    f" ({library.source if library else '?'})"
+                )
             problems = check_config_home(toolchain.config_home)
             if problems:
                 raise KiCadEnvironmentError("; ".join(problems))

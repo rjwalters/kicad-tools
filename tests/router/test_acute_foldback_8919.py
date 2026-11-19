@@ -841,3 +841,281 @@ class TestCrossNetRepairsClearEachOther:
         monkeypatch.setattr("kicad_tools.router.acute_foldback.plan_foldback_repairs", spy)
         router.cleanup_artifacts()
         assert seen["clearance"] == pytest.approx(float(router.grid.rules.trace_clearance))
+
+
+# --------------------------------------------------------------------------
+# Issue #9210: copper a later same-group repair removed must not veto
+# a later group's repair
+# --------------------------------------------------------------------------
+
+#: Net 5: two fold-backs chained so that round 2 supersedes a chord round 1
+#: added.  Round 1 (detour-collapse at (0.24, -0.299)) adds
+#: (0.112,0.725)-(0.332,0.945)-(0.531,0.945); round 2 (detour-collapse at
+#: (0.531, 0.945)) removes the second of those, (0.332,0.945)-(0.531,0.945).
+_SUPERSEDING_NET5 = [
+    seg((0.0, 0.0), (0.531, 0.945), net=5, net_name="A"),
+    seg((0.531, 0.945), (0.24, -0.299), net=5, net_name="A"),
+    seg((0.24, -0.299), (0.112, 0.725), net=5, net_name="A"),
+]
+#: Net 6 (planned after net 5): a fold-back whose collapse chord lands within
+#: clearance (0.14 mm gap < 0.2 mm) of the superseded chord, yet clears every
+#: segment net 5 actually leaves behind.  Found by randomized search (seed 11).
+_LATER_NET6 = [
+    seg((0.534, -0.001), (0.288, 1.355), net=6, net_name="B"),
+    seg((0.288, 1.355), (0.702, 0.651), net=6, net_name="B"),
+]
+
+
+class TestSupersededChordDoesNotVeto:
+    """Issue #9210: ``accepted_added`` must drop segments a later repair removed."""
+
+    def _scene(self) -> list[Segment]:
+        return _SUPERSEDING_NET5 + _LATER_NET6
+
+    def test_scene_supersedes_a_chord_within_the_group(self):
+        """Fixture check: net 5's second repair removes a segment its first added."""
+        result = plan_foldback_repairs(_SUPERSEDING_NET5, path_is_clear=clear)
+        assert [r.net for r in result.repairs] == [5, 5]
+        added = {id(s) for s in result.repairs[0].added}
+        assert any(id(s) in added for s in result.repairs[1].removed)
+
+    def test_later_group_repair_is_accepted(self):
+        """The chord net 5 superseded is not copper any more, so it cannot veto."""
+        scene = self._scene()
+        # ``clear`` as the base model isolates the plan's own veto list: the
+        # only thing that can decline net 6 is the copper the plan added.
+        out, result = repair_foldbacks(scene, path_is_clear=clear, clearance=_CLEARANCE)
+        assert [r.net for r in result.repairs] == [5, 5, 6]
+        assert (result.repaired, result.skipped) == (3, 0)
+        assert TestCrossNetRepairsClearEachOther._cross_net_violations(out) == []
+
+
+# --------------------------------------------------------------------------
+# Issue #9355: a later group must not be vetoed by legs an earlier repair
+# already removed
+# --------------------------------------------------------------------------
+
+#: Net 5 (planned first) is repaired, which deletes its two legs.  Net 6's own
+#: collapse chord clears every segment that *survives* the plan, but passes
+#: within clearance of net 5's original long leg.  Found by randomized search
+#: (seed 9355, iteration 2779) against an oracle that re-plans net 6 on the
+#: post-repair copper; the original copper is a legal board.
+_STALE_NET5 = [
+    seg((0.1704, 0.5183), (0.0, 0.0), width=0.25, net=5, net_name="A"),
+    seg((0.0, 0.0), (-0.5597, 1.1081), width=0.25, net=5, net_name="A"),
+]
+_STALE_NET6 = [
+    seg((0.3987, -0.539), (0.3472, -1.131), width=0.15, net=6, net_name="B"),
+    seg((0.3472, -1.131), (-1.1195, 0.6154), width=0.15, net=6, net_name="B"),
+]
+
+
+def _snapshot_model_ignoring(copper: list[Segment]):
+    """:func:`_snapshot_model`, plus the ``ignoring`` hook the real checker has.
+
+    Same exact-clearance arithmetic, bound to *copper* as it stood before
+    planning; ``ignoring(ids)`` drops those segments from the comparison and
+    reads *ids* live, as ``VectorCollisionChecker.ignoring`` does.
+    """
+
+    def build(ignored):
+        def path_is_clear(x1, y1, x2, y2, layer, width, net):
+            cand = seg((x1, y1), (x2, y2), width=width, net=net, layer=layer)
+            return all(
+                _edge_gap(cand, other) >= _CLEARANCE
+                for other in copper
+                if id(other) not in ignored and other.net != net and other.layer == layer
+            )
+
+        return path_is_clear
+
+    return build(frozenset()), build
+
+
+class TestRemovedLegsDoNotVeto:
+    """Issue #9355: the planner's collision model forgets copper it removed."""
+
+    def _scene(self) -> list[Segment]:
+        return _STALE_NET5 + _STALE_NET6
+
+    def test_scene_is_a_legal_board(self):
+        assert TestCrossNetRepairsClearEachOther._cross_net_violations(self._scene()) == []
+
+    def test_stale_snapshot_declines_a_legal_repair(self):
+        """The defect: without the hook net 6 is vetoed by net 5's removed leg."""
+        scene = self._scene()
+        _, result = repair_foldbacks(
+            scene, path_is_clear=_snapshot_model(scene), clearance=_CLEARANCE
+        )
+        assert [r.net for r in result.repairs] == [5]
+        assert result.skipped == 1
+
+    def test_removed_legs_are_not_vetoed(self):
+        scene = self._scene()
+        base, build = _snapshot_model_ignoring(scene)
+        out, result = repair_foldbacks(
+            scene, path_is_clear=base, clearance=_CLEARANCE, path_is_clear_ignoring=build
+        )
+        assert (result.repaired, result.skipped) == (2, 0)
+        assert [r.net for r in result.repairs] == [5, 6]
+
+    def test_oracle_agrees_with_post_repair_copper(self):
+        """Independent check: planning net 6 on the post-net-5 copper accepts it too."""
+        scene = self._scene()
+        base, build = _snapshot_model_ignoring(scene)
+        _, result = repair_foldbacks(
+            scene, path_is_clear=base, clearance=_CLEARANCE, path_is_clear_ignoring=build
+        )
+        after5, _ = repair_foldbacks(_STALE_NET5, path_is_clear=clear)
+        oracle = plan_foldback_repairs(
+            _STALE_NET6, path_is_clear=_snapshot_model(after5 + _STALE_NET6), clearance=_CLEARANCE
+        )
+        assert oracle.repaired == 1
+        net6 = [r for r in result.repairs if r.net == 6][0]
+        assert net6.construction == oracle.repairs[0].construction
+
+    def test_applied_copper_has_no_new_clearance_violation(self):
+        """Safety: the applied result is a subset of what was checked."""
+        scene = self._scene()
+        base, build = _snapshot_model_ignoring(scene)
+        out, _ = repair_foldbacks(
+            scene, path_is_clear=base, clearance=_CLEARANCE, path_is_clear_ignoring=build
+        )
+        assert TestCrossNetRepairsClearEachOther._cross_net_violations(out) == []
+
+    def test_ignored_set_holds_only_removed_copper(self):
+        """The hook is only ever asked to ignore legs the plan actually removed."""
+        scene = self._scene()
+        base, build = _snapshot_model_ignoring(scene)
+        asked: list[set[int]] = []
+
+        def spy(ids):
+            asked.append(set(ids))  # the planner grows one set; copy it now
+            return build(ids)
+
+        result = plan_foldback_repairs(
+            scene, path_is_clear=base, clearance=_CLEARANCE, path_is_clear_ignoring=spy
+        )
+        removed = {id(s) for r in result.repairs for s in r.removed}
+        assert all(ids <= removed for ids in asked)
+        assert asked[0] == set()  # net 5 is planned first: nothing removed yet
+        # Net 6 is planned second and is checked against net 5's removed legs.
+        assert asked[-1] == {id(s) for s in _STALE_NET5}
+
+    def test_without_clearance_the_hook_is_not_used(self):
+        """No added-copper veto, no leniency: ``clearance=None`` keeps the snapshot."""
+        scene = self._scene()
+        base, build = _snapshot_model_ignoring(scene)
+        calls: list[object] = []
+
+        def spy(ids):
+            calls.append(ids)
+            return build(ids)
+
+        _, result = repair_foldbacks(scene, path_is_clear=base, path_is_clear_ignoring=spy)
+        assert calls == []
+        assert result.skipped == 1
+
+    def test_same_net_group_is_unaffected(self):
+        legs = [seg((0.0, 0.0), (0.0, 1.0)), seg((0.0, 0.0), (1.0, 1.0))]
+        base, build = _snapshot_model_ignoring(legs)
+        a = repair_foldbacks(legs, path_is_clear=base, clearance=_CLEARANCE)
+        b = repair_foldbacks(
+            legs, path_is_clear=base, clearance=_CLEARANCE, path_is_clear_ignoring=build
+        )
+        assert (a[1].repaired, a[1].skipped) == (b[1].repaired, b[1].skipped)
+        assert a[0] == b[0]
+
+
+class TestRouterUsesTheVectorCheckerHook:
+    """Issue #9355 end to end: ``cleanup_artifacts`` on a populated grid."""
+
+    @staticmethod
+    def _router_with(legs: list[Segment], offset: Point = (30.0, 25.0)) -> Autorouter:
+        router = _router()
+        by_net: dict[int, Route] = {}
+        for leg in legs:
+            moved = seg(
+                (leg.x1 + offset[0], leg.y1 + offset[1]),
+                (leg.x2 + offset[0], leg.y2 + offset[1]),
+                width=leg.width,
+                net=leg.net,
+                net_name=leg.net_name,
+            )
+            by_net.setdefault(
+                leg.net, Route(net=leg.net, net_name=leg.net_name, segments=[])
+            ).segments.append(moved)
+        router.routes = list(by_net.values())
+        for route in router.routes:
+            router.grid.mark_route(route)
+        return router
+
+    def test_second_net_is_repaired_not_skipped(self):
+        router = self._router_with(_STALE_NET5 + _STALE_NET6)
+        stats = router.cleanup_artifacts()
+        assert stats["acute_foldbacks_repaired"] == 2
+        assert stats["acute_foldbacks_skipped"] == 0
+
+    def test_result_respects_the_grid_clearance(self):
+        router = self._router_with(_STALE_NET5 + _STALE_NET6)
+        router.cleanup_artifacts()
+        copper = [s for r in router.routes for s in r.segments]
+        assert TestCrossNetRepairsClearEachOther._cross_net_violations(copper) == []
+
+    def test_raster_fallback_passes_no_hook(self, monkeypatch):
+        """An empty grid selects ``GridCollisionChecker``, which cannot ignore."""
+        import kicad_tools.router.acute_foldback as af
+
+        router = _router()
+        router.routes = [Route(net=5, net_name="USER_LED", segments=list(USER_LED_REGEN))]
+        seen: dict[str, object] = {}
+        real_plan = af.plan_foldback_repairs
+
+        def spy(segments, **kw):
+            seen.update(kw)
+            return real_plan(segments, **kw)
+
+        monkeypatch.setattr("kicad_tools.router.acute_foldback.plan_foldback_repairs", spy)
+        router.cleanup_artifacts()
+        assert seen["path_is_clear_ignoring"] is None
+
+
+class TestVectorCheckerIgnoring:
+    """``VectorCollisionChecker.ignoring`` on a real grid."""
+
+    def _checker(self):
+        from kicad_tools.router.optimizer.collision import VectorCollisionChecker
+
+        router = _router()
+        near = seg((30.0, 25.0), (32.0, 25.0), width=0.25, net=5)
+        far = seg((30.0, 29.0), (32.0, 29.0), width=0.25, net=7)
+        for s in (near, far):
+            router.grid.mark_route(Route(net=s.net, net_name="N", segments=[s]))
+        checker = VectorCollisionChecker(router.grid)
+        return checker, near, far
+
+    # A net-6 probe 0.3 mm beside ``near`` (edge gap ~0.05 mm < clearance).
+    _PROBE = (30.0, 25.3, 32.0, 25.3, Layer.F_CU, 0.15, 6)
+
+    def test_ignored_segment_no_longer_blocks(self):
+        checker, near, _ = self._checker()
+        assert checker.path_is_clear(*self._PROBE) is False
+        assert checker.ignoring({id(near)})(*self._PROBE) is True
+
+    def test_other_segments_still_block(self):
+        checker, near, far = self._checker()
+        probe_by_far = (30.0, 29.3, 32.0, 29.3, Layer.F_CU, 0.15, 6)
+        assert checker.ignoring({id(near)})(*probe_by_far) is False
+        assert checker.ignoring({id(far)})(*probe_by_far) is True
+
+    def test_set_is_read_live(self):
+        checker, near, _ = self._checker()
+        ids: set[int] = set()
+        fn = checker.ignoring(ids)
+        assert fn(*self._PROBE) is False
+        ids.add(id(near))
+        assert fn(*self._PROBE) is True
+
+    def test_plain_path_is_clear_is_unchanged(self):
+        checker, _, _ = self._checker()
+        assert checker.ignoring(set())(*self._PROBE) == checker.path_is_clear(*self._PROBE)

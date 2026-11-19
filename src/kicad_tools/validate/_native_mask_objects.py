@@ -135,6 +135,27 @@ def main():
             "margin_mm": {},
             "net": item.GetNetname() if hasattr(item, "GetNetname") else "",
         }
+        # Declared pad-to-pour connection (issue #9284), as pcbnew loads it:
+        # the zone's default and the pad's/footprint's own overrides, raw
+        # ZONE_CONNECTION codes (-1 inherited). kct resolves the precedence;
+        # the geometry check still has to confirm the spokes in the fill.
+        if isinstance(item, pcbnew.ZONE):
+            entry["zone_connection"] = {
+                "pad_connection": int(item.GetPadConnection()),
+                "thermal_gap_mm": item.GetThermalReliefGap() / 1e6,
+                "thermal_spoke_width_mm": item.GetThermalReliefSpokeWidth() / 1e6,
+            }
+        elif isinstance(item, pcbnew.PAD):
+            footprint = item.GetParentFootprint()
+            gap = item.GetLocalThermalGapOverride()
+            spoke = item.GetLocalThermalSpokeWidthOverride()
+            entry["zone_connection"] = {
+                "pad": int(item.GetLocalZoneConnection()),
+                "footprint": int(footprint.GetLocalZoneConnection()) if footprint else -1,
+                "plated_through": item.GetAttribute() == pcbnew.PAD_ATTRIB_PTH,
+                "thermal_gap_mm": None if gap is None else gap / 1e6,
+                "thermal_spoke_width_mm": None if spoke is None else spoke / 1e6,
+            }
         for name, layer in layers.items():
             on_layer = item.IsOnLayer(layer)
             if isinstance(item, pcbnew.PCB_VIA) and name.endswith(".Mask"):

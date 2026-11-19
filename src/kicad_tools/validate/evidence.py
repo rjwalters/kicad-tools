@@ -71,14 +71,28 @@ KEY_SEPARATOR = "|"
 # messages now report sheet-absolute coordinates (Issue #8493) where they used
 # to be board-relative.  On an origin-offset board every such hash moved, which
 # a same-version waiver would misreport as ``evidence_changed``.
+# ``ev4`` (Issue #9431): the named footprints' ``at`` is hashed in sheet (file)
+# coordinates.  ``PCB.load()`` stores footprint positions board-relative (the
+# Edge.Cuts minimum corner subtracted), so under ev3 an outline-only edit that
+# moved the top-left corner changed every footprint-bearing hash -- and so
+# turned reviewed waivers STALE -- although no copper moved.  Whole-net and
+# local-pad evidence were already sheet-absolute and are unchanged in shape.
 # Waivers recorded against an older version go stale exactly once after an
 # upgrade, and are reported as such (see :func:`is_outdated_evidence_hash`).
-EVIDENCE_HASH_VERSION = "ev3"
+EVIDENCE_HASH_VERSION = "ev4"
 EVIDENCE_HASH_PREFIX = EVIDENCE_HASH_VERSION + ":"
+
+# The one superseded recipe :func:`compute_evidence_hash` can still reproduce
+# (Issue #9454).  ``ev3`` differs from ``ev4`` in exactly one field -- the named
+# footprints' ``at`` is board-relative instead of sheet-absolute -- so a waiver
+# recorded under ``ev3`` can be *proven* unchanged by recomputing its digest and
+# then re-bound to ``ev4`` (``kct check --migrate-waivers``).  It is not a
+# selectable recipe: nothing records new hashes with it.
+PRIOR_EVIDENCE_HASH_VERSION = "ev3"
 
 # ``kct detect-mistakes`` hashes (Issue #6006) add the check's structured
 # measurements to the recipe above, so they carry a compound version
-# ``<evidence version>.<measurement recipe>`` (``ev3.m1``).  Bumping either
+# ``<evidence version>.<measurement recipe>`` (``ev4.m1``).  Bumping either
 # part makes mistake waivers report ``outdated_evidence_version``; bumping
 # only the ``m`` part leaves every ``kct check`` waiver untouched.
 #
@@ -185,7 +199,7 @@ def net_evidence_radius(rule_id: str) -> float | None:
 
 
 def evidence_hash_version(evidence_hash: str | None) -> str | None:
-    """Return the version tag (``"ev1"``, ``"ev3"``, ...) of an evidence hash."""
+    """Return the version tag (``"ev1"``, ``"ev4"``, ...) of an evidence hash."""
     if not evidence_hash or ":" not in evidence_hash:
         return None
     return evidence_hash.split(":", 1)[0]
@@ -194,7 +208,7 @@ def evidence_hash_version(evidence_hash: str | None) -> str | None:
 def current_evidence_hash_version(evidence_hash: str | None) -> str:
     """The version this kct computes for hashes of ``evidence_hash``'s family.
 
-    A compound version (``ev1.m1``, ``ev3.m1``) is a ``kct detect-mistakes``
+    A compound version (``ev1.m1``, ``ev4.m1``) is a ``kct detect-mistakes``
     hash, compared against :data:`MISTAKE_EVIDENCE_HASH_VERSION`; anything
     else is a ``kct check`` hash, compared against
     :data:`EVIDENCE_HASH_VERSION`.
@@ -249,7 +263,13 @@ def _resolve_ref(item: str, footprints: dict[str, Any]) -> str | None:
     return None
 
 
-def _footprint_evidence(fp: Any) -> dict[str, Any]:
+def _footprint_evidence(fp: Any, origin: tuple[float, float] = (0.0, 0.0)) -> dict[str, Any]:
+    """Evidence for one footprint, its position in **sheet** coordinates.
+
+    ``fp.position`` is board-relative (see :func:`_net_pads`); ``origin`` is
+    added back so the hash does not move when only the Edge.Cuts outline does
+    (Issue #9431).  Pad positions are footprint-local and need no shift.
+    """
     pads = []
     for pad in getattr(fp, "pads", []) or []:
         pads.append(
@@ -265,7 +285,7 @@ def _footprint_evidence(fp: Any) -> dict[str, Any]:
         )
     pads.sort(key=lambda row: (row[0], row[1], str(row[2:])))
     return {
-        "at": _point(fp.position),
+        "at": _point((fp.position[0] + origin[0], fp.position[1] + origin[1])),
         "rot": _round(fp.rotation, _VALUE_DIGITS),
         "layer": fp.layer,
         "footprint": getattr(fp, "name", ""),
@@ -419,10 +439,21 @@ def _pad_bbox_distance(
 class EvidenceContext:
     """Per-board lookup tables shared by every hash computed for one run."""
 
-    def __init__(self, pcb: PCB | None) -> None:
+    def __init__(self, pcb: PCB | None, *, recipe: str = EVIDENCE_HASH_VERSION) -> None:
+        if recipe not in (EVIDENCE_HASH_VERSION, PRIOR_EVIDENCE_HASH_VERSION):
+            raise ValueError(f"cannot compute evidence hashes with recipe {recipe!r}")
+        #: Hash version this context computes (``ev4``, or ``ev3`` for migration).
+        self.recipe = recipe
         self.footprints: dict[str, Any] = _footprint_index(pcb) if pcb is not None else {}
         self.net_members: dict[str, list[str]] = _net_members(pcb) if pcb is not None else {}
         self.net_pads: dict[str, list[_NetPad]] = _net_pads(pcb) if pcb is not None else {}
+        self.board_origin: tuple[float, float] = (
+            _board_origin(pcb) if pcb is not None else (0.0, 0.0)
+        )
+        # ev3 hashed footprint ``at`` board-relative (no origin shift added back).
+        self.footprint_origin: tuple[float, float] = (
+            self.board_origin if recipe == EVIDENCE_HASH_VERSION else (0.0, 0.0)
+        )
         self.has_board = pcb is not None
 
 
@@ -488,7 +519,7 @@ def evidence_payload(
         for item in violation.items:
             ref = _resolve_ref(item, ctx.footprints)
             if ref is not None and ref not in footprints:
-                footprints[ref] = _footprint_evidence(ctx.footprints[ref])
+                footprints[ref] = _footprint_evidence(ctx.footprints[ref], ctx.footprint_origin)
         payload["footprints"] = dict(sorted(footprints.items()))
         nets = sorted(set(violation.nets))
         radius = net_evidence_radius(violation.rule_id)
@@ -513,14 +544,19 @@ def compute_evidence_hash(
     *,
     multiplicity: int = 1,
 ) -> str:
-    """Hash the local evidence of ``violation`` (see module docstring)."""
+    """Hash the local evidence of ``violation`` (see module docstring).
+
+    The prefix is the version of ``context``'s recipe: ``ev4`` normally, ``ev3``
+    for a context built with ``recipe="ev3"`` (waiver migration, Issue #9454).
+    """
     canonical = json.dumps(
         evidence_payload(violation, context, multiplicity=multiplicity),
         sort_keys=True,
         separators=(",", ":"),
     )
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
-    return EVIDENCE_HASH_PREFIX + digest
+    recipe = context.recipe if context is not None else EVIDENCE_HASH_VERSION
+    return f"{recipe}:{digest}"
 
 
 def annotate_evidence(results: DRCResults, pcb: PCB | None) -> None:

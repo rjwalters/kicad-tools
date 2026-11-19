@@ -38,6 +38,7 @@ is a report the gallery's validator accepts.
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import logging
@@ -60,6 +61,8 @@ from kicad_tools.analysis.routing_quality import (
     RULE_OFF_AXIS_LENGTH_WARNING,
     off_axis_layer_warning_count,
 )
+from kicad_tools.exceptions import FileFormatError
+from kicad_tools.sexp import ParseError
 
 from .board_readiness import read_readiness, readiness_input_hash
 from .format_options import FORMAT_JSON, add_format_flag, emit_json, stdout_to_stderr_when
@@ -283,6 +286,36 @@ def _declared_copper_weights(pcb_path: Path) -> dict[str, float | None]:
     except Exception:  # noqa: BLE001 - receipt metadata must not fail readiness
         return {"outer_oz": None, "inner_oz": None}
     return {"outer_oz": outer, "inner_oz": inner}
+
+
+def _declared_reference_height_deviation(options: ReadinessOptions) -> dict[str, Any] | None:
+    """The project's declared designator-height deviation, or ``None`` (Issue #9448).
+
+    Present only when ``project.kct`` declares a reference-designator height
+    below the target fab's silkscreen text-height floor -- the one case where
+    ``silkscreen_text_height`` is relaxed for designators.  Reported in the
+    manifest and README so a sign-off never carries the relaxation silently.
+    """
+    from kicad_tools.sync.discover import resolve_declared_reference_height_for_pcb
+
+    declared = resolve_declared_reference_height_for_pcb(options.pcb)
+    if declared is None:
+        return None
+    try:
+        from kicad_tools.manufacturers import get_profile
+
+        fab_floor = get_profile(options.manufacturer).get_design_rules(2).min_silkscreen_height_mm
+    except Exception:  # noqa: BLE001 - receipt metadata must not fail readiness
+        return None
+    if declared >= fab_floor:
+        return None
+    return {
+        "rule": "silkscreen_text_height",
+        "scope": "reference designators",
+        "declared_min_height_mm": declared,
+        "fab_min_height_mm": fab_floor,
+        "source": "project.kct requirements.manufacturing.silkscreen_min_reference_height_mm",
+    }
 
 
 def _run_native_drc(pcb: Path, report_path: Path) -> EngineRun:
@@ -2370,6 +2403,11 @@ def _write_full_manifest(options: ReadinessOptions, warning_counts: dict[str, in
             "copper_weights": _declared_copper_weights(options.pcb),
         }
     )
+    deviation = _declared_reference_height_deviation(options)
+    if deviation is not None:
+        manifest["declared_deviations"] = [deviation]
+    else:
+        manifest.pop("declared_deviations", None)
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return manifest_path
 
@@ -2871,12 +2909,20 @@ def _write_readme(
         lines.extend(["", "Assembly prep", "-------------"])
         for key in ("fiducials", "board_info"):
             lines.append(f"  {key}: {prep[key]}")
+    deviation = _declared_reference_height_deviation(options)
     lines.extend(["", "Accepted-risk waivers", "---------------------"])
     if acked:
         lines.append(f"  see the {len(acked)} line(s) above")
+    if deviation is not None:
+        lines.append(
+            f"  DECLARED DEVIATION: reference designators may be as small as "
+            f"{deviation['declared_min_height_mm']:g} mm (fab floor "
+            f"{deviation['fab_min_height_mm']:g} mm) per project.kct "
+            "silkscreen_min_reference_height_mm; labels keep the fab floor."
+        )
     for entry in options.known_issues:
         lines.append(f"  #{entry['issue']} [{entry['kind']}] {entry['summary']}")
-    if not acked and not options.known_issues:
+    if not acked and not options.known_issues and deviation is None:
         lines.append("  no accepted-risk waivers")
     lines.append("")
 
@@ -2908,6 +2954,7 @@ def _verify_finished_artifacts(options: ReadinessOptions) -> CheckOutcome:
     if "README.txt" not in actual:
         problems.append("finished package has no assembly/fabrication instructions")
     problems.extend(_verify_project_provenance(options))
+    problems.extend(_verify_cpl_rotations(options))
     for name, info in files.items():
         if (
             not isinstance(info, dict)
@@ -3586,6 +3633,15 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
     if spec.is_file():
         paths.add(spec.resolve())
 
+    # Issue #9322: the CPL rotation sidecar changes the shipped CPL, so it is
+    # provenance like the waivers sidecar; one outside the board directory is
+    # dropped by the filter below.
+    from kicad_tools.export.rotation_overrides import discover_rotation_overrides
+
+    rotations = discover_rotation_overrides(options.pcb)
+    if rotations is not None:
+        paths.add(rotations.resolve())
+
     return sorted(
         p
         for p in paths
@@ -3594,6 +3650,169 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
         and not _is_transient_local(p.relative_to(root))
         and not _is_render_artifact(p.relative_to(root))
     )
+
+
+# Inputs whose failure to read or parse means the CPL rotation re-derivation
+# cannot run (issue #9346): the retained CSVs and the board PCB.  ``ParseError``
+# is the s-expression parser's (a ``ValueError``), raised by ``PCB.load`` on a
+# malformed board; ``FileFormatError`` for a file that is not a PCB.  The
+# sidecar has its own error type and message; anything else reaching this
+# point used to hit a blanket ``except Exception`` that silently skipped the
+# check, and must be reported instead.
+_CPL_REDERIVATION_INPUT_ERRORS: tuple[type[Exception], ...] = (
+    OSError,
+    csv.Error,
+    UnicodeDecodeError,
+    ParseError,
+    FileFormatError,
+)
+
+
+def _cpl_rotation_state(options: ReadinessOptions) -> tuple[Any, str | None]:
+    """Re-derive the shipped CPL's rotation provenance (issue #9322).
+
+    Returns ``(RotationReview | None, problem)``.  Reads the shipped BOM/CPL for
+    the LCSC numbers and footprint names the export actually used, so the
+    recorded corrections are the ones keyed against the shipped files.  ``(None,
+    None)`` means there is nothing to report (no CPL, or a board the export step
+    could not have parsed); a non-``None`` problem string means the
+    re-derivation could not be trusted -- an invalid sidecar, or an input or
+    unexpected failure, which callers must report rather than skip silently
+    (issue #9346: a check that cannot run must never look like one that passed).
+    """
+    if not options.assembly or not options.pcb.is_file():
+        return None, None
+    cpl = next(iter(sorted(options.output_dir.glob("cpl*.csv"))), None)
+    if cpl is None:
+        return None, None
+    from kicad_tools.export.assembly import resolve_pnp_config, review_cpl_rotations
+    from kicad_tools.export.pnp import PnPExportConfig
+    from kicad_tools.export.rotation_overrides import RotationOverridesError
+    from kicad_tools.manufacturers import get_fab_family
+
+    # Mirror the export's effective PnP config: --include-tht exported with an
+    # explicit exclude_tht=False (cli.export_cmd._build_configs), so the
+    # re-derived placement set must resolve the same way instead of assuming
+    # the fab default (#9346).
+    pnp_config = resolve_pnp_config(
+        get_fab_family(options.manufacturer),
+        PnPExportConfig(exclude_tht=False) if options.include_tht else None,
+    )
+    try:
+        names: dict[str, str] = {}
+        header, rows = _read_csv_rows(cpl)
+        lowered = [column.strip().lower() for column in header]
+        ref_col = next(
+            (lowered.index(n) for n in ("designator", "reference", "ref") if n in lowered), 0
+        )
+        pkg_col = next((lowered.index(n) for n in ("package", "footprint") if n in lowered), None)
+        if pkg_col is not None:
+            for row in rows:
+                if max(ref_col, pkg_col) < len(row) and row[ref_col].strip():
+                    names[row[ref_col].strip()] = row[pkg_col].strip()
+        lcsc: dict[str, str] = {}
+        for bom in sorted(options.output_dir.glob("bom*.csv")):
+            bom_header, bom_rows = _read_csv_rows(bom)
+            bom_lowered = [column.strip().lower() for column in bom_header]
+            d_col = next((i for i, n in enumerate(bom_lowered) if n.startswith("designator")), None)
+            l_col = next((i for i, n in enumerate(bom_lowered) if n.startswith("lcsc")), None)
+            if d_col is None or l_col is None:
+                continue
+            for row in bom_rows:
+                if max(d_col, l_col) < len(row) and row[l_col].strip():
+                    for ref in re.split(r"[,;\s]+", row[d_col].strip()):
+                        if ref:
+                            lcsc[ref] = row[l_col].strip()
+        review = review_cpl_rotations(
+            options.pcb,
+            options.manufacturer,
+            lcsc_by_reference=lcsc,
+            footprint_names=names,
+            pnp_config=pnp_config,
+        )
+    except RotationOverridesError as exc:
+        return None, f"CPL rotation sidecar is invalid: {exc}"
+    except _CPL_REDERIVATION_INPUT_ERRORS as exc:
+        logger.warning("CPL rotation re-derivation skipped: %s: %s", type(exc).__name__, exc)
+        return None, f"CPL rotation re-derivation skipped ({type(exc).__name__}: {exc})"
+    except Exception as exc:
+        logger.warning(
+            "CPL rotation re-derivation failed unexpectedly: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        return None, f"CPL rotation re-derivation failed ({type(exc).__name__}: {exc})"
+    return review, None
+
+
+def _verify_cpl_rotations(options: ReadinessOptions) -> list[str]:
+    """Problems between the retained CPL and the project's rotation sidecar (#9322).
+
+    Re-derives each sidecar-corrected placement's rotation from the PCB and the
+    sidecar *as they are now* and compares it with the retained CPL row, so an
+    edited sidecar (or one removed since generation) fails verification instead
+    of being waved through on a stale bundle.  Boards without a sidecar are not
+    touched.
+    """
+    from kicad_tools.export.rotation_overrides import SOURCE_GLOB
+
+    if not options.assembly:
+        return []
+    review, problem = _cpl_rotation_state(options)
+    if problem:
+        # An invalid sidecar, or a re-derivation that could not run (issue
+        # #9346): report it instead of letting the check pass by omission.
+        return [problem]
+    if review is None or review.sidecar is None:
+        return []
+    cpl = next(iter(sorted(options.output_dir.glob("cpl*.csv"))), None)
+    if cpl is None:
+        return []
+    header, rows = _read_csv_rows(cpl)
+    lowered = [column.strip().lower() for column in header]
+    ref_col = next(
+        (lowered.index(n) for n in ("designator", "reference", "ref") if n in lowered), 0
+    )
+    rot_col = next((lowered.index(n) for n in ("rotation", "rot") if n in lowered), None)
+    if rot_col is None:
+        return []
+    retained = {
+        row[ref_col].strip(): row[rot_col].strip()
+        for row in rows
+        if max(ref_col, rot_col) < len(row)
+    }
+    problems: list[str] = []
+    for entry in review.applied:
+        if entry["source"] == SOURCE_GLOB:
+            continue
+        ref = entry["reference"]
+        expected = f"{review.rotations[ref]:.1f}"
+        if ref in retained and retained[ref] != expected:
+            problems.append(
+                f"CPL rotation for {ref} is {retained[ref]} but the current "
+                f"{Path(review.sidecar).name} gives {expected}; regenerate the bundle"
+            )
+    return problems
+
+
+def _cpl_rotation_report_entry(options: ReadinessOptions) -> dict[str, Any] | None:
+    """The ``cpl_rotations`` evidence block for ``readiness.json``, if any.
+
+    ``None`` when there is genuinely nothing to report (no CPL, or a board the
+    export step could not have parsed).  A re-derivation that could not be
+    trusted (invalid sidecar, unreadable input, unexpected failure) is recorded
+    as a skip so the evidence never shows a silently-skipped check as a pass
+    (issue #9346).
+    """
+    review, problem = _cpl_rotation_state(options)
+    if review is not None:
+        block: dict[str, Any] = review.to_report(
+            _rel(options, Path(review.sidecar)) if review.sidecar else None
+        )
+        return block
+    if problem is not None:
+        return {"rederivation_skipped": problem}
+    return None
 
 
 def build_report(
@@ -3688,6 +3907,9 @@ def build_report(
         }
         if produced:
             report["report_sources"] = produced
+    cpl_block = _cpl_rotation_report_entry(options)
+    if cpl_block is not None:
+        report["cpl_rotations"] = cpl_block
     external = _external_dependencies(options)
     if external:
         # Hash the exact collected out-of-directory dependencies (Issue #5813).
