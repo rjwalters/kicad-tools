@@ -269,12 +269,17 @@ class LatticeObstacleModel:
         agent_radius: float,
         pad_extra: list[float] | None = None,
         pad_class_extra: list[float] | None = None,
+        base_clearance: float = 0.0,
     ) -> None:
         self.lattice = lattice
         self.pads = pads
         self.pad_layer_indices = pad_layer_indices
         self.num_layers = num_layers
         self.agent_radius = agent_radius
+        # The board-global trace clearance (issue #9636 review): the floor a
+        # relaxed sibling pad is still held to, so the sibling relaxation
+        # waives only the class surcharge above it -- never the board rule.
+        self._base_clearance = base_clearance
 
         # Inflated keep-out rectangle per pad (pad half-extent + agent radius).
         # Issue #6243: ``pad_extra[i]`` grows pad ``i``'s keep-out by the
@@ -426,8 +431,9 @@ class LatticeObstacleModel:
         outline gap that pad is held to instead of its full keep-out: the
         caller passes the OTHER pads of the footprint a stub leaves from, whose
         distance to the origin pad is fixed by the part (so an authored class
-        clearance on their net must not wall that pad in).  Pads not in
-        ``relax`` are judged exactly as before.
+        clearance on their net must not wall that pad in).  The floor is never
+        below the board's base clearance, so only the class surcharge above it
+        is waived.  Pads not in ``relax`` are judged exactly as before.
 
         ``extra`` (issue #4271) inflates every pad keep-out beyond the
         global ``agent_radius`` -- the per-connection surcharge for a net
@@ -465,12 +471,16 @@ class LatticeObstacleModel:
         keep-out an authored class clearance grows around a sibling pad must
         not wall the origin pad in: copper leaving ``pad`` is held to the gap
         the part itself leaves between the two pads (``half`` + that
-        outline-to-outline gap) rather than the full class keep-out.  Only
-        siblings whose full keep-out (``extra`` is the caller's surcharge over
-        the global agent radius, as for :meth:`segment_blocked`) reaches
-        further than that fixed gap are listed -- an ordinary neighbour whose
-        base clearance the part already satisfies is judged exactly as before.
-        Empty for a pad without a reference designator.
+        outline-to-outline gap) rather than the full class keep-out.  The
+        floor never drops below the board's base clearance (``half`` +
+        ``base_clearance``): a fine-pitch part whose pad gap is narrower than
+        the board rule keeps that rule -- only the class surcharge above base
+        is waived.  Only siblings whose full keep-out (``extra`` is the
+        caller's surcharge over the global agent radius, as for
+        :meth:`segment_blocked`) reaches further than that floor are listed --
+        an ordinary neighbour whose keep-out the part already satisfies is
+        judged exactly as before.  Empty for a pad without a reference
+        designator.
         """
         if not pad.ref:
             return {}
@@ -480,7 +490,7 @@ class LatticeObstacleModel:
             if other is pad or other.ref != pad.ref or other.net == net:
                 continue
             gap = ka.gap(self._outline_of(other, idx), own)
-            floor = half + max(0.0, gap)
+            floor = half + max(gap, self._base_clearance)
             if floor < self._pad_reach[idx] + extra - ka.LATTICE_CLEARANCE_EPSILON_MM:
                 out[idx] = floor
         return out

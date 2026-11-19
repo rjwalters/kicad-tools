@@ -171,6 +171,63 @@ def _two_pad_part(floor: float):
 _LOW = NetClassRouting(name="LV", trace_width=0.2, clearance=0.2)
 
 
+def _fine_pitch_part():
+    """Seven 0.25 x 1.0 mm U1 pads at 0.4 mm pitch (outline gap 0.15 mm).
+
+    The middle pin (net 1) is routed to a pad 3 mm below; the board
+    clearance (0.2 mm) is wider than the part's own pad gap (0.15 mm), so a
+    class trace cannot leave the pin between its neighbours at the board
+    rule -- main declines it and the sibling relaxation may not un-decline
+    it below that rule.
+    """
+    pads = []
+    nets = [2, 3, 4, 1, 5, 6, 7]
+    for k in range(7):
+        pads.append(_pad(4.0 + 0.4 * k, 4.0, nets[k], "U1", w=0.25, h=1.0, pin=str(k + 1)))
+    pads.append(_pad(5.2, 1.0, 1, "R9", w=0.6, h=0.6))
+    pf = LatticePathfinder(
+        [(0.0, 0.0), (12.0, 0.0), (12.0, 8.0), (0.0, 8.0)],
+        pads,
+        DesignRules(trace_width=0.2, trace_clearance=0.2),
+        layer_stack=LayerStack.two_layer(),
+    )
+    return pf, pads
+
+
+def test_fine_pitch_sibling_floor_keeps_board_clearance() -> None:
+    """A pad gap narrower than the board clearance is not a relaxation floor.
+
+    Pre-fix the floor was ``half + gap`` (0.1 + 0.15 = 0.25 mm), below the
+    siblings' own base keep-outs, so a 0.2 mm class trace shipped with its
+    edge 0.175 mm from the neighbouring pins.  The floor is bounded below by
+    the board clearance, so the relaxation stays off and the route declines
+    exactly as main does.
+    """
+    from kicad_tools.router.clearance_shapes import pad_kernel_params
+    from kicad_tools.router.lattice import kernel_adapter as ka
+
+    pf, pads = _fine_pitch_part()
+    pin, far = pads[3], pads[7]
+    # No sibling is listed: the base-bounded floor (0.1 + 0.2 = 0.3 mm)
+    # reaches as far as the siblings' own unclassed keep-outs.
+    assert pf.obstacles.footprint_sibling_floors(pin, 1, 0.1, 0.0) == {}
+    route = pf.route(pin, far, net_class=_LOW)
+    if route is not None:
+        base = pf.rules.trace_clearance
+        for sib in pads[:7]:
+            if sib.net == 1:
+                continue
+            shape, rratio = pad_kernel_params(sib)
+            outline = ka.pad_outline(
+                shape, sib.width, sib.height, rratio, sib.rotation, (sib.x, sib.y)
+            )
+            for seg in route.segments:
+                if seg.layer != Layer.F_CU:
+                    continue
+                copper = ka.trace((seg.x1, seg.y1), (seg.x2, seg.y2), seg.width / 2)
+                assert ka.gap(copper, outline) >= base - 1e-9
+
+
 def test_sibling_pad_class_keepout_does_not_wall_the_pad_in() -> None:
     """A 2 mm class clearance on the sibling's net used to decline ``pad-escape-start``."""
     pf, pads = _two_pad_part(2.0)
@@ -178,15 +235,26 @@ def test_sibling_pad_class_keepout_does_not_wall_the_pad_in() -> None:
         pads[0], pads[2], _LOW, committed=pf._fresh_committed(), history={}, present=0.0
     )
     assert reason == "ok" and result is not None
-    # The route does not touch the sibling pad: it stays clear of its copper by
-    # at least the gap the part leaves between its own two pads.
+    # Every same-layer copper shape keeps at least the board's base clearance
+    # (0.2 mm) from the sibling pad's outline -- not merely staying outside
+    # the pad.  The relaxation waives the sibling's 2 mm class floor, never
+    # the board rule underneath it.
+    from kicad_tools.router.clearance_shapes import pad_kernel_params
+    from kicad_tools.router.lattice import kernel_adapter as ka
+
     sib = pads[1]
+    shape, rratio = pad_kernel_params(sib)
+    outline = ka.pad_outline(shape, sib.width, sib.height, rratio, sib.rotation, (sib.x, sib.y))
+    base = pf.rules.trace_clearance
     for seg in result.route.segments:
-        for x, y in ((seg.x1, seg.y1), (seg.x2, seg.y2)):
-            inside = abs(x - sib.x) < sib.width / 2 + seg.width / 2 and (
-                abs(y - sib.y) < sib.height / 2 + seg.width / 2
-            )
-            assert not inside
+        if seg.layer != Layer.F_CU:
+            continue
+        copper = ka.trace((seg.x1, seg.y1), (seg.x2, seg.y2), seg.width / 2)
+        assert ka.gap(copper, outline) >= base - 1e-9
+    for via in result.route.vias:
+        if Layer.F_CU not in via.layers:
+            continue
+        assert ka.gap(ka.site((via.x, via.y), via.diameter / 2.0), outline) >= base - 1e-9
 
 
 def test_sibling_relaxation_leaves_other_pads_unchanged() -> None:

@@ -1158,6 +1158,7 @@ class LatticePathfinder:
             self._agent_radius,
             pad_extra=self._authored_pad_extra(),
             pad_class_extra=self._class_outline_extra(),
+            base_clearance=self.rules.trace_clearance,
         )
         # Issue #7880: under an HV projection a pad's grown keep-out (authored
         # floor, #6489 class growth) composes with the pair requirement by
