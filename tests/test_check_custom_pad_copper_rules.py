@@ -70,6 +70,7 @@ def _board(
     tht_pad: bool = False,
     silk_local: tuple[float, float] | None = None,
     primitive: str | None = None,
+    pad_local: tuple[float, float] = PAD_AT,
 ) -> Path:
     """A probe board: the SOT-89-3 fixture at ``rotation`` on ``side``.
 
@@ -78,10 +79,13 @@ def _board(
     adds a through-hole pad 1.2 mm from the tab's side edge in its own
     footprint; ``silk_local`` puts a silk text at that pad-local point.
     ``primitive`` overrides the tab's gr_poly (refused-shape tests).
+    ``pad_local`` moves the custom pad's anchor (default: the stock tab at
+    PAD_AT); the footprint anchor itself keeps the pad's board centre fixed
+    under rotation when set to (0, 0).
     """
     cu, mask, silk = f"{side}.Cu", f"{side}.Mask", f"{side}.SilkS"
     fx, fy = 110.0, 110.0
-    ax, ay = _rot(*PAD_AT, rotation)
+    ax, ay = _rot(*pad_local, rotation)
     anchor = (fx + ax, fy + ay)  # board position of the custom pad's anchor
 
     def at(p: tuple[float, float]) -> tuple[float, float]:
@@ -93,7 +97,7 @@ def _board(
         f"""(footprint "Package_TO_SOT_SMD:SOT-89-3" (layer "{cu}") (at {fx} {fy} {rotation})
   (property "Reference" "Q1" (at 0 -3.5) (layer "{silk}"))
   (pad "1" smd rect (at -1.5 -1.5 {rotation}) (size 1.0 0.5) (layers "{cu}") (net 1 "GND"))
-  (pad "2" smd custom (at {PAD_AT[0]} {PAD_AT[1]} {rotation}) (size 1.5 0.9)
+  (pad "2" smd custom (at {pad_local[0]} {pad_local[1]} {rotation}) (size 1.5 0.9)
    (layers "{cu}" "{mask}") (net 2 "SIG")
    (options (clearance outline) (anchor rect))
    (primitives {tab}))
@@ -335,4 +339,54 @@ def test_custom_pad_without_primitives_is_measured(tmp_path, capsys):
     report = _run(board, capsys, "--only", "tht_smd_spacing")
     assert not _violations(report, "tht_smd_spacing_incomplete"), (
         "a custom pad with no primitives is its exact anchor, not missing coverage"
+    )
+
+
+def test_remeasure_after_in_memory_rotation_matches_fresh_parse(tmp_path):
+    """The per-pad outline cache must key on the pad's absolute rotation.
+
+    A rotate delta applied in memory (``recovery.applicator.
+    _apply_rotate_component``) turns ``fp.rotation`` and every pad's absolute
+    angle while leaving ``fp.position`` -- so a custom pad at the footprint
+    anchor (pad_local (0, 0)) keeps its board centre and only its rotation
+    changes.  A cache keyed on the centre alone returns the pre-rotation tab
+    there; re-measuring the same pad object must instead match a freshly
+    parsed board at the new rotation.
+    """
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.clearance import _pad_polygon
+
+    def custom_pad(board: PCB):
+        fp = next(iter(board.footprints))
+        return fp, next(p for p in fp.pads if getattr(p, "shape", "") == "custom")
+
+    def bounds(fp, pad) -> list[float]:
+        polygon = _pad_polygon(pad, fp)
+        assert polygon is not None
+        return [round(v, 6) for v in polygon.bounds]
+
+    pcb0 = PCB.load(_board(tmp_path, rotation=0.0, side="F", pad_local=(0.0, 0.0)))
+    fp, pad = custom_pad(pcb0)
+    before = bounds(fp, pad)
+
+    # Rotate in place exactly as _apply_rotate_component does: fp.position
+    # untouched, fp.rotation and every pad's absolute angle advanced.
+    fp.rotation = (float(fp.rotation) + 90.0) % 360.0
+    for p in fp.pads:
+        if hasattr(p, "rotation"):
+            p.rotation = (float(p.rotation) + 90.0) % 360.0
+    after = bounds(fp, pad)
+
+    fp_fresh, pad_fresh = custom_pad(
+        PCB.load(_board(tmp_path, rotation=90.0, side="F", pad_local=(0.0, 0.0)))
+    )
+    fresh_bounds = bounds(fp_fresh, pad_fresh)
+
+    assert after != before, (
+        "the tab's 90-degree outline must differ from its 0-degree outline; "
+        "identical bounds mean the stale pre-rotation outline was returned"
+    )
+    assert after == fresh_bounds, (
+        f"re-measure after an in-memory rotation must match a freshly parsed "
+        f"90-degree board: {after} != {fresh_bounds}"
     )

@@ -131,17 +131,27 @@ def custom_pad_outline_detail(
     unavailable.  The ``detail`` names the primitive kind where the refusal is
     about one.
 
-    Memoised on the pad object (keyed by the centre, rounded to nm): one pad is
-    asked for its outline by several rules per ``kct check`` run, and the
-    builder re-parses the pad's S-expression and unions shapely geometry each
-    time.
+    Memoised on the pad object (keyed by the centre and the pad's ABSOLUTE
+    rotation, each rounded to nm): one pad is asked for its outline by several
+    rules per ``kct check`` run, and the builder re-parses the pad's
+    S-expression and unions shapely geometry each time.  The rotation is part
+    of the key because it is the other mutable input ``custom_pad_copper``
+    reads: an in-place rotate (``recovery.applicator.
+    _apply_rotate_component``) leaves ``fp.position`` -- and with it a pad at
+    the footprint anchor's board centre -- untouched while advancing the pad's
+    absolute angle, so a centre-only key would hand back the pre-rotation
+    outline.
     """
     if (getattr(pad, "shape", "") or "").lower() != "custom":
         return None, None
     node = getattr(pad, "_sexp_node", None)
     if node is None or not _has_shapely():
         return None, None
-    cache_key = (round(center[0], 9), round(center[1], 9))
+    cache_key = (
+        round(center[0], 9),
+        round(center[1], 9),
+        round(float(getattr(pad, "rotation", 0.0) or 0.0), 9),
+    )
     cached = pad.__dict__.get("_custom_outline_detail")
     if cached is not None and cached[0] == cache_key:
         return cached[1], cached[2]
