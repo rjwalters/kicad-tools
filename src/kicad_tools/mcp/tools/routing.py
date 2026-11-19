@@ -492,6 +492,74 @@ def _apply_declared_clearances(path: Path, pcb_rules, design_rules) -> list[str]
     return resolved.warnings
 
 
+def _resolve_route_auto_grid(
+    path: Path,
+    pcb: PCB,
+    pcb_rules,
+    grid: float | str | None,
+) -> tuple[float | None, list[str]]:
+    """Resolve route-auto's routing grid pitch (Issue #9620).
+
+    ``grid`` is ``None`` / ``"auto"`` (the default) or an explicit mm value.
+    Auto reuses ``auto_select_grid_resolution`` -- pad-position aware and
+    memory-capped, the same selector ``kct route --grid auto`` uses -- over the
+    board's WHOLE pad set (the lattice is global), with the #6283
+    declared-aware clearance (``resolve_routing_clearances``, the same resolver
+    ``_apply_declared_clearances`` uses) as the DRC basis.  An explicit value
+    is honoured as given (#6741 semantics: the orchestrator's routers are built
+    by ``load_pcb_for_routing``, which disables the #972 adaptive coarsening).
+
+    Returns ``(resolution, warnings)``.  ``None`` means "fall back to
+    ``to_design_rules``'s legacy ``clearance / 2``" -- only when selection
+    cannot run at all (no pads extractable, or the selector raised); a
+    successful selection is never coarsened further and there is no retry
+    loop, only selection.
+    """
+    warnings: list[str] = []
+    if grid is not None and not (isinstance(grid, str) and grid.strip().lower() == "auto"):
+        try:
+            value = float(grid)
+        except (TypeError, ValueError):
+            raise ValueError(f"--grid must be 'auto' or a number in mm, got {grid!r}") from None
+        if value <= 0:
+            raise ValueError(f"--grid must be a positive pitch in mm, got {value}")
+        return value, warnings
+    try:
+        from kicad_tools.router.clearance_resolver import resolve_routing_clearances
+        from kicad_tools.router.io import auto_select_grid_resolution, extract_pad_positions
+
+        clearance = resolve_routing_clearances(path, target_mm=pcb_rules.min_clearance).trace_mm
+        pads = extract_pad_positions(path)
+        if not pads:
+            return None, warnings
+        board_width: float | None = None
+        board_height: float | None = None
+        outline = pcb.get_board_outline()
+        if outline:
+            xs = [p[0] for p in outline]
+            ys = [p[1] for p in outline]
+            board_width = max(xs) - min(xs)
+            board_height = max(ys) - min(ys)
+        selection = auto_select_grid_resolution(
+            pads=pads,
+            clearance=clearance,
+            board_width=board_width,
+            board_height=board_height,
+        )
+        if selection.memory_forced_unsafe_grid:
+            warnings.append(
+                f"Auto-selected a {selection.resolution:.4g}mm grid, coarser than "
+                f"clearance/2 ({clearance / 2:.4g}mm), because the memory cap "
+                "forced it; copper may violate clearance (Issue #9620)"
+            )
+        return float(selection.resolution), warnings
+    except Exception as exc:
+        logger.warning(
+            "route-auto auto grid selection failed (%s); falling back to clearance/2", exc
+        )
+        return None, warnings
+
+
 def _detect_stub_terminals_for_pcb(pcb: PCB, region_box: tuple[float, float, float, float]) -> dict:
     """Detect boundary stub terminals for every straddling net on ``pcb``.
 
@@ -570,6 +638,7 @@ def route_net_auto(
     via_drill: float | None = None,
     via_diameter: float | None = None,
     diagnose_unrouted_budget: float | None = None,
+    grid: float | str | None = None,
 ) -> dict:
     """Route a specific net using the RoutingOrchestrator.
 
@@ -635,6 +704,14 @@ def route_net_auto(
                 board at route-auto's fine grid resolution) and add the
                 ``unrouted`` list and ``unrouted_diagnosis`` summary to the
                 result.  ``None`` / ``0`` (the default) skips it.
+        grid: Issue #9620.  The routing grid pitch in mm, or ``None`` /
+                ``"auto"`` (the default) to auto-select: the same
+                pad-position-aware, memory-capped selector ``kct route --grid
+                auto`` uses (``auto_select_grid_resolution``), replacing the
+                legacy fixed ``clearance / 2`` lattice that had no memory cap
+                and could burn a long net's whole budget on a fine pitch over
+                a big board.  An explicit numeric value is honoured as given
+                (no adaptive coarsening, no retry loop -- selection only).
 
     Returns:
         Dictionary with routing result including:
@@ -769,9 +846,15 @@ def route_net_auto(
     # Extract design rules from PCB
     pcb_text = path.read_text()
     pcb_rules = parse_pcb_design_rules(pcb_text)
-    design_rules = pcb_rules.to_design_rules()
+    # Issue #9620: the routing grid -- auto-selected (pad-aware, memory-
+    # capped, the ``kct route --grid auto`` selector) or an explicit --grid
+    # value honoured as given.  ``None`` only when selection could not run;
+    # ``to_design_rules`` then keeps its legacy clearance/2 fallback.
+    grid_resolution, grid_warnings = _resolve_route_auto_grid(path, pcb, pcb_rules, grid)
+    design_rules = pcb_rules.to_design_rules(grid_resolution=grid_resolution)
     # Issue #6283: honour the board's .kicad_pro / .kicad_dru clearances.
     clearance_warnings = _apply_declared_clearances(path, pcb_rules, design_rules)
+    clearance_warnings.extend(grid_warnings)
 
     # Apply explicit via-geometry overrides (Issue #4247).  Only the fields the
     # caller explicitly passes are overridden; the rest still derive from the

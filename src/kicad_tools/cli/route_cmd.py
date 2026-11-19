@@ -22360,6 +22360,23 @@ _CHAIN_COMPLETE_ACCEPT_EXITS = frozenset({0, 8})
 # negotiation that ends near the deadline cannot turn into a timeout.
 _CHAIN_COMPLETE_MIN_BUDGET_S = 90.0
 
+# Issue #9620: the budget-only coarser retry runs only on the partial-routing
+# exit -- a batch that routed something but ended below --min-completion.
+# Exit 1 (fatal, nothing routed), 3/4 (dirty copper -- coarsening does not fix
+# shorts), 5 (interrupted), 9 (pre-route gate) and 10 (unverified success) all
+# keep their own verdicts; a batch that met its threshold (0) succeeded by
+# contract and is never re-run.
+_BUDGET_RETRY_EXIT = 2
+# Inner-pass exits whose staged board may be promoted: clean (0), still-partial
+# (2 -- the inner exit ladder has already cleared it of seg-seg / short /
+# pairwise / stranded-pour violations by the time it returns 2) and UNVERIFIED
+# (10 -- everything routed, the post-route DRC did not finish).  Dirty-copper
+# exits (3, 4) and fatal (1) discard the retry even when it closed nets.
+_BUDGET_RETRY_ACCEPT_EXITS = frozenset({0, 2, EXIT_UNVERIFIED})
+# Like the chained completion pass: under ``--timeout`` the retry is skipped
+# below this much remaining budget so it cannot turn into a deadline timeout.
+_BUDGET_RETRY_MIN_BUDGET_S = 90.0
+
 
 def _restore_supervisor_control(control: str, snapshot: str) -> None:
     """Put the supervisor control record back (JSON sidecar, not PCB text)."""
@@ -22843,6 +22860,285 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
     return chain_rc if not after and chain_rc == 0 else result
 
 
+def _budget_retry_argv(argv: list[str] | None, grid_mm: float, staged: Path) -> list[str]:
+    """Argv for the one-shot coarser-grid retry (Issue #9620).
+
+    The operator's own argv is reused verbatim -- every copper-affecting flag
+    (``--seed``, ``--manufacturer``, escalation selectors, budgets, ...) reaches
+    the retry unchanged because it is the same command line -- with exactly
+    three edits:
+
+    * ``--grid`` is replaced with the coarser numeric pitch, so the inner run
+      takes the explicit-grid path (no auto selection, no multi-resolution
+      plan) and, crucially, sets ``args._grid_selection = "explicit"``: the
+      retry can never chain another retry.
+    * ``-o`` / ``--output`` is replaced with the staging path, so the first
+      result stays untouched until the retry is judged better.
+    * ``--lint-gate`` / ``--lint-gate-waivers`` / ``--lint-gate-strict`` are
+      dropped: the OUTER run's gate (which finishes after this pass) judges
+      whatever board ends up at ``--output``, promoted or not.
+    """
+    base = list(sys.argv[1:]) if argv is None else list(argv)
+    out: list[str] = []
+    grid_set = False
+    output_set = False
+    i = 0
+    while i < len(base):
+        tok = base[i]
+        if tok == "--grid":
+            out.extend(["--grid", f"{grid_mm:g}"])
+            grid_set = True
+            i += 2
+        elif tok.startswith("--grid="):
+            out.append(f"--grid={grid_mm:g}")
+            grid_set = True
+            i += 1
+        elif tok in ("-o", "--output"):
+            out.extend([tok, str(staged)])
+            output_set = True
+            i += 2
+        elif tok.startswith("--output="):
+            out.append(f"--output={staged}")
+            output_set = True
+            i += 1
+        elif tok in ("--lint-gate", "--lint-gate-strict"):
+            i += 1
+        elif tok == "--lint-gate-waivers":
+            i += 2
+        elif tok.startswith("--lint-gate-waivers="):
+            i += 1
+        else:
+            out.append(tok)
+            i += 1
+    if not grid_set:
+        out.extend(["--grid", f"{grid_mm:g}"])
+    if not output_set:
+        out.extend(["-o", str(staged)])
+    return out
+
+
+def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int:
+    """One automatic coarser-grid retry after a budget-only failed batch (#9620).
+
+    The PCBJam failure mode: a fine auto-selected lattice makes long nets burn
+    their per-net budget (timeout / iteration cap) with no recourse.  When the
+    batch ended partial (exit 2), the grid was auto-selected, and EVERY open
+    signal net's last recorded search failure is budget-labelled -- the
+    ``.search_failures.json`` sidecar's merged grid+lattice classification,
+    where a geometric reason always beats a budget one -- the whole batch is
+    re-run once at 2x the resolution, capped at the clearance safety ceiling
+    (the explicit-grid DRC bound ``grid <= clearance``, so the retry needs no
+    ``--force``).  The retry reuses the operator's argv via
+    :func:`_budget_retry_argv` and the existing ``_main_impl`` flow, not a new
+    routing loop.
+
+    A strict no-op -- ``result`` untouched, nothing written -- unless every
+    gate passes.  No retry when the user passed an explicit ``--grid`` (#6741
+    semantics: honoured as given), when any failure is geometric (no-path --
+    do not coarsen a board that is genuinely blocked), when an open net has no
+    recorded reason, or under the same ineligibility set as the chained
+    completion pass (``--complete``, ``--resume``/``--checkpoint``,
+    ``--nets``/``--skip-nets``/``--region``, non-grid engines, ``--format
+    json``, an interrupt).  The staged board is promoted over ``-o`` only when
+    the retry routes strictly more nets; a retry that routes fewer (or equal)
+    keeps the first result, per the issue's acceptance criteria.
+    """
+    if (
+        result != _BUDGET_RETRY_EXIT
+        or getattr(args, "_grid_selection", None) != "auto"
+        or getattr(args, "dry_run", False)
+        or getattr(args, "complete", False)
+        or getattr(args, "resume", None)
+        or getattr(args, "checkpoint", None)
+        or getattr(args, "nets", None)
+        or getattr(args, "skip_nets", None)
+        or getattr(args, "region", None)
+        or _resolve_route_engine(args) != "grid"
+        or getattr(args, "format", "text") == "json"
+        or _interrupt_pending()
+    ):
+        return result
+    pcb = Path(args.pcb)
+    output = (
+        Path(args.output) if getattr(args, "output", None) else pcb.with_stem(pcb.stem + "_routed")
+    )
+    if not output.is_file():
+        return result
+    try:
+        first_grid = float(args.grid)
+        clearance = float(args.clearance)
+    except (TypeError, ValueError):
+        return result
+    retry_grid = round(min(first_grid * 2.0, clearance), 6)
+    if retry_grid <= first_grid + 1e-9:
+        # Already at/over the clearance ceiling -- no coarser legal grid.
+        return result
+
+    from kicad_tools.router.partial_rescue import partially_connected_signal_nets
+    from kicad_tools.router.stuck_classifier import (
+        is_budget_search_failure,
+        load_search_failures_sidecar,
+    )
+
+    from .route_deadline import CONTROL_ENV, DEADLINE_ENV
+
+    quiet = bool(getattr(args, "quiet", False))
+    manufacturer = getattr(args, "manufacturer", "jlcpcb") or "jlcpcb"
+    excluded = frozenset(
+        n.strip()
+        for n in (getattr(args, "complete_exclude_nets", "") or "").split(",")
+        if n.strip()
+    )
+    # Issue #7922, as for the chained completion pass: a placement-invalid net
+    # is open by design and was never attempted, so it must not veto (or gate)
+    # the retry.
+    disposition = getattr(args, "_initial_placement_disposition", None) or getattr(
+        args, "_placement_disposition", None
+    )
+    if disposition is not None:
+        excluded |= frozenset(disposition.invalid_nets)
+
+    def _open_nets(board: Path) -> list[str]:
+        return list(
+            partially_connected_signal_nets(
+                board,
+                manufacturer=manufacturer,
+                excluded_nets=excluded,
+                include_unrouted=True,
+            )
+        )
+
+    deadline = os.environ.get(DEADLINE_ENV)
+    if deadline is not None:
+        remaining = float(deadline) - time.monotonic()
+        if remaining < _BUDGET_RETRY_MIN_BUDGET_S:
+            if not quiet:
+                print(
+                    f"\n--- Coarser-grid retry skipped: {remaining:.0f}s of --timeout "
+                    f"left (< {_BUDGET_RETRY_MIN_BUDGET_S:.0f}s) ---"
+                )
+            return result
+
+    try:
+        before = _open_nets(output)
+    except Exception:
+        return result
+    if not before:
+        return result
+    labels = load_search_failures_sidecar(output) or {}
+    unlabelled = [n for n in before if n not in labels]
+    geometric = [n for n in before if n in labels and not is_budget_search_failure(labels[n])]
+    if unlabelled or geometric:
+        # A geometric give-up means the router PROVED no path exists at this
+        # pitch for at least one net; more budget or a coarser lattice is not
+        # the fix, and an unlabelled open net is treated the same (fail closed).
+        if not quiet:
+            why = (
+                f"{len(geometric)} geometric failure(s) "
+                f"({', '.join(f'{n}:{labels[n]}' for n in geometric[:4])})"
+                if geometric
+                else f"{len(unlabelled)} open net(s) with no recorded reason"
+            )
+            print(f"\n--- Coarser-grid retry skipped: {why}; not a budget-only failure ---")
+        return result
+
+    if not quiet:
+        names = ", ".join(before)
+        capped = " (capped at the clearance ceiling)" if retry_grid < first_grid * 2.0 else ""
+        print(
+            f"\n--- Coarser-grid retry (Issue #9620): all {len(before)} open net(s) "
+            f"({names}) stopped at the search budget (timeout / iteration cap); "
+            f"retrying the batch once on a {retry_grid:g}mm grid "
+            f"({first_grid:g}mm x2{capped}) ---"
+        )
+    stage_stem = output.stem + ".coarser"
+    staged = output.with_name(stage_stem + output.suffix)
+    retry_argv = _budget_retry_argv(argv, retry_grid, staged)
+
+    def _staged_files() -> list[Path]:
+        import glob
+
+        return sorted(
+            Path(f) for f in glob.glob(glob.escape(str(output.with_name(stage_stem))) + "*")
+        )
+
+    def _discard() -> None:
+        for f in _staged_files():
+            f.unlink(missing_ok=True)
+
+    # Same supervisor / receipt restoration contract as the chained completion
+    # pass: the inner run republishes the output identity and receipt context;
+    # put the outer invocation's back so a later timeout quarantines -o and the
+    # outer run still owns the receipt.
+    control = os.environ.get(CONTROL_ENV)
+    control_snapshot: str | None = None
+    if control:
+        try:
+            control_snapshot = Path(control).read_text()
+        except OSError:
+            control_snapshot = None
+    from . import route_receipt
+
+    outer_invocation = route_receipt._current.get()
+
+    _discard()
+    retry_rc: int | None = None
+    after = before
+    try:
+        try:
+            retry_rc = _main_impl(retry_argv)
+            if staged.is_file():
+                after = _open_nets(staged)
+        except BaseException as exc:
+            print(
+                f"  Coarser-grid retry failed ({type(exc).__name__}: {exc}); "
+                "keeping the first result"
+            )
+            retry_rc, after = None, before
+        finally:
+            route_receipt._current.set(outer_invocation)
+            if control and control_snapshot is not None:
+                _restore_supervisor_control(control, control_snapshot)
+        if (
+            retry_rc not in _BUDGET_RETRY_ACCEPT_EXITS
+            or not staged.is_file()
+            or len(after) >= len(before)
+        ):
+            if not quiet:
+                print(
+                    "  Coarser-grid retry did not route more nets "
+                    f"(exit {retry_rc}, {len(after)} open vs {len(before)}); "
+                    "first result kept"
+                )
+            return result
+        # Sidecars first, the board last (same promotion set as the chained
+        # completion pass: the receipt and constraint sidecars are re-derived
+        # by the outer run).
+        for f in _staged_files():
+            if (
+                f != staged
+                and f.suffix not in {".kicad_pro", ".kicad_dru", ".kicad_prl"}
+                and not f.name.endswith(".route.json")
+            ):
+                os.replace(
+                    f,
+                    output.with_name(
+                        output.name[: -len(output.suffix)] + f.name[len(stage_stem) :]
+                    ),
+                )
+        os.replace(staged, output)
+    finally:
+        # Also runs on RouteDeadlineExpired / KeyboardInterrupt: -o was never
+        # touched before promotion, so only staging needs removing.
+        _discard()
+    if not quiet:
+        print(
+            f"  Coarser-grid retry routed {len(before) - len(after)} more net(s) "
+            f"on the {retry_grid:g}mm grid; promoted"
+        )
+    return retry_rc if not after and retry_rc != 2 else result
+
+
 def _main_impl(argv: list[str] | None = None) -> int:
     parser = _route_parser()
     args = parser.parse_args(argv)
@@ -22909,6 +23205,13 @@ def _main_impl(argv: list[str] | None = None) -> int:
                             args._lint_gate_output = str(gate.output)
                             args.output = str(staged)
                     result = _run_main_impl(args, parser, argv)
+                    # Issue #9620: the budget-only coarser retry re-routes the
+                    # whole batch before the chained completion pass, so its
+                    # classification reads the grid pass's own give-up labels
+                    # (a completion pass would overwrite them with lattice
+                    # declines), and a promoted fully-routed board makes the
+                    # completion pass a no-op.
+                    result = _chain_budget_coarser_pass(args, argv, result)
                     result = _chain_complete_pass(args, argv, result)
                 except BaseException:
                     if gate is not None:
