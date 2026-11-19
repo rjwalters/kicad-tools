@@ -224,8 +224,8 @@ reasons:
 Re-promote the auto-detect work as a separate issue once [#3089] resolves
 and a regression baseline exists for board 06's escape-time behavior.
 
-[#3072]: https://github.com/rjwalters/kicad-tools/issues/3072
-[#3089]: https://github.com/rjwalters/kicad-tools/issues/3089
+[#3072]: https://github.com/2AMLogic/kicad-tools/issues/3072
+[#3089]: https://github.com/2AMLogic/kicad-tools/issues/3089
 
 ## Known Issues
 
@@ -237,13 +237,13 @@ These are known limitations that may affect your experience:
 | [#661] | All | Router doesn't always warn about DRC violations |
 | [#3918] | All | `kct build` currently cannot complete on any demo board — use each board's `generate_design.py`/`design.py` recipe until the orchestrator fixes land |
 
-[#659]: https://github.com/rjwalters/kicad-tools/issues/659
-[#661]: https://github.com/rjwalters/kicad-tools/issues/661
-[#3918]: https://github.com/rjwalters/kicad-tools/issues/3918
-[#3921]: https://github.com/rjwalters/kicad-tools/issues/3921
-[#3922]: https://github.com/rjwalters/kicad-tools/issues/3922
-[#3766]: https://github.com/rjwalters/kicad-tools/issues/3766
-[#3952]: https://github.com/rjwalters/kicad-tools/issues/3952
+[#659]: https://github.com/2AMLogic/kicad-tools/issues/659
+[#661]: https://github.com/2AMLogic/kicad-tools/issues/661
+[#3918]: https://github.com/2AMLogic/kicad-tools/issues/3918
+[#3921]: https://github.com/2AMLogic/kicad-tools/issues/3921
+[#3922]: https://github.com/2AMLogic/kicad-tools/issues/3922
+[#3766]: https://github.com/2AMLogic/kicad-tools/issues/3766
+[#3952]: https://github.com/2AMLogic/kicad-tools/issues/3952
 
 ## Pad pin types (`pintype`)
 
@@ -299,9 +299,9 @@ themselves ([#5985]):
   its bytes, so refresh the board's `readiness.json` by re-running its
   generator.
 
-[#5985]: https://github.com/rjwalters/kicad-tools/issues/5985
-[#5998]: https://github.com/rjwalters/kicad-tools/issues/5998
-[#6025]: https://github.com/rjwalters/kicad-tools/issues/6025
+[#5985]: https://github.com/2AMLogic/kicad-tools/issues/5985
+[#5998]: https://github.com/2AMLogic/kicad-tools/issues/5998
+[#6025]: https://github.com/2AMLogic/kicad-tools/issues/6025
 
 ## Project Files (.kct)
 
@@ -467,7 +467,7 @@ Multi-protocol HSDI regression testbench:
 `target_diff_impedance`, `target_single_impedance`, `skew_tolerance_mm`).
 Not a working device --- synthetic sinks drive routing exercise only.
 
-[#2556]: https://github.com/rjwalters/kicad-tools/issues/2556
+[#2556]: https://github.com/2AMLogic/kicad-tools/issues/2556
 
 ### 07 - SDRAM exerciser and archived match-group fixture
 
@@ -488,7 +488,7 @@ Multi-protocol N-trace match-group regression testbench:
 members within a group).  Not a working device --- synthetic
 sources/sinks drive routing exercise only.
 
-[#2661]: https://github.com/rjwalters/kicad-tools/issues/2661
+[#2661]: https://github.com/2AMLogic/kicad-tools/issues/2661
 
 ## Other Contents
 
@@ -511,7 +511,7 @@ worktrees — they dangle unless the sibling repos are checked out locally.
 - [examples/](../examples/) - Feature-specific demos (BOM, DRC, placement, etc.)
 - [examples/04-autorouter/](../examples/04-autorouter/) - Routing strategy comparisons
 
-[#6269]: https://github.com/rjwalters/kicad-tools/issues/6269
-[#7209]: https://github.com/rjwalters/kicad-tools/issues/7209
-[#7220]: https://github.com/rjwalters/kicad-tools/issues/7220
-[#7250]: https://github.com/rjwalters/kicad-tools/issues/7250
+[#6269]: https://github.com/2AMLogic/kicad-tools/issues/6269
+[#7209]: https://github.com/2AMLogic/kicad-tools/issues/7209
+[#7220]: https://github.com/2AMLogic/kicad-tools/issues/7220
+[#7250]: https://github.com/2AMLogic/kicad-tools/issues/7250

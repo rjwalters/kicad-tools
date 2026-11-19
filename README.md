@@ -684,7 +684,7 @@ exemptions and per-command JSON shapes.
 
 Release notes live in [CHANGELOG.md](CHANGELOG.md) (one section per release,
 newest first) and on the
-[GitHub Releases page](https://github.com/rjwalters/kicad-tools/releases).
+[GitHub Releases page](https://github.com/2AMLogic/kicad-tools/releases).
 Changes merged since the last release are collected as fragments under
 [`changelog.d/`](changelog.d/) until the next release assembles them.
 
@@ -721,7 +721,7 @@ This project uses [uv](https://docs.astral.sh/uv/) for fast, reproducible Python
 
 ```bash
 # Clone repository
-git clone https://github.com/rjwalters/kicad-tools.git
+git clone https://github.com/2AMLogic/kicad-tools.git
 cd kicad-tools
 
 # Set up development environment (installs all dev dependencies)

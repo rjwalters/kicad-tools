@@ -33,7 +33,7 @@ const projectBoards = boards.filter((b) => b.category === "project");
 // check and `resolve(process.cwd(), "public", "boards")` root resolution. Runs
 // in Node at build time (cwd = `site/`), so `existsSync` is available.
 const stagedBoardsRoot = resolve(process.cwd(), "public", "boards");
-const REPO = "https://github.com/rjwalters/kicad-tools";
+const REPO = "https://github.com/2AMLogic/kicad-tools";
 const DOCS = `${REPO}/blob/main/docs`;
 const harnessNames = harnesses.map(harnessLabel);
 const harnessList =

@@ -14,7 +14,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kicad_tools.sync.discover import resolve_schematic_for_pcb
+from kicad_tools.sync.discover import (
+    pcb_matches_spec,
+    resolve_schematic_for_pcb,
+    resolve_schematic_with_source,
+)
 
 
 def _touch(path: Path) -> Path:
@@ -121,3 +125,132 @@ class TestPrecedencePreserved:
 
         resolved = resolve_schematic_for_pcb(pcb)
         assert resolved == tmp_path / "custom_name.kicad_sch"
+
+
+class TestSiblingRevisionUnderOneSpec:
+    """Issue #9637: one project.kct names revision A; revision B sits beside it."""
+
+    @staticmethod
+    def _layout(tmp_path, artifacts: str = "") -> tuple[Path, Path]:
+        a = tmp_path / "rev_a"
+        b = tmp_path / "rev_b"
+        a.mkdir()
+        b.mkdir()
+        for d in (a, b):
+            _touch(d / "board.kicad_sch")
+        pcb_a = _touch(a / "board_routed.kicad_pcb")
+        pcb_b = _touch(b / "board_routed.kicad_pcb")
+        (tmp_path / "project.kct").write_text(
+            'kct_version: "1.0"\n'
+            "project:\n"
+            '  name: "test"\n'
+            "  artifacts:\n"
+            '    schematic: "rev_a/board.kicad_sch"\n'
+            '    pcb: "rev_a/board.kicad_pcb"\n' + artifacts
+        )
+        return pcb_a, pcb_b
+
+    def test_spec_board_still_resolves_via_project_kct(self, tmp_path):
+        pcb_a, _ = self._layout(tmp_path)
+        assert resolve_schematic_with_source(pcb_a) == (
+            tmp_path / "rev_a" / "board.kicad_sch",
+            "project.kct",
+        )
+
+    def test_sibling_revision_resolves_its_own_schematic(self, tmp_path):
+        _, pcb_b = self._layout(tmp_path)
+        assert resolve_schematic_with_source(pcb_b) == (
+            tmp_path / "rev_b" / "board.kicad_sch",
+            "sibling",
+        )
+        assert resolve_schematic_for_pcb(pcb_b) == tmp_path / "rev_b" / "board.kicad_sch"
+
+    def test_explicit_pcb_routed_artifact_matches(self, tmp_path):
+        pcb_a, pcb_b = self._layout(tmp_path, '    pcb_routed: "rev_a/board_routed.kicad_pcb"\n')
+        assert pcb_matches_spec(pcb_a, tmp_path / "project.kct", _spec(tmp_path))
+        assert not pcb_matches_spec(pcb_b, tmp_path / "project.kct", _spec(tmp_path))
+
+    def test_spec_without_board_artifact_matches_any_pcb(self, tmp_path):
+        _, pcb_b = self._layout(tmp_path)
+        (tmp_path / "project.kct").write_text(
+            'kct_version: "1.0"\n'
+            "project:\n"
+            '  name: "test"\n'
+            "  artifacts:\n"
+            '    schematic: "rev_a/board.kicad_sch"\n'
+        )
+        assert resolve_schematic_with_source(pcb_b) == (
+            tmp_path / "rev_a" / "board.kicad_sch",
+            "project.kct",
+        )
+
+    def test_spec_beside_pcb_is_that_boards_spec(self, tmp_path):
+        # Spec in the PCB's own directory describes it even if the artifact
+        # name differs (versioned boards, recipe fixtures).
+        _touch(tmp_path / "custom.kicad_sch")
+        pcb = _touch(tmp_path / "board_v5.kicad_pcb")
+        (tmp_path / "project.kct").write_text(
+            'kct_version: "1.0"\n'
+            "project:\n"
+            '  name: "test"\n'
+            "  artifacts:\n"
+            '    schematic: "custom.kicad_sch"\n'
+            '    pcb: "board.kicad_pcb"\n'
+        )
+        assert resolve_schematic_with_source(pcb) == (tmp_path / "custom.kicad_sch", "project.kct")
+
+    def test_missing_spec_schematic_falls_through(self, tmp_path):
+        pcb_a, _ = self._layout(tmp_path)
+        (tmp_path / "rev_a" / "board.kicad_sch").unlink()
+        assert resolve_schematic_with_source(pcb_a) == (None, None)
+
+    def test_source_labels(self, tmp_path):
+        _touch(tmp_path / "root.kicad_sch")
+        _touch(tmp_path / "root.kicad_pro")
+        pcb = _touch(tmp_path / "root_v2.kicad_pcb")
+        assert resolve_schematic_with_source(pcb)[1] == ".kicad_pro pairing"
+        flat = tmp_path / "flat"
+        flat.mkdir()
+        _touch(flat / "only.kicad_sch")
+        assert resolve_schematic_with_source(_touch(flat / "x.kicad_pcb"))[1] == "sole schematic"
+
+
+def _spec(tmp_path):
+    from kicad_tools.spec import load_spec
+
+    return load_spec(tmp_path / "project.kct")
+
+
+def test_check_reports_schematic_path_and_source_for_sibling_revision(tmp_path, capsys):
+    """Issue #9637: kct check names the schematic LVS ran against and how."""
+    from kicad_tools.cli.check_cmd import (
+        MetaCheckResult,
+        SubCheckResult,
+        _resolve_check_schematic_with_source,
+        print_meta_check_stanza,
+    )
+
+    _, pcb_b = TestSiblingRevisionUnderOneSpec._layout(tmp_path)
+    sch, source = _resolve_check_schematic_with_source(None, pcb_b)
+    assert sch == tmp_path / "rev_b" / "board.kicad_sch"
+    assert source == "sibling"
+
+    explicit = tmp_path / "rev_a" / "board.kicad_sch"
+    assert _resolve_check_schematic_with_source(str(explicit), pcb_b) == (
+        explicit.resolve(),
+        "--schematic",
+    )
+
+    ok = SubCheckResult(status="PASSED", detail="ok")
+    result = MetaCheckResult(
+        drc=ok,
+        erc=ok,
+        lvs=ok,
+        manifest=ok,
+        schematic_path=str(sch),
+        schematic_source=source,
+    )
+    result.compute_overall()
+    assert result.to_dict()["schematic"] == {"path": str(sch), "source": "sibling"}
+    print_meta_check_stanza(result)
+    assert f"Schematic: {sch} (found via sibling)" in capsys.readouterr().out
