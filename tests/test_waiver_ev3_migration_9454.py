@@ -593,6 +593,29 @@ class TestInactiveRuleOrphans:
         assert f"orphan (no current finding): {key}" in out
         assert "[rule not evaluated in this run]" in out
 
+    def test_rule_skipped_for_a_beyond_the_old_two_reason_says_not_evaluated(
+        self, tmp_path, capsys
+    ):
+        """Issue #9529: the inactive set derives from the recorded ``skipped``
+        coverage states, so it generalises past the two rules the hand-mirrored
+        helper knew.  The fixture board has no net-class-map sidecar, so
+        ``match_group_length_skew`` is skipped ``no_net_class_map`` -- a skip
+        reason the old helper had no condition for."""
+        from kicad_tools.validate.coverage import skipped as cov_skipped
+
+        board = _write_board(tmp_path)
+        assert check_cmd._inactive_rules_from_coverage(
+            {"match_group_length_skew": cov_skipped("match_group_length_skew", "no_net_class_map")}
+        ) == frozenset({"match_group_length_skew"})
+        key = "match_group_length_skew|GND||"
+        waivers = _write_waivers(tmp_path, [_entry(key, "ev3:0123456789abcdef")])
+
+        code, out = _migrate(capsys, board, waivers, "--write")
+
+        assert code == 0
+        assert f"orphan (no current finding): {key}" in out
+        assert "[rule not evaluated in this run]" in out
+
     def test_inactive_rules_parameter_marks_only_the_named_rules(self, tmp_path):
         board = _write_board(tmp_path)
         findings, pcb = _findings(board)
@@ -642,8 +665,58 @@ class TestInactiveRuleOrphans:
         assert orphan.candidates == ("path_ampacity|U1-A|GND|F.Cu",)
 
 
+class TestInactiveRulesFromCoverage:
+    """``check_cmd._inactive_rules_from_coverage`` semantics (issue #9529)."""
+
+    @staticmethod
+    def _coverage() -> dict:
+        from kicad_tools.validate.coverage import checked, skipped, unknown
+
+        return {
+            "ampacity": skipped("ampacity", "no_declared_targets"),
+            "path_ampacity": skipped("path_ampacity", "no_declared_current_paths"),
+            "reinforcement_incomplete": skipped(
+                "reinforcement_incomplete", "no_reinforcement_eligible_paths"
+            ),
+            "physical_copper_gap": skipped("physical_copper_gap", "opt_in:--physical-copper-gap"),
+            "tht_smd_spacing": skipped("tht_smd_spacing", "opt_in:--mfr jlcpcb"),
+            "routing_policy": skipped("routing_policy", "no_declared_policies"),
+            "match_group_length_skew": skipped("match_group_length_skew", "no_net_class_map"),
+            "diffpair_length_skew": skipped("diffpair_length_skew", "no_diff_pairs_detected"),
+            "width_consistency": skipped("width_consistency", "opt_in:--only"),
+            "clearance": checked("clearance"),
+            "silkscreen": checked("silkscreen"),
+            "segment_zone": unknown("segment_zone", "zone_fills_absent (2 unfilled zone(s))"),
+            "impedance": unknown("impedance", "diff_pair_unmeasurable (P/N)"),
+        }
+
+    def test_every_skipped_state_is_inactive_whatever_the_reason(self):
+        skipped_names = {name for name, cov in self._coverage().items() if cov.state == "skipped"}
+        assert check_cmd._inactive_rules_from_coverage(self._coverage()) == skipped_names
+
+    def test_unknown_states_are_not_inactive_the_rule_ran_and_may_find(self):
+        from kicad_tools.validate.coverage import unknown
+
+        coverage = {
+            "ampacity": unknown(
+                "ampacity",
+                "needs_input:target_ampacity (project.kct declares 1 current requirement(s))",
+            ),
+            "sch_fields": unknown("sch_fields", "needs_input:schematic"),
+        }
+        assert check_cmd._inactive_rules_from_coverage(coverage) == frozenset()
+
+    def test_checked_states_are_not_inactive(self):
+        from kicad_tools.validate.coverage import checked
+
+        assert (
+            check_cmd._inactive_rules_from_coverage({"clearance": checked("clearance")})
+            == frozenset()
+        )
+
+
 class TestUntouchedListedByKey:
-    def test_ev2_ev5_and_legacy_entries_are_listed_not_only_counted(self, tmp_path):
+    def test_ev2_entry_is_not_migratable_ev5_and_legacy_need_no_migration(self, tmp_path):
         board = _write_board(tmp_path)
         findings, pcb = _findings(board)
         legacy = {
@@ -669,8 +742,15 @@ class TestUntouchedListedByKey:
             COURTYARD_R1,
             "courtyard_missing (legacy rule/items entry)",
         ]
+        # Issue #9529: an ev2 hash predates the oldest re-bindable recipe, so
+        # this command cannot migrate it -- it must not read "no migration
+        # needed", which an ev4/ev5 entry (already current) legitimately earns.
+        assert report.not_migratable_keys == [COURTYARD_R2]
         text = "\n".join(format_waiver_migration(report, waivers, write=False))
-        assert f"untouched (no migration needed): {COURTYARD_R2}" in text
+        assert (
+            f"not migratable by this command (predates ev3; re-record the waiver): {COURTYARD_R2}"
+            in text
+        )
         assert f"untouched (no migration needed): {COURTYARD_R1}" in text
         assert (
             "untouched (no migration needed): courtyard_missing (legacy rule/items entry)" in text

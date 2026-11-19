@@ -1091,6 +1091,14 @@ def write_keyed_waivers(
 # ev3 -> ev4 migration (Issue #9454)
 # ---------------------------------------------------------------------------
 
+# Evidence-hash versions that predate ``ev3``, the oldest recipe this command
+# can re-bind: ``ev1`` (Issue #5946) and ``ev2`` (Issue #6011).  The ev3 -> ev4
+# re-bind is provable because the two recipes differ in exactly one field; that
+# proof does not reach back to ``ev1``/``ev2``, so an entry keyed under one is
+# reported ``not migratable by this command`` instead of ``no migration
+# needed`` (issue #9529).
+_PRE_EV3_EVIDENCE_VERSIONS = frozenset({"ev1", "ev2"})
+
 
 @dataclass(frozen=True)
 class WaiverMigrationItem:
@@ -1123,9 +1131,14 @@ class WaiverMigrationReport:
     #: Keyed entries that need no migration (already current version, mistake entries, ...).
     untouched: int = 0
     #: Names of the untouched entries that have one (issue #9504): the key of
-    #: an ``ev2:``/``ev4:``/``ev5:`` entry, or the rule name of a legacy
-    #: ``rule``/``items`` entry. Keyless malformed entries are only counted.
+    #: a keyed entry, or the rule name of a legacy ``rule``/``items`` entry.
+    #: Keyless malformed entries are only counted.
     untouched_keys: list[str] = field(default_factory=list)
+    #: The subset of ``untouched_keys`` whose ``evidence_hash`` version predates
+    #: ``ev3`` (``ev1:``/``ev2:``; issue #9529): this command re-binds ev3 ->
+    #: ev4 only, so those entries are *not migratable by this command* and the
+    #: report says so instead of implying no migration is needed.
+    not_migratable_keys: list[str] = field(default_factory=list)
     written: bool = False
 
 
@@ -1201,6 +1214,11 @@ def migrate_evidence_waivers(
         ):
             report.untouched += 1
             report.untouched_keys.append(key)
+            # Issue #9529: a version older than the oldest re-bindable recipe
+            # is not migratable by this command -- say so rather than imply
+            # no migration is needed.
+            if evidence_hash_version(old_hash) in _PRE_EV3_EVIDENCE_VERSIONS:
+                report.not_migratable_keys.append(key)
             continue
         matches = by_key.get(key, [])
         if not matches:
@@ -1315,5 +1333,11 @@ def format_waiver_migration(report: WaiverMigrationReport, path: Path, *, write:
             line += " -> re-waive candidate(s): " + ", ".join(repr(k) for k in shown)
         lines.append(line)
     for key in report.untouched_keys:
-        lines.append(f"  untouched (no migration needed): {key}")
+        if key in report.not_migratable_keys:
+            lines.append(
+                f"  not migratable by this command (predates {PRIOR_EVIDENCE_HASH_VERSION};"
+                f" re-record the waiver): {key}"
+            )
+        else:
+            lines.append(f"  untouched (no migration needed): {key}")
     return lines
