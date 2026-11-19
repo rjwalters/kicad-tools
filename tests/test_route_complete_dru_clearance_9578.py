@@ -32,6 +32,7 @@ from kicad_tools.router.board_clearance_rules import (
     ItemProps,
     evaluate_condition,
     item_props_for_type,
+    parse_dru,
 )
 from kicad_tools.router.clearance_resolver import (
     DeclaredClearanceRules,
@@ -129,6 +130,16 @@ class TestFootprintScopedRuleOnPreservedCopper:
         assert (
             evaluate_condition(
                 "A.memberOfFootprint('J3')", trace, ItemProps("Pad", "GND", footprint_ref="J3")
+            )
+            is False
+        )
+
+    def test_wildcard_does_not_match_board_copper(self) -> None:
+        """A wildcard matches footprint *names*; board copper has none (#9588 review)."""
+        trace = item_props_for_type("track", "+3V3", layer="F.Cu", footprint_ref="")
+        assert (
+            evaluate_condition(
+                "A.memberOfFootprint('*')", trace, ItemProps("Pad", "GND", footprint_ref="J3")
             )
             is False
         )
@@ -354,3 +365,189 @@ class TestConditionalNetClassRuleFloorsNewCopper:
         )
 
         assert read_declared_clearance_rules(pcb).dru_conditional_mm is None
+
+
+# ------------------------------------------- Direction 2, #9588-review scoping
+
+
+ZONE_DRU = """(version 1)
+(rule "Clearance - jlcpcb"
+  (constraint clearance (min 0.127mm)))
+(rule "SMD Pad Clearance - jlcpcb"
+  (condition "A.Type == 'Pad' && B.Type == 'Pad' && A.Pad_Type == 'SMD' && B.Pad_Type == 'SMD' \
+&& A.Net != B.Net && A.Reference != B.Reference")
+  (constraint clearance (min 0.2mm)))
+(rule "Zone clearance - GND (B.Cu)"
+  (layer "B.Cu")
+  (condition "(A.Type == 'Zone' && A.NetName == 'GND') || (B.Type == 'Zone' \
+&& B.NetName == 'GND')")
+  (constraint clearance (min 0.3mm)))
+(rule "Reviewed clearance - Power"
+  (condition "(A.NetClass == 'Power' || B.NetClass == 'Power') && !(A.Type == 'Pad' \
+&& B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
+  (constraint clearance (min 0.2mm)))
+"""
+
+_PAD_PAD_DRU = """(version 1)
+(rule "SMD Pad Clearance - jlcpcb"
+  (condition "A.Type == 'Pad' && B.Type == 'Pad' && A.Pad_Type == 'SMD' && B.Pad_Type == 'SMD' \
+&& A.Net != B.Net && A.Reference != B.Reference")
+  (constraint clearance (min 0.2mm)))
+"""
+
+
+def _expected_conditional_floor(dru_path: Path) -> float | None:
+    """Re-derive the conditional floor through a different parse path.
+
+    ``parse_dru`` + the probe shapes, so a bucketing bug in the resolver's
+    own ``.kicad_dru`` walk (a scoped rule leaking into another layer, as in
+    the first cut of the #9588-review fix) shows up as a mismatch.
+    """
+    from kicad_tools.router.clearance_resolver import (
+        _condition_may_select_routed_pair,
+        _is_via_scoped_condition,
+    )
+
+    rules, error = parse_dru(dru_path)
+    assert error is None, f"{dru_path}: {error}"
+    best: float | None = None
+    for rule in rules:
+        value = rule.value("clearance")
+        if value is None or rule.ignored:
+            continue
+        if rule.condition is None or _is_via_scoped_condition(rule.condition):
+            continue
+        if _condition_may_select_routed_pair(rule.condition):
+            best = value if best is None or value > best else best
+    return best
+
+
+class TestBoardWideConditionalFloorScopesToRoutedPairs:
+    """#9588 review: the board-wide conditional floor exists for the pairs
+    ``kct route`` commits, so a rule whose condition is provably false on
+    every (Track, Track) / (Track, Via) / (Via, Via) pair -- a zone-only or
+    pad-to-pad rule -- floors nothing, and one that might still apply keeps
+    the conservative floor."""
+
+    @staticmethod
+    def _board(tmp_path: Path, dru: str = ZONE_DRU) -> Path:
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        pcb.with_suffix(".kicad_dru").write_text(dru)
+        return pcb
+
+    def test_zone_and_pad_rules_floor_nothing(self, tmp_path: Path) -> None:
+        """The 0.3 mm zone rule and the 0.2 mm pad-to-pad rule are decided
+        false on every track/via pair; the undecided net-class rule keeps the
+        floor -- and nothing leaks into the unconditional bucket."""
+        pcb = self._board(tmp_path)
+
+        assert _read_dru_clearances(pcb.with_suffix(".kicad_dru")) == (
+            0.127,  # unconditional: no condition
+            None,  # via-scoped
+            0.2,  # conditional: the net-class rule only
+        )
+        declared = read_declared_clearance_rules(pcb)
+        assert declared.dru_mm == pytest.approx(0.127)
+        assert declared.dru_conditional_mm == pytest.approx(0.2)
+        assert declared.project_requirement() == (
+            pytest.approx(0.2),
+            RuleSource.PROJECT_DRU_CONDITIONAL,
+            None,
+        )
+
+    def test_zone_rule_alone_floors_nothing(self, tmp_path: Path) -> None:
+        pcb = self._board(
+            tmp_path,
+            """(version 1)
+(rule "Zone clearance - GND (B.Cu)"
+  (layer "B.Cu")
+  (condition "(A.Type == 'Zone' && A.NetName == 'GND') || (B.Type == 'Zone' \
+&& B.NetName == 'GND')")
+  (constraint clearance (min 0.3mm)))
+""",
+        )
+
+        declared = read_declared_clearance_rules(pcb)
+
+        assert declared.dru_mm is None
+        assert declared.dru_via_mm is None
+        assert declared.dru_conditional_mm is None
+        assert declared.project_requirement() is None
+        assert declared.via_requirement() is None
+        assert declared.is_empty()
+
+    def test_pad_to_pad_rule_alone_floors_nothing(self, tmp_path: Path) -> None:
+        declared = read_declared_clearance_rules(self._board(tmp_path, _PAD_PAD_DRU))
+
+        assert declared.dru_mm is None
+        assert declared.dru_via_mm is None
+        assert declared.dru_conditional_mm is None
+        assert declared.project_requirement() is None
+        assert declared.via_requirement() is None
+        assert declared.is_empty()
+
+    def test_undecidable_condition_keeps_the_floor(self, tmp_path: Path) -> None:
+        """``insideArea`` is not modelled: the probe is undecided, so the
+        rule keeps its floor -- the conservative reading."""
+        pcb = self._board(
+            tmp_path,
+            """(version 1)
+(rule "keepout band"
+  (condition "A.insideArea('X')")
+  (constraint clearance (min 0.25mm)))
+""",
+        )
+
+        assert read_declared_clearance_rules(pcb).dru_conditional_mm == pytest.approx(0.25)
+
+    def test_condition_true_on_a_routed_shape_keeps_the_floor(self, tmp_path: Path) -> None:
+        pcb = self._board(
+            tmp_path,
+            """(version 1)
+(rule "not a pad"
+  (condition "A.Type != 'Pad'")
+  (constraint clearance (min 0.9mm)))
+""",
+        )
+
+        assert read_declared_clearance_rules(pcb).dru_conditional_mm == pytest.approx(0.9)
+
+    def test_routed_example_boards_floor_only_at_routable_rules(self) -> None:
+        """Every routed example board's conditional floor equals the strictest
+        rule the probe still keeps -- the #9588-review measurement, pinned:
+        the zone-only 0.3 mm rules on 01/03 and the pad-to-pad 0.2 mm rule on
+        06 no longer win anything."""
+        boards = sorted(
+            Path(__file__).resolve().parents[1].glob("boards/*/output/*_routed.kicad_pcb")
+        )
+        if not boards:
+            pytest.skip("routed example boards not present")
+        for pcb in boards:
+            declared = read_declared_clearance_rules(pcb)
+            expected = _expected_conditional_floor(pcb.with_suffix(".kicad_dru"))
+            if expected is None:
+                assert declared.dru_conditional_mm is None, pcb
+            else:
+                assert declared.dru_conditional_mm == pytest.approx(expected), pcb
+
+    @pytest.mark.parametrize(
+        ("board_dir", "expected_mm"),
+        [
+            ("01-voltage-divider", 0.2),  # zone rules (0.3) dropped; Power rule wins
+            ("03-usb-joystick", 0.2),  # zone rules (0.3) dropped; the 3x jump is gone
+            ("06-diffpair-test", 0.2),  # pad-to-pad and zone rules dropped; Power wins
+            ("07-matchgroup-test", 0.175),  # AUX/SDRAM net-class rules keep their floor
+        ],
+    )
+    def test_measured_boards(self, board_dir: str, expected_mm: float) -> None:
+        pcbs = list(
+            (Path(__file__).resolve().parents[1] / "boards" / board_dir / "output").glob(
+                "*_routed.kicad_pcb"
+            )
+        )
+        if not pcbs:
+            pytest.skip(f"{board_dir} routed board not present")
+        assert read_declared_clearance_rules(pcbs[0]).dru_conditional_mm == pytest.approx(
+            expected_mm
+        )

@@ -64,7 +64,9 @@ a board that declares *less* than the router's target from being loosened.
 What is still deliberately **not** read: ``.kicad_dru`` rules carrying a
 ``(condition …)`` per *pair* -- the #9578 change floors the run at the
 strictest conditional ``clearance`` minimum
-(:attr:`DeclaredClearanceRules.dru_conditional_mm`), because KiCad enforces
+(:attr:`DeclaredClearanceRules.dru_conditional_mm`) whose condition can
+still select a track/via pair (the #9588 review scoped it: zone-only and
+pad-to-pad rules floor nothing), because KiCad enforces
 such a rule on every pair it selects and routing below it fails the board's
 own DRC -- but no per-pair resolution comes from a condition here: that is
 :class:`~kicad_tools.router.board_clearance_rules.BoardClearanceRules`' job
@@ -339,8 +341,12 @@ class DeclaredClearanceRules:
         dru_conditional_mm: Strictest **other conditional** ``(constraint
             clearance (min …))`` in the ``.kicad_dru`` -- a net-class rule
             (``A.NetClass == 'HV' || B.NetClass == 'HV'``), a footprint-scoped
-            one, anything else with a condition (#9578).  KiCad enforces such
-            a rule on every pair it selects, so its minimum is a floor on
+            one, anything else with a condition that can still select a
+            track/via pair (#9578; scoped by the #9588 review: a rule
+            provably false on every such pair -- a zone-only or pad-to-pad
+            rule -- floors nothing, because no pair the router commits can
+            select it).  KiCad enforces such a rule on every pair it
+            selects, so its minimum is a floor on
             what the board can require of *some* pair: both
             :meth:`project_requirement` and :meth:`via_requirement` carry it,
             and a run routed below it can fail the board's own DRC even when
@@ -985,6 +991,49 @@ def _is_via_scoped_condition(expression: str) -> bool:
     return bool(types) and "via" in types and all(kind in _VIA_PEER_TYPES for kind in types)
 
 
+#: Pair shapes the board-wide conditional floor governs: the track/via pairs
+#: ``kct route`` commits (#9588 review).  Both orders of the mixed shape, since
+#: KiCad decides an ordered pair and the condition may name the types in
+#: either order.
+_PROBE_PAIR_SHAPES: tuple[tuple[str, str], ...] = (
+    ("Track", "Track"),
+    ("Track", "Via"),
+    ("Via", "Track"),
+    ("Via", "Via"),
+)
+
+
+def _condition_may_select_routed_pair(expression: str) -> bool:
+    """Whether a conditional rule's condition can still select routed copper.
+
+    The board-wide conditional floor governs the track/via pairs ``kct route``
+    commits, so a rule whose condition is provably false on every such pair --
+    a zone-only rule (``A.Type == 'Zone' …``), a pad-to-pad one -- must not
+    raise it (#9588 review).  Each shape is probed with the kept-copper
+    audit's own evaluator: the copper type is known, everything else (net,
+    class, layer, footprint) is unknown, so type-only conditions resolve
+    decisively while net-class and footprint conditions stay undecided.  A
+    condition that is undecided on any shape -- or one the evaluator cannot
+    run at all -- may still select routed copper and keeps its floor, the
+    same conservative reading undecided conditions get everywhere else.
+    Never raises.
+    """
+    try:
+        from kicad_tools.router.board_clearance_rules import ItemProps, evaluate_condition
+
+        for a_type, b_type in _PROBE_PAIR_SHAPES:
+            verdict = evaluate_condition(
+                expression,
+                ItemProps(type=a_type, net_name=None),
+                ItemProps(type=b_type, net_name=None),
+            )
+            if verdict is not False:
+                return True
+        return False
+    except Exception:
+        return True
+
+
 def _read_dru_clearances(dru_path: Path) -> tuple[float | None, float | None, float | None]:
     """The three ``.kicad_dru`` clearance layers, from one parse of the file.
 
@@ -992,13 +1041,16 @@ def _read_dru_clearances(dru_path: Path) -> tuple[float | None, float | None, fl
     strictest unconditional ``(constraint clearance (min …))`` (see
     :func:`_read_dru_clearance`), the strictest one whose condition is
     via-scoped (:func:`_is_via_scoped_condition`, #6280), and -- #9578 --
-    the strictest remaining conditional one.  KiCad enforces a conditional
-    rule on every pair its condition selects, so the largest of those
-    minima is a floor on what the board can require of *some* pair; routing
-    below it can fail the board's own DRC even when the unconditional rule,
-    the board minimum and the netclass all sit lower.  A conditional rule
-    with ``(severity ignore)`` is skipped: where it wins, KiCad checks
-    nothing.  Never raises.
+    the strictest remaining conditional one **whose condition can still
+    select a track/via pair** (:func:`_condition_may_select_routed_pair`,
+    #9588 review).  KiCad enforces a conditional rule on every pair its
+    condition selects, so the largest of those minima is a floor on what
+    the board can require of *some* routed pair; routing below it can fail
+    the board's own DRC even when the unconditional rule, the board minimum
+    and the netclass all sit lower.  A conditional rule that is provably
+    false on every track/via pair -- zone-only, pad-to-pad -- contributes to
+    no board-wide floor, and one with ``(severity ignore)`` is skipped
+    outright: where it wins, KiCad checks nothing.  Never raises.
     """
     try:
         text = dru_path.read_text(encoding="utf-8", errors="replace")
@@ -1023,10 +1075,16 @@ def _read_dru_clearances(dru_path: Path) -> tuple[float | None, float | None, fl
         conditional = False
         if condition is not None:
             expression = condition.get_first_atom()
-            if expression is None or not _is_via_scoped_condition(str(expression)):
+            if expression is None:
                 conditional = True
-            else:
+            elif _is_via_scoped_condition(str(expression)):
                 via_scoped = True
+            elif _condition_may_select_routed_pair(str(expression)):
+                conditional = True
+            # else: the condition is provably false on every track/via pair
+            # the router commits (#9588 review) -- a zone-only or pad-to-pad
+            # rule -- so it contributes to no board-wide floor.
+        unconditional = condition is None
         severity_node = rule.find_child("severity")
         ignored = (
             severity_node is not None
@@ -1048,8 +1106,11 @@ def _read_dru_clearances(dru_path: Path) -> tuple[float | None, float | None, fl
             elif conditional:
                 if not ignored and (best_conditional is None or value > best_conditional):
                     best_conditional = value
-            elif best is None or value > best:
-                best = value
+            elif unconditional:
+                if best is None or value > best:
+                    best = value
+            # else: a conditional rule the #9588-review probe proved unable to
+            # select any track/via pair -- counted nowhere, by design.
     return (best, best_via, best_conditional)
 
 

@@ -10609,8 +10609,9 @@ def _audit_kept_copper_clearance(
     returned so they fail the run; at ``warning`` they are printed and not
     returned; at ``ignore`` nothing is reported.  Issue #9578: a pair whose
     verdict hinges on a rule the evaluator cannot decide is printed as
-    UNKNOWN -- naming the rule -- under every severity, and is never
-    returned as an input defect.  Never raises.
+    UNKNOWN -- naming the rule -- and is never returned as an input defect,
+    under every severity but ``ignore``, which returns before anything is
+    computed or printed.  Never raises.
     """
     from kicad_tools.router.board_clearance_rules import BoardClearanceRules
     from kicad_tools.router.io import kept_copper_clearance_violations, kicad_rule_severity

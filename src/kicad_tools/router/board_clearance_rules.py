@@ -719,9 +719,14 @@ class _PairContext:
             # KiCad's ``A.memberOfFootprint('REF')`` (#9578): one argument,
             # matched like every other string comparison -- case-insensitive
             # with ``*`` / ``?`` wildcards.  An item with no known footprint
-            # reference cannot be decided.
+            # reference cannot be decided; one known to belong to no
+            # footprint (board-level copper, ``""``) decisively matches no
+            # pattern -- a wildcard matches footprint *names*, and this item
+            # has none (#9588 review).
             if item.footprint_ref is None:
                 return _UNKNOWN
+            if item.footprint_ref == "":
+                return False
             return _strings_equal(item.footprint_ref, args[0])
         return _UNKNOWN
 
