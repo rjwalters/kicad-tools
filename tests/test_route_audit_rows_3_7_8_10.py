@@ -24,10 +24,24 @@ parent #9592):
 * **Row 10** -- a partly-routed net was summarised "0/N nets connected"
   with no partial-progress breakdown.  The summary must report the partial
   net with its per-pad progress.
+
+``route-auto`` verdicts (the orchestrator path -- ``RoutingOrchestrator``
+via ``EscapeRouter``/``AdaptiveAutorouter`` -- never calls the CLI's
+``_finalize_routes``, so rows 3/8/10 are asserted on it separately, as
+#9600 asks "for ``kct route`` and separately for ``route-auto``"):
+
+* **Row 3** -- ``route-auto`` CAN emit sub-class-width copper (its global
+  corridor runs at the board default width, not the net's class width)
+  and must not be silent about it:
+  ``test_row3_route_auto_reports_necked_copper``.
+* **Rows 8 + 10** -- the orchestrator's per-pad completion verification
+  reports the honest k/n and persists the reachable links' copper:
+  ``test_rows_8_10_route_auto_partial_progress_is_reported``.
 """
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -65,53 +79,6 @@ _HEADER = """(kicad_pcb (version 20240108) (generator "test")
   (net 2 "GND")
   (gr_rect (start 0 0) (end 24 28) (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))
 """
-
-
-def _sealed_box_board_text() -> str:
-    """BUS (net 1) with four pads, one sealed inside a GND ring.
-
-    Pads 1/2/3 are in open space; pad 4 sits inside a ring of GND
-    through-hole pads spaced so no 0.2 mm trace or via can leave the ring
-    on any layer.  GND is a pour net, so only BUS is trace-routed.
-    """
-    bus = [("1", 10.0, 2.0), ("2", 2.0, 10.0), ("3", 18.0, 10.0), ("4", 10.0, 18.0)]
-    ring: list[tuple[float, float]] = []
-    for i in range(9):
-        x = 7.0 + 0.7 * i
-        ring.append((x, 15.0))
-        ring.append((x, 20.6))
-    for i in range(1, 8):
-        y = 15.0 + 0.7 * i
-        ring.append((7.0, y))
-        ring.append((12.6, y))
-
-    nodes = [_HEADER]
-    body = ""
-    for i, (pin, x, y) in enumerate(bus):
-        body += (
-            f'(pad "{pin}" smd rect (at {x - 10.0:g} {y - 10.0:g}) (size 1 1) '
-            f'(layers "F.Cu") (net 1 "BUS") '
-            f'(uuid "00000000-0000-0000-0000-00000000000{i + 1}"))\n    '
-        )
-    nodes.append(
-        '(footprint "Test:BUS" (layer "F.Cu") (at 10 10)\n'
-        '  (property "Reference" "U1" (at 0 -2) (layer "F.SilkS"))\n'
-        f"  {body})\n"
-    )
-    body = ""
-    for i, (x, y) in enumerate(ring):
-        body += (
-            f'(pad "{i + 1}" thru_hole rect (at {x - 10.0:g} {y - 18.0:g}) (size 1 1) '
-            f'(drill 0.5) (layers "*.Cu" "*.Mask") (net 2 "GND") '
-            f'(uuid "00000000-0000-0000-0000-000000001{i + 1:03d}"))\n    '
-        )
-    nodes.append(
-        '(footprint "Test:WALL" (layer "F.Cu") (at 10 18)\n'
-        '  (property "Reference" "W1" (at 0 -5) (layer "F.SilkS"))\n'
-        f"  {body})\n"
-    )
-    nodes.append(")")
-    return "\n".join(nodes)
 
 
 def _add_pad(router: Autorouter, ref: str, pin: str, x: float, y: float, net: int, net_name: str):
@@ -178,24 +145,25 @@ def test_row3_necks_stay_within_the_taper_disk():
 
     pads = [(p.x, p.y) for key, p in router.pads.items() if key[0] == "U1"]
     assert pads, "sanity: U1 pads must be registered"
+
+    def _nearest_pad_dist(x: float, y: float) -> float:
+        return min(((x - px) ** 2 + (y - py) ** 2) ** 0.5 for px, py in pads)
+
     for seg in necked:
-        min_dist = min(
-            min(
-                ((seg.x1 - px) ** 2 + (seg.y1 - py) ** 2) ** 0.5,
-                ((seg.x2 - px) ** 2 + (seg.y2 - py) ** 2) ** 0.5,
-            )
-            for px, py in pads
-        )
-        assert min_dist < router.rules.neck_down_distance + router.grid.resolution, (
-            f"necked segment {seg} lies {min_dist:.3f} mm from every U1 pad -- "
+        # The FAR endpoint: a 0.122 mm segment that merely *starts* on a U1
+        # pad and runs 5 mm away must fail this check, not pass because one
+        # endpoint sits on the pad (the audit's several-mm neck had an
+        # on-pad endpoint -- min() over both endpoints cannot see it).
+        far_dist = max(_nearest_pad_dist(seg.x1, seg.y1), _nearest_pad_dist(seg.x2, seg.y2))
+        assert far_dist < router.rules.neck_down_distance + router.grid.resolution, (
+            f"necked segment {seg} reaches {far_dist:.3f} mm from every U1 pad -- "
             f"beyond the {router.rules.neck_down_distance} mm taper disk"
         )
 
 
 def test_row3_neck_report_names_necked_nets():
     """Row 3 (reporting half): necked copper is reported, never silent."""
-    from kicad_tools.cli.route_cmd import format_neck_report
-    from kicad_tools.router.neck_report import collect_necked_copper
+    from kicad_tools.router.neck_report import collect_necked_copper, format_neck_report
 
     router = _neckdown_router()
     routes = router.route_net(1)
@@ -214,8 +182,7 @@ def test_row3_neck_report_names_necked_nets():
 
 
 def test_row3_neck_report_silent_when_copper_is_full_width():
-    from kicad_tools.cli.route_cmd import format_neck_report
-    from kicad_tools.router.neck_report import collect_necked_copper
+    from kicad_tools.router.neck_report import collect_necked_copper, format_neck_report
 
     route = Route(net=1, net_name="BUS")
     route.segments.append(
@@ -262,10 +229,6 @@ def _route(net: int, segments=()) -> Route:
 # decimal subtraction lands one float ULP under the limit, which is what the
 # PCBJam run reported as "failing due to float rounding".
 AUDIT_GAP_Y = 0.327  # 0.327 - 0.1 - 0.1 == 0.12699999999999997
-
-
-def test_row7_kernels_keep_the_exact_boundary_legal():
-    assert CLEARANCE_EPSILON_MM > 0.0, "the shared clearance slack must exist"
 
 
 @pytest.mark.parametrize("gap_y", [AUDIT_GAP_Y, AUDIT_GAP_Y - 5e-12], ids=["exact", "float-noise"])
@@ -360,6 +323,113 @@ def test_row10_summary_reports_partial_progress_per_net(capsys, tmp_path: Path):
     written = out_path.read_text()
     assert written.count("(segment") >= 10, (
         "the partial net's useful copper is missing from the written board"
+    )
+
+
+# ---------------------------------------------------------------------------
+# route-auto: the orchestrator path carries its own row 3 / 8 / 10 verdicts
+# ---------------------------------------------------------------------------
+
+
+def _high_current_board_text() -> str:
+    """Two-pad ``PHASE_A`` net in open space (route-auto neck fixture).
+
+    ``PHASE_A`` auto-classifies as HIGH_CURRENT_SIGNAL (0.4 mm class
+    width) while the board declares no track constraints, so the rules
+    default to a 0.2 mm trace width -- route-auto's global corridor emits
+    the net at 0.2 mm, i.e. half its class width: real necked copper.
+    """
+    header = _HEADER.replace('(net 1 "BUS")\n  (net 2 "GND")', '(net 1 "PHASE_A")')
+    header = header.replace("(end 24 28)", "(end 40 40)")
+    body = ""
+    for i, (pin, x, y) in enumerate((("1", 5.0, 5.0), ("2", 30.0, 30.0))):
+        body += (
+            f'(pad "{pin}" smd rect (at {x - 10.0:g} {y - 10.0:g}) (size 1 1) '
+            f'(layers "F.Cu") (net 1 "PHASE_A") '
+            f'(uuid "00000000-0000-0000-0000-00000000000{i + 1}"))\n    '
+        )
+    return (
+        header
+        + '(footprint "Test:U1" (layer "F.Cu") (at 10 10)\n'
+        + '  (property "Reference" "U1" (at 0 -2) (layer "F.SilkS"))\n'
+        + f"  {body})\n"
+        + ")\n"
+    )
+
+
+def test_row3_route_auto_reports_necked_copper(tmp_path: Path, capsys):
+    """Row 3 on route-auto: sub-class-width copper is reported, not silent.
+
+    The orchestrator never calls the CLI's ``_finalize_routes`` (where
+    ``kct route`` prints its neck report), so without this the route-auto
+    surface can emit necked copper and say nothing -- the audit's failure
+    mode, on the second code path.  Asserted on both surfaces route-auto
+    owns: the ``--format json`` document and the text report.
+    """
+    from kicad_tools.cli import main as kct_main
+    from kicad_tools.router.net_class import classify_and_apply_rules
+
+    board = tmp_path / "high_current.kicad_pcb"
+    board.write_text(_high_current_board_text())
+
+    # Sanity: the fixture's class width really is wider than the board
+    # default, or "necked" would be vacuous.
+    class_width = classify_and_apply_rules({1: "PHASE_A"})["PHASE_A"].trace_width
+    assert class_width > 0.3, f"PHASE_A must classify wide, got {class_width}"
+
+    # JSON surface: the per-net document carries the neck census.
+    out_json = tmp_path / "out_json.kicad_pcb"
+    rc = kct_main(
+        ["route-auto", str(board), "--net", "PHASE_A", "-o", str(out_json), "--format", "json"]
+    )
+    assert rc == 0
+    doc = json.loads(capsys.readouterr().out)
+    [entry] = doc["nets"]
+    assert entry["success"] is True
+    [neck] = entry["necked_copper"]
+    assert neck["net_name"] == "PHASE_A"
+    assert neck["min_width_mm"] == pytest.approx(0.2), (
+        "the corridor runs at the 0.2 mm board default, below the 0.4 mm class width"
+    )
+    assert neck["segment_count"] >= 1
+    # A 25 mm corridor necked along its whole length is far beyond the
+    # 1.0 mm taper distance: the entry says so.
+    assert neck["beyond_taper"] is True
+
+    # Text surface: the same census, rendered in the run's report.
+    out_text = tmp_path / "out_text.kicad_pcb"
+    rc = kct_main(["route-auto", str(board), "--net", "PHASE_A", "-o", str(out_text)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Necked copper:" in out, f"route-auto text output is silent about necks:\n{out}"
+    assert "PHASE_A" in out and "long, verify intent" in out
+
+
+def test_rows_8_10_route_auto_partial_progress_is_reported(tmp_path: Path):
+    """Rows 8 + 10 on route-auto: honest k/n, reachable links keep copper.
+
+    The orchestrator's per-pad completion verification (not the
+    strategy's self-reported status) decides the verdict: one sealed pad
+    must not stop the reachable links from routing (row 8), and the
+    partial net is reported with per-pad progress, never a bare failure
+    (row 10).
+    """
+    from kicad_tools.mcp.tools.routing import route_net_auto
+
+    out_path = tmp_path / "out.kicad_pcb"
+    result = route_net_auto(
+        pcb_path=str(_SEALED_BOARD),
+        net_name="BUS",
+        output_path=str(out_path),
+        allow_partial=True,
+    )
+    assert result["success"] is False, "a net with an open pad must not report success"
+    assert result["partial"] is True, "copper plus a stranded pad is partial, not failed"
+    assert result["pads_connected"] == 3, result.get("error_message")
+    assert result["pads_total"] == 4
+    written = out_path.read_text()
+    assert written.count("(segment") >= 10, (
+        "the reachable links' copper is missing from the written board"
     )
 
 

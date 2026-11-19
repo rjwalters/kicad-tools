@@ -71,7 +71,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from kicad_tools.core.kicad_lock import check_kicad_lock
-from kicad_tools.router.neck_report import NeckedNet, collect_necked_copper
+from kicad_tools.router.neck_report import (
+    class_width_lookup,
+    collect_necked_copper,
+    format_neck_report,
+)
 from kicad_tools.sexp.scan import has_unquoted
 
 from .route_deadline import record_stage, restore_stage
@@ -4256,45 +4260,21 @@ def _finalize_routes(
         )
         flush_print(f"  Unrouted:        {unrouted_count}/{nets_to_route} -- no segments at all")
         neck_report = format_neck_report(
-            collect_necked_copper(router.routes, _class_width_of(router))
+            collect_necked_copper(
+                router.routes,
+                class_width_lookup(
+                    getattr(router, "net_class_map", None), router.rules.trace_width
+                ),
+            ),
+            # A contiguous neck longer than the taper distance (plus one
+            # grid cell of placement slack, the same bound the row-3
+            # geometry test uses) is beyond the #1018 taper: call it long.
+            long_threshold_mm=(router.rules.neck_down_distance + router.grid.resolution),
         )
         if neck_report:
             flush_print(neck_report)
 
     return route_sexp, stats, cleanup_stats
-
-
-def _class_width_of(router: "Autorouter") -> "Callable[[str], float]":
-    """Each net's intended trace width: its net class, else the global rule."""
-
-    def width_of(net_name: str) -> float:
-        nc = router.net_class_map.get(net_name) if hasattr(router, "net_class_map") else None
-        return getattr(nc, "trace_width", None) or router.rules.trace_width
-
-    return width_of
-
-
-def format_neck_report(necks: dict[str, NeckedNet]) -> str:
-    """Render the neck census for the Results section (audit row 3, #9600).
-
-    Empty when no net carries sub-class-width copper -- a clean board adds
-    no output.  A necked run well beyond the neck-down taper distance is
-    called out as long: never silent, exactly what the audit asked for.
-    """
-    if not necks:
-        return ""
-    lines = [f"  Necked copper:  {len(necks)} net(s) below class width"]
-    for name in sorted(necks):
-        info = necks[name]
-        note = ""
-        if info.longest_run_mm > 2.0:
-            note = " -- long, verify intent"
-        lines.append(
-            f"    {name}: {info.segment_count} segment(s), min width "
-            f"{info.min_width_mm:.3f}mm, necked length {info.necked_length_mm:.2f}mm "
-            f"(longest run {info.longest_run_mm:.2f}mm){note}"
-        )
-    return "\n".join(lines)
 
 
 # Global state for Ctrl+C handling

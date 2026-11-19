@@ -1013,6 +1013,24 @@ def get_routing_diagnostics_json(
     )
     if diagnosis_block is not None:
         result_dict["unrouted"], result_dict["unrouted_diagnosis"] = diagnosis_block
+    # Issue #9600 (row 3): the neck census on the JSON surface.  Absent
+    # (not empty) when no net carries sub-class-width copper, so a clean
+    # board's JSON is unchanged -- but the audit's readers (agents) see
+    # necked copper here, not only in the prose Results section.
+    from .neck_report import class_width_lookup, collect_necked_copper, necked_net_to_dict
+
+    necked = collect_necked_copper(
+        router.routes,
+        class_width_lookup(getattr(router, "net_class_map", None), router.rules.trace_width),
+    )
+    if necked:
+        result_dict["necked_copper"] = [
+            necked_net_to_dict(
+                necks_info,
+                long_threshold_mm=(router.rules.neck_down_distance + router.grid.resolution),
+            )
+            for _, necks_info in sorted(necked.items())
+        ]
     return result_dict
 
 

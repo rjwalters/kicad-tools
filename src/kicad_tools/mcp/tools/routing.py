@@ -930,6 +930,39 @@ def route_net_auto(
     if clearance_warnings:
         result_dict["warnings"] = list(clearance_warnings) + list(result_dict.get("warnings", []))
 
+    # Issue #9600 (audit row 3): never silent about necked copper on the
+    # route-auto path either.  The orchestrator's strategies can emit
+    # sub-class-width copper (e.g. the global corridor at the board default
+    # width for a HIGH_CURRENT-class net); measure the produced segments
+    # against the net's class width -- same census, same class-width rule
+    # as ``kct route`` -- and attach the structured entries so both the
+    # JSON document and the CLI text report (which renders them) carry it.
+    # Absent (not empty) when the copper is entirely at class width.
+    from kicad_tools.router.neck_report import (
+        class_width_lookup,
+        collect_necked_copper,
+        necked_net_to_dict,
+    )
+    from kicad_tools.router.primitives import Route
+
+    if result.segments:
+        produced = Route(net=net_number, net_name=net_name)
+        produced.segments.extend(result.segments)
+        necked = collect_necked_copper(
+            [produced],
+            class_width_lookup(net_class_map, design_rules.trace_width),
+        )
+        if necked:
+            result_dict["necked_copper"] = [
+                necked_net_to_dict(
+                    info,
+                    long_threshold_mm=(
+                        design_rules.neck_down_distance + design_rules.grid_resolution
+                    ),
+                )
+                for _, info in sorted(necked.items())
+            ]
+
     # Issue #6001: why is the net (still) unrouted -- congested or blocked?
     if diagnose_unrouted_budget and diagnose_unrouted_budget > 0 and not result.success:
         _attach_unrouted_diagnosis(
