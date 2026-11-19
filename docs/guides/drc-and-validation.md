@@ -449,7 +449,9 @@ recorded one (the evidence the reviewer signed off is provably unchanged),
 re-binds the entry to its `ev4` hash. Reviewer, date, reason and issue are kept
 verbatim, and the entry gains `rebound_at`, `rebound_from` (the old hash) and
 `rebound_by` (the kct version). A waiver whose digest no longer matches stays
-stale, and a key that names no current finding is reported as an orphan (the
+stale (including ev3 waivers already stale from an outline-only edit, since an
+ev3 digest depends on the board origin: the migration does not carry them, so
+re-review and re-record those), and a key that names no current finding is reported as an orphan (the
 key changed, e.g. per-layer `path_ampacity` keys or geometry-named silk keys);
 neither is touched. The command previews by default and changes no file; add
 `--write` to apply it. It never runs during a normal check, and it needs the

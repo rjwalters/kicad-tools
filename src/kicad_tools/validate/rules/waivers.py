@@ -102,7 +102,10 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import os
 import re
+import shutil
+import tempfile
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
@@ -1212,8 +1215,10 @@ def migrate_evidence_waivers(
                     key=key,
                     old_hash=old_hash,
                     reason=(
-                        "the recorded ev3 digest no longer matches the board "
-                        "(the evidence under the finding changed)"
+                        "the recorded ev3 digest no longer matches the board: the evidence "
+                        "under the finding changed, or the outline/board origin moved since "
+                        "the waiver was recorded (the tool cannot tell which). Re-review the "
+                        "finding and re-record the waiver; the migration does not carry it"
                     ),
                 )
             )
@@ -1232,9 +1237,24 @@ def migrate_evidence_waivers(
     if write and report.migrated:
         new_data = {**data, "waivers": raw_entries}
         waivers_from_dict(new_data)  # never write a file this build cannot read back
-        path.write_text(json.dumps(new_data, indent=2) + "\n")
+        _atomic_write_text(path, json.dumps(new_data, indent=2) + "\n")
         report.written = True
     return report
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write via a same-directory temp file and ``os.replace`` (no truncated file)."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        shutil.copymode(path, tmp)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def format_waiver_migration(report: WaiverMigrationReport, path: Path, *, write: bool) -> list[str]:
@@ -1251,7 +1271,7 @@ def format_waiver_migration(report: WaiverMigrationReport, path: Path, *, write:
     for it in report.stale:
         lines.append(f"  stale: {it.key}  ({it.old_hash}): {it.reason}")
     for it in report.orphan:
-        line = f"  orphan (key changed): {it.key}  ({it.old_hash})"
+        line = f"  orphan (no current finding): {it.key}  ({it.old_hash})"
         if it.candidates:
             shown = it.candidates[:_MAX_REWAIVE_HINT_KEYS]
             line += " -> re-waive candidate(s): " + ", ".join(repr(k) for k in shown)

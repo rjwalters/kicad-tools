@@ -245,8 +245,28 @@ class TestMigration:
 
         assert code == 0
         assert "orphan (left alone): 1" in out
-        assert f"orphan (key changed): {gone}" in out
+        assert f"orphan (no current finding): {gone}" in out
         assert waivers.read_text() == before
+
+    def test_write_keeps_orphan_and_stale_entries_byte_equal(self, tmp_path, capsys):
+        board = _write_board(tmp_path)
+        gone = "courtyard_missing|U9||F.Cu"
+        orphan = _entry(gone, "ev3:0123456789abcdef")
+        stale = _entry(COURTYARD_R2, _ev3_hash(board, COURTYARD_R2))
+        waivers = _write_waivers(
+            tmp_path,
+            [_entry(COURTYARD_R1, _ev3_hash(board, COURTYARD_R1)), orphan, stale],
+        )
+        _write_board(tmp_path, r2x=105.0)  # R2 evidence changes -> stale
+
+        code, out = _migrate(capsys, board, waivers, "--write")
+
+        assert code == 0 and "migrated: 1" in out
+        data = json.loads(waivers.read_text())["waivers"]
+        assert len(data) == 3
+        assert data[1] == orphan
+        assert data[2] == stale
+        assert not list(tmp_path.glob(".*.tmp"))
 
     def test_orphan_lists_rewaive_candidates(self, tmp_path):
         board = _write_board(tmp_path)
