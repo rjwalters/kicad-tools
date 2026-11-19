@@ -10,10 +10,11 @@ and ``board-04-end-to-end.sh`` stages a whole output directory through
 only a hand run caught it, because the CI jobs that exercise it are gated off
 for PRs; this module is the regression net that closes that gap.
 
-The tests never regenerate a board: they source a byte-identical copy of the
-real ``_lib.sh`` inside a ``tmp_path`` sandbox laid out as a miniature repo
-(the script derives ``REPO_ROOT`` from its own location, so the copy must sit
-at ``<sandbox>/scripts/ci/jobs/_lib.sh``), and the one hard-coded inner
+The tests never regenerate a board: they run a probe script written at
+``<sandbox>/scripts/ci/jobs/probe.sh`` inside a ``tmp_path`` sandbox laid out
+as a miniature repo, which sources the real ``_lib.sh`` by absolute path (the
+script derives ``REPO_ROOT`` from the sourcing script's path, so the probe's
+placement resolves it to the sandbox root), and the one hard-coded inner
 command, ``uv run python scripts/ci/check_routed_drc_internal.py``, resolves
 inside the sandbox to a deterministic stub that records what it saw and exits
 a code the test chooses.
@@ -28,7 +29,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -74,11 +74,10 @@ def _snapshot(tree: Path) -> dict[str, bytes]:
 
 @pytest.fixture()
 def sandbox(tmp_path: Path) -> Path:
-    """Miniature repo whose scripts/ tree makes _lib.sh's REPO_ROOT local."""
+    """Miniature repo whose scripts/ci/jobs/ dir hosts the sourcing probe."""
     repo = tmp_path / "repo"
     jobs = repo / "scripts" / "ci" / "jobs"
     jobs.mkdir(parents=True)
-    shutil.copyfile(LIB_SH, jobs / "_lib.sh")
     stub = repo / "scripts" / "ci" / "check_routed_drc_internal.py"
     stub.write_text(DRC_STUB)
     (tmp_path / "tmp").mkdir()
@@ -88,10 +87,10 @@ def sandbox(tmp_path: Path) -> Path:
 def _run_lib(
     sandbox: Path, tmp_path: Path, snippet: str, **env_overrides
 ) -> subprocess.CompletedProcess[str]:
-    """Run a bash snippet that sources the sandbox copy of _lib.sh.
+    """Run a bash snippet that sources the selected _lib.sh from a sandbox probe.
 
-    The snippet is written next to the _lib.sh copy as a miniature job
-    script: _lib.sh derives JOBS_DIR/REPO_ROOT from ``BASH_SOURCE[1]`` (the
+    The snippet runs as a miniature job script in the sandbox's jobs
+    directory. _lib.sh derives JOBS_DIR/REPO_ROOT from ``BASH_SOURCE[1]`` (the
     sourcing script's path), so sourcing it directly from a ``bash -c``
     string leaves REPO_ROOT unresolved (its ``BASH_SOURCE[1]`` is unset
     there). Sourcing a real file inside ``scripts/ci/jobs/`` is exactly how
@@ -117,9 +116,7 @@ def _run_lib(
     )
 
 
-def _assert_committed_tree_restored(
-    sandbox: Path, tmp_path: Path, before: dict[str, bytes]
-) -> None:
+def _assert_committed_tree_restored(sandbox: Path, before: dict[str, bytes]) -> None:
     """The committed output tree must be byte-identical to the snapshot."""
     committed = sandbox / "boards" / "probe" / "output"
     assert _snapshot(committed) == before
@@ -158,7 +155,7 @@ def test_stage_over_committed_dir_inner_sees_fresh_and_tree_restored(
         f"""\
 #! /usr/bin/env bash
 {{
-  find boards/probe/output -mindepth 1 -printf '%P\\n' | sort
+  find boards/probe/output -mindepth 1 | sed 's|^boards/probe/output/||' | sort
   printf -- '--\\n'
   cat boards/probe/output/board.json
   cat boards/probe/output/manifests/m.txt
@@ -177,11 +174,11 @@ echo "RC=$rc"
     )
     assert result.returncode == 0, result.stderr
     assert "RC=0" in result.stdout
-    inner = (tmp_path / "inner.log").read_text()
+    inner_log = (tmp_path / "inner.log").read_text()
     # The inner command ran against the staged tree: the fresh tree is merged
     # over the committed one, so fresh contents (and the fresh-only file)
     # travel with the committed-only file during the window.
-    assert sorted(inner.splitlines()) == sorted(
+    assert sorted(inner_log.splitlines()) == sorted(
         [
             "board.json",
             "only-fresh.txt",
@@ -195,7 +192,7 @@ echo "RC=$rc"
     )
     # Afterwards: staged-over contents (incl. the fresh-only file) dropped,
     # committed tree byte-identical to before.
-    _assert_committed_tree_restored(sandbox, tmp_path, before)
+    _assert_committed_tree_restored(sandbox, before)
     _assert_no_backup_left(tmp_path)
 
 
@@ -217,7 +214,7 @@ echo "RC=$rc"
     )
     assert result.returncode == 0, result.stderr
     assert "RC=7" in result.stdout
-    _assert_committed_tree_restored(sandbox, tmp_path, before)
+    _assert_committed_tree_restored(sandbox, before)
     _assert_no_backup_left(tmp_path)
 
 
@@ -293,4 +290,4 @@ def test_helpers_fall_back_when_tmpdir_unset(sandbox: Path, tmp_path: Path) -> N
     )
     assert result.returncode == 0, result.stderr
     assert "RC=0" in result.stdout
-    _assert_committed_tree_restored(sandbox, tmp_path, before)
+    _assert_committed_tree_restored(sandbox, before)
