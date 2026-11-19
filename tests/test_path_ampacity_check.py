@@ -935,15 +935,26 @@ def _force_spec(
     )
 
 
-def _wired_trunk(trace_width: float = 2.0, *, reinforced: bool = True) -> tuple[PCB, list[dict]]:
+def _wired_trunk(
+    trace_width: float = 2.0, *, reinforced: bool = True, end_width: float | None = None
+) -> tuple[PCB, list[dict]]:
     """A straight reinforcement-eligible trunk, with a real placed 16 AWG wire.
 
     Built with the placer itself (``reinforce_net``) so the credit is judged
     against what ``kct pcb reinforce`` actually writes: two end anchors, a
-    continuous mask opening and a sidecar wire record.
+    continuous mask opening and a sidecar wire record. ``end_width`` splits
+    the run into wide end stretches at that width flanking a ``trace_width``
+    middle -- the shape a board the wire actually rescues has, since the
+    hole-to-pad stubs outside the anchors are always judged at bare copper
+    (Issue #9654).
     """
     pcb = PCB.create(width=200, height=100, center=False)
-    pcb.add_trace((20, 50), (120, 50), width=trace_width, layer="F.Cu", net=_WIRE_NET)
+    if end_width is None or end_width == trace_width:
+        pcb.add_trace((20, 50), (120, 50), width=trace_width, layer="F.Cu", net=_WIRE_NET)
+    else:
+        pcb.add_trace((20, 50), (30, 50), width=end_width, layer="F.Cu", net=_WIRE_NET)
+        pcb.add_trace((30, 50), (110, 50), width=trace_width, layer="F.Cu", net=_WIRE_NET)
+        pcb.add_trace((110, 50), (120, 50), width=end_width, layer="F.Cu", net=_WIRE_NET)
     _add_th_pad_footprint(pcb, ref="J1", x=20.0, y=50.0, net=_WIRE_NET, drill=1.0, size=2.0)
     _add_th_pad_footprint(pcb, ref="J2", x=120.0, y=50.0, net=_WIRE_NET, drill=1.0, size=2.0)
     wires: list[dict] = []
@@ -964,10 +975,76 @@ def _wired_legs(pcb: PCB, wires: list[dict], spec: CurrentPathSpec) -> list[Wire
 
 
 class TestButtressWireCredit:
-    def test_fully_wired_leg_clears_the_underwidth_errors(self) -> None:
-        # 15 A at 2 oz needs ~6.29 mm; the 2.0 mm trace + a 16 AWG wire
-        # (~18.7 mm of extra width at 2 oz) carries it.
+    def test_hole_to_pad_stub_is_judged_at_copper_width(self) -> None:
+        # Issue #9654: the wire is soldered between the two anchors, so the
+        # ~2.96 mm hole-to-pad stub at each end of the run is bare copper
+        # and must fail at its own width (15 A at 2 oz needs ~6.29 mm),
+        # while the anchored span between them stays clean.
         pcb, wires = _wired_trunk(trace_width=2.0)
+        spec = _force_spec(15.0)
+        rule = PathAmpacityRule(specs=[spec], wired_legs=_wired_legs(pcb, wires, spec))
+        results = rule.check(pcb, _design_rules_2oz())
+        underwidth = [v for v in results.errors if "too narrow" in v.message]
+        assert len(underwidth) == 2
+        for v in underwidth:
+            assert "width 2.000mm; this stretch is not covered by a wire leg" in v.message
+            assert "wire =" not in v.message
+        xs = sorted(v.location[0] for v in underwidth)
+        assert xs[0] == pytest.approx(21.5, abs=0.1)
+        assert xs[1] == pytest.approx(118.5, abs=0.1)
+
+    def test_stub_across_a_bend_is_still_bare_copper(self) -> None:
+        # The run bends 2 mm in from its end, inside the start stub: each
+        # stretch of the polyline before the anchor is judged at its own
+        # copper width, the span between the anchors stays clean.
+        pcb = PCB.create(width=200, height=100, center=False)
+        pcb.add_trace((20, 50), (22, 50), width=2.0, layer="F.Cu", net=_WIRE_NET)
+        pcb.add_trace((22, 50), (120, 68), width=2.0, layer="F.Cu", net=_WIRE_NET)
+        _add_th_pad_footprint(pcb, ref="J1", x=20.0, y=50.0, net=_WIRE_NET, drill=1.0, size=2.0)
+        _add_th_pad_footprint(pcb, ref="J2", x=120.0, y=68.0, net=_WIRE_NET, drill=1.0, size=2.0)
+        from kicad_tools.pcb.reinforcement_sidecar import build_wire_records
+
+        outcome = reinforce_net(pcb, _WIRE_NET)
+        wires = build_wire_records(outcome, 0.0, 0.0)
+        spec = _force_spec(15.0)
+        rule = PathAmpacityRule(specs=[spec], wired_legs=_wired_legs(pcb, wires, spec))
+        results = rule.check(pcb, _design_rules_2oz())
+        underwidth = [v for v in results.errors if "too narrow" in v.message]
+        assert len(underwidth) == 3  # first segment, bent stub, end stub
+        for v in underwidth:
+            assert "width 2.000mm; this stretch is not covered by a wire leg" in v.message
+        # the whole first segment sits in the start stub, at its midpoint
+        assert underwidth[0].location == pytest.approx((21.0, 50.0))
+
+    def test_segment_straddling_one_anchor_splits_at_it(self) -> None:
+        # Two collinear segments sharing a leg whose anchors sit at arc
+        # 10 and 90: each segment is credited only past the anchor it
+        # straddles, and both bare stubs fail at their own width.
+        pcb = PCB.create(width=200, height=100, center=False)
+        pcb.add_trace((20, 50), (70, 50), width=2.0, layer="F.Cu", net=_WIRE_NET)
+        pcb.add_trace((70, 50), (120, 50), width=2.0, layer="F.Cu", net=_WIRE_NET)
+        _add_th_pad_footprint(pcb, ref="J1", x=20.0, y=50.0, net=_WIRE_NET, drill=1.0, size=2.0)
+        _add_th_pad_footprint(pcb, ref="J2", x=120.0, y=50.0, net=_WIRE_NET, drill=1.0, size=2.0)
+        leg = WiredLeg(
+            net=_WIRE_NET,
+            layer="F.Cu",
+            points=((20.0, 50.0), (70.0, 50.0), (120.0, 50.0)),
+            width=2.0,
+            gauge=16,
+            anchor_arc=(10.0, 90.0),
+        )
+        rule = PathAmpacityRule(specs=[_force_spec(15.0)], wired_legs=[leg])
+        results = rule.check(pcb, _design_rules_2oz())
+        underwidth = [v for v in results.errors if "too narrow" in v.message]
+        assert [v.location for v in underwidth] == [(25.0, 50.0), (115.0, 50.0)]
+        for v in underwidth:
+            assert "width 2.000mm; this stretch is not covered by a wire leg" in v.message
+
+    def test_fully_wired_leg_clears_the_underwidth_errors(self) -> None:
+        # The unwired stubs are wide enough on their own (6.5 mm > 6.29 mm
+        # at 15 A) and the 2.0 mm middle stretch rides the 16 AWG wire
+        # (~18.7 mm of extra width at 2 oz): nothing fails.
+        pcb, wires = _wired_trunk(trace_width=2.0, end_width=6.5)
         spec = _force_spec(15.0)
         rule = PathAmpacityRule(specs=[spec], wired_legs=_wired_legs(pcb, wires, spec))
         results = rule.check(pcb, _design_rules_2oz())
@@ -1020,15 +1097,21 @@ class TestButtressWireCredit:
 
     def test_credited_segment_that_still_fails_states_the_wire(self) -> None:
         # ~224 mm is required at 200 A: even the credited 2.0 + ~18.7 mm
-        # effective width fails, and the message must say what was counted.
+        # effective width fails and must say what was counted -- while the
+        # two bare hole-to-pad stubs fail at their own copper width.
         pcb, wires = _wired_trunk(trace_width=2.0)
         spec = _force_spec(200.0)
         rule = PathAmpacityRule(specs=[spec], wired_legs=_wired_legs(pcb, wires, spec))
         results = rule.check(pcb, _design_rules_2oz())
-        (error,) = [v for v in results.errors if "too narrow" in v.message]
-        assert "width 2.000mm + 16 AWG wire = 20.700mm effective" in error.message
-        assert "not covered" not in error.message
-        assert error.actual_value == pytest.approx(20.7, abs=0.01)
+        underwidth = [v for v in results.errors if "too narrow" in v.message]
+        assert len(underwidth) == 3
+        (with_wire,) = [v for v in underwidth if "wire =" in v.message]
+        assert "width 2.000mm + 16 AWG wire = 20.700mm effective" in with_wire.message
+        assert "not covered" not in with_wire.message
+        assert with_wire.actual_value == pytest.approx(20.7, abs=0.01)
+        assert all(
+            "not covered by a wire leg" in v.message for v in underwidth if v is not with_wire
+        )
 
     def test_wire_leg_on_another_layer_does_not_credit(self) -> None:
         pcb, _ = _wired_trunk(trace_width=2.0, reinforced=False)
@@ -1060,18 +1143,23 @@ class TestButtressWireCredit:
 
     def test_credit_scales_with_the_layer_copper_thickness(self) -> None:
         # The same wire over 1 oz foil is worth twice the width (same area,
-        # half the thickness): 2.0 + ~37.4 mm clears 15 A's ~12.6 mm floor.
+        # half the thickness): the credited stretch that still fails at
+        # 200 A reports ~39.4 mm effective at 1 oz versus ~20.7 mm at 2 oz.
         pcb, wires = _wired_trunk(trace_width=2.0)
-        spec = _force_spec(15.0)
+        spec = _force_spec(200.0)
         rules_1oz = dataclasses.replace(_design_rules_2oz(), outer_copper_oz=1.0)
         from kicad_tools.validate.rules.reinforcement_incomplete import ReinforcementIncompleteRule
 
-        legs = ReinforcementIncompleteRule(specs=[spec], wires=wires).fully_wired_legs(
-            pcb, rules_1oz
-        )
-        rule = PathAmpacityRule(specs=[spec], wired_legs=legs)
-        results = rule.check(pcb, rules_1oz)
-        assert results.errors == []
+        def credited_effective(rules: DesignRules) -> float:
+            legs = ReinforcementIncompleteRule(specs=[spec], wires=wires).fully_wired_legs(
+                pcb, rules
+            )
+            results = PathAmpacityRule(specs=[spec], wired_legs=legs).check(pcb, rules)
+            (with_wire,) = [v for v in results.errors if "wire =" in v.message]
+            return float(with_wire.actual_value)
+
+        assert credited_effective(_design_rules_2oz()) == pytest.approx(20.7, abs=0.01)
+        assert credited_effective(rules_1oz) == pytest.approx(39.4, abs=0.05)
 
 
 class TestButtressWireFusing:
@@ -1083,7 +1171,7 @@ class TestButtressWireFusing:
     # so the fusing check is the only thing that moves.
     _SPEC = {"continuous_a": 1.0, "pulsed_a": 300.0, "duty_cycle": 0.002, "pulse_duration_s": 1.0}
 
-    def test_bare_copper_fuses_but_the_wire_carries_the_pulse(self) -> None:
+    def test_the_stubs_fuse_but_the_wired_span_carries_the_pulse(self) -> None:
         pcb, wires = _wired_trunk(trace_width=6.0)
         spec = _force_spec(**self._SPEC)
         bare = PathAmpacityRule(specs=[spec]).check(pcb, _design_rules_2oz())
@@ -1091,10 +1179,19 @@ class TestButtressWireFusing:
         credited = PathAmpacityRule(specs=[spec], wired_legs=_wired_legs(pcb, wires, spec)).check(
             pcb, _design_rules_2oz()
         )
-        assert credited.errors == []
+        # The bare ~2.96 mm hole-to-pad stubs still fuse at their own
+        # 6.0 mm copper (Issue #9654); the stretch between the anchors
+        # rides the wire (~499 A) and survives.
+        fused = [v for v in credited.errors if "would fuse" in v.message]
+        assert len(fused) == 2
+        for v in fused:
+            assert "6.000mm of 2.0oz copper" in v.message
+            assert "wire" not in v.message
 
     def test_pulse_above_the_combined_section_names_the_wire(self) -> None:
-        # 600 A for 1 s fuses even the combined ~24.7 mm section.
+        # 600 A for 1 s fuses even the combined ~24.7 mm section; the bare
+        # stubs fuse at 6.0 mm copper too, but only the credited stretch
+        # names the wire.
         pcb, wires = _wired_trunk(trace_width=6.0)
         spec = _force_spec(
             continuous_a=1.0, pulsed_a=600.0, duty_cycle=0.0005, pulse_duration_s=1.0
@@ -1102,26 +1199,31 @@ class TestButtressWireFusing:
         rule = PathAmpacityRule(specs=[spec], wired_legs=_wired_legs(pcb, wires, spec))
         results = rule.check(pcb, _design_rules_2oz())
         fused = [v for v in results.errors if "would fuse" in v.message]
-        assert len(fused) == 1
-        assert "24.700mm effective" in fused[0].message
-        assert "16 AWG wire" in fused[0].message
+        assert len(fused) == 3
+        (with_wire,) = [v for v in fused if "wire" in v.message]
+        assert "24.700mm effective" in with_wire.message
+        assert "16 AWG wire" in with_wire.message
 
 
 class TestButtressWireCreditThroughChecker:
     def test_check_path_ampacity_credits_placed_wires(self) -> None:
         from kicad_tools.validate.checker import DRCChecker
 
-        pcb, wires = _wired_trunk(trace_width=2.0)
+        # The 14 mm end stretches carry 15 A on bare copper past the
+        # anchors even at the checker's default foil weight; the 2.0 mm
+        # middle is rescued by the wire.
+        pcb, wires = _wired_trunk(trace_width=2.0, end_width=14.0)
         checker = DRCChecker(pcb, current_path_specs=[_force_spec(15.0)], reinforcement_wires=wires)
         assert checker.check_path_ampacity().errors == []
 
-        # Break the wire (one end anchor gone): the credit disappears and the
-        # bare-width errors come back on the same board.
+        # Break the wire (one end anchor gone): the credit disappears and
+        # the bare-width error comes back on the middle stretch.
         anchor = min((v for v in pcb.vias if v.net_name == _WIRE_NET), key=lambda v: v.position[0])
         pcb.vias.remove(anchor)
         broken = DRCChecker(pcb, current_path_specs=[_force_spec(15.0)], reinforcement_wires=wires)
         errors = broken.check_path_ampacity().errors
         assert errors and "too narrow" in errors[0].message
+        assert "width 2.000mm" in errors[0].message
 
     def test_unreinforced_board_output_is_unchanged(self) -> None:
         from kicad_tools.validate.checker import DRCChecker
