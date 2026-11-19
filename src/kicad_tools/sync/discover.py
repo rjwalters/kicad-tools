@@ -118,11 +118,11 @@ def pcb_matches_spec(pcb_path: str | Path, kct_path: str | Path, spec: object) -
     pcb_path = Path(pcb_path)
     project = getattr(spec, "project", None)
     artifacts = getattr(project, "artifacts", None)
-    named = [
-        getattr(artifacts, "pcb", None),
-        getattr(artifacts, "pcb_routed", None),
+    named: list[str] = [
+        n
+        for n in (getattr(artifacts, "pcb", None), getattr(artifacts, "pcb_routed", None))
+        if isinstance(n, str) and n
     ]
-    named = [n for n in named if isinstance(n, str) and n]
     if not named:
         return True
 
