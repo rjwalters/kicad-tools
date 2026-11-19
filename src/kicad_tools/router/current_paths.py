@@ -1738,6 +1738,109 @@ def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGra
     return graph
 
 
+def _pad_segments_touch(a: Segment, b: Segment) -> bool:
+    """Whether two wholly pad-internal segments form series copper.
+
+    Endpoint-on-segment covers shared vertices and T-joints;
+    :func:`segments_intersect` covers copper crossing at an interior point.
+    """
+    return (
+        point_to_segment_distance(*a.start, *b.start, *b.end) <= _PAD_EPS
+        or point_to_segment_distance(*a.end, *b.start, *b.end) <= _PAD_EPS
+        or point_to_segment_distance(*b.start, *a.start, *a.end) <= _PAD_EPS
+        or point_to_segment_distance(*b.end, *a.start, *a.end) <= _PAD_EPS
+        or segments_intersect(*a.start, *a.end, *b.start, *b.end)
+    )
+
+
+def _pad_continuation_chains(
+    internal: Sequence[Segment],
+    centres: Iterable[tuple[float, float]],
+    entries: Iterable[tuple[float, float]],
+) -> list[Segment]:
+    """The wholly pad-internal copper a resolved route rides to its terminal.
+
+    The current enters the pad at an off-centre attachment of route copper
+    and flows to the pad centre -- its terminal -- along chained pad-internal
+    segments, across segment and width changes (#9647 review: a split trunk
+    must keep its narrowest buried piece). For each entry point the shortest
+    chain of touching internal segments that reaches the centre is kept; a
+    dead-end spur is never on one, so copper hanging off the route -- a
+    Kelvin/sense tap whose first segment lies wholly inside the pad, even one
+    sharing the trunk's own attachment point -- stays out. When no
+    centre-reaching chain exists from an entry (buried copper that stops
+    short of the terminal), the segments under it are kept as the best
+    on-route evidence rather than silently dropped.
+    """
+    internal = list(internal)
+    centres = list(centres)
+    if not internal or not centres:
+        return []
+
+    def _touches_point(seg: Segment, point: tuple[float, float]) -> bool:
+        return point_to_segment_distance(*point, *seg.start, *seg.end) <= _PAD_EPS
+
+    goal = {i for i, seg in enumerate(internal) if any(_touches_point(seg, c) for c in centres)}
+    kept: dict[int, Segment] = {}
+    for entry in entries:
+        if any(math.dist(entry, centre) <= _PAD_EPS for centre in centres):
+            continue
+        seeds = {i for i, seg in enumerate(internal) if _touches_point(seg, entry)}
+        if not seeds:
+            continue
+        # Dijkstra over the segment-touching graph; the pad hub carries a
+        # handful of internal segments, so a plain scan is plenty.
+        dist: dict[int, float] = dict.fromkeys(range(len(internal)), math.inf)
+        for i in seeds:
+            dist[i] = 0.0
+        prev: dict[int, int] = {}
+        chain: list[int] | None = None
+        unvisited = set(dist)
+        while unvisited:
+            i = min(unvisited, key=lambda k: dist[k])
+            if dist[i] == math.inf:
+                break
+            unvisited.remove(i)
+            if i in goal:
+                chain = []
+                while i in prev:
+                    chain.append(i)
+                    i = prev[i]
+                chain.append(i)
+                break
+            for j in unvisited:
+                if dist[i] + _seg_length(internal[j]) < dist[j] and _pad_segments_touch(
+                    internal[i], internal[j]
+                ):
+                    dist[j] = dist[i] + _seg_length(internal[j])
+                    prev[j] = i
+        for i in chain if chain is not None else seeds:
+            kept.setdefault(i, internal[i])
+    return [internal[i] for i in sorted(kept)]
+
+
+def _hub_continuation_segments(
+    graph: _CopperGraph, hub: _Node, edges: Iterable[_GraphEdge]
+) -> list[Segment]:
+    """Pad-internal continuation copper the given route edges ride at ``hub``.
+
+    Entry points are the edges' pad attachments that sit beyond the pad
+    centre: copper hanging off the terminal itself carries a branch, not the
+    route (#9647).
+    """
+    internal = graph.internal.get(hub)
+    if not internal:
+        return []
+    centres = graph.pad_centres.get(hub, ())
+    entries = [
+        point
+        for edge in edges
+        for attach_hub, point in graph.attachments.get(edge, [])
+        if attach_hub == hub and not any(math.dist(point, centre) <= _PAD_EPS for centre in centres)
+    ]
+    return _pad_continuation_chains(internal, centres, entries)
+
+
 def _bfs_path(graph: _CopperGraph, start: _Node, goal: _Node) -> list[Segment] | None:
     """Find a route, reporting each original routed segment exactly once."""
     visited = {start}
@@ -1762,41 +1865,15 @@ def _bfs_path(graph: _CopperGraph, start: _Node, goal: _Node) -> list[Segment] |
         node = prev
     on_route = set(route_edges)
 
-    def hub_attachments(hub: _Node, edges: Iterable[_GraphEdge]) -> list[tuple[float, float]]:
-        return [
-            point
-            for edge in edges
-            for attach_hub, point in graph.attachments.get(edge, [])
-            if attach_hub == hub
-        ]
-
     def internal_evidence(hub: _Node) -> list[Segment]:
         # Wholly pad-internal copper is evidence only where the route rides
-        # it beyond the pad centre -- the current's pad-side terminal. A
-        # segment whose span only meets route copper at the centre itself is
-        # a branch hanging off the terminal (a Kelvin/sense tap whose first
-        # segment starts wholly inside a large endpoint pad, #9647), while a
-        # segment reached at a non-centre attachment point is in series with
-        # the route: a trunk piece buried in the pad, or a stub to a via
-        # dropped inside it.
-        internal = graph.internal.get(hub)
-        if not internal:
-            return []
-        boarded = [
-            point
-            for point in hub_attachments(hub, on_route)
-            if not any(
-                math.dist(point, centre) <= _PAD_EPS for centre in graph.pad_centres.get(hub, ())
-            )
-        ]
-        return [
-            seg
-            for seg in internal
-            if any(
-                point_to_segment_distance(*point, *seg.start, *seg.end) <= _PAD_EPS
-                for point in boarded
-            )
-        ]
+        # it toward the pad centre -- the current's pad-side terminal: the
+        # chained continuation from the route's pad attachment to the centre
+        # stays, across segment and width changes, while copper hanging off
+        # the route inside the pad (a Kelvin/sense tap whose first segment
+        # starts wholly inside a large endpoint pad, #9647) is a branch and
+        # is excluded -- even when it shares the trunk's attachment point.
+        return _hub_continuation_segments(graph, hub, on_route)
 
     evidence = internal_evidence(goal)
     node = goal
@@ -2844,6 +2921,23 @@ def resolve_current_path(
             source=source,
             sink=sink,
             witness=witness,
+        )
+
+    # A parallel arm the BFS chain did not ride still owns its pad-internal
+    # copper: each resolved arm's buried continuation to the pad terminal
+    # stays evidence. Taking attachments from a single BFS predecessor chain
+    # left a second arm's buried neck in or out by file order (#9647 review).
+    if parallel_groups:
+        group_ids = {id(seg) for group in parallel_groups for seg in group.segments}
+        arm_edges = {
+            edge
+            for hub_edges in adjacency.adjacency.values()
+            for _, edge in hub_edges
+            if edge.segment is not None and id(edge.segment) in group_ids
+        }
+        arm_hubs = {hub for edge in arm_edges for hub, _ in adjacency.attachments.get(edge, [])}
+        path_segments.extend(
+            seg for hub in arm_hubs for seg in _hub_continuation_segments(adjacency, hub, arm_edges)
         )
 
     # Every member remains physical evidence checked at the full current.

@@ -150,3 +150,77 @@ def test_stub_to_via_buried_in_pad_stays_on_route():
     trunk = next(s for s in pcb.segments if s.width == 3.0)
     assert {id(s) for s in result.segments} == {id(stub), id(trunk)}
     assert result.min_width is not None and result.min_width.width_mm == pytest.approx(1.5)
+
+
+def test_split_trunk_keeps_whole_in_pad_continuation():
+    # Judge review of #9647: a trunk split inside the endpoint pad must keep
+    # every buried piece, across segment and width changes -- dropping the
+    # final 0.3 mm span reported a 4.0 mm minimum and hid the undersized neck
+    # (merge base: 3 segments, 100 mm, 0.3 mm minimum, ampacity exit 2).
+    pcb = _branch_board(branch_at="sink", divider=False, pad_size=5.0)
+    pcb._segments = []
+    pcb.add_trace(("J1", "1"), (118, 50), width=4.0, layer="F.Cu", net="NET1", dedupe=False)
+    pcb.add_trace((118, 50), (119, 50), width=4.0, layer="F.Cu", net="NET1", dedupe=False)
+    pcb.add_trace((119, 50), (120, 50), width=0.3, layer="F.Cu", net="NET1", dedupe=False)
+    result = resolve_current_path(pcb, _branch_spec())
+    assert result.ok, result.reason
+    assert {id(s) for s in result.segments} == {id(s) for s in pcb.segments}
+    assert result.length_mm == pytest.approx(100.0)
+    assert result.min_width is not None and result.min_width.width_mm == pytest.approx(0.3)
+
+
+@pytest.mark.parametrize("fcu_first", [True, False], ids=["fcu-first", "bcu-first"])
+def test_parallel_arm_keeps_buried_neck_in_any_file_order(fcu_first):
+    # Judge review of #9647: a parallel arm the BFS chain did not ride still
+    # owns its pad-internal neck. Taking attachments from a single BFS
+    # predecessor chain made the verdict depend on file order (F.Cu first:
+    # 8 mm effective width, exit 0; B.Cu first: 0.3 mm, exit 2).
+    pcb = PCB.create(width=200, height=120, center=False)
+    _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+    _add_pad_footprint(pcb, ref="J2", x=120, y=50, net="NET1")
+    pcb.get_footprint("J1").pads[0].size = (5.0, 5.0)
+    pcb.get_footprint("J2").pads[0].size = (5.0, 5.0)
+    fcu = [("F.Cu", (20, 50), (120, 50), 4.0)]
+    bcu = [("B.Cu", (20, 50), (118, 50), 4.0), ("B.Cu", (118, 50), (120, 50), 0.3)]
+    for layer, start, end, width in fcu + bcu if fcu_first else bcu + fcu:
+        pcb.add_trace(start, end, width=width, layer=layer, net="NET1", dedupe=False)
+    result = resolve_current_path(pcb, _branch_spec())
+    assert result.ok, result.reason
+    neck = next(s for s in pcb.segments if s.width == 0.3)
+    assert id(neck) in {id(s) for s in result.segments}
+    assert result.min_width is not None and result.min_width.width_mm == pytest.approx(0.3)
+
+
+@pytest.mark.parametrize("branch_layer", ["F.Cu", "B.Cu"])
+def test_off_centre_tap_sharing_trunk_entry_is_excluded(branch_layer):
+    # Judge review of #9647: a sense tap leaving the trunk's own off-centre
+    # entry point inside the pad is a branch, not the continuation -- the
+    # trunk must not inherit the tap's 0.3 mm neck (2 segments, 100 mm,
+    # 4.0 mm minimum) even though the tap's first buried segment touches the
+    # trunk's attachment point.
+    pcb = PCB.create(width=200, height=120, center=False)
+    _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+    _add_pad_footprint(pcb, ref="J2", x=120, y=50, net="NET1")
+    _add_pad_footprint(pcb, ref="R1", x=130, y=70, net="NET1")
+    for ref in ("J1", "J2"):
+        pcb.get_footprint(ref).pads[0].size = (5.0, 5.0)
+    pcb.add_trace(("J1", "1"), (118, 50), width=4.0, layer="F.Cu", net="NET1", dedupe=False)
+    pcb.add_trace((118, 50), (120, 50), width=4.0, layer="F.Cu", net="NET1", dedupe=False)
+    pcb.add_trace((118, 50), (118, 51), width=0.3, layer=branch_layer, net="NET1", dedupe=False)
+    pcb.add_trace((118, 51), (130, 70), width=0.3, layer=branch_layer, net="NET1", dedupe=False)
+    trunk = resolve_current_path(pcb, _branch_spec())
+    assert trunk.ok, trunk.reason
+    assert {id(s) for s in trunk.segments} == {id(s) for s in pcb.segments if s.width == 4.0}
+    assert trunk.length_mm == pytest.approx(100.0)
+    assert trunk.min_width is not None and trunk.min_width.width_mm == pytest.approx(4.0)
+    sense = resolve_current_path(
+        pcb,
+        CurrentPathSpec(
+            name="SENSE",
+            net_name="NET1",
+            source=PathEndpoint("J2", "1"),
+            sink=PathEndpoint("R1", "1"),
+            continuous_a=0.01,
+        ),
+    )
+    assert sense.ok, sense.reason
