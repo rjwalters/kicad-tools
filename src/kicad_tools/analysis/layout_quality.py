@@ -338,6 +338,11 @@ def _edge_cuts_segments(pcb: PCB) -> list[tuple[tuple[float, float], tuple[float
     for fp in pcb.footprints:
         # fp_curve is not parsed into the footprint model at all, so an
         # Edge.Cuts one would silently vanish: refuse the whole area.
+        # This guard depends on _sexp_node being linked — PCB's
+        # constructor runs _link_footprint_sexp_nodes(), which every
+        # production parse path goes through; without the link the guard
+        # is skipped and an fp_curve cutout would vanish instead of
+        # forcing None.
         node = getattr(fp, "_sexp_node", None)
         if node is not None:
             for child in node.iter_children():
@@ -356,8 +361,17 @@ def _edge_cuts_segments(pcb: PCB) -> list[tuple[tuple[float, float], tuple[float
                 start, end = fp_point(fp, graphic.start), fp_point(fp, graphic.end)
                 segments.append((start, end))
             elif kind == "rect":
-                a, b = fp_point(fp, graphic.start), fp_point(fp, graphic.end)
-                add_chain([a, (b[0], a[1]), b, (a[0], b[1])])
+                # Transform all four local corners, exactly like the poly
+                # branch: synthesizing the other two in board space would
+                # rebuild an axis-aligned box from two rotated points and
+                # shrink a cutout at any non-multiple-of-90 rotation.
+                (lx1, ly1), (lx2, ly2) = graphic.start, graphic.end
+                add_chain(
+                    [
+                        fp_point(fp, corner)
+                        for corner in ((lx1, ly1), (lx2, ly1), (lx2, ly2), (lx1, ly2))
+                    ]
+                )
             elif kind == "arc":
                 chain = tessellate_arc(
                     fp_point(fp, graphic.start),

@@ -239,6 +239,32 @@ FP_RECT_CUTOUT_PCB = """(kicad_pcb
 )
 """
 
+# A rotated footprint's fp_rect cutout: the four corners are transformed
+# from footprint space, not synthesized as an axis-aligned box from two
+# rotated opposite corners (review finding on #9614: at 30 deg that box
+# understated a 24 mm^2 cutout to 3.34, and a square at 45 deg collapsed
+# to a zero-height line, dropping the area to None).
+FP_RECT_ROTATED_CUTOUT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+
+  (gr_rect (start 0 0) (end 100 50) (stroke (width 0.1)) (layer "Edge.Cuts"))
+
+  (footprint "Mech:BoardCutout"
+    (layer "F.Cu")
+    (at 40 20 {rot})
+    (property "Reference" "J9")
+    (fp_rect (start {lx1} {ly1}) (end {lx2} {ly2}) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  )
+)
+"""
+
 # fp_curve on Edge.Cuts is not parsed into the footprint model at all,
 # so the contour cannot be measured: refuse the area rather than report
 # the gross rect (review finding on #9614).
@@ -433,6 +459,25 @@ def test_footprint_rect_cutout_subtracts():
     # Footprint-owned Edge.Cuts graphics are part of the outline.
     area = analyze_layout_quality(_load_pcb(FP_RECT_CUTOUT_PCB)).outline_area_mm2
     assert area == pytest.approx(100 * 50 - 10 * 10, abs=1e-6)
+
+
+@pytest.mark.parametrize("rot", [0, 30, 45, 60, 90, 135, 180, 270])
+def test_footprint_rect_cutout_rotation_invariant(rot):
+    # A rigid rotation cannot change a cutout's area: a 6x4 fp_rect at
+    # any footprint orientation subtracts exactly 24 mm^2. The old rect
+    # branch synthesized two corners in board space, which understated
+    # the cutout at every non-multiple of 90 deg (3.34 at 30 deg).
+    pcb = _load_pcb(FP_RECT_ROTATED_CUTOUT_PCB.format(rot=rot, lx1=-3, ly1=-2, lx2=3, ly2=2))
+    assert analyze_layout_quality(pcb).outline_area_mm2 == pytest.approx(100 * 50 - 24.0, abs=1e-6)
+
+
+@pytest.mark.parametrize("rot", [30, 45])
+def test_footprint_square_cutout_rotated_not_degenerate(rot):
+    # A square at a non-multiple of 90 deg used to collapse to a
+    # zero-height line (two points, not four), leaving dangles that
+    # dropped the whole area to None; it must subtract 36 mm^2.
+    pcb = _load_pcb(FP_RECT_ROTATED_CUTOUT_PCB.format(rot=rot, lx1=-3, ly1=-3, lx2=3, ly2=3))
+    assert analyze_layout_quality(pcb).outline_area_mm2 == pytest.approx(100 * 50 - 36.0, abs=1e-6)
 
 
 def test_footprint_curve_edge_cuts_returns_none():
