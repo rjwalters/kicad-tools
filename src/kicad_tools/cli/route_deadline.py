@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import io
 import json
 import math
 import os
@@ -17,9 +18,18 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
+from kicad_tools.core.route_run_lock import (
+    LOCK_HELD_ENV,
+    RouteLockError,
+    acquire_route_lock,
+    held_env_value,
+    release_route_lock,
+)
 from kicad_tools.router.access_witness import ACCESS_WITNESS_SIDECAR_SUFFIX
 from kicad_tools.router.reporting import RouteAttemptResult
 
@@ -210,6 +220,11 @@ def _supervise(
     deadline = time.monotonic() + budget
     launched_at = time.time()
     env = dict(os.environ, **{DEADLINE_ENV: str(deadline), CONTROL_ENV: str(control)})
+    # Issue #9628: tell the worker (and anything it spawns) this run already
+    # holds the output's lock, so they never refuse against their own parent.
+    held = held_env_value()
+    if held is not None:
+        env[LOCK_HELD_ENV] = held
     process = subprocess.Popen(
         command,
         env=env,
@@ -342,6 +357,80 @@ def run(argv: list[str] | None = None) -> int:
     return run_attempt(argv).exit_code
 
 
+def _lock_target(parsed) -> Path | None:
+    """Output a run would write, or None when the run writes nothing (``--dry-run``)."""
+    if getattr(parsed, "dry_run", False):
+        return None
+    source = Path(parsed.pcb).absolute()
+    requested = getattr(parsed, "_lint_gate_output", None) or parsed.output
+    return Path(requested).absolute() if requested else source.with_stem(source.stem + "_routed")
+
+
+def _probe_lock_target(argv: list[str]) -> Path | None:
+    """Lock target for an in-process run; None for help, bad args or dry runs.
+
+    Argument errors are left for the real parse to report once, so the probe's
+    own usage message is swallowed.
+    """
+    from .route_cmd import _route_parser
+
+    if "--help" in argv or "-h" in argv:
+        return None
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            parsed, _ = _route_parser().parse_known_args(argv)
+    except SystemExit:
+        return None
+    return _lock_target(parsed)
+
+
+@contextlib.contextmanager
+def _sigterm_as_interrupt():
+    """Let a SIGTERM to the supervisor unwind like Ctrl-C.
+
+    The default action would kill the supervisor outright, skipping the lock
+    release *and* orphaning the worker, which would keep writing the output
+    with no lock held. ``_supervise`` already turns KeyboardInterrupt into
+    "terminate the worker group", so reuse that.
+    """
+    if (
+        threading.current_thread() is not threading.main_thread()
+        or signal.getsignal(signal.SIGTERM) is not signal.SIG_DFL
+    ):
+        yield
+        return
+
+    def handler(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+
+def _with_run_lock(
+    output: Path | None, body: Callable[[], RouteAttemptResult], *, supervised: bool = False
+) -> RouteAttemptResult:
+    """Run ``body()`` holding the output's run lock (issue #9628).
+
+    A refused lock exits 1 before anything touches the output.
+    """
+    if output is None:
+        return body()
+    try:
+        handle = acquire_route_lock(output)
+    except (RouteLockError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return RouteAttemptResult(1)
+    try:
+        with _sigterm_as_interrupt() if supervised else contextlib.nullcontext():
+            return body()
+    finally:
+        release_route_lock(handle)
+
+
 def run_attempt(argv: list[str] | None = None) -> RouteAttemptResult:
     """Return metadata from this invocation, including a supervised worker."""
     from .route_cmd import _in_process_main, _route_parser
@@ -353,9 +442,13 @@ def run_attempt(argv: list[str] | None = None) -> RouteAttemptResult:
     timeout_args, _ = probe.parse_known_args(argv)
     budget = timeout_args.timeout
     if budget is None or budget <= 0 or "--help" in argv or "-h" in argv:
-        with capture_disposition() as values:
-            code = _in_process_main(argv)
-            return RouteAttemptResult(code, values[-1] if values else None)
+
+        def in_process() -> RouteAttemptResult:
+            with capture_disposition() as values:
+                code = _in_process_main(argv)
+                return RouteAttemptResult(code, values[-1] if values else None)
+
+        return _with_run_lock(_probe_lock_target(argv), in_process)
     if not math.isfinite(budget):
         print("Error: --timeout must be finite", file=sys.stderr)
         return RouteAttemptResult(1)
@@ -365,33 +458,37 @@ def run_attempt(argv: list[str] | None = None) -> RouteAttemptResult:
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return RouteAttemptResult(1)
-    with tempfile.TemporaryDirectory(prefix="kct-route-deadline-") as directory:
-        control = Path(directory) / "control.json"
-        # Bind output before launching: even startup timeout cannot leave a
-        # previous canonical result masquerading as this invocation's output.
-        control.write_text(json.dumps(dict(state, stage="startup")))
-        # Capture report identities before the worker can replace stale files.
-        for option, attribute in (
-            ("complete_report", "_placement_report_before"),
-            ("export_failed_nets", "_placement_failed_before"),
-        ):
-            value = getattr(parsed, option, None)
-            path = Path(value) if value else None
-            setattr(parsed, attribute, path.stat() if path and path.exists() else None)
-        code = _supervise([sys.executable, "-m", __name__, *argv], budget, control)
-        disposition = disposition_from_control(_read_control(control))
-        if code == TIMEOUT_EXIT and disposition is not None:
-            parsed._placement_disposition = disposition
-            parsed._placement_output = Path(state["output"])
-            output = parsed._placement_output
-            # Even a checkpoint written before unwinding is unverified.
-            parsed._placement_output_before = output.stat() if output.exists() else None
-            finish(parsed, code)
-        if code == TIMEOUT_EXIT:
-            # After ``finish()``: it may write the ``--export-failed-nets``
-            # target itself, and the note must describe the final state.
-            _note_skipped_failed_export(parsed, state)
-        return RouteAttemptResult(code, disposition)
+
+    def supervised() -> RouteAttemptResult:
+        with tempfile.TemporaryDirectory(prefix="kct-route-deadline-") as directory:
+            control = Path(directory) / "control.json"
+            # Bind output before launching: even startup timeout cannot leave a
+            # previous canonical result masquerading as this invocation's output.
+            control.write_text(json.dumps(dict(state, stage="startup")))
+            # Capture report identities before the worker can replace stale files.
+            for option, attribute in (
+                ("complete_report", "_placement_report_before"),
+                ("export_failed_nets", "_placement_failed_before"),
+            ):
+                value = getattr(parsed, option, None)
+                path = Path(value) if value else None
+                setattr(parsed, attribute, path.stat() if path and path.exists() else None)
+            code = _supervise([sys.executable, "-m", __name__, *argv], budget, control)
+            disposition = disposition_from_control(_read_control(control))
+            if code == TIMEOUT_EXIT and disposition is not None:
+                parsed._placement_disposition = disposition
+                parsed._placement_output = Path(state["output"])
+                output = parsed._placement_output
+                # Even a checkpoint written before unwinding is unverified.
+                parsed._placement_output_before = output.stat() if output.exists() else None
+                finish(parsed, code)
+            if code == TIMEOUT_EXIT:
+                # After ``finish()``: it may write the ``--export-failed-nets``
+                # target itself, and the note must describe the final state.
+                _note_skipped_failed_export(parsed, state)
+            return RouteAttemptResult(code, disposition)
+
+    return _with_run_lock(_lock_target(parsed), supervised, supervised=True)
 
 
 def _note_skipped_failed_export(parsed, state: dict) -> None:
