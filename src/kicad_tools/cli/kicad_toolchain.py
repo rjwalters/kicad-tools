@@ -559,22 +559,39 @@ def _resolve_footprint_library() -> FootprintLibraryResolution | None:
     return FootprintLibraryResolution(paths.footprints_path, paths.source)
 
 
+@contextlib.contextmanager
+def _footprint_read_scope() -> Iterator[None]:
+    """Isolate this context's footprint reads (Issue #9526 review).
+
+    A no-op when ``kicad_tools.footprints`` is not importable (the standalone
+    CI-init load of this module).
+    """
+    try:
+        from kicad_tools.footprints.library_path import library_read_scope
+    except ImportError:  # pragma: no cover - standalone (CI init) use
+        yield
+        return
+    with library_read_scope():
+        yield
+
+
 def footprint_library_identity() -> dict[str, Any] | None:
     """Content identity of the standard-library footprints the producer read.
 
     A SHA-256 over the ``.kicad_mod`` files recorded by
-    ``kicad_tools.footprints.library_path`` (the reads ``PCB.add_footprint``
-    sources from the detected standard library), each named relative to its
-    library root, plus that root's resolution ``source``.  Because KiCad ships
-    no library version file, this digest *is* the library identity a
+    ``kicad_tools.footprints.library_path`` in *this* evidence run (the reads
+    ``PCB.add_footprint`` sources from the detected standard library), each
+    named relative to its library root, plus that root's resolution ``source``
+    as the lookup reported it.  Both the per-file digests and the source are
+    the ones captured when the file was consumed -- reopening the path or
+    re-detecting the source at evidence time would let a later library edit or
+    environment change rewrite the record (Issue #9526 review).  Because KiCad
+    ships no library version file, this digest *is* the library identity a
     library-driven geometry change shows up in (Issue #9526) -- recorded, not
     gated.  ``None`` when the producer read no standard-library footprints.
     """
     try:
-        from kicad_tools.footprints.library_path import (
-            detect_kicad_library_path,
-            recorded_library_reads,
-        )
+        from kicad_tools.footprints.library_path import recorded_library_reads
     except ImportError:  # pragma: no cover - standalone (CI init) use
         return None
     reads = recorded_library_reads()
@@ -586,13 +603,15 @@ def footprint_library_identity() -> dict[str, Any] | None:
             name = read.path.relative_to(read.root).as_posix()
         except ValueError:  # pragma: no cover - defensive; funnel paths are under root
             name = read.path.as_posix()
-        entries.append((name, hashlib.sha256(read.path.read_bytes()).hexdigest()))
+        entries.append((name, read.sha256))
     entries.sort()
     combined = hashlib.sha256()
     for name, digest in entries:
         combined.update(f"{name}\0{digest}\n".encode())
+    sources = {read.source for read in reads}
+    source = sources.pop() if len(sources) == 1 else "+".join(sorted(sources))
     return {
-        "source": detect_kicad_library_path().source,
+        "source": source,
         "sha256": combined.hexdigest(),
         "files": [name for name, _ in entries],
     }
@@ -708,7 +727,8 @@ def evidence_toolchain(
             chain = EvidenceToolchain(binary, version, home, image, _resolve_footprint_library())
             _ACTIVE_TOOLCHAIN.append(chain)
             try:
-                yield chain
+                with _footprint_read_scope():
+                    yield chain
             finally:
                 _ACTIVE_TOOLCHAIN.pop()
         finally:

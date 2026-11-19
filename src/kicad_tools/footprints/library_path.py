@@ -5,8 +5,11 @@ Detects the location of KiCad's standard footprint libraries on different platfo
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import os
 import platform
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -97,30 +100,74 @@ class LibraryRead:
     """That root's ``detect_kicad_library_path`` source: 'config'/'env'/'auto'."""
     path: Path
     """The resolved ``.kicad_mod`` file."""
+    sha256: str
+    """Digest of the file's bytes, captured at consumption time (Issue #9526
+    review).  Recorded here -- not re-read at evidence time -- so a later edit
+    of the library file cannot rewrite what the producer actually used."""
 
 
-#: Recorded standard-library reads of this process, deduplicated per
-#: ``(root, path)`` in first-seen order.  Fed unconditionally (recording is
-#: cheap); only evidence producers *read* it back, via
+#: Reads recorded outside any :func:`library_read_scope` (plain library use),
+#: deduplicated per ``(root, path)`` in first-seen order.  Recording is fed
+#: unconditionally (it is cheap); only evidence producers *read* it back, via
 #: :func:`kicad_tools.cli.kicad_toolchain.footprint_library_identity`.
-_RECORDED_READS: dict[tuple[str, str], LibraryRead] = {}
+_DEFAULT_READS: dict[tuple[str, str], LibraryRead] = {}
+
+#: Stack of per-evidence-run collections.  Each :func:`library_read_scope`
+#: (one :func:`kicad_tools.cli.kicad_toolchain.evidence_toolchain` context)
+#: pushes a fresh dict so consecutive runs never see each other's reads and a
+#: nested exit restores the outer collection untouched (Issue #9526 review).
+_READ_SCOPES: list[dict[tuple[str, str], LibraryRead]] = []
+
+
+def _active_reads() -> dict[tuple[str, str], LibraryRead]:
+    """The collection new reads record into: the innermost scope, else default."""
+    return _READ_SCOPES[-1] if _READ_SCOPES else _DEFAULT_READS
 
 
 def record_library_read(root: Path, source: str, path: Path) -> None:
-    """Record *path* as consumed from the library *root* (idempotent)."""
+    """Record *path* as consumed from the library *root* (idempotent).
+
+    The bytes are digested now, at consumption, together with the *source* the
+    lookup resolved under -- so later file edits or environment changes cannot
+    rewrite the record (Issue #9526 review).
+    """
+    reads = _active_reads()
     key = (str(root), str(path))
-    if key not in _RECORDED_READS:
-        _RECORDED_READS[key] = LibraryRead(root=Path(root), source=source, path=Path(path))
+    if key not in reads:
+        reads[key] = LibraryRead(
+            root=Path(root),
+            source=source,
+            path=Path(path),
+            sha256=hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+        )
 
 
 def recorded_library_reads() -> tuple[LibraryRead, ...]:
-    """The standard-library reads recorded so far, first-seen order."""
-    return tuple(_RECORDED_READS.values())
+    """The standard-library reads recorded in the active scope, first-seen order."""
+    return tuple(_active_reads().values())
+
+
+@contextlib.contextmanager
+def library_read_scope() -> Iterator[None]:
+    """Collect standard-library reads into a fresh scope (Issue #9526 review).
+
+    Reads made inside the ``with`` block go to a collection that vanishes at
+    exit; the outer collection is restored untouched.  One scope per
+    :func:`kicad_tools.cli.kicad_toolchain.evidence_toolchain` entry keeps
+    each evidence run's provenance its own, with no manual reset between
+    consecutive runs.
+    """
+    _READ_SCOPES.append({})
+    try:
+        yield
+    finally:
+        _READ_SCOPES.pop()
 
 
 def reset_library_reads() -> None:
-    """Forget every recorded read (test isolation)."""
-    _RECORDED_READS.clear()
+    """Forget every recorded read, in every scope (test isolation)."""
+    _DEFAULT_READS.clear()
+    _READ_SCOPES.clear()
 
 
 @dataclass

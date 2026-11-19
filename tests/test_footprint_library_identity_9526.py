@@ -77,8 +77,10 @@ def read_one() -> Path | None:
 
 
 def identity_of(monkeypatch, root: Path) -> dict:
-    """Identity recorded for one ``read_one()`` against *root*."""
-    reset_library_reads()
+    """Identity recorded for one ``read_one()`` against *root*.
+
+    No manual reset: each evidence run gets its own read scope, so consecutive
+    ``identity_of`` calls cannot see each other's reads (Issue #9526 review)."""
     monkeypatch.setenv(kicad_toolchain.KICAD_FOOTPRINT_DIR_ENV, str(root))
     with kicad_toolchain.evidence_toolchain():
         assert read_one() is not None
@@ -103,6 +105,73 @@ def test_provenance_records_version_and_identity(host_with_pinned_kicad, monkeyp
     assert resolution is not None
     assert resolution.source == "env"
     assert resolution.root == root
+
+
+def test_consecutive_runs_are_isolated_without_manual_reset(
+    host_with_pinned_kicad, monkeypatch, tmp_path
+):
+    """Each evidence run records only its own reads (Issue #9526 review).
+
+    The first run reads a footprint; the second run reads nothing, so its
+    provenance must be version-only -- the first run's capacitor must not
+    leak into it.  A third run reads again and sees exactly its own file."""
+    root = make_library(tmp_path / "lib")
+    monkeypatch.setenv(kicad_toolchain.KICAD_FOOTPRINT_DIR_ENV, str(root))
+    with kicad_toolchain.evidence_toolchain():
+        assert read_one() is not None
+    with kicad_toolchain.evidence_toolchain():
+        prov = kicad_toolchain.evidence_provenance()
+    assert prov["footprint_library"] is None
+    assert prov["kicad_version"] == kicad_toolchain.PINNED_KICAD_VERSION
+    with kicad_toolchain.evidence_toolchain():
+        assert read_one() is not None
+        identity = kicad_toolchain.evidence_provenance()["footprint_library"]
+    assert identity["files"] == [FP_NAME]
+
+
+def test_identity_uses_bytes_and_source_captured_at_read_time(
+    host_with_pinned_kicad, monkeypatch, tmp_path
+):
+    """A later file edit or environment change cannot rewrite the record.
+
+    The digest is taken from the bytes consumed and the source from the
+    lookup that resolved the file -- not re-read/re-detected at evidence
+    time (Issue #9526 review)."""
+    config_root = make_library(tmp_path / "config-lib")
+    env_root = make_library(tmp_path / "env-lib", pad1_x="-2.5")
+    monkeypatch.setenv(kicad_toolchain.KICAD_FOOTPRINT_DIR_ENV, str(env_root))
+    with kicad_toolchain.evidence_toolchain():
+        resolved = detect_kicad_library_path(config_override=config_root).get_footprint_file(
+            "Capacitor_SMD", "C_0805_2012Metric"
+        )
+        assert resolved is not None
+        before = kicad_toolchain.evidence_provenance()["footprint_library"]
+        # Tamper with the library after consumption: the record must hold.
+        resolved.write_text(resolved.read_text() + "\n")
+        after = kicad_toolchain.evidence_provenance()["footprint_library"]
+    assert after == before
+    assert before["source"] == "config"
+    assert before["files"] == [FP_NAME]
+    consumed = hashlib.sha256(FP_TEXT.encode()).hexdigest()
+    assert before["sha256"] == hashlib.sha256(f"{FP_NAME}\0{consumed}\n".encode()).hexdigest()
+
+
+def test_tampered_env_library_after_a_config_read_cannot_rewrite_source(
+    host_with_pinned_kicad, monkeypatch, tmp_path
+):
+    """Re-detecting the source at evidence time would report ``env`` for a
+    lookup that actually resolved ``config``; the recorded source must win."""
+    config_root = make_library(tmp_path / "config-lib")
+    env_root = make_library(tmp_path / "env-lib")
+    monkeypatch.setenv(kicad_toolchain.KICAD_FOOTPRINT_DIR_ENV, str(env_root))
+    with kicad_toolchain.evidence_toolchain():
+        resolved = detect_kicad_library_path(config_override=config_root).get_footprint_file(
+            "Capacitor_SMD", "C_0805_2012Metric"
+        )
+        assert resolved is not None
+        monkeypatch.delenv(kicad_toolchain.KICAD_FOOTPRINT_DIR_ENV)
+        identity = kicad_toolchain.evidence_provenance()["footprint_library"]
+    assert identity["source"] == "config"
 
 
 def test_one_changed_footprint_changes_identity(host_with_pinned_kicad, monkeypatch, tmp_path):
@@ -264,8 +333,9 @@ def test_generate_emits_toolchain_record(host_with_pinned_kicad, monkeypatch, tm
     assert "Capacitor_SMD.pretty/C_0603_1608Metric.kicad_mod" in files
     assert "Package_DFN_QFN.pretty/QFN-24-1EP_4x4mm_P0.5mm_EP2.6x2.6mm.kicad_mod" in files
     assert (tmp_path / "out-a" / "circuit.json").read_text().count('"toolchain"') == 1
-    # Second run, same library: identical identity (content hash, not paths).
-    reset_library_reads()
+    # Second run, same library: identical identity (content hash, not paths) --
+    # and no manual reset: the second context's scope is its own (Issue #9526
+    # review).
     with kicad_toolchain.evidence_toolchain():
         result2 = module.generate(tmp_path / "out-b")
     assert result2["toolchain"] == record
