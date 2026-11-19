@@ -42,7 +42,12 @@ def _board(
     track_local_x: float,
     fp_at: tuple[float, float] = (110.0, 110.0),
     extra_footprints: str = "",
+    side: str = "F",
+    pad_size: tuple[float, float] = (1.5, 0.9),
+    tab: tuple[float, float, float] = (TAB_NEAR, TAB_FAR, 0.45),
 ) -> Path:
+    cu, mask, paste = f"{side}.Cu", f"{side}.Mask", f"{side}.Paste"
+    t_near, t_far, t_half = tab
     fx, fy = fp_at
     ax, ay = _rot(*PAD_AT, rotation)
     anchor = (fx + ax, fy + ay)  # board position of the custom pad's anchor
@@ -60,21 +65,21 @@ def _board(
  (setup (pad_to_mask_clearance 0))
  (net 0 "") (net 1 "GND") (net 2 "SIG") (net 3 "VCC")
  (gr_rect (start 90 90) (end 130 130) (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))
- (footprint "Package_TO_SOT_SMD:SOT-89-3" (layer "F.Cu") (at {fx} {fy} {rotation})
-  (property "Reference" "Q1" (at 0 0) (layer "F.SilkS"))
-  (pad "1" smd rect (at -1.5 -1.5 {rotation}) (size 1.0 0.5) (layers "F.Cu") (net 1 "GND"))
-  (pad "2" smd custom (at {PAD_AT[0]} {PAD_AT[1]} {rotation}) (size 1.5 0.9)
-   (layers "F.Cu" "F.Mask" "F.Paste") (net 2 "SIG")
+ (footprint "Package_TO_SOT_SMD:SOT-89-3" (layer "{cu}") (at {fx} {fy} {rotation})
+  (property "Reference" "Q1" (at 0 0) (layer "{side}.SilkS"))
+  (pad "1" smd rect (at -1.5 -1.5 {rotation}) (size 1.0 0.5) (layers "{cu}") (net 1 "GND"))
+  (pad "2" smd custom (at {PAD_AT[0]} {PAD_AT[1]} {rotation}) (size {pad_size[0]} {pad_size[1]})
+   (layers "{cu}" "{mask}" "{paste}") (net 2 "SIG")
    (options (clearance outline) (anchor rect))
-   (primitives (gr_poly (pts (xy {TAB_NEAR} -0.45) (xy {TAB_FAR} -0.45)
-     (xy {TAB_FAR} 0.45) (xy {TAB_NEAR} 0.45)) (width 0) (fill yes))))
-  (pad "3" smd rect (at -1.5 1.5 {rotation}) (size 1.0 0.5) (layers "F.Cu") (net 3 "VCC")))
- (footprint "Resistor_SMD:R_0603" (layer "F.Cu") (at {r1[0]:.4f} {r1[1]:.4f})
-  (property "Reference" "R1" (at 0 0) (layer "F.SilkS"))
-  (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "SIG")))
+   (primitives (gr_poly (pts (xy {t_near} -{t_half}) (xy {t_far} -{t_half})
+     (xy {t_far} {t_half}) (xy {t_near} {t_half})) (width 0) (fill yes))))
+  (pad "3" smd rect (at -1.5 1.5 {rotation}) (size 1.0 0.5) (layers "{cu}") (net 3 "VCC")))
+ (footprint "Resistor_SMD:R_0603" (layer "{cu}") (at {r1[0]:.4f} {r1[1]:.4f})
+  (property "Reference" "R1" (at 0 0) (layer "{side}.SilkS"))
+  (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "{cu}") (net 2 "SIG")))
  {extra_footprints}
  (segment (start {r1[0]:.4f} {r1[1]:.4f}) (end {end[0]:.4f} {end[1]:.4f})
-  (width 0.25) (layer "F.Cu") (net 2)))"""
+  (width 0.25) (layer "{cu}") (net 2)))"""
     del g1x, g1y, g3x, g3y
     path = tmp_path / "sot89.kicad_pcb"
     path.write_text(text)
@@ -133,3 +138,56 @@ def test_only_pad_grid_runs_and_still_flags_ordinary_off_grid_pad(tmp_path, caps
     assert flagged, "an ordinary off-grid pad must still be identified"
     assert all("R9" in v["message"] for v in flagged)
     assert not any("Q1" in v["message"] for v in flagged)
+
+
+# The stock library's exact pad-2 numbers (KiCad 10.0 SOT-89-3): anchor at
+# (-1.8625, 0) with size 1.475 x 0.9, tab gr_poly x 0.7375..3.8625, y
+# +/-0.8665.  The fixture above is a structural stand-in (1.5 x 0.9, tab
+# half height 0.45); these use the real outline, and flip the footprint to
+# the back side, which no earlier placement does.  With the custom-pad rules
+# from #9498 on main, the stock pad is measured exactly: the tab is copper
+# for connectivity and no rule may stub it with an incomplete finding.
+STOCK_SIZE = (1.475, 0.9)
+STOCK_TAB = (0.7375, 3.8625, 0.8665)
+STOCK_PLACEMENTS = [
+    pytest.param(30.0, "F", id="30-front"),
+    pytest.param(0.0, "B", id="0-back"),
+    pytest.param(30.0, "B", id="30-back"),
+]
+
+
+@pytest.mark.parametrize(("rotation", "side"), STOCK_PLACEMENTS)
+def test_stock_pad_exact_numbers_tab_is_real_copper(tmp_path, capsys, rotation, side):
+    board = _board(
+        tmp_path,
+        rotation=rotation,
+        track_local_x=ON_TAB,
+        side=side,
+        pad_size=STOCK_SIZE,
+        tab=STOCK_TAB,
+    )
+    report = _run(board, capsys)
+    rules = _rules(report)
+    assert "connectivity" not in rules
+    assert "track_dangling" not in rules
+    stubbed = [
+        v
+        for v in report["violations"]
+        if v["rule_id"].endswith("_incomplete") and "Q1" in v["message"]
+    ]
+    assert not stubbed, f"the stock pad is measurable; no rule may stub it: {stubbed}"
+
+
+def test_stock_pad_exact_numbers_back_side_off_tab_still_dangling(tmp_path, capsys):
+    board = _board(
+        tmp_path,
+        rotation=30.0,
+        track_local_x=OFF_TAB,
+        side="B",
+        pad_size=STOCK_SIZE,
+        tab=STOCK_TAB,
+    )
+    report = _run(board, capsys)
+    rules = _rules(report)
+    assert "connectivity" in rules
+    assert "track_dangling" in rules
