@@ -16,6 +16,17 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-18
 
+- **PR #9440**: fix: skip silk_ref_obscured for hidden references replaced by a function label
+- **Issue #9435** (closed): silk_ref_obscured counts designators hidden on purpose and replaced by a function label
+- **PR #9437**: fix: hash footprint positions in sheet coordinates so outline-only edits keep waivers valid
+- **Issue #9432** (closed): kct export rewrites the board's .kicad_dru and drops per-zone clearance rules that a newer kct wrote (0.29.0)
+- **Issue #9431** (closed): Evidence-bound waivers go stale when only the board outline (origin) changes: netclass_clearance_copper evidence is board-relative
+- **PR #9430**: fix: pick export DRU floors from the stackup's outer copper and check them in --dry-run
+- **PR #9427**: feat: add reinforce --adopt and excuse far-side/same-net mask openings of recorded runs
+- **PR #9423**: test: make optimizer-unwind fixture SIGTERM handler one-shot to catch a lost first deadline raise
+- **Issue #9419** (closed): mask_to_copper after #9315: no way to record hand-adjusted wires, and 138 same-net errors remain at opposite-side anchor openings and under attributed strips
+- **Issue #9418** (closed): Optimizer-unwind test no longer detects a lost first deadline raise after #9297
+- **PR #9277**: fix(board01): slide same-net vias out of pad mask apertures in the recipe
 - **Issue #8858** (closed): Verify default-on mask_to_copper on native KiCad 10.0.5 and baseline 543/670 board findings (PR #8849)
 - **PR #9414**: test(ci): verify per-PR changelog admission before enabling a merge queue
 - **Issue #9413** (closed): Verify the per-PR changelog admission check before enabling a merge queue

@@ -2834,6 +2834,7 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
                     through_hole=is_thru,
                     side=fp_side,
                     footprint_name=footprint_name,
+                    footprint_origin=(fp_x, fp_y),
                     rotation=pad_rotation,
                     shape=pad_shape,
                     roundrect_rratio=_pad_rratio_from_block(pad_block, pad_shape),

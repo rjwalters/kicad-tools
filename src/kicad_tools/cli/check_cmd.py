@@ -1909,8 +1909,9 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help=(
             "Use the fixed 0.05mm pad_grid tolerance (PR #3057 default) "
-            "instead of auto-deriving per-board from the pad-offset "
-            "histogram (issue #3061).  Default: auto-derive."
+            "instead of auto-deriving a tolerance per footprint from that "
+            "footprint's own pad lattice (issues #3061, #9434; other parts "
+            "never influence it).  Default: auto-derive."
         ),
     )
     pad_grid_group.add_argument(
