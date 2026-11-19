@@ -80,10 +80,151 @@ from kicad_tools.silkscreen._silk_defaults import (  # noqa: E402
     SILK_HOLE_CLEARANCE_MM,
 )
 
-# Per-character width factor used to approximate a stroked-font text bounding
-# box.  KiCad's true glyph metrics are not modeled; a simple per-character box
-# is sufficient to reproduce the kicad-cli silk findings.
-_TEXT_CHAR_WIDTH_FACTOR = 0.7
+# Per-character advance widths for KiCad's stroke font, in quanta of
+# ``size / 21`` (KiCad quantizes glyph advances to 1/21 of the font size --
+# every measured advance landed on an exact integer multiple).  The text
+# bounding box used to approximate a whole string as
+# ``0.7 * size * len(text) + thickness`` (Issue #9515): a single average that
+# under-covered KiCad's plotted ink badly for wide glyphs and long digit runs
+# (measured under-coverage: "ABCD" +0.77 mm, "1234567890" +2.14 mm,
+# "MMMMMMMMMM" +3.95 mm at 1.0 mm / 0.15 mm), which loosened
+# ``silk_over_copper`` / ``silk_overlap`` / ``silk_hole_overlap`` -- a pad or
+# silk item inside KiCad's ink but outside the box is silently missed, and
+# since #9433 honours justification the whole error lands at the far end of a
+# justified label.
+#
+# The table below was measured by plotting probe ``gr_text`` strings on
+# F.SilkS with kicad-cli 10.0.6 (the pinned CI image) and scanning the gerber
+# stroke vertices plus the round aperture diameter: for every probed glyph the
+# plotted ink width of a repeated-glyph string is exactly
+# ``(n - 1) * advance + ink``, and all advances are integer quanta.  178 probe
+# strings (A-Z, a-z, 0-9, 12 symbols, space; lengths 1-10; sizes 0.8/1.0/2.0;
+# thicknesses 0.12/0.15/0.3; centred/left/right, 0/90 deg) are covered by the
+# model below -- advance sum, plus aperture/guard terms, minus the capped
+# end trim -- with zero violations: it is an over-approximation of plotted
+# ink, which is the direction the box-based silk rules need (over-coverage
+# can only cost a hairline intersection, suppressed by the
+# ``_MIN_*_OVERLAP_AREA*`` gates; under-coverage drops real findings).
+#
+# Tolerance assumptions a future reviewer should know:
+# * ``+ font_thickness`` below models the round aperture that stamps the
+#   stroke endpoints (the box must include the stroke half-width, not just
+#   centerline vertices); ``_TEXT_WIDTH_GUARD_MM`` covers the exactly tight
+#   measured case ('_' ink reaches its full advance plus the aperture) and
+#   KiCad's nanometre rounding of stroke coordinates.
+# * Glyphs outside the measured set (accents, ``@ # $ & * = [ ]`` ...) take
+#   the widest measured advance (``m``) and no end trim; any KiCad-side
+#   widening we did not model (bold double-stroking, italic skew) also widens
+#   real ink, so the defaults err loose, never tight.
+# * Justified text: KiCad starts the ink of a ``(justify left)`` string at or
+#   right of its anchor (measured lead-in +0.26..+0.45 mm), so the box edge at
+#   the anchor and the advance-table width cover both ends of left/right-
+#   justified labels.
+_TEXT_CHAR_ADVANCE_QUANTA: dict[str, int] = {
+    # uppercase (advance quanta; 'M'/'W' widest at 24)
+    "A": 18,
+    "B": 21,
+    "C": 21,
+    "D": 21,
+    "E": 19,
+    "F": 18,
+    "G": 21,
+    "H": 22,
+    "I": 10,
+    "J": 16,
+    "K": 21,
+    "L": 17,
+    "M": 24,
+    "N": 22,
+    "O": 22,
+    "P": 21,
+    "Q": 22,
+    "R": 21,
+    "S": 20,
+    "T": 16,
+    "U": 22,
+    "V": 18,
+    "W": 24,
+    "X": 20,
+    "Y": 18,
+    "Z": 20,
+    # digits are uniform in KiCad's stroke font
+    "0": 20,
+    "1": 20,
+    "2": 20,
+    "3": 20,
+    "4": 20,
+    "5": 20,
+    "6": 20,
+    "7": 20,
+    "8": 20,
+    "9": 20,
+    # lowercase ('m' widest at 28; i/j narrow like 'I')
+    "a": 19,
+    "b": 19,
+    "c": 18,
+    "d": 19,
+    "e": 18,
+    "f": 12,
+    "g": 19,
+    "h": 19,
+    "i": 10,
+    "j": 10,
+    "k": 17,
+    "l": 11,
+    "m": 28,
+    "n": 19,
+    "o": 19,
+    "p": 19,
+    "q": 19,
+    "r": 13,
+    "s": 17,
+    "t": 12,
+    "u": 19,
+    "v": 16,
+    "w": 22,
+    "x": 17,
+    "y": 16,
+    "z": 17,
+    # symbols and space (measured)
+    "!": 10,
+    "%": 24,
+    "'": 10,
+    "(": 14,
+    ")": 14,
+    "+": 26,
+    "-": 26,
+    ".": 10,
+    "/": 22,
+    ":": 10,
+    "?": 18,
+    "_": 16,
+    " ": 16,
+}
+#: Advance for glyphs not in the measured set: the widest measured advance
+#: (lowercase ``m``), so unknown/symbol ink stays over-covered.
+_TEXT_ADVANCE_DEFAULT_QUANTA = 28
+
+#: Minimum slack the box keeps over plotted ink ('_' ink equals its advance
+#: exactly, so without this guard the box would sit hairline-tight on
+#: underscore-ending strings; it also absorbs KiCad's nanometre rounding of
+#: stroke coordinates).
+_TEXT_WIDTH_GUARD_MM = 0.01
+
+#: End trim applied when the string's last glyph is one whose measured plotted
+#: ink ends well short of its advance.  Summing full advances over-shoots the
+#: far end of a string by the last glyph's (advance - ink): a box that reaches
+#: pads the real ink clears would raise false ``silk_over_copper`` findings --
+#: the kicad-cli parity fixtures pin this (e.g. "U3"'s reference ink clears its
+#: own end pads by ~0.14 mm, but an untrimmed advance-sum box reached them,
+#: Issue #9515).  The trim is capped at 0.10 mm: deeper trims would spend the
+#: coverage headroom (``font_thickness`` + guard must absorb the <=0.15 mm
+#: string-position wander measured across mixed strings).  Glyphs whose ink
+#: ends within 0.10 mm of the advance ('A' 'T' 'V' 'Y' 'f' 't' 'j' '/' '_',
+#: space) get no trim -- underscore ink reaches its full advance plus the
+#: aperture, so trimming it would under-cover.
+_TEXT_END_TRIM_MM = -0.10
+_TEXT_WIDE_INK_END = frozenset("BCDEFGHIJKLMNOPQRSUWXZ0123456789abcdghiklmnopqrstuvwxyz!%'()+-.:?")
 
 # Floating-point tolerance for clearance comparisons (0.1 micron), matching
 # ``edge.py``'s ``_CLEARANCE_EPSILON_MM``.
@@ -676,7 +817,14 @@ def _text_bbox_geometry(
     n = len(text)
     if n == 0:
         return None
-    width = font_size[0] * n * _TEXT_CHAR_WIDTH_FACTOR + font_thickness
+    width = (
+        font_size[0]
+        * sum(_TEXT_CHAR_ADVANCE_QUANTA.get(c, _TEXT_ADVANCE_DEFAULT_QUANTA) for c in text)
+        / 21.0
+        + font_thickness
+        + _TEXT_WIDTH_GUARD_MM
+        + (_TEXT_END_TRIM_MM if text[-1] in _TEXT_WIDE_INK_END else 0.0)
+    )
     height = font_size[1] + font_thickness
     cx, cy = center
     # Mirrored text swaps left/right (verified against KiCad plots).

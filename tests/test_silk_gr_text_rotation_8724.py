@@ -75,7 +75,13 @@ def test_gr_text_bbox_extents_follow_rotation(tmp_path, angle):
     (_, geom, *_rest) = next(e for e in silk._iter_silk_elements(pcb) if e[2] == "ABCD")
     minx, miny, maxx, maxy = geom.bounds
     w, h = maxx - minx, maxy - miny
-    long_, short = 4 * silk._TEXT_CHAR_WIDTH_FACTOR + 0.15, 1.15
+    long_ = (
+        sum(silk._TEXT_CHAR_ADVANCE_QUANTA[c] for c in "ABCD") / 21.0
+        + 0.15
+        + silk._TEXT_WIDTH_GUARD_MM
+        + silk._TEXT_END_TRIM_MM  # 'ABCD' ends in 'D', a wide-ink-end glyph
+    )
+    short = 1.15
     if angle in (90, 270):
         assert (w, h) == pytest.approx((short, long_))
     else:
