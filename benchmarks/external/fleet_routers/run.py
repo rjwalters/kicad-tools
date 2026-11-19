@@ -391,6 +391,7 @@ def _r(v: float, nd: int = 3) -> float:
 
 def fingerprint(pcb_path: Path) -> dict[str, Any]:
     """What a fixed-placement router must not change."""
+    from kicad_tools.analysis.layout_quality import analyze_layout_quality
     from kicad_tools.schema.pcb import PCB
 
     pcb = PCB.load(str(pcb_path))
@@ -428,6 +429,10 @@ def fingerprint(pcb_path: Path) -> dict[str, Any]:
         "outline": [list(s) for s in outline],
         "copper_layers": sorted(layer.name for layer in pcb.copper_layers),
         "zones": zones,
+        # Reported per case (issue #9594): the layout-quality metric block.
+        # compare_fingerprints deliberately does NOT compare it — routing is
+        # supposed to change it, that is the metric's point.
+        "layout_quality": analyze_layout_quality(pcb).to_dict(),
     }
 
 
@@ -446,6 +451,8 @@ def compare_fingerprints(before: dict[str, Any], after: dict[str, Any]) -> list[
     for key in ("outline", "copper_layers"):
         if before[key] != after[key]:
             out.append(f"{key} changed")
+    # "layout_quality" is intentionally absent here: it is the per-case
+    # quality report (issue #9594), and routing changing it is the point.
     # Every input zone (copper or keepout) must survive unchanged. A router
     # ADDING a pour is routing output, not a placement change: see added_zones.
     remaining = Counter(after["zones"])
@@ -1384,6 +1391,10 @@ def run_tool(
         return rec
 
     rec.score = score(out, prep, int(board["copper_layers"]), base / "score", kicad_cli)
+    # Per-case layout quality (issue #9594): routed output alongside the
+    # copper-stripped input it was routed from.
+    rec.score["layout_quality"] = fp_out["layout_quality"]
+    rec.score["layout_quality_input"] = fp_in["layout_quality"]
     if not rec.score["drc"].get("ran"):
         rec.outcome, rec.stage = "scorer-failure", "drc"
         rec.reason = "headline kicad-cli DRC unavailable: " + str(rec.score["drc"].get("note"))
@@ -1525,7 +1536,7 @@ def print_table(rows: list[dict[str, Any]]) -> None:
     cols = [
         "Board", "Tool", "Outcome", "Connections", "DRC errors (total)", "DRC warnings",
         "Unconnected", "kct check (jlcpcb)", "Sync", "Vias", "Wirelength mm", "Clean pass",
-        "Wall s", "Lost constraints",
+        "Corners 90/ac/turn", "Wall s", "Lost constraints",
     ]  # fmt: skip
     print("\n| " + " | ".join(cols) + " |")
     print("|" + "---|" * len(cols))
@@ -1535,6 +1546,12 @@ def print_table(rows: list[dict[str, Any]]) -> None:
         comp = s.get("completion") or {}
         chk = s.get("kct_check") or {}
         sync = s.get("sync") or {}
+        lq = (s.get("layout_quality") or {}).get("corners") or {}
+        corners = (
+            f"{lq.get('right_angle', 0)}/{lq.get('acute', 0)}/{lq.get('turn_back', 0)}"
+            if s
+            else "--"
+        )
         cells = [
             r["board"], r["tool"], r["outcome"],
             f"{comp['connections_routed']}/{comp['connections_total']}" if comp else "--",
@@ -1546,6 +1563,7 @@ def print_table(rows: list[dict[str, Any]]) -> None:
             _cell(s.get("via_count")) if s else "--",
             _cell(s.get("wirelength_mm")) if s else "--",
             _cell(s.get("clean_pass")) if s else "--",
+            corners,
             _cell(r.get("wall_s")) + (" (TIMEOUT)" if r.get("timed_out") else ""),
             str(len(r.get("lost_constraints") or [])),
         ]  # fmt: skip

@@ -843,3 +843,104 @@ def test_title_read_from_schematic_title_block(tmp_path: Path):
 
 def test_title_omitted_without_schematic(tmp_path: Path):
     assert "title" not in extract_board_metrics(_make_board(tmp_path))
+
+
+# ---------------------------------------------------------------------------
+# layout_quality block (issue #9594)
+# ---------------------------------------------------------------------------
+
+QUALITY_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "SIG")
+  (net 5 "GND")
+
+  (gr_rect (start 0 0) (end 50 30) (stroke (width 0.1)) (layer "Edge.Cuts"))
+
+  (segment (start 5 5) (end 15 5) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 15 5) (end 15 15) (width 0.2) (layer "F.Cu") (net 1))
+
+  (via (at 45 5) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 5))
+  (via (at 45 25) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
+)
+"""
+
+
+def test_layout_quality_attached_on_manufacturing_board(tmp_path: Path):
+    import hashlib
+
+    import yaml
+
+    board = _make_board(tmp_path, manifest=SAMPLE_MANIFEST, package=True)
+    (board / "output" / "quality.kicad_pcb").write_text(QUALITY_PCB)
+    # A routed artifact, when declared, is the measured copper.
+    (board / "output" / "quality_routed.kicad_pcb").write_text(QUALITY_PCB + "\n")
+    project = {
+        "project": {
+            "name": "Quality",
+            "artifacts": {
+                "pcb": "output/quality.kicad_pcb",
+                "pcb_routed": "output/quality_routed.kicad_pcb",
+            },
+        }
+    }
+    (board / "project.kct").write_text(yaml.safe_dump(project))
+
+    m = extract_board_metrics(board)
+    lq = m["layout_quality"]
+    assert lq["pcb_path"] == "output/quality_routed.kicad_pcb"
+    assert (
+        lq["pcb_sha256"]
+        == hashlib.sha256((board / "output" / "quality_routed.kicad_pcb").read_bytes()).hexdigest()
+    )
+    assert lq["via"] == {"track": 1, "ground": 1, "total": 2}
+    assert lq["corners"]["right_angle"] == 1
+    assert lq["corners"]["per_net"] == {"SIG": {"right_angle": 1, "acute": 0, "turn_back": 0}}
+    assert lq["total_track_length_mm"] == 20.0
+    assert lq["outline_area_mm2"] == 1500.0
+    assert m["status"] == "partial"  # the block never changes status
+
+
+def test_layout_quality_omitted_when_pcb_ambiguous(tmp_path: Path):
+    board = _make_board(tmp_path, manifest=SAMPLE_MANIFEST)
+    (board / "output" / "a.kicad_pcb").write_text(QUALITY_PCB)
+    (board / "output" / "b.kicad_pcb").write_text(QUALITY_PCB)
+    assert "layout_quality" not in extract_board_metrics(board)
+
+
+def test_layout_quality_omitted_when_no_pcb(tmp_path: Path):
+    assert "layout_quality" not in extract_board_metrics(
+        _make_board(tmp_path, manifest=SAMPLE_MANIFEST, package=True)
+    )
+
+
+def test_layout_quality_bound_on_development_board(development_board):
+    m = extract_board_metrics(development_board)
+    lq = m["layout_quality"]
+    # PCB.create(30, 20) board: no copper, plain rect outline.
+    assert lq["pcb_path"] == "output/actual.kicad_pcb"
+    assert lq["pcb_sha256"] == m["sources"]["pcb"]["sha256"]
+    assert lq["via"] == {"track": 0, "ground": 0, "total": 0}
+    assert lq["corners"]["right_angle"] == 0
+    assert "per_net" not in lq["corners"]
+    assert "diff_pair_skew" not in lq
+    assert lq["outline_area_mm2"] == 600.0
+
+
+def test_layout_quality_emitted_into_written_board_json(tmp_path: Path):
+    import yaml
+
+    board = _make_board(tmp_path, manifest=SAMPLE_MANIFEST)
+    (board / "output" / "quality.kicad_pcb").write_text(QUALITY_PCB)
+    project = {"project": {"name": "Q", "artifacts": {"pcb": "output/quality.kicad_pcb"}}}
+    (board / "project.kct").write_text(yaml.safe_dump(project))
+    out = emit_board_json(board)
+    data = json.loads(out.read_text())
+    assert data["layout_quality"]["corners"]["right_angle"] == 1
