@@ -20,7 +20,13 @@ logger = logging.getLogger(__name__)
 
 from kicad_tools.sexp import SExp
 
-from ..core.board_outline import board_outline_bounds, legacy_arc_points
+from ..core.board_outline import (
+    board_outline_bounds,
+    footprint_outline_graphics,
+    is_degenerate_closed_curve,
+    legacy_arc_points,
+    outline_node_points,
+)
 from ..core.schematic_uuids import UuidMinter
 from ..core.sexp_file import load_footprint, load_pcb, save_pcb
 from ..core.version import KICAD_BOARD_FORMAT_VERSION, KICAD_GENERATOR_VERSION
@@ -4168,6 +4174,9 @@ class PCB:
         on ``rect``/``circle``/``bezier``, so the added ``poly`` entries
         cannot double-count an outline.
 
+        Footprint-local ``fp_poly``/``fp_curve`` Edge.Cuts graphics are
+        included, re-emitted in board coordinates by the shared core reader.
+
         Returns:
             A list of vertex chains; each chain is an ordered list of
             ``(x, y)`` tuples.  Empty if no ``gr_poly``/``gr_curve`` Edge.Cuts
@@ -4178,23 +4187,32 @@ class PCB:
             layer_node = node.find_child("layer")
             return bool(layer_node and layer_node.get_string(0) == "Edge.Cuts")
 
+        def _chain_from(node: SExp) -> list[tuple[float, float]]:
+            chain: list[tuple[float, float]] = []
+            for pts in node.find_all("pts"):
+                for xy in pts.find_children("xy"):
+                    x, y = xy.get_float(0), xy.get_float(1)
+                    if x is not None and y is not None:
+                        chain.append((x, y))
+            return chain
+
         chains: list[list[tuple[float, float]]] = []
         for child in self._sexp.iter_children():
             if child.tag not in ("gr_poly", "gr_curve"):
                 continue
             if not _on_edge_cuts(child):
                 continue
-            chain: list[tuple[float, float]] = []
-            for pts in child.find_all("pts"):
-                for xy in pts.find_children("xy"):
-                    x, y = xy.get_float(0), xy.get_float(1)
-                    if x is not None and y is not None:
-                        chain.append((x, y))
-            if child.tag == "gr_curve":
-                from kicad_tools.core.board_outline import is_degenerate_closed_curve
-
-                if is_degenerate_closed_curve(chain):
-                    continue
+            chain = _chain_from(child)
+            if child.tag == "gr_curve" and is_degenerate_closed_curve(chain):
+                continue
+            if chain:
+                chains.append(chain)
+        for child in footprint_outline_graphics(self._sexp):
+            if child.tag not in ("gr_poly", "gr_curve"):
+                continue
+            chain = _chain_from(child)
+            if child.tag == "gr_curve" and is_degenerate_closed_curve(chain):
+                continue
             if chain:
                 chains.append(chain)
         return chains
@@ -5114,6 +5132,14 @@ class PCB:
         :meth:`_edge_cuts_bbox_sexp`).  Without this, a board whose outline is
         a single ``gr_poly`` would silently return ``[]``.
 
+        Footprint-local Edge.Cuts graphics (``fp_*`` on Edge.Cuts, which KiCad
+        treats as board outline -- e.g. SparkFun's IoT RedBoard ESP32-P4)
+        participate too: the core reader re-emits them as board-frame
+        ``gr_line``/``gr_arc`` nodes, chained like any other segment.
+        Malformed footprint graphics raise ``ValueError`` (fail-loud, like
+        :attr:`board_size`); board-level graphics keep their tolerant
+        in-memory parsing.
+
         Segments do not need to be stored in end-to-end path order, and the
         Edge.Cuts layer may contain more than one closed contour (mounting
         holes, fiducial marks, stray shapes) alongside the real board edge.
@@ -5138,8 +5164,15 @@ class PCB:
         # gr_poly / gr_curve are not parsed into the in-memory collections, so
         # recover their vertex chains straight off the S-expression tree.
         poly_chains = self._edge_cuts_poly_chains_sexp()
+        footprint_nodes = list(footprint_outline_graphics(self._sexp))
 
-        if not edge_lines and not edge_arcs and not edge_rects and not poly_chains:
+        if (
+            not edge_lines
+            and not edge_arcs
+            and not edge_rects
+            and not poly_chains
+            and not footprint_nodes
+        ):
             return []
 
         # Build a list of all line segments (including arc endpoints)
@@ -5155,6 +5188,24 @@ class PCB:
 
         for rect in edge_rects:
             segments.extend(self._rect_to_segments(rect.start, rect.end))
+
+        for node in footprint_nodes:
+            points = outline_node_points(node)
+            tag = node.tag or ""
+            if tag == "gr_line":
+                segments.append((points[0], points[1]))
+            elif tag == "gr_arc":
+                segments.append((points[0], points[1]))
+                segments.append((points[1], points[2]))
+            elif tag in ("gr_poly", "gr_curve"):
+                chain = points
+                for i in range(len(chain) - 1):
+                    segments.append((chain[i], chain[i + 1]))
+                if len(chain) >= 3:
+                    segments.append((chain[-1], chain[0]))
+            # gr_circle: a ring cannot chain into a simple closed polygon
+            # under the strict one-mate-per-endpoint walk below, so it is
+            # skipped -- identical to the board-level treatment.
 
         # Each gr_poly / gr_curve contributes edges between consecutive
         # vertices (and a closing edge back to the first vertex) so the shared
@@ -5352,6 +5403,12 @@ class PCB:
         Handles gr_line, gr_arc, and gr_rect elements.
         More useful for distance calculations than the polygon.
 
+        Footprint-local Edge.Cuts graphics (``fp_line``/``fp_arc``/``fp_rect``,
+        which KiCad treats as board outline) participate with the same
+        line/two-chord-arc treatment as their board-level counterparts; like
+        the board level, ``gr_poly``/``gr_curve``/``gr_circle`` geometry is
+        not represented here (see :meth:`get_board_outline` for those).
+
         Returns:
             List of ((x1, y1), (x2, y2)) tuples representing line segments.
         """
@@ -5370,6 +5427,16 @@ class PCB:
         for graphic in self._graphics:
             if graphic.layer == "Edge.Cuts" and graphic.graphic_type == "rect":
                 segments.extend(self._rect_to_segments(graphic.start, graphic.end))
+
+        for node in footprint_outline_graphics(self._sexp):
+            tag = node.tag or ""
+            points = outline_node_points(node)
+            if tag == "gr_line":
+                segments.append((points[0], points[1]))
+            elif tag == "gr_arc":
+                segments.append((points[0], points[1]))
+                segments.append((points[1], points[2]))
+            # gr_poly / gr_curve / gr_circle: same treatment as the board level.
 
         # Transform from sheet-absolute to board-relative coordinates
         # so that outline segments match footprint positions (which are

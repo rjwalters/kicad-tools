@@ -329,6 +329,44 @@ def _outline_polylines(pcb: PCB, shift: Point) -> list[list[Point]]:
             lines.append([mv(p) for p in arc_points(g.start, g.mid, g.end)])
         elif kind == "poly" and g.points:
             lines.append([mv(p) for p in [*g.points, g.points[0]]])
+
+    # Footprint-local Edge.Cuts graphics are board outline per KiCad; the
+    # shared core reader re-emits them as board-frame gr_* nodes so they
+    # render next to the board-level ones.  (Do not rebind ``sx``/``sy``:
+    # ``mv`` closes over the shift.)
+    from ..core.board_outline import footprint_outline_graphics, outline_node_points
+
+    for node in footprint_outline_graphics(pcb._sexp):
+        tag = node.tag or ""
+        if tag == "gr_line":
+            (x1, y1), (x2, y2) = outline_node_points(node)
+            lines.append([mv((x1, y1)), mv((x2, y2))])
+        elif tag == "gr_arc":
+            (a1, b1), (a2, b2), (a3, b3) = outline_node_points(node)
+            lines.append([mv(p) for p in arc_points((a1, b1), (a2, b2), (a3, b3))])
+        elif tag == "gr_circle":
+            (cx, cy), (ex, ey) = outline_node_points(node)
+            r = math.hypot(ex - cx, ey - cy)
+            n = _ARC_STEPS_PER_TURN
+            lines.append(
+                [
+                    mv(
+                        (
+                            cx + r * math.cos(2 * math.pi * i / n),
+                            cy + r * math.sin(2 * math.pi * i / n),
+                        )
+                    )
+                    for i in range(n + 1)
+                ]
+            )
+        elif tag in ("gr_poly", "gr_curve"):
+            chain = outline_node_points(node)
+            if tag == "gr_curve":
+                from ..core.outline_tessellation import tessellate_cubic
+
+                chain = tessellate_cubic(chain)
+            if len(chain) >= 2:
+                lines.append([mv(p) for p in [*chain, chain[0]]])
     return lines
 
 

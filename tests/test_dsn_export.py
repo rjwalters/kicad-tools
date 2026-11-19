@@ -796,14 +796,32 @@ class TestBoardOutline:
         assert "(boundary" not in dsn
         assert any("closed outline" in o for o in exporter.omissions)
 
-    def test_footprint_edge_cuts_listed(self, tmp_path):
+    def test_footprint_edge_cuts_exported_not_listed(self, tmp_path):
+        # Issue #9593: footprint-local Edge.Cuts is board outline per KiCad,
+        # so it is exported (polygonized together with the board-level rect),
+        # not omitted with a "footprint-embedded Edge.Cuts" note.
         fp = (
             '(footprint "X" (layer "F.Cu") (at 5 5)\n'
             '  (fp_line (start 0 0) (end 1 0) (layer "Edge.Cuts")))'
         )
         edges = '(gr_rect (start 0 0) (end 100 60) (layer "Edge.Cuts"))'
         exporter, _ = self._export(tmp_path, edges, fp)
-        assert any("footprint-embedded Edge.Cuts" in o for o in exporter.omissions)
+        assert not any("footprint-embedded Edge.Cuts" in o for o in exporter.omissions)
+        assert len(exporter._board_outline) == 4  # the board-level rect
+
+    def test_footprint_only_outline_exported(self, tmp_path):
+        # A board whose ONLY outline is footprint-level Edge.Cuts now exports.
+        fp = (
+            '(footprint "X" (layer "F.Cu") (at 50 30)\n'
+            '  (fp_line (start -40 -25) (end 40 -25) (layer "Edge.Cuts"))\n'
+            '  (fp_line (start 40 -25) (end 40 25) (layer "Edge.Cuts"))\n'
+            '  (fp_line (start 40 25) (end -40 25) (layer "Edge.Cuts"))\n'
+            '  (fp_line (start -40 25) (end -40 -25) (layer "Edge.Cuts")))'
+        )
+        exporter, dsn = self._export(tmp_path, "", fp)
+        assert not any("Edge.Cuts" in o or "board outline" in o.lower() for o in exporter.omissions)
+        poly = self._boundary(dsn)
+        assert poly.area == pytest.approx(80 * 50, abs=0.1)
 
     def test_micron_gap_is_snapped(self, tmp_path):
         edges = "\n".join(

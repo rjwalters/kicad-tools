@@ -328,8 +328,28 @@ class BoardGeometry:
                 # gr_bezier stores control points in pts attribute
                 if hasattr(g, "pts") and g.pts:
                     ctrl = [(p[0] - ox, p[1] - oy) for p in g.pts]
-                    pts = _linearize_bezier(ctrl)
-                    lines.append(pts)
+                    lines.append(_linearize_bezier(ctrl))
+
+        # --- footprint-local Edge.Cuts (board outline per KiCad) ---
+        # The shared core reader re-emits fp_* Edge.Cuts graphics as
+        # board-frame gr_* nodes; an outline drawn inside a footprint (e.g.
+        # SparkFun's IoT RedBoard ESP32-P4) participates like any other.
+        from ..core.board_outline import footprint_outline_graphics, outline_node_points
+
+        for node in footprint_outline_graphics(pcb._sexp):
+            tag = node.tag or ""
+            if tag == "gr_line":
+                (sx, sy), (ex, ey) = outline_node_points(node)
+                lines.append([(sx - ox, sy - oy), (ex - ox, ey - oy)])
+            elif tag == "gr_arc":
+                (sx, sy), (mx, my), (ex, ey) = outline_node_points(node)
+                lines.append(_linearize_arc(sx - ox, sy - oy, mx - ox, my - oy, ex - ox, ey - oy))
+            elif tag in ("gr_poly", "gr_curve"):
+                chain = [(x - ox, y - oy) for x, y in outline_node_points(node)]
+                if tag == "gr_curve":
+                    lines.append(_linearize_bezier(chain))
+                else:
+                    lines.append([*chain, chain[0]])
 
         if not lines:
             raise ValueError("No Edge.Cuts elements found -- cannot construct board outline.")
