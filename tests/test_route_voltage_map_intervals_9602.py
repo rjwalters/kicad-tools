@@ -216,7 +216,6 @@ def test_route_link_fallback_uses_intervals(tmp_path: Path) -> None:
     therefore census-consistent either way; this pins that the interval
     threading does not break the fail-closed rebuild on a range-bearing map.
     """
-    pytest.importorskip("shapely")
 
     from kicad_tools.cli.route_link_cmd import (
         _rules_for_link,
