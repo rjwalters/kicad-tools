@@ -22481,6 +22481,19 @@ def _chain_complete_argv(
     ``--auto-fix`` are excluded because the outer run's result already covers them
     (see the guard test).
 
+    Issue #9621 -- the bus family is forwarded together: ``--bus-routing``,
+    ``--bus-mode``, ``--bus-spacing``, ``--bus-min-width`` and
+    ``--group-length-window``.  The length window rides on ``--bus-routing``
+    (without it the pass only draws the "requires --bus-routing" warning), so
+    forwarding the window alone would pin a flag the pass can never honour.
+    Under ``--complete`` the strategy is coerced to basic, so the pass
+    dispatches ``route_all_with_buses`` with the outer run's bus
+    configuration; on the pass's lattice engine the one-shot netset
+    negotiation (:meth:`Autorouter._negotiate_lattice_netset`) is
+    order-independent, so that differs from ``route_all`` only in ``route_net``
+    call order (escape-ordered groups first) and logging -- the operator's bus
+    ordering reaches the pass without changing its copper.
+
     Deliberately not forwarded:
 
     * ``--auto-layers``, ``--route-engine``, ``--grid`` and the grid-engine
@@ -22589,6 +22602,27 @@ def _chain_complete_argv(
     # forwarding, the pass would only auto-tune via ``checker_limit``.
     if getattr(args, "length_match_groups", False):
         chain_argv.append("--length-match-groups")
+    # Issue #9621: the bus family is forwarded together (see the docstring's
+    # Issue #9621 note).  --bus-mode and --bus-min-width carry value defaults
+    # ("parallel" / 2), so only an explicit value is passed on, like
+    # --via-drill above; --bus-spacing and --group-length-window default to
+    # None, so a set value is always the operator's.
+    if getattr(args, "bus_routing", False):
+        chain_argv.append("--bus-routing")
+    for flag, attr in (
+        ("--bus-mode", "bus_mode"),
+        ("--bus-min-width", "bus_min_width"),
+    ):
+        value = getattr(args, attr, None)
+        if value is not None and _flag_passed_explicitly(argv, (flag,)):
+            chain_argv.extend([flag, str(value)])
+    for flag, attr in (
+        ("--bus-spacing", "bus_spacing"),
+        ("--group-length-window", "group_length_window"),
+    ):
+        value = getattr(args, attr, None)
+        if value is not None:
+            chain_argv.extend([flag, str(value)])
     return chain_argv
 
 

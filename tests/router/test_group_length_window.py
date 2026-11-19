@@ -39,11 +39,7 @@ from kicad_tools.router.bus import (
 )
 from kicad_tools.router.bus_routing import BusRouter
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.cpp_backend import is_cpp_available
 from tests.route_cli import route_args
-
-native = pytest.mark.skipif(not is_cpp_available(), reason="native router required")
-
 
 # ---------------------------------------------------------------------------
 # group_by_length_window: pure clustering
@@ -194,9 +190,27 @@ def _tight_row_router() -> Autorouter:
         y = 7.0 + i * 0.8
         net = i + 1
         name = f"RAIL_{chr(65 + i)}"
-        src.append({"number": str(i + 1), "x": 6, "y": y, "width": 0.5, "height": 0.5, "net": net, "net_name": name})
+        src.append(
+            {
+                "number": str(i + 1),
+                "x": 6,
+                "y": y,
+                "width": 0.5,
+                "height": 0.5,
+                "net": net,
+                "net_name": name,
+            }
+        )
         dst.append(
-            {"number": str(i + 1), "x": 44, "y": y, "width": 0.9, "height": 0.9, "net": net, "net_name": name}
+            {
+                "number": str(i + 1),
+                "x": 44,
+                "y": y,
+                "width": 0.9,
+                "height": 0.9,
+                "net": net,
+                "net_name": name,
+            }
         )
     router.add_component("U1", src)
     router.add_component("U2", dst)
@@ -237,8 +251,24 @@ class TestDetectLengthWindowGroups:
         router.add_component(
             "PWR",
             [
-                {"number": "1", "x": 6, "y": 16, "width": 1.0, "height": 1.0, "net": 7, "net_name": "+3V3"},
-                {"number": "2", "x": 44, "y": 16, "width": 1.0, "height": 1.0, "net": 7, "net_name": "+3V3"},
+                {
+                    "number": "1",
+                    "x": 6,
+                    "y": 16,
+                    "width": 1.0,
+                    "height": 1.0,
+                    "net": 7,
+                    "net_name": "+3V3",
+                },
+                {
+                    "number": "2",
+                    "x": 44,
+                    "y": 16,
+                    "width": 1.0,
+                    "height": 1.0,
+                    "net": 7,
+                    "net_name": "+3V3",
+                },
             ],
         )
         config = BusRoutingConfig(enabled=True, length_window=90.0)
@@ -251,10 +281,42 @@ class TestDetectLengthWindowGroups:
         router.add_component(
             "U3",
             [
-                {"number": "1", "x": 6, "y": 16, "width": 0.9, "height": 0.9, "net": 7, "net_name": "DATA_0"},
-                {"number": "2", "x": 44, "y": 16, "width": 0.9, "height": 0.9, "net": 7, "net_name": "DATA_0"},
-                {"number": "3", "x": 6, "y": 17, "width": 0.9, "height": 0.9, "net": 8, "net_name": "DATA_1"},
-                {"number": "4", "x": 44, "y": 17, "width": 0.9, "height": 0.9, "net": 8, "net_name": "DATA_1"},
+                {
+                    "number": "1",
+                    "x": 6,
+                    "y": 16,
+                    "width": 0.9,
+                    "height": 0.9,
+                    "net": 7,
+                    "net_name": "DATA_0",
+                },
+                {
+                    "number": "2",
+                    "x": 44,
+                    "y": 16,
+                    "width": 0.9,
+                    "height": 0.9,
+                    "net": 7,
+                    "net_name": "DATA_0",
+                },
+                {
+                    "number": "3",
+                    "x": 6,
+                    "y": 17,
+                    "width": 0.9,
+                    "height": 0.9,
+                    "net": 8,
+                    "net_name": "DATA_1",
+                },
+                {
+                    "number": "4",
+                    "x": 44,
+                    "y": 17,
+                    "width": 0.9,
+                    "height": 0.9,
+                    "net": 8,
+                    "net_name": "DATA_1",
+                },
             ],
         )
         bus = BusRouter(router)
@@ -272,9 +334,33 @@ class TestDetectLengthWindowGroups:
         router.add_component(
             "U1",
             [
-                {"number": "1", "x": 5, "y": 5, "width": 1.0, "height": 1.0, "net": 1, "net_name": "SOLO"},
-                {"number": "2", "x": 5, "y": 10, "width": 1.0, "height": 1.0, "net": 2, "net_name": "OTHER"},
-                {"number": "3", "x": 25, "y": 10, "width": 1.0, "height": 1.0, "net": 2, "net_name": "OTHER"},
+                {
+                    "number": "1",
+                    "x": 5,
+                    "y": 5,
+                    "width": 1.0,
+                    "height": 1.0,
+                    "net": 1,
+                    "net_name": "SOLO",
+                },
+                {
+                    "number": "2",
+                    "x": 5,
+                    "y": 10,
+                    "width": 1.0,
+                    "height": 1.0,
+                    "net": 2,
+                    "net_name": "OTHER",
+                },
+                {
+                    "number": "3",
+                    "x": 25,
+                    "y": 10,
+                    "width": 1.0,
+                    "height": 1.0,
+                    "net": 2,
+                    "net_name": "OTHER",
+                },
             ],
         )
         config = BusRoutingConfig(enabled=True, length_window=90.0)
@@ -292,8 +378,24 @@ class TestDetectLengthWindowGroups:
         router.add_component(
             "U4",
             [
-                {"number": "1", "x": 6, "y": 17.5, "width": 0.9, "height": 0.9, "net": 7, "net_name": "DISTANT"},
-                {"number": "2", "x": 48, "y": 17.5, "width": 0.9, "height": 0.9, "net": 7, "net_name": "DISTANT"},
+                {
+                    "number": "1",
+                    "x": 6,
+                    "y": 17.5,
+                    "width": 0.9,
+                    "height": 0.9,
+                    "net": 7,
+                    "net_name": "DISTANT",
+                },
+                {
+                    "number": "2",
+                    "x": 48,
+                    "y": 17.5,
+                    "width": 0.9,
+                    "height": 0.9,
+                    "net": 7,
+                    "net_name": "DISTANT",
+                },
             ],
         )
         config = BusRoutingConfig(enabled=True, length_window=5.0)
@@ -443,9 +545,14 @@ class TestCliFlag:
 # are tighter than edge pads) and the group's order differs from the plain
 # priority order -- so the group ordering is real and exercised, just not
 # completion-decisive on a 2-layer board this small.
+#
+# The measurement runs unconditionally on the pure-Python path
+# (``_tight_row_router`` builds its Autorouter with ``force_python=True``, so
+# the C++ backend changes nothing here); a 6-net synthetic row is cheap
+# enough that skipping when the backend is absent would only make the AC's
+# recorded refutation silently disappear.
 
 
-@native
 class TestCongestedBoardMeasurement:
     def test_escape_order_differs_from_plain_priority_and_completion_equal(self, capsys):
         router = _tight_row_router()
