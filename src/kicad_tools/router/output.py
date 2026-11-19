@@ -283,7 +283,8 @@ def show_routing_summary(
             if budget_label:
                 print(
                     f"  {net_name}: {budget_label} (search budget spent -- "
-                    "the A* was cut off before it could finish, not geometrically blocked)"
+                    "the A* was cut off before it could establish whether a"
+                    " path exists)"
                 )
             else:
                 print(f"  {net_name}: No path found")
@@ -434,17 +435,37 @@ def show_routing_summary(
                 f"{suggestions_shown}. SEARCH BUDGET ({count} net{'s' if count != 1 else ''} affected)"
             )
             print("   These nets stopped at their search budget (wall-clock deadline")
-            print("   or iteration cap), not at a geometric blocker.")
+            print("   or iteration cap) -- the search was cut off before it could")
+            print("   establish whether a path exists.")
             grid_res_hint = getattr(router.grid, "resolution", None)
             if isinstance(grid_res_hint, (int, float)) and grid_res_hint > 0:
                 print(
                     f"   Try: a coarser grid, e.g. --grid {grid_res_hint * 2:g}, to shrink"
                     " the per-net A* space; and/or"
                 )
-            print(
-                "   Try: raise the budgets --per-net-timeout <seconds> (default 30)"
-                " / --max-search-iterations <n>"
-            )
+            # The remedy names the flag that actually bounds the failed
+            # searches: a wall-clock cut-off is answered by --per-net-timeout,
+            # an iteration_limit by the per-net cap / backstop pair (the
+            # effective per-net cap is the smaller of the two, so raising only
+            # --max-search-iterations never relieves a binding --per-net-iterations,
+            # and vice versa).
+            budget_label_set = {budget_search_labels[nid].lower() for nid in budget_nets}
+            has_wall_clock = any("timeout" in l or "deadline" in l for l in budget_label_set)
+            has_iteration = any("iteration" in l for l in budget_label_set)
+            if has_wall_clock:
+                print(
+                    "   Try: raise the wall-clock budget --per-net-timeout <seconds> (default 30)"
+                )
+            if has_iteration:
+                print("   Try: raise the iteration budgets --per-net-iterations <n>")
+                print(
+                    "         / --max-search-iterations <n> (effective per-net cap: min of the two)"
+                )
+            if not has_wall_clock and not has_iteration:
+                print(
+                    "   Try: raise the budgets --per-net-timeout <seconds> (default 30)"
+                    " / --max-search-iterations <n>"
+                )
             print("   Per-net diagnosis: kct net-status --why <board>\n")
 
         # Check for PAD_INACCESSIBLE issues
