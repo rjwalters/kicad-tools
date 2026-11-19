@@ -16,6 +16,36 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-19
 
+- **PR #9392**: ci: single-source the gate commands in scripts/ci/jobs/<id>.sh
+- **PR #9544**: feat: record footprint-library identity in evidence provenance
+- **PR #9416**: ci: hoist !cancelled() in the two merge-group gates that bypassed it
+- **PR #9573**: fix: exclude auto-named Net-(...) nets from the sync-netlist convention census
+- **PR #9572**: docs: expand pcb sync-netlist help to cover net, pintype, value and drift behavior
+- **PR #9553**: fix(board06): clear the jlcpcb-tier1 gate's 48 mask_to_copper errors in the recipe
+- **PR #9568**: fix: label mixed parallel groups merged+summed from a shared three-way shape
+- **PR #9569**: fix: gate resistance parsing on part category to skip LED/CCT/Rds(on)/crystal tokens
+- **PR #9565**: fix: count off-centreline tie vias as parallel in path_ampacity layer changes
+- **PR #9564**: fix: resolve sync-netlist /-prefixed net names against the board net table
+- **PR #9567**: fix: report value and footprint drift on matched refs in pcb sync-netlist
+- **PR #9559**: fix: say 'merged parallel group' for same-layer merged group widths
+- **PR #9489**: fix: rank exact resistance matches first in kct parts search
+- **PR #9558**: fix: migrate-waivers orphan says 'not evaluated' for needs_input coverage
+- **PR #9555**: test: make GR_CIRCLE_PRIMITIVE fixture KiCad-loadable gr_circle syntax
+- **Issue #9340** (closed): Local CI gate: convert the jobs that can be a script call, record the rest, retire the job-manifest drift test
+- **Issue #9526** (closed): Evidence toolchain gates kicad-cli's version but never the footprint library's, so native-mode geometry is still host-sourced
+- **Issue #9345** (closed): ci: two merge-group job gates bypass `!cancelled()`, unlike the other 14
+- **Issue #9571** (closed): sync-netlist convention census counts KiCad auto-named `Net-(...)` nets as bare, so a new label net can be added bare on a /-prefixed board
+- **Issue #9570** (closed): pcb sync-netlist --help description omits net assignment, pintype annotation, value copy and the non-zero footprint exit
+- **Issue #9548** (closed): Board 06: clear the jlcpcb-tier1 kct_check gate (48 errors) and re-pin readiness so the manufacturing package can be regenerated
+- **Issue #9560** (closed): A parallel group that is both merged and summed is called only "merged"
+- **Issue #9551** (closed): Resistance regex false positives: CCT, colour-temperature and Rds(on) tokens parse as ohms
+- **Issue #9561** (closed): path_ampacity: layer-change rating counts only the centreline via, not tie vias in the same bar
+- **Issue #9562** (closed): pcb sync-netlist strips the leading / from root-sheet label nets and disconnects a routed board
+- **Issue #9563** (closed): pcb sync-netlist ignores footprint and value changes on existing references
+- **Issue #9557** (closed): current-paths-audit calls a merged same-layer group width "summed"
+- **Issue #9474** (closed): kct parts search returns kilo-ohm parts for an ohm-value query
+- **Issue #9552** (closed): migrate-waivers: ampacity orphan loses '[rule not evaluated in this run]' when currents are declared but unmapped
+- **Issue #9554** (closed): Test fixture GR_CIRCLE_PRIMITIVE is not loadable KiCad syntax (no `end`)
 - **PR #9556**: test: pin that mask_to_copper refuses boards whose footprints share a uuid
 - **PR #9549**: fix: judge overlapping same-layer parallel copper at its merged width
 - **PR #9547**: docs: document clearance_incomplete's info severity and its kicad-cli parity
