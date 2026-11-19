@@ -356,7 +356,17 @@ def check(output):
     )
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path, nargs="?", default=ROOT / "output")
-    raise SystemExit(0 if check(parser.parse_args().output) else 1)
+    return 0 if check(parser.parse_args(argv).output) else 1
+
+
+if __name__ == "__main__":
+    # The native ERC/DRC below call a bare ``kicad-cli``; run on the pinned
+    # evidence toolchain so a host with another KiCad release is refused (exit 2,
+    # nothing written) instead of stamping its version into committed evidence
+    # (Issue #9495, contract of #6962).
+    from kicad_tools.cli.kicad_toolchain import run_on_evidence_toolchain
+
+    raise SystemExit(run_on_evidence_toolchain(main, [Path(__file__).resolve().parents[2]]))

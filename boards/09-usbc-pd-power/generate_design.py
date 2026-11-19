@@ -1079,7 +1079,17 @@ def generate(output: Path) -> dict:
     return result
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path, nargs="?", default=ROOT / "output")
-    generate(parser.parse_args().output)
+    generate(parser.parse_args(argv).output)
+    return 0
+
+
+if __name__ == "__main__":
+    # Footprints resolve from the installed KiCad library, so the producing
+    # release decides committed geometry; refuse any other than the pinned one
+    # (Issue #9495, contract of #6962).
+    from kicad_tools.cli.kicad_toolchain import run_on_evidence_toolchain
+
+    raise SystemExit(run_on_evidence_toolchain(main, [Path(__file__).resolve().parents[2]]))
