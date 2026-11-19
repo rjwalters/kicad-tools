@@ -16,6 +16,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-19
 
+- **PR #9478**: test: pin ci.yml merge_group gates and concurrency invariants
+- **Issue #9307** (closed): Declare merge_group in select_routed_pcbs.py and pin the merge-group CI invariants with a test
+- **PR #9496**: docs: note the same-footprint same-net mask-bridge info exemption
+- **Issue #9484** (closed): docs: physical-copper-gap guide omits the same-footprint same-net pad mask-bridge info class
+- **PR #9469**: chore(boards): put board 09 C6 on the 0.1 mm grid; update per-footprint pad_grid docstrings
+- **PR #9446**: fix: attribute mid-run vias and anchor-size holes on a reinforce strip to the run
+- **Issue #9444** (closed): mask_to_copper after #9419: same-net untented vias on a recorded reinforce run are not attributed to it
 - **PR #9462**: fix: report same-footprint same-net pad mask bridges at info
 - **Issue #9420** (closed): Same-net pads inside one library footprint are reported as errors by physical_copper_gap and mask_to_copper (stock RF_Module:ESP32-C3-WROOM-02 ground pad array)
 - **PR #9429**: fix: raise tht_smd_spacing thresholds to 2.032/3.05 mm and record fab DFM values
