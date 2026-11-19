@@ -87,10 +87,10 @@ def sandbox(tmp_path: Path) -> Path:
 def _run_lib(
     sandbox: Path, tmp_path: Path, snippet: str, **env_overrides
 ) -> subprocess.CompletedProcess[str]:
-    """Run a bash snippet that sources the sandbox copy of _lib.sh.
+    """Run a bash snippet that sources the selected _lib.sh from a sandbox probe.
 
-    The snippet is written next to the _lib.sh copy as a miniature job
-    script: _lib.sh derives JOBS_DIR/REPO_ROOT from ``BASH_SOURCE[1]`` (the
+    The snippet runs as a miniature job script in the sandbox's jobs
+    directory. _lib.sh derives JOBS_DIR/REPO_ROOT from ``BASH_SOURCE[1]`` (the
     sourcing script's path), so sourcing it directly from a ``bash -c``
     string leaves REPO_ROOT unresolved (its ``BASH_SOURCE[1]`` is unset
     there). Sourcing a real file inside ``scripts/ci/jobs/`` is exactly how
