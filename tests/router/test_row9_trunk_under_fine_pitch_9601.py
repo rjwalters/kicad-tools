@@ -54,6 +54,17 @@ QFN_PAD_SIZE = 0.3
 TRUNK_NET = 100
 TRUNK_NET_NAME = "TRUNK"
 
+# A second QFN-class body whose pad ring interleaves U1's (overlap class
+# from the #9622 review): U2's left column (x=21.0) sits inside U1's pad
+# bbox (x=18.0..22.0), so the two margin-grown surcharge regions share a
+# real cell band on every pad row.
+U2_LEFT_X = 21.0
+U2_RIGHT_X = 25.0
+# A net with a pad on U1 only: local to U1, non-local to U2 -- the
+# review's "shared net" whose overlap charge was insertion-order
+# dependent in the single-owner array.
+SHARED_NET = 700
+
 # The body core in world coordinates: the pad-ring bbox (no margin).  The
 # surcharge REGION is one grid cell wider on every side (the halo a trunk
 # would hug), but "through the body" -- the failure mode the audit
@@ -127,6 +138,97 @@ def _qfn_board(force_python: bool) -> Autorouter:
         ],
     )
     return router
+
+
+def _qfn_pad_columns(left_x: float, right_x: float, first_net: int, shared_row: int | None = None):
+    """One QFN-class body's pad list: two 0.5mm-pitch columns.
+
+    ``shared_row`` (0-based right-column row) carries ``SHARED_NET``
+    instead of a fresh net, so that net has a pad on this component only.
+    """
+    pads: list[dict] = []
+    net_id = first_net
+    for i in range(QFN_ROWS):
+        y = QFN_Y0 + i * QFN_PITCH
+        pads.append(
+            {
+                "number": f"L{i}",
+                "x": left_x,
+                "y": y,
+                "net": net_id,
+                "net_name": f"N{net_id}",
+                "width": QFN_PAD_SIZE,
+                "height": QFN_PAD_SIZE,
+            }
+        )
+        net_id += 1
+        right_net = SHARED_NET if shared_row == i else net_id
+        pads.append(
+            {
+                "number": f"R{i}",
+                "x": right_x,
+                "y": y,
+                "net": right_net,
+                "net_name": f"N{right_net}",
+                "width": QFN_PAD_SIZE,
+                "height": QFN_PAD_SIZE,
+            }
+        )
+        net_id += 1
+    return pads
+
+
+def _overlapping_bodies_board(force_python: bool, swap_insertion_order: bool = False) -> Autorouter:
+    """Two QFN-class bodies whose surcharge regions overlap.
+
+    U1 and U2 interleave pad columns (U1 x=18/22, U2 x=21/25) so their
+    pad bboxes overlap in x=21..22 and the margin-grown regions share a
+    cell band on every pad row.  ``SHARED_NET`` has one pad on U1 and none
+    on U2; ``TRUNK_NET`` has no pad on either body.
+    """
+    router = Autorouter(width=60.0, height=30.0, force_python=force_python)
+    u1 = _qfn_pad_columns(QFN_LEFT_X, QFN_RIGHT_X, 1, shared_row=QFN_ROWS - 1)
+    u2 = _qfn_pad_columns(U2_LEFT_X, U2_RIGHT_X, 1000)
+    if swap_insertion_order:
+        router.add_component("U2", u2)
+        router.add_component("U1", u1)
+    else:
+        router.add_component("U1", u1)
+        router.add_component("U2", u2)
+    return router
+
+
+def _python_charge_map(finder, net: int) -> dict[tuple[int, int, int], float]:
+    """Summed per-cell under-body charge the Python A* adds for ``net``.
+
+    Computed from the engine's own state (mask array + per-net non-local
+    bitmask) exactly the way the hot loop does: one penalty per covering
+    region the net is not local to.
+    """
+    masks = finder._under_body_mask_array()
+    assert masks is not None
+    nonlocal_mask, penalty = finder._under_body_net_state(net)
+    charge: dict[tuple[int, int, int], float] = {}
+    for layer, gy, gx in zip(*np.nonzero(masks), strict=True):
+        cover = int(masks[layer, gy, gx]) & nonlocal_mask
+        if cover:
+            charge[(int(layer), int(gy), int(gx))] = cover.bit_count() * penalty
+    return charge
+
+
+def _cpp_charge_map(finder: CppPathfinder, net: int) -> dict[tuple[int, int, int], float]:
+    """Summed per-cell under-body charge the C++ lookup applies for ``net``.
+
+    Replays the C++ builder's summing semantics (``out[key] += penalty``
+    per budget), multiplicities preserved.
+    """
+    charge: dict[tuple[int, int, int], float] = {}
+    for budget in finder._under_body_budgets_for_net(net):
+        for gx in range(budget.gx1, budget.gx2 + 1):
+            for gy in range(budget.gy1, budget.gy2 + 1):
+                key = (int(budget.layer), gy, gx)
+                charge[key] = charge.get(key, 0.0) + float(budget.overflow_penalty)
+    return charge
 
 
 def _segment_crosses_body(x1: float, y1: float, x2: float, y2: float, step: float = 0.05) -> bool:
@@ -239,8 +341,8 @@ class TestRegionDerivation:
         router = _qfn_board(force_python=True)
         assert router.grid.under_body_surcharges  # regions exist
         router.rules.cost_under_body = 0.0
-        owner = router.router._under_body_owner_array()
-        assert owner is None
+        mask = router.router._under_body_mask_array()
+        assert mask is None
 
     def test_region_covers_cell_helper(self) -> None:
         region = BodySurchargeRegion(
@@ -282,44 +384,66 @@ class TestLocalNetExemption:
     def test_python_state_exempts_local_net(self) -> None:
         router = _qfn_board(force_python=True)
         finder = router.router
-        owner = finder._under_body_owner_array()
-        assert owner is not None
-        local, penalty = finder._under_body_net_state(TRUNK_NET)
-        assert local == frozenset()
+        mask = finder._under_body_mask_array()
+        assert mask is not None
+        nonlocal_mask, penalty = finder._under_body_net_state(TRUNK_NET)
+        assert nonlocal_mask == 1  # region 1's bit: the trunk is non-local
         assert penalty == pytest.approx(finder.rules.cost_under_body * finder.rules.cost_straight)
-        # The body cells carry the region id.
-        assert owner[0, int(16.0 / 0.1), int(20.0 / 0.1)] == 1
-        local1, _ = finder._under_body_net_state(1)
-        assert local1 == {1}
+        # The body cells carry the region's bit.
+        assert mask[0, int(16.0 / 0.1), int(20.0 / 0.1)] == 1
+        nonlocal1, _ = finder._under_body_net_state(1)
+        assert nonlocal1 == 0  # U1's own net is exempt
 
     def test_charge_maps_identical_between_backends(self) -> None:
-        """The C++ per-cell charge map (budget bboxes x layers x penalty)
-        must equal the Python owner array's non-zero cells cell-for-cell --
-        the #4511-style mirror contract, asserted at the adapter level."""
-        py_router = _qfn_board(force_python=True)
-        cpp_router = _qfn_board(force_python=False)
+        """The summed per-cell under-body charge must be identical between
+        the engines on a board with two OVERLAPPING body regions: the C++
+        budget lookup sums overlapping budgets (``out[key] += penalty``),
+        so the Python mirror must charge one penalty per covering
+        non-local region (bitmask popcount), not at most one.  Asserted at
+        the adapter level, comparing the full charge map -- multiplicity
+        included -- not just the charged cell set."""
+        py_router = _overlapping_bodies_board(force_python=True)
+        cpp_router = _overlapping_bodies_board(force_python=False)
 
-        owner = py_router.router._under_body_owner_array()
-        assert owner is not None
-        penalty = py_router.router.rules.cost_under_body * py_router.rules.cost_straight
-        py_cells = {
-            (int(layer), int(gy), int(gx)) for layer, gy, gx in zip(*np.nonzero(owner), strict=True)
-        }
-
+        py_finder = py_router.router
         cpp_finder = cpp_router.router
         assert isinstance(cpp_finder, CppPathfinder)
-        cpp_cells = set()
-        for budget in cpp_finder._under_body_budgets_for_net(TRUNK_NET):
-            for gx in range(budget.gx1, budget.gx2 + 1):
-                for gy in range(budget.gy1, budget.gy2 + 1):
-                    cpp_cells.add((int(budget.layer), gy, gx))
-        # (The C++ lookup clamps bboxes to the grid extent; on this board no
-        # region touches an edge, so the raw bbox equals the clamped one.)
 
-        assert py_cells == cpp_cells
-        assert penalty == pytest.approx(
-            cpp_finder._rules.cost_under_body * cpp_finder._rules.cost_straight
+        regions = py_finder._under_body_regions()
+        assert {r.ref for r in regions} == {"U1", "U2"}
+        # The regions genuinely share cells (the overlap class under test):
+        # their bboxes intersect in x on the shared pad rows.
+        assert max(r.gx1 for r in regions) <= min(r.gx2 for r in regions)
+        penalty = py_finder.rules.cost_under_body * py_finder.rules.cost_straight
+
+        # Instance 1: a net local to neither body -- the overlap band must
+        # carry the doubled charge on BOTH engines (the single-owner cell
+        # map charged it once).
+        py_trunk = _python_charge_map(py_finder, TRUNK_NET)
+        cpp_trunk = _cpp_charge_map(cpp_finder, TRUNK_NET)
+        assert py_trunk == cpp_trunk, "per-cell charge maps must agree, sums included"
+        assert any(c == pytest.approx(2.0 * penalty) for c in py_trunk.values()), (
+            "overlap cells must carry the doubled charge"
         )
+
+        # Instance 2: a net with a pad on U1 only -- still charged for
+        # U2's body in the overlap band, on both engines.
+        py_shared = _python_charge_map(py_finder, SHARED_NET)
+        cpp_shared = _cpp_charge_map(cpp_finder, SHARED_NET)
+        assert py_shared == cpp_shared
+        assert any(c == pytest.approx(penalty) for c in py_shared.values())
+
+    def test_overlap_charge_is_insertion_order_independent(self) -> None:
+        """The Python mirror's charge map must not depend on the order the
+        components were added in (the single-owner array made the
+        shared-net charge order-dependent: whichever body landed last owned
+        the overlap cells)."""
+        router_a = _overlapping_bodies_board(force_python=True)
+        router_b = _overlapping_bodies_board(force_python=True, swap_insertion_order=True)
+        for net in (TRUNK_NET, SHARED_NET):
+            charge_a = _python_charge_map(router_a.router, net)
+            charge_b = _python_charge_map(router_b.router, net)
+            assert charge_a == charge_b, f"net {net}: charge map changed with add order"
 
 
 # ---------------------------------------------------------------------------
@@ -397,9 +521,6 @@ class TestTrunkAvoidsBody:
 # ---------------------------------------------------------------------------
 # route-auto (RoutingOrchestrator path)
 # ---------------------------------------------------------------------------
-
-
-FIXTURE = Path(__file__).parent / "fixtures" / "row9_trunk_9601_qfn_board.kicad_pcb"
 
 
 def _qfn_board_text() -> str:

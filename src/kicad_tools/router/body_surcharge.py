@@ -38,7 +38,10 @@ Backend wiring:
   prices them on every cost site (trace steps and via drops) with no new
   C++ code.
 * Pure-Python engine: :class:`pathfinder.Router` mirrors the identical
-  per-cell additive term from a precomputed region-id array.
+  per-cell additive term from a precomputed per-cell region bitmask (one
+  bit per region), so a cell covered by two overlapping bodies is
+  surcharged once per covering region -- the same summing semantics as
+  the C++ budget lookup above.
 """
 
 from __future__ import annotations

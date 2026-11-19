@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     from kicad_tools.performance import PerformanceConfig
     from kicad_tools.schema.pcb import Zone
 
+    from .body_surcharge import BodySurchargeRegion
     from .cpp_backend import CppGrid
 
 from kicad_tools.acceleration import (
@@ -1322,7 +1323,7 @@ class RoutingGrid:
         # Issue #9622: lazy cache for the under-body surcharge regions
         # (``under_body_surcharges``).  Same invalidation contract as the
         # pitch cache: ``add_pad`` drops it so late pad additions re-derive.
-        self._under_body_cache: list | None = None
+        self._under_body_cache: list[BodySurchargeRegion] | None = None
 
         # Issue #3371 (P_FP2): Fine-pitch escape regions detected on this
         # board.  Populated by the autorouter (or test fixture) once after
@@ -2542,7 +2543,7 @@ class RoutingGrid:
         return tuple(self._pads)
 
     @property
-    def under_body_surcharges(self) -> list:
+    def under_body_surcharges(self) -> list[BodySurchargeRegion]:
         """Per-component under-body surcharge regions (Issue #9622).
 
         Computed once from the registered pads via
