@@ -1079,7 +1079,24 @@ def generate(output: Path) -> dict:
     return result
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path, nargs="?", default=ROOT / "output")
-    generate(parser.parse_args().output)
+    generate(parser.parse_args(argv).output)
+    return 0
+
+
+if __name__ == "__main__":
+    # Footprints resolve from the installed KiCad library, so the producing
+    # release decides committed geometry; refuse any other than the pinned one
+    # (Issue #9495, contract of #6962).  Under KCT_KICAD_DOCKER=1 the Python
+    # step still runs on the host, so pin_host_footprints sources its standard
+    # footprint reads from the image's libraries too -- otherwise add_footprint
+    # embeds the host library's geometry (Issue #9502 review).
+    from kicad_tools.cli.kicad_toolchain import run_on_evidence_toolchain
+
+    raise SystemExit(
+        run_on_evidence_toolchain(
+            main, [Path(__file__).resolve().parents[2]], pin_host_footprints=True
+        )
+    )
