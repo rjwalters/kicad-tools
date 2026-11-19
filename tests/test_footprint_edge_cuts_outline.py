@@ -445,7 +445,6 @@ def test_footprint_circle_outline_supported_by_bounds_and_geometry() -> None:
 
     # BoardGeometry must polygonize it like a board-level circle instead of
     # raising "No Edge.Cuts elements found".
-    pytest.importorskip("shapely")
     from kicad_tools.pcb.board_geometry import BoardGeometry
 
     geometry = BoardGeometry.from_pcb(pcb)
@@ -601,23 +600,26 @@ _VARIANT_BOARDS = {
         ],
     ),
     # A circular footprint outline reaching EdgeClearanceRule as a tessellated
-    # boundary.  Native 10.0.6 treats a lone Edge.Cuts circle as a cutout:
-    # copper *inside* the disk is flagged (actual 0.0 mm) and copper *outside*
-    # it is left clean, while kct's rule is stroke-distance based -- so the
-    # probes sit where both engines provably agree: a crossing track
-    # (violates in both), a track hugging the stroke from inside (native: in
-    # the cutout; kct: inside the 0.5 mm corridor) and a far-exterior track
-    # (clean in both).  A deep-interior "TRACK_IN" probe would assert a
-    # divergence, not parity, and was removed.  The probes must also stay
+    # boundary.  The circle carries an explicit stroke and ``(fill no)``:
+    # KiCad parses an Edge.Cuts shape with no ``fill`` token as filled, and
+    # a filled shape makes native DRC flag even deep-interior copper,
+    # while kct ignores Edge.Cuts fill (#9690) -- a fixture without the
+    # token would encode that divergence, not parity.  With ``(fill no)``
+    # both engines treat the circle as a stroke-only outline: a crossing
+    # track violates in both, a track hugging the stroke from inside sits
+    # in the 0.5 mm clearance corridor in both, and deep-interior and
+    # far-exterior copper stays clean in both.  The probes must also stay
     # non-collinear and non-touching: native DRC merges touching collinear
     # tracks into one cluster attributed to a single (build-dependent) net.
     "fp_circle": _variant_board(
         '\t(footprint "OUTLINE" (layer "F.Cu") (at 60 50)\n'
         "\t\t(attr board_only exclude_from_pos_files exclude_from_bom)\n"
-        '\t\t(fp_circle (center 0 0) (end 20 0) (layer "Edge.Cuts")))',
+        "\t\t(fp_circle (center 0 0) (end 20 0) (stroke (width 0.05) (type solid)) "
+        '(fill no) (layer "Edge.Cuts")))',
         [
             ("TRACK_EDGE", (60.0, 50.0), (85.0, 50.0)),
             ("TRACK_NEAR", (40.3, 50.0), (40.3, 52.0)),
+            ("TRACK_IN", (55.0, 55.0), (60.0, 55.0)),
             ("TRACK_OUT", (100.0, 50.0), (105.0, 50.0)),
         ],
     ),
@@ -657,10 +659,11 @@ _VARIANT_BOARDS = {
             {
                 "TRACK_EDGE": ((60.0, 50.0), (85.0, 50.0)),
                 "TRACK_NEAR": ((40.3, 50.0), (40.3, 52.0)),
+                "TRACK_IN": ((55.0, 55.0), (60.0, 55.0)),
                 "TRACK_OUT": ((100.0, 50.0), (105.0, 50.0)),
             },
             {"TRACK_EDGE", "TRACK_NEAR"},
-            {"TRACK_OUT"},
+            {"TRACK_IN", "TRACK_OUT"},
         ),
         (
             _VARIANT_BOARDS["fp_curve"],
@@ -749,7 +752,6 @@ def test_placer_outline_is_board_relative_and_exact() -> None:
 
 
 def test_board_geometry_polygonizes_footprint_outline() -> None:
-    pytest.importorskip("shapely")
     from kicad_tools.pcb.board_geometry import BoardGeometry
 
     a = BoardGeometry.from_pcb(PCB.load(FIXTURE_A))
@@ -767,7 +769,6 @@ def test_board_geometry_keeps_other_contours_beside_a_circle() -> None:
     # centre came back as a 78.51 mm^2 disc. The circle is now one ring in
     # the shared polygonization: the board keeps its area with the disc as
     # a hole.
-    pytest.importorskip("shapely")
     from kicad_tools.pcb.board_geometry import BoardGeometry
 
     text = FIXTURE_B.read_text()
@@ -799,7 +800,6 @@ def test_placement_optimizer_keeps_parts_out_of_footprint_cutout() -> None:
     # there forever -- even at the hole's centre, where keepout-style
     # repulsion cancels by symmetry. Containment must be enforced on the
     # optimizer itself (#9593).
-    pytest.importorskip("shapely")
     from kicad_tools.optim.placement import PlacementOptimizer
 
     text = FIXTURE_B.read_text().replace("(at 15 45)", "(at 40 30)")  # R1 into the hole centre
@@ -815,7 +815,6 @@ def test_placement_optimizer_keeps_parts_out_of_footprint_cutout() -> None:
 
 
 def test_silkscreen_accepts_footprint_outline() -> None:
-    pytest.importorskip("shapely")
     from shapely.geometry import Polygon
 
     from kicad_tools.silkscreen.place_refs import _board_material, _SilkscreenPCB
