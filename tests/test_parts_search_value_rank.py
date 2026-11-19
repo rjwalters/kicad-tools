@@ -114,7 +114,12 @@ def test_ohm_query_ranks_exact_value_above_other_decades(capsys):
 
 @pytest.mark.parametrize(
     ("query", "first"),
-    [("4R7 2512", "C878295"), ("4k7 2512", "C878291"), ("4.7kΩ 2512", "C878291"), ("4.7 ohm", "C878295")],
+    [
+        ("4R7 2512", "C878295"),
+        ("4k7 2512", "C878291"),
+        ("4.7kΩ 2512", "C878291"),
+        ("4.7 ohm", "C878295"),
+    ],
 )
 def test_short_and_unit_spellings(query, first, capsys):
     assert _search_json(query, capsys)[0] == first
