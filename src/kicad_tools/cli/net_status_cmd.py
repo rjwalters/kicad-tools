@@ -235,6 +235,7 @@ def main(argv: list[str] | None = None) -> int:
             args.by_class,
             strict=strict,
             origin=analyzer.pcb.board_origin,
+            net_filter=args.net,
         )
     else:
         # For --incomplete the summary header must describe the unfiltered
@@ -362,7 +363,7 @@ def output_text(
     print()
 
     if by_class:
-        _output_by_class(result, verbose)
+        _output_by_class(result, verbose, show_pieces=net_filter is not None)
     else:
         _output_flat(result, verbose, incomplete_only, net_filter=net_filter)
 
@@ -385,7 +386,7 @@ def _output_flat(
         print("=" * 60)
 
         for net in result.incomplete + result.unrouted:
-            _print_net_status(net, verbose)
+            _print_net_status(net, verbose, show_pieces=net_filter is not None)
 
     elif not incomplete_only and not result.stranded:
         if net_filter is not None:
@@ -404,6 +405,8 @@ def _output_flat(
         for net in stranded_complete:
             print(f"  [~] {net.net_name} ({net.padless_components} stranded fragment(s))")
             print(f"    -> Fix: {net.suggested_fix}")
+            if net_filter is not None:
+                _print_pieces(net, "  ")
 
     # Show complete nets if not filtering
     if not incomplete_only and result.complete:
@@ -416,7 +419,7 @@ def _output_flat(
             print(f"  ... and {len(result.complete) - 20} more")
 
 
-def _output_by_class(result: NetStatusResult, verbose: bool) -> None:
+def _output_by_class(result: NetStatusResult, verbose: bool, show_pieces: bool = False) -> None:
     """Output nets grouped by net class."""
     by_class = result.by_net_class()
 
@@ -431,11 +434,36 @@ def _output_by_class(result: NetStatusResult, verbose: bool) -> None:
         if incomplete:
             print()
             for net in incomplete:
-                _print_net_status(net, verbose, indent="  ")
+                _print_net_status(net, verbose, indent="  ", show_pieces=show_pieces)
 
 
-def _print_net_status(net: NetStatus, verbose: bool, indent: str = "") -> None:
-    """Print status for a single net."""
+def _print_pieces(net: NetStatus, indent: str = "") -> None:
+    """List each disconnected piece of a split net with its pads/vias (Issue #9598).
+
+    Prints nothing for a single-piece net.  Piece 1 is the largest pad island;
+    pad-less track/via fragments follow as their own pieces.
+    """
+    pieces = net.pieces
+    if not pieces:
+        return
+    print(f"{indent}  Pieces ({len(pieces)} disconnected):")
+    for piece in pieces:
+        members = [p["name"] for p in piece["pads"]]
+        members += [f"via @ {v[0]:.2f},{v[1]:.2f}" for v in piece["vias"]]
+        if not piece["pads"]:
+            members += [i for i in piece["stranded_items"] if not i.startswith("Via")]
+        listing = ", ".join(members) if members else "(no pads)"
+        suffix = "" if piece["pads"] else " [no pads]"
+        print(f"{indent}    piece {piece['piece']}: {listing}{suffix}")
+
+
+def _print_net_status(
+    net: NetStatus, verbose: bool, indent: str = "", show_pieces: bool = False
+) -> None:
+    """Print status for a single net.
+
+    ``show_pieces`` (``--net``) appends the per-piece listing of a split net.
+    """
     # Status indicator
     if net.status == "complete":
         status_char = "+"
@@ -472,6 +500,9 @@ def _print_net_status(net: NetStatus, verbose: bool, indent: str = "") -> None:
     # Suggested fix
     print(f"{indent}  -> Fix: {net.suggested_fix}")
 
+    if show_pieces:
+        _print_pieces(net, indent)
+
 
 def output_json(
     result: NetStatusResult,
@@ -479,8 +510,12 @@ def output_json(
     by_class: bool = False,
     strict: bool = True,
     origin: tuple[float, float] = (0.0, 0.0),
+    net_filter: str | None = None,
 ) -> None:
     """Output results as JSON.
+
+    ``net_filter`` (``--net``) adds a ``pieces`` listing to a split net
+    (Issue #9598).
 
     ``origin`` is ``PCB.board_origin``; it moves the board-relative pad
     positions back into the KiCad file frame for ``findings`` (Issue #8015).
@@ -501,11 +536,11 @@ def output_json(
 
     if by_class:
         data["by_class"] = {
-            class_name: [n.to_dict() for n in nets]
+            class_name: [n.to_dict(include_pieces=net_filter is not None) for n in nets]
             for class_name, nets in result.by_net_class().items()
         }
     else:
-        data["nets"] = [n.to_dict() for n in result.nets]
+        data["nets"] = [n.to_dict(include_pieces=net_filter is not None) for n in result.nets]
 
     print(json.dumps(data, indent=2))
 

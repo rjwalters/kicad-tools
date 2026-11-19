@@ -305,18 +305,28 @@ class TestWorkflowJob:
         assert any("06-diffpair-test" in str(b) for b in boards)
 
     def test_job_invokes_helper_script(self, workflow: dict) -> None:
+        """Issue #9340: the workflow calls the shared job script, which is
+        the single copy of the check command the local gate also runs
+        (2am#7561 ruling); assert both legs."""
         steps = workflow["jobs"][JOB_NAME]["steps"]
         run_blocks = [s.get("run", "") for s in steps if isinstance(s, dict) and "run" in s]
         joined = "\n".join(run_blocks)
-        assert "scripts/ci/check_diffpair_coverage.py" in joined
+        assert "scripts/ci/jobs/diffpair-routing-regression.sh" in joined
+        job_script = (
+            REPO_ROOT / "scripts" / "ci" / "jobs" / "diffpair-routing-regression.sh"
+        ).read_text()
+        assert "scripts/ci/check_diffpair_coverage.py" in job_script
 
     def test_job_passes_seed_42(self, workflow: dict) -> None:
-        """Curator-mandated: ``--seed 42`` for determinism (Issue #2589)."""
-        steps = workflow["jobs"][JOB_NAME]["steps"]
-        run_blocks = [s.get("run", "") for s in steps if isinstance(s, dict) and "run" in s]
-        joined = "\n".join(run_blocks)
-        assert "--seed 42" in joined or "--seed=42" in joined, (
-            f"Expected ``--seed 42`` in {JOB_NAME} run step (Issue #2589 / Phase 3X.2 determinism)."
+        """Curator-mandated: ``--seed 42`` for determinism (Issue #2589).
+
+        Issue #9340: the seed lives in the shared job script."""
+        job_script = (
+            REPO_ROOT / "scripts" / "ci" / "jobs" / "diffpair-routing-regression.sh"
+        ).read_text()
+        assert "--seed 42" in job_script or "--seed=42" in job_script, (
+            "Expected ``--seed 42`` in the diffpair job script "
+            "(Issue #2589 / Phase 3X.2 determinism)."
         )
 
     def test_job_has_no_diff_driven_short_circuit(self, workflow: dict) -> None:

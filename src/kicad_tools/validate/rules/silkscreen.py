@@ -1239,9 +1239,14 @@ def _iter_pad_apertures(
     default).  ``check_silk_over_copper`` chains both iterators into a single
     aperture index.
     """
+    from .clearance import _pad_has_no_copper, _pad_has_no_mask
+
     for footprint in pcb.footprints:
         transform = _fp_transform(footprint)
         for pad in footprint.pads:
+            if _pad_has_no_copper(pad) and _pad_has_no_mask(pad):
+                # Issue #9528: no copper and no mask opening: no aperture.
+                continue
             sides: tuple[str, ...]
             if pad.type == "smd":
                 pad_side = "F" if footprint.layer == "F.Cu" else "B"
@@ -1316,11 +1321,16 @@ def check_silk_over_copper(
     # would read as clean.
     from kicad_tools.geometry.copper import custom_pad_outline_detail
 
+    from .clearance import _pad_has_no_copper, _pad_has_no_mask
+
     for footprint in pcb.footprints:
         for pad in footprint.pads:
             if (pad.shape or "").lower() != "custom":
                 continue
             if pad.type not in {"smd", "thru_hole"}:
+                continue
+            if _pad_has_no_copper(pad) and _pad_has_no_mask(pad):
+                # Issue #9528: neither copper nor a mask opening to smear silk onto.
                 continue
             geometry, refusal = custom_pad_outline_detail(
                 pad, _fp_transform(footprint)(pad.position)
