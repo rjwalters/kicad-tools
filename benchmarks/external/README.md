@@ -47,6 +47,22 @@ to this repo. Don't conflate the two — see the module docstrings in
 | `strf` | STRF RF mixed-signal | `github.com/pms67/STRF-Kicad` | 100% routed, 68 vias, <3 min, 98 airwires |
 | `pocketbeagle` | PocketBeagle | `github.com/beagleboard/pocketbeagle` (`KiCAD/`) | 290 airwires (vs-Quilter comparison) |
 | `beagleconnect_freedom` | BeagleConnect Freedom | `git.beagleboard.org/beagleconnect/freedom` (`hw/KICAD/`) | 414 airwires (vs-Quilter comparison) |
+| `pcbjam_m2_pcie_adapter` | Antmicro M.2 to PCIe x4 adapter | `github.com/PCBJam/blind-pcb-runs` (`boards/m2-pcie-adapter/`) | PCBJam reference: Fable 5.2 place+route, 22 min, 0 DRC, 0 open, 886 mm, 218 vias |
+
+### PCBJam blind-PCB study boards (`pcbjam_*`, issue #9595)
+
+[PCBJam's blind PCB study](https://github.com/PCBJam/blind-pcb-runs) (MIT)
+publishes stripped boards, briefs, host-side scoring and the results of a
+frontier agent, and invites other tools to run the same boards. Like the
+`srj18_*` dataset boards below, these entries are `opt_in = true`: name them
+explicitly (`--board pcbjam_m2_pcie_adapter`). PCBJam's published runs are
+place+route; a route-only run uses their generic 4-layer brief
+(`sandbox/briefs/route-4layer.md`) and the same host-side scoring
+(`scoring/score.sh` + `sandbox/report.cjs`). The first run and its
+like-for-like table live in `docs/research/pcbjam-blind-pcb-results.md`.
+Never commit their board files or run outputs here — the manifest pins the
+study repo commit instead, and each board keeps its own upstream licence
+(Antmicro M.2-to-PCIe adapter: Apache-2.0, from `antmicro/m2-pcie-adapter`).
 
 Each board's `.kicad_pcb` predates KiCad 8 (STRF: KiCad 5.1.5-era format;
 PocketBeagle: pre-KiCad-6 format; BeagleConnect Freedom: KiCad 6-era
