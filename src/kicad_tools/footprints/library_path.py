@@ -77,6 +77,52 @@ STANDARD_LIBRARY_MAPPINGS = {
 }
 
 
+@dataclass(frozen=True)
+class LibraryRead:
+    """One footprint file resolved from a detected standard library (Issue #9526).
+
+    Emitted by the read funnel (:meth:`LibraryPaths.get_footprint_file` and
+    :meth:`LibraryPaths.find_footprint_by_name`) so an evidence producer can
+    record *which* standard-library geometry it consumed: the ``.kicad_mod``
+    files ``PCB.add_footprint`` embeds come from whatever root
+    :func:`detect_kicad_library_path` resolved, which no version file pins.
+    Reads made through explicit paths (project ``fp-lib-table`` entries,
+    repo-local ``.pretty`` directories, ``add_footprint_from_file``) never go
+    through the funnel and are deliberately not recorded.
+    """
+
+    root: Path
+    """The library root the read resolved under."""
+    source: str
+    """That root's ``detect_kicad_library_path`` source: 'config'/'env'/'auto'."""
+    path: Path
+    """The resolved ``.kicad_mod`` file."""
+
+
+#: Recorded standard-library reads of this process, deduplicated per
+#: ``(root, path)`` in first-seen order.  Fed unconditionally (recording is
+#: cheap); only evidence producers *read* it back, via
+#: :func:`kicad_tools.cli.kicad_toolchain.footprint_library_identity`.
+_RECORDED_READS: dict[tuple[str, str], LibraryRead] = {}
+
+
+def record_library_read(root: Path, source: str, path: Path) -> None:
+    """Record *path* as consumed from the library *root* (idempotent)."""
+    key = (str(root), str(path))
+    if key not in _RECORDED_READS:
+        _RECORDED_READS[key] = LibraryRead(root=Path(root), source=source, path=Path(path))
+
+
+def recorded_library_reads() -> tuple[LibraryRead, ...]:
+    """The standard-library reads recorded so far, first-seen order."""
+    return tuple(_RECORDED_READS.values())
+
+
+def reset_library_reads() -> None:
+    """Forget every recorded read (test isolation)."""
+    _RECORDED_READS.clear()
+
+
 @dataclass
 class LibraryPaths:
     """Container for KiCad library paths."""
@@ -139,6 +185,9 @@ class LibraryPaths:
         if lib_path:
             fp_path = lib_path / fp_filename
             if fp_path.exists():
+                root = self.footprints_path
+                if root is not None:
+                    record_library_read(root, self.source, fp_path)
                 return fp_path
 
         # If library wasn't found or footprint not in library, try fallback search
@@ -174,6 +223,7 @@ class LibraryPaths:
             if lib_dir.is_dir() and lib_dir.name.endswith(".pretty"):
                 fp_path = lib_dir / fp_filename
                 if fp_path.exists():
+                    record_library_read(self.footprints_path, self.source, fp_path)
                     return fp_path
 
         return None
