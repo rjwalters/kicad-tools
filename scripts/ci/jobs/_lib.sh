@@ -72,12 +72,30 @@ _with_staged_committed_path() {
   # Match the backup allocation to the kind of path being staged: cp -a
   # refuses to overwrite a regular file (mktemp) with a directory, so the
   # committed directory must be backed up into a mktemp -d directory.
+  # Every step is status-checked: a failed or partial backup (e.g. ENOSPC on
+  # the backup filesystem) must abort BEFORE staging or running the inner
+  # command, because the restore would otherwise copy the truncated backup
+  # over the committed path (#9638).
   if [ -d "$committed" ]; then
-    bak="$(mktemp -d "${TMPDIR:-/tmp}/ci-jobs-stage-bak.XXXXXX")"
-    cp -a "$committed/." "$bak/"
+    bak="$(mktemp -d "${TMPDIR:-/tmp}/ci-jobs-stage-bak.XXXXXX")" || {
+      echo "_with_staged_committed_path: cannot allocate backup for $committed" >&2
+      return 1
+    }
+    cp -a "$committed/." "$bak/" || {
+      echo "_with_staged_committed_path: backup of $committed failed; aborting before staging" >&2
+      rm -rf "$bak"
+      return 1
+    }
   else
-    bak="$(mktemp "${TMPDIR:-/tmp}/ci-jobs-stage-bak.XXXXXX")"
-    cp -a "$committed" "$bak"
+    bak="$(mktemp "${TMPDIR:-/tmp}/ci-jobs-stage-bak.XXXXXX")" || {
+      echo "_with_staged_committed_path: cannot allocate backup for $committed" >&2
+      return 1
+    }
+    cp -a "$committed" "$bak" || {
+      echo "_with_staged_committed_path: backup of $committed failed; aborting before staging" >&2
+      rm -rf "$bak"
+      return 1
+    }
   fi
   local rc=0
   (
