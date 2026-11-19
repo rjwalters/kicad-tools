@@ -66,9 +66,16 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "drc": ["{pcb}"],
     "detect-mistakes": ["{pcb}"],
     "check": ["{pcb}"],
+    # Items file left missing on purpose: the JSON error document on stdout is
+    # part of the contract (same shape as the pcb reannotate missing-map entry).
+    "probe": ["{pcb}", "{dir}/probe_items.json"],
+    "apply": ["{pcb}", "{dir}/probe_items.json", "--checked"],
     "creepage": ["{pcb}", "--min", "1.0"],
     "creepage-export-rules": ["{pro}"],
     "repair-creepage": ["{pcb}", "--min", "1.0", "--dry-run"],
+    # Issue #9582: deliberately-absent inputs walk the JSON error path
+    # ({"error": ..., "success": false}); no fixture files needed.
+    "voltage-map-merge": ["{dir}/missing_a.json", "{dir}/missing_b.json", "-o", "{dir}/env.json"],
     # -- sch family ---------------------------------------------------------
     "sch summary": ["{sch}"],
     "sch hierarchy": ["{sch}"],

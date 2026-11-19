@@ -70,6 +70,8 @@ kct [--help] [--version] [--verbose] [-q] [--units {mm,mils}] <command> [options
 | | `datasheet` | Datasheet search and PDF parsing |
 | **PCB Operations** | `route` | Autoroute a PCB |
 | | `route-auto` | Route a net with smart strategy selection |
+| | `probe` | Check a batch of proposed tracks/vias/arcs against a board; write nothing (#9590) |
+| | `apply` | Apply proposed copper `--checked`: probe first, write only if all pass (#9590) |
 | | `retune-lengths` | Length-tune selected match groups / diff pairs on an already-routed PCB |
 | | `zones` | Add copper pour zones |
 | | `placement` | Detect and fix placement conflicts |
@@ -1913,6 +1915,74 @@ kct route board.kicad_pcb --lint-gate --seed 7 -o routed.kicad_pcb
 
 ---
 
+### `probe`
+
+Check a batch of proposed tracks, arcs and vias against a board without
+writing anything (Issue #9590). Implemented in
+[`src/kicad_tools/cli/probe_cmd.py`](../../src/kicad_tools/cli/probe_cmd.py).
+
+```bash
+kct probe <pcb_file> <items.json> [options]
+```
+
+The items file is JSON in absolute board millimetres (the file's literal
+sheet coordinates, as KiCad shows them):
+
+```json
+{"items": [
+  {"type": "segment", "net": "GND", "layer": "F.Cu", "width": 0.2,
+   "start": [10.0, 10.0], "end": [20.0, 10.0]},
+  {"type": "arc", "net": "GND", "layer": "F.Cu", "width": 0.2,
+   "start": [20.0, 10.0], "mid": [22.5, 12.5], "end": [25.0, 10.0]},
+  {"type": "via", "net": "GND", "at": [25.0, 12.0], "size": 0.6,
+   "drill": 0.3, "layers": ["F.Cu", "B.Cu"]}
+]}
+```
+
+The items are appended to an in-memory copy of the board and checked with
+the same rule set `kct check` runs (clearances and shorts, zone fills,
+board edge, trace/via dimensions, authored net-class clearances, via
+placement). Only findings the batch **adds** are reported, so pre-existing
+board problems never fail a probe. Arcs are checked through a 1 um-sagitta
+tessellation. Exit `1` on any added error finding or items-file problem;
+warnings are reported but do not fail. `--format json` emits the full
+report (`ok`, `problems`, `warnings`, per-item attribution).
+
+| Option | Description |
+|--------|-------------|
+| `--mfr` `NAME` | Manufacturer rules (default: resolved like `kct check` — `fab_profile.json` > `project.kct` > `jlcpcb`) |
+| `--format` `{text,json}` | Output format (default: `text`) |
+
+---
+
+### `apply`
+
+Apply a batch of proposed copper **checked**: probe first (exactly `kct
+probe`), then write the board only when every item passes (Issue #9590).
+Implemented in
+[`src/kicad_tools/cli/probe_cmd.py`](../../src/kicad_tools/cli/probe_cmd.py).
+
+```bash
+kct apply <pcb_file> <items.json> --checked [options]
+```
+
+The write is atomic (sibling temp file + rename, the `kct route` output
+discipline) and the previous bytes are kept beside the board. Before the
+rename the board's `st_mtime_ns` / `st_size` are re-checked against the
+read; a board that changed underneath is refused with nothing written.
+A failed probe never writes: the board stays byte-identical. Exit `0`
+written; `1` probe problems; `2` refused (concurrent modification, or a
+KiCad lock under the `error` policy) — nothing is written on `1` or `2`.
+
+| Option | Description |
+|--------|-------------|
+| `--checked` | Required. Probe first and write only if every item passes (the only mode) |
+| `--backup` `PATH` | Backup path for the previous bytes (default: `<pcb>.kicad_pcb.bak`) |
+| `--mfr` `NAME` | Manufacturer rules (default: resolved like `kct check` — `fab_profile.json` > `project.kct` > `jlcpcb`) |
+| `--format` `{text,json}` | Output format (default: `text`) |
+
+---
+
 ### `retune-lengths`
 
 Apply the existing match-group and diff-pair skew tuners to **named** groups of
@@ -2408,6 +2478,36 @@ kct net-status board.kicad_pcb --by-class
 kct net-status board.kicad_pcb --net DAC_CLK --why   # only DAC_CLK's diagnosis
 ```
 
+#### `--net`: the per-piece listing
+
+A net in several disconnected pieces gets a piece-by-piece listing under
+`--net` (issue #9598): the largest pad island is `piece 1`, smaller islands
+follow, and pad-less track/via fragments come last, marked `[no pads]`.
+
+```
+[!] GND (1 pads unconnected)
+  R3.1     @ (9.50, 20.00) -- needs routing
+  -> Fix: Route traces to connect 1 pads
+  Pieces (3 disconnected):
+    piece 1: R1.1, R2.1
+    piece 2: R3.1, via @ 9.50,20.00
+    piece 3: via @ 30.00,30.00 [no pads]
+```
+
+In `--format json` the same data appears as a `pieces` list on the net:
+each entry carries `piece`, `pads[]` (`name` / `position`), `vias[]` as
+`[x, y]`, and `stranded_items[]` (track/via labels) for a pad-less
+fragment. The key is **absent** (not null) for a single-piece net and in
+the board-wide view — per
+[`machine-output.md`](machine-output.md) the field is additive, so
+`schema_version` is unchanged.
+
+`--net X --why` shows the same block for a `POUR_DISCONTINUOUS` diagnosis
+(issue #9612) — the class where a split pour net is actionable — printed
+after the `evidence` line, and the net's JSON payload carries the same
+`pieces` key. Other classifications and `--why` without `--net` never
+print it.
+
 #### `--why`: the access witness
 
 `--why` classifies each incomplete net into the `ESCAPE_BLOCKED` /
@@ -2597,6 +2697,51 @@ kct interactive [pcb_file]
 ```
 
 Provides an interactive shell for exploring and modifying PCB files.
+
+---
+
+### `voltage-map-merge`
+
+Merge two or more per-scenario voltage maps into one **envelope map** for the
+interval-aware `--voltage-map` consumers (`kct creepage`, `kct audit`,
+`kct repair-creepage`, `kct route-link`). Author one map per operating
+scenario of the board (e.g. mains forward vs. reverse) and merge, instead of
+hand-writing an envelope of ranges plus one `_pair_bounds` entry per
+varying-net pair:
+
+```bash
+kct voltage-map-merge forward.json reverse.json -o envelope.json
+```
+
+Each net becomes the span of its per-scenario potentials (`{"min": …, "max": …}`;
+a plain scalar when every scenario agrees). For every net pair whose envelope
+span overstates its real difference — nets that move together across scenarios
+(a follower bank riding the line) but not in the envelope — a generated
+`_pair_bounds` entry caps the pair back to its worst per-scenario |ΔV|
+("always the same potential" is `max_dv: 0`). A net present in only one
+scenario is treated as 0 V in the others (the consumers' own unmapped-net
+default). The scenarios must agree on `_edge_voltage` and must not carry
+their own `_pair_bounds` (issue #9582).
+
+`--format json` (see [Machine output](machine-output.md)) emits one JSON
+document on stdout — the input/output paths, the net and generated
+`_pair_bounds` counts, and the `route_understated_pairs` array (below) — so
+machine consumers need not scrape stderr; failure paths emit
+`{"error": …}` with unchanged exit codes.
+
+> **Route-time limitation (#4411):** `kct route` and `kct pcb` read the map
+> through `load_signed_voltage_map`, which collapses each net's range to its
+> largest-magnitude endpoint *with its sign*. On a merged envelope a
+> sign-flipping net and its opposite bank can collapse to the same endpoint,
+> scoring those pairs **below** the census value — down to 0 V, dropping them
+> from the route widening matrix entirely. When the merged map contains such
+> pairs the command warns on stderr, naming them, and the `--format json`
+> document carries them in its `route_understated_pairs` array. For
+> route-time spacing,
+> drive `kct route` / `kct pcb` with a **per-scenario** map (correct within
+> each scenario) and use the merged envelope for the `kct creepage` /
+> `kct audit` gate. Teaching the route consumers to difference intervals is
+> #4411 follow-up work.
 
 ---
 

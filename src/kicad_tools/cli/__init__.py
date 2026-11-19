@@ -406,6 +406,11 @@ def _dispatch_command(args) -> int:
 
         return run_creepage_export_rules_command(args)
 
+    elif args.command == "voltage-map-merge":
+        from .commands.voltage_map_merge import run_voltage_map_merge_command
+
+        return run_voltage_map_merge_command(args)
+
     elif args.command == "sch":
         from .commands.schematic import run_sch_command
 
@@ -463,6 +468,16 @@ def _dispatch_command(args) -> int:
         from .route_link_cmd import run_route_link_command
 
         return run_route_link_command(args)
+
+    elif args.command == "probe":
+        from .probe_cmd import run_probe_command
+
+        return run_probe_command(args)
+
+    elif args.command == "apply":
+        from .probe_cmd import run_apply_command
+
+        return run_apply_command(args)
 
     elif args.command == "retune-lengths":
         from .commands.routing import run_retune_lengths_command

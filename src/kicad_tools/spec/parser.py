@@ -103,7 +103,7 @@ def _spec_header(kct_version: str) -> str:
     return f"""\
 # KiCad Tools Project Specification
 # Format version: {kct_version}
-# Documentation: https://github.com/rjwalters/kicad-tools#spec-format
+# Documentation: https://github.com/2AMLogic/kicad-tools#spec-format
 #
 # This file captures design intent, requirements, and progress for the project.
 # Edit manually or use: kct spec <command>
