@@ -207,3 +207,113 @@ def test_hv_pad_blocks_shortcut_with_voltage_map(pad_pcb, vmap, tmp_path, capsys
     assert any(s.y1 == 90 or s.y2 == 90 for s in segs if s.x1 < 120 and s.x2 < 120)
     assert not any(s.y1 == 90 or s.y2 == 90 for s in segs if s.x1 > 120 and s.x2 > 120)
     assert {(r["net_a"], r["net_b"]) for r in data["creepage_skipped"]} == {("HV", "LV")}
+
+
+# ---------------------------------------------------------------------------
+# Issue #9640: a range map must not let a rewrite deepen an already-failing pair
+# ---------------------------------------------------------------------------
+
+
+def _shaped_board() -> str:
+    """As :func:`_board`, plus a second LV stub that already sits short of 1.6 mm.
+
+    Under the envelope map both nets swing ``0..150 V``: the per-edit table
+    collapses each to its largest endpoint (150 V), differences them to 0 V and
+    gates nothing, while the census scores ``dV = 150 V`` (1.6 mm).  The extra
+    stub runs 1.0 mm (edge to edge) from the HV stub, so ``HV|LV|F.Cu`` already
+    fails in the input; the detour-1 shortcut would take it to 0.8 mm.  The
+    failing *key* is unchanged -- only its shortfall grows.
+    """
+    board = _board()
+    near = _seg(111.3, 98, 111.3, 108, 2)
+    return board[: board.rindex(")")] + "\t" + near.lstrip("\t") + ")\n"
+
+
+@pytest.fixture
+def shaped_pcb(tmp_path: Path) -> Path:
+    p = tmp_path / "shaped.kicad_pcb"
+    p.write_text(_shaped_board())
+    return p
+
+
+@pytest.fixture
+def range_vmap(tmp_path: Path) -> Path:
+    p = tmp_path / "range.json"
+    p.write_text(
+        json.dumps(
+            {
+                "HV": {"min": 0.0, "max": 150.0},
+                "LV": {"min": 0.0, "max": 150.0},
+                "_pair_bounds": [{"nets": ["HV", "LV"], "max_dv": 150.0, "why": "test"}],
+            }
+        )
+    )
+    return p
+
+
+def _detour1_shortcut_taken(segs) -> bool:
+    return not any(s.y1 == 90 or s.y2 == 90 for s in segs if s.x1 < 120 and s.x2 < 120)
+
+
+def test_range_map_baseline_takes_shortcut_without_gate(shaped_pcb, tmp_path, capsys):
+    segs = _run(shaped_pcb, tmp_path)
+    capsys.readouterr()
+    assert _detour1_shortcut_taken(segs)
+
+
+def test_range_map_rolls_back_rewrite_that_deepens_failing_pair(
+    shaped_pcb, range_vmap, tmp_path, capsys
+):
+    segs = _run(shaped_pcb, tmp_path, "--voltage-map", str(range_vmap))
+    data = json.loads(capsys.readouterr().out)
+    # The shaped detour survives: the shortcut would put the pair 0.2 mm deeper.
+    assert not _detour1_shortcut_taken(segs)
+    assert data["creepage_audit"] == "ran"
+    assert data["output_verify_rolled_back"]["creepage"] == ["LV"]
+    assert data["creepage_unwaived_failures_after"] <= data["creepage_unwaived_failures_before"]
+
+
+def test_range_map_json_lists_pairs_checked(shaped_pcb, range_vmap, tmp_path, capsys):
+    _run(shaped_pcb, tmp_path, "--voltage-map", str(range_vmap))
+    data = json.loads(capsys.readouterr().out)
+    checked = data["creepage_pairs_checked"]
+    assert any({r["net_a"], r["net_b"]} == {"HV", "LV"} for r in checked)
+    row = next(r for r in checked if {r["net_a"], r["net_b"]} == {"HV", "LV"})
+    assert row["margin_mm_before"] is not None
+    # Rolled back: the written board is no worse than the input.
+    assert row["margin_mm_after"] >= row["margin_mm_before"] - 1e-6
+    assert data["creepage_pairs_unchecked"] == []
+
+
+def test_json_lists_voltage_map_pair_absent_from_board(pcb, tmp_path, capsys):
+    vm = tmp_path / "ghost.json"
+    vm.write_text(json.dumps({"HV": 150.0, "LV": 0.0, "GHOST": 300.0}))
+    _run(pcb, tmp_path, "--voltage-map", str(vm))
+    data = json.loads(capsys.readouterr().out)
+    ghost = {frozenset((r["net_a"], r["net_b"])) for r in data["creepage_pairs_unchecked"]}
+    assert frozenset(("GHOST", "HV")) in ghost
+
+
+def _lock_stub(board_text: str) -> str:
+    """Mark the shaped LV detour-1 run as locked (KiCad 8+ ``(locked yes)``)."""
+    return board_text.replace(
+        _seg(105, 90, 115, 90, 2),
+        _seg(105, 90, 115, 90, 2).replace("(net 2))", "(net 2) (locked yes))"),
+    )
+
+
+def test_locked_track_net_is_left_untouched(tmp_path, capsys):
+    p = tmp_path / "locked.kicad_pcb"
+    p.write_text(_lock_stub(_board()))
+    segs = _run(p, tmp_path)
+    data = json.loads(capsys.readouterr().out)
+    # Without any voltage map the shortcut would be taken, but the net is locked.
+    assert not _detour1_shortcut_taken(segs)
+    # The whole net is left alone, so the unrelated detour 2 stays too.
+    assert any(s.y1 == 90 or s.y2 == 90 for s in segs if s.x1 > 120 and s.x2 > 120)
+    assert data["locked_nets_skipped"] == ["LV"]
+
+
+def test_unlocked_board_reports_no_locked_nets(pcb, tmp_path, capsys):
+    _run(pcb, tmp_path)
+    assert json.loads(capsys.readouterr().out)["locked_nets_skipped"] == []

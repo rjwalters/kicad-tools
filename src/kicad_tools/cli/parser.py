@@ -2936,7 +2936,9 @@ def _add_pcb_parser(subparsers) -> None:
         "segment -- runs whose joints are pure two-segment joints directly, and "
         "runs whose joints also sit on a same-net via, pad or zone only when the "
         "merged run leaves every terminal, neighbour, zone anchor and via/pad "
-        "centre joint as it was. Locked tracks are never touched. With kicad-cli available each "
+        "centre joint as it was. Locked tracks are never touched (this is how to mark a "
+        "run as shaped on purpose; each locked track is skipped individually, while "
+        "unlocked tracks on the same net may still be snapped or merged). With kicad-cli available each "
         "net's edits are checked with 'pcb drc --refill-zones' and dropped if "
         "they add violations; without that check the file is only written with "
         "--unverified. In-place by default; use -o to write elsewhere.",
@@ -2995,6 +2997,48 @@ def _add_pcb_parser(subparsers) -> None:
         "declared current's IPC-2221 width on its own layer (external for "
         "F.Cu/B.Cu, internal otherwise, at the stackup's copper weight); refused "
         "cuts are reported.",
+    )
+    pcb_prune.add_argument(
+        "--voltage-map",
+        dest="voltage_map",
+        metavar="FILE",
+        help="JSON per-net voltage map (same format as 'kct creepage' / 'kct route', "
+        "ranges and _pair_bounds included). Each net's plan is also dropped when "
+        "applying it leaves any pair further under its creepage requirement than "
+        "the input board (a new failure, or a deeper shortfall on one that already "
+        "failed); the JSON lists rejected_by_creepage, creepage_pairs_checked and "
+        "creepage_pairs_unchecked. Plans are judged per net, so a net's merges and "
+        "snaps stand or fall together. If the creepage audit cannot run nothing is "
+        "written. Absent, prune takes no creepage input",
+    )
+    pcb_prune.add_argument(
+        "--creepage-standard",
+        dest="creepage_standard",
+        choices=["iec60664", "iec62368"],
+        default="iec60664",
+        help="Creepage standard for --voltage-map (default: iec60664)",
+    )
+    pcb_prune.add_argument(
+        "--pollution-degree",
+        dest="pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help="IEC pollution degree for --voltage-map (default: 2)",
+    )
+    pcb_prune.add_argument(
+        "--material-group",
+        dest="material_group",
+        default="IIIa",
+        help="Insulation material group I/II/IIIa/IIIb for --voltage-map (default: IIIa)",
+    )
+    pcb_prune.add_argument(
+        "--hv-threshold",
+        dest="hv_threshold",
+        type=float,
+        default=30.0,
+        metavar="VOLTS",
+        help="Minimum net-pair |dV| that is checked against --voltage-map (default: 30.0)",
     )
     pcb_prune.add_argument(
         "--unverified",

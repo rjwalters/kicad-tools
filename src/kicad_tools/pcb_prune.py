@@ -77,6 +77,7 @@ from typing import TYPE_CHECKING, Any, cast
 from kicad_tools.schema.pcb import PCB, Pad, Segment, _mm_atom
 
 if TYPE_CHECKING:
+    from kicad_tools.creepage.output_audit import CreepageAudit
     from kicad_tools.router.current_paths import CurrentPathSpec
 
 logger = logging.getLogger(__name__)
@@ -2456,6 +2457,11 @@ class PruneResult:
     uncut_loops: list[dict[str, Any]] = field(default_factory=list)
     #: plans not applied because an edit fell outside ``--region``
     region_skipped: list[NetPlan] = field(default_factory=list)
+    #: plans dropped because applying them left a pair further under its
+    #: creepage requirement (Issue #9640); empty without ``--voltage-map``
+    creepage_rejected: list[NetPlan] = field(default_factory=list)
+    #: creepage gate report (Issue #9640): ``None`` without ``--voltage-map``
+    creepage: dict[str, Any] | None = None
 
 
 def prune_board(
@@ -2471,12 +2477,21 @@ def prune_board(
     allow_default_rules: bool = False,
     nets: Collection[str] | None = None,
     region: Region | None = None,
+    creepage_audit: CreepageAudit | None = None,
+    creepage_baseline_text: str | None = None,
+    creepage_required_pairs: Mapping[Any, Any] | None = None,
 ) -> tuple[PCB, PruneResult]:
     """Plan (and optionally apply) pruning for ``pcb_path``.
 
     Returns the board (edited in memory when ``apply``) and a summary.  With
     ``kicad-cli`` available each net's plan is trial-applied to a scratch copy
     and kept only when ``pcb drc --refill-zones`` reports nothing new.
+
+    With ``creepage_audit`` (Issue #9640) each net's plan is also dropped when
+    applying it leaves any pair further under its creepage requirement than
+    ``creepage_baseline_text`` (default: ``pcb_path``'s text) -- a new failing
+    pair, or a deeper shortfall on one that already failed.  An audit that
+    cannot run drops every plan: nothing unverified is written.
     """
     import tempfile
 
@@ -2549,6 +2564,17 @@ def prune_board(
         accepted, audit_rejected = _audit_gate(Path(pcb_path), accepted, gate_specs)
         rejected = [*rejected, *audit_rejected]
 
+    creepage_rejected: list[NetPlan] = []
+    creepage_report: dict[str, Any] | None = None
+    if creepage_audit is not None:
+        accepted, creepage_rejected, creepage_report = _creepage_gate(
+            Path(pcb_path),
+            accepted,
+            creepage_audit,
+            creepage_baseline_text,
+            creepage_required_pairs,
+        )
+
     stats = {"segments_removed": 0, "ends_snapped": 0}
     if apply and accepted:
         stats = apply_plans(pcb, accepted)
@@ -2567,8 +2593,82 @@ def prune_board(
             apply_plans(result, accepted)
         uncut.extend(audit_loops_left(result, current_paths, uncut))
     return pcb, PruneResult(
-        plans, accepted, rejected, drc_verified, note, stats, uncut, region_skipped
+        plans,
+        accepted,
+        rejected,
+        drc_verified,
+        note,
+        stats,
+        uncut,
+        region_skipped,
+        creepage_rejected,
+        creepage_report,
     )
+
+
+def _plans_board_text(pcb_path: Path, group: list[NetPlan]) -> str:
+    """The board text of ``pcb_path`` with ``group``'s plans applied (scratch copy)."""
+    import tempfile
+
+    trial = PCB.load(pcb_path)
+    apply_plans(trial, group)
+    with tempfile.TemporaryDirectory(prefix="kct_prune_creep_") as tmp:
+        out = Path(tmp) / "trial.kicad_pcb"
+        trial.save(out)
+        return out.read_text()
+
+
+def _creepage_gate(
+    pcb_path: Path,
+    accepted: list[NetPlan],
+    audit: CreepageAudit,
+    baseline_text: str | None,
+    required_pairs: Mapping[Any, Any] | None,
+) -> tuple[list[NetPlan], list[NetPlan], dict[str, Any]]:
+    """Split ``accepted`` into (kept, rejected) by the creepage audit (Issue #9640).
+
+    Plans are judged per net (a net's snaps, merges and removals stand or fall
+    together), like the DRC trial above: first all together, then -- only when
+    that regresses -- one at a time on top of the plans already kept.
+    """
+    from kicad_tools.creepage.output_audit import audit_summary
+
+    base_text = baseline_text if baseline_text is not None else Path(pcb_path).read_text()
+    report: dict[str, Any] = {"creepage_gate": "active", "creepage_audit": "unchanged"}
+    if not accepted:
+        return accepted, [], report
+    base = audit(base_text)
+    if base is None:
+        for plan in accepted:
+            plan.reject_reason = "creepage audit could not run; edit not verified"
+        report["creepage_audit"] = "unavailable"
+        return [], list(accepted), report
+    report["creepage_audit"] = "ran"
+
+    def worse(group: list[NetPlan]) -> dict[str, int] | None:
+        cur = audit(_plans_board_text(pcb_path, group))
+        if cur is None:
+            return {"unverifiable": 1}
+        excess = {k: n for k, n in cur.items() if n > base.get(k, 0)}
+        return excess or None
+
+    kept: list[NetPlan] = []
+    rejected: list[NetPlan] = []
+    if worse(accepted) is None:
+        kept = list(accepted)
+    else:
+        for plan in accepted:
+            excess = worse([*kept, plan])
+            if excess is None:
+                kept.append(plan)
+            else:
+                pairs = ", ".join(sorted(k.rsplit("|", 1)[0] for k in excess))
+                plan.reject_reason = f"creepage: leaves pair(s) further under requirement: {pairs}"
+                rejected.append(plan)
+    report.update(
+        audit_summary(audit, base_text, _plans_board_text(pcb_path, kept), required_pairs)
+    )
+    return kept, rejected, report
 
 
 def _gate_specs(

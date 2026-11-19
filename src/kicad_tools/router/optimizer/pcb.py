@@ -186,6 +186,29 @@ def _is_unresolvable_numeric_ref(
 resolve_block_net = _resolve_block_net
 
 
+_RE_LOCKED = re.compile(r"\(locked\s+yes\s*\)|\(locked\s*\)|(?<=[\s)])locked(?=[\s)])")
+
+
+def locked_segment_nets(pcb_text: str) -> set[str]:
+    """Names of nets that carry at least one locked track segment (Issue #9640).
+
+    A track locked in KiCad (``(locked yes)``, or the bare ``locked`` token of
+    older files) is how a designer marks a run as shaped on purpose.  The
+    optimizer rewrites whole chains, so it leaves every net that owns one
+    untouched rather than guessing which neighbouring segments may move.
+    """
+    net_names = parse_net_names(pcb_text)
+    name_to_id = {name: nid for nid, name in net_names.items()}
+    locked: set[str] = set()
+    for _start, _end, block in _extract_balanced_blocks(pcb_text, "segment"):
+        if not _RE_LOCKED.search(block):
+            continue
+        resolved = _resolve_block_net(block, net_names, name_to_id)
+        if resolved and resolved[1]:
+            locked.add(resolved[1])
+    return locked
+
+
 def parse_segments(pcb_text: str) -> dict[str, list[Segment]]:
     """Parse segments from PCB file text, grouped by net name.
 
@@ -1276,9 +1299,18 @@ def optimize_pcb(
 
     vias_by_net = parse_vias(pcb_text) if net_anchors_by_name else {}
 
+    # Issue #9640: a net owning a locked track was shaped on purpose; leave it.
+    locked_nets = locked_segment_nets(pcb_text)
+
     # Optimize each net
     optimized_segments: dict[str, list[Segment]] = {}
     for net, segs in segments_by_net.items():
+        if net in locked_nets:
+            stats.locked_nets_skipped.append(net)
+            optimized_segments[net] = list(segs)
+            if on_net_optimized is not None:
+                on_net_optimized(net, segs, segs)
+            continue
         optimized = kelvin.optimize_net(net, segs, optimize_fn) if kelvin else None
         if optimized is None:
             optimized = optimize_fn(segs)

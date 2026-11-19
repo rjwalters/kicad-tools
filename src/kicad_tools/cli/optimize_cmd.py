@@ -18,8 +18,12 @@ import argparse
 import contextlib
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from kicad_tools.cli.format_options import FORMAT_JSON, add_format_flag, emit_json
+
+if TYPE_CHECKING:
+    from kicad_tools.creepage.output_audit import CreepageAudit
 
 
 def _fail(as_json: bool, pcb: str, message: str, *, text: str | None = None) -> int:
@@ -222,58 +226,24 @@ def _make_drc_verifier(rules_from: Path):
     return verify
 
 
-def _make_creepage_verifier(args):
-    """Board-text -> ``{"netA|netB|layer": 1}`` for un-waived failing pairs.
+def _make_creepage_verifier(args) -> "CreepageAudit":
+    """Board-text -> ``{"netA|netB|layer": shortfall units}`` for un-waived failing pairs.
 
     Runs the same audit as ``kct creepage`` (same voltage map, standard,
     pollution degree and material group; same-footprint and attach-zone
-    waivers on) on the candidate board (Issue #8632).  ``None`` if it cannot run.
+    waivers on) on the candidate board (Issue #8632).  Counts are per-pair
+    shortfall, so a rewrite that deepens an already-failing pair is a
+    regression too (Issue #9640).  ``None`` if it cannot run.
     """
-    import contextlib
-    import io
-    import json
-    import tempfile
-    from types import SimpleNamespace
+    from kicad_tools.creepage.output_audit import CreepageAudit
 
-    from kicad_tools.cli.commands.creepage import run_creepage_command
-
-    def verify(board_text: str) -> dict[str, int] | None:
-        try:
-            with tempfile.TemporaryDirectory(prefix="kct_optcreep_") as td:
-                board = Path(td) / "creep.kicad_pcb"
-                board.write_text(board_text)
-                ns = SimpleNamespace(
-                    pcb=str(board),
-                    format="json",
-                    min=None,
-                    standard=args.creepage_standard,
-                    working_voltage=None,
-                    pollution_degree=args.pollution_degree,
-                    material_group=args.material_group,
-                    voltage_map=args.voltage_map,
-                    census_threshold=args.hv_threshold,
-                    waive_same_footprint=True,
-                    waive_attach_zone=True,
-                    witness=False,
-                    net_class="HV",
-                    net_class_map=None,
-                )
-                out, err = io.StringIO(), io.StringIO()
-                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                    run_creepage_command(ns)
-                data = json.loads(out.getvalue())
-        except Exception:
-            return None
-        pairs = data.get("pairs")
-        if pairs is None:
-            return None
-        return {
-            f"{p['net_a']}|{p['net_b']}|{p.get('layer')}": 1
-            for p in pairs
-            if not p.get("pass", True) and not p.get("waived")
-        }
-
-    return verify
+    return CreepageAudit(
+        voltage_map=args.voltage_map,
+        standard=args.creepage_standard,
+        pollution_degree=args.pollution_degree,
+        material_group=args.material_group,
+        hv_threshold=args.hv_threshold,
+    )
 
 
 def _kicad_cli_drc_summary(before: dict | None, after: dict | None, has_dru: bool) -> dict:
@@ -683,6 +653,16 @@ Examples:
     kct optimize-traces board.kicad_pcb -o optimized.kicad_pcb --no-45
     kct optimize-traces board.kicad_pcb --dry-run
     kct optimize-traces board.kicad_pcb --drc-aware --mfr jlcpcb --layers 4
+
+Shaped-on-purpose copper (Issue #9640):
+    Lock a track in KiCad to mark a run as shaped on purpose (e.g. a stub held
+    off a high-voltage neighbour).  optimize-traces leaves every net that owns
+    a locked track completely untouched and lists it as locked_nets_skipped.
+    It does not look at pads, vias, zones or footprints, and it never edits a
+    locked track's net even when only some of its segments are locked.  With
+    --voltage-map, unlocked nets are additionally rolled back if the rewrite
+    leaves any pair further under its creepage requirement.  `kct pcb prune`
+    also skips locked tracks (individually, not per net).
 """,
     )
 
@@ -836,7 +816,12 @@ Examples:
             "JSON per-net voltage map (same format and semantics as kct route). "
             "A candidate edit that would bring a net pair below its pairwise "
             "creepage requirement is rejected on its own; other edits on the "
-            "net are still applied. Absent, behaviour is unchanged"
+            "net are still applied. The whole board is then re-audited like "
+            "`kct creepage`, and a net whose rewrite leaves any pair further under "
+            "its requirement (a new failure, or a deeper shortfall on one that "
+            "already failed, e.g. under a range map) is rolled back. The JSON "
+            "lists creepage_pairs_checked and creepage_pairs_unchecked. Absent, "
+            "behaviour is unchanged"
         ),
     )
     parser.add_argument(
@@ -1003,8 +988,10 @@ Examples:
         # Issue #8720: any kicad-cli rule count rising (project .kicad_dru
         # included) rolls the offending nets back.
         config.output_verifiers["drc"] = _make_drc_verifier(verifier_rules)
+    creepage_audit = None
     if args.voltage_map is not None:
-        config.output_verifiers["creepage"] = _make_creepage_verifier(args)
+        creepage_audit = _make_creepage_verifier(args)
+        config.output_verifiers["creepage"] = creepage_audit
 
     # Issue #8214: collision-check every rewrite against the board's own
     # copper instead of relying on whole-net ``--drc-aware`` rollback.  A grid
@@ -1154,6 +1141,8 @@ Examples:
             pcb_path, **({"rules_from": Path(args.project)} if args.project else {})
         )
 
+    creepage_input_text = pcb_path.read_text() if args.voltage_map is not None else None
+
     # Run optimization
     try:
         with spinner("Optimizing traces...", quiet=quiet), _deterministic_uuids(pcb_path, args.net):
@@ -1182,6 +1171,34 @@ Examples:
 
     if pairwise_checker is not None:
         stats.creepage_skips = dict(pairwise_checker.skips)
+
+    # Issue #9640: name the pairs the whole-board audit scored (with margins
+    # before/after) and the voltage-map pairs it could not, from the written
+    # board -- the same text the user gets.
+    creepage_report: dict = {}
+    if creepage_audit is not None and creepage_input_text is not None and not args.dry_run:
+        from kicad_tools.creepage.output_audit import audit_summary
+
+        creepage_report = audit_summary(
+            creepage_audit,
+            creepage_input_text,
+            Path(args.output or pcb_path).read_text(),
+            getattr(args, "_pairwise_required", None),
+        )
+        before_n = creepage_report.get("creepage_unwaived_failures_before")
+        after_n = creepage_report.get("creepage_unwaived_failures_after")
+        if before_n is not None and after_n is not None and after_n > before_n:
+            print(
+                f"WARNING: written board has {after_n} unwaived creepage failures "
+                f"(input: {before_n}); re-run `kct creepage` before tapeout",
+                file=sys.stderr,
+            )
+        elif before_n is None:
+            print(
+                "WARNING: creepage audit could not run on the written board; "
+                "creepage of the result is UNVERIFIED -- run `kct creepage`",
+                file=sys.stderr,
+            )
 
     # Issue #8286: the rewrite moved copper but the board still carries the
     # zone fills it was read with; ``kct check`` reads stored fills, so refill
@@ -1248,6 +1265,7 @@ Examples:
                 "copper_oz": args.copper,
                 "stack_source": getattr(args, "_stack_source", {}),
                 "output_checks": stats.output_checks,
+                "locked_nets_skipped": stats.locked_nets_skipped,
                 "output_verify_rolled_back": stats.output_verify_rolled_back,
                 "stats": {
                     "nets_optimized": stats.nets_optimized,
@@ -1296,6 +1314,7 @@ Examples:
                 "success": True,
                 # Issues #8300/#8433: creepage_gate always; the rest only with --voltage-map.
                 **_creepage_keys(args, stats),
+                **creepage_report,
             }
         )
         return exit_code
@@ -1368,6 +1387,12 @@ Examples:
             elif cli_drc:
                 why = f" ({cli_drc['reason']})" if cli_drc["reason"] else ""
                 print(f"  kicad-cli clearance cross-check unavailable{why}")
+        if stats.locked_nets_skipped:
+            shown = ", ".join(stats.locked_nets_skipped[:5])
+            more = ", ..." if len(stats.locked_nets_skipped) > 5 else ""
+            print(
+                f"  Left untouched (locked track): {len(stats.locked_nets_skipped)} ({shown}{more})"
+            )
         if args.voltage_map is not None:
             total = sum(stats.creepage_skips.values())
             print(f"  Edits skipped for creepage: {total}")
