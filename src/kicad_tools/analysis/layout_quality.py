@@ -241,34 +241,58 @@ def _outline_area_mm2(pcb: PCB) -> float | None:
     """Area enclosed by the Edge.Cuts outline, or ``None`` when unsupported.
 
     Polygonizes ``PCB.get_board_outline_segments()`` (straight lines,
-    two-chord arc approximations, rects). Cutouts subtract: polygon depth
-    parity decides add vs subtract, so outer - cutout + nested island
-    comes out right. Open, crossing, malformed or absent outlines (and
-    outline shapes the accessor does not model, e.g. ``gr_circle``)
-    return ``None`` rather than an inaccurate area -- the same policy as
-    the development board-size metadata.
+    two-chord arc approximations, rects). ``polygonize_full`` returns the
+    faces of the line arrangement: the outer face *with its holes punched
+    out*, each cutout face, and any nested island face, so the material
+    area is the sum of faces at even nesting depth (outer and islands in
+    cutouts), skipping odd-depth cutout faces. Nesting depth is the same
+    probe ``router.mesh.pathfinder.interior_edge_loops`` uses (issue
+    #6822): each face's *exterior* ring (a punched hole would defeat
+    containment on the face itself), largest first, counting how many of
+    the larger exterior rings contain the ring's representative point.
+
+    Outline shapes the segment accessor does not model (``gr_circle``,
+    ``gr_poly``) leave the segment set incomplete, so any Edge.Cuts
+    graphic of those kinds returns ``None`` rather than an inaccurate
+    area -- the same policy as the development board-size metadata.
+    Open, crossing, malformed or absent outlines return ``None`` too.
     """
+    from shapely.errors import ShapelyError  # type: ignore[import-untyped]
+    from shapely.geometry import MultiLineString, Polygon  # type: ignore[import-untyped]
+    from shapely.ops import polygonize_full  # type: ignore[import-untyped]
+
+    # The accessor models gr_line/gr_arc/gr_rect only; any other Edge.Cuts
+    # graphic is missing from the segments (a circular hole would silently
+    # vanish into the gross rect area).
+    if any(
+        g.layer == "Edge.Cuts" and g.graphic_type not in ("line", "arc", "rect")
+        for g in pcb.graphics
+    ):
+        return None
     segments = pcb.get_board_outline_segments()
     if not segments:
         return None
     try:
-        from shapely.errors import GEOSException  # type: ignore[import-untyped]
-        from shapely.geometry import MultiLineString  # type: ignore[import-untyped]
-        from shapely.ops import polygonize_full  # type: ignore[import-untyped]
-
         lines = MultiLineString(segments)
         if not lines.is_simple:  # crossings and overlapping edges
             return None
         polygons, cuts, dangles, invalid = polygonize_full(lines)
         if polygons.is_empty or not all(g.is_empty for g in (cuts, dangles, invalid)):
             return None
-        rings = list(polygons.geoms)
+        faces = [face for face in polygons.geoms if face.area > 0]
+        rings = sorted(
+            ((face, Polygon(face.exterior)) for face in faces),
+            key=lambda pair: pair[1].area,
+            reverse=True,
+        )
         area = 0.0
-        for ring in rings:
-            depth = sum(1 for other in rings if other is not ring and other.covers(ring))
-            area += ring.area if depth % 2 == 0 else -ring.area
+        for idx, (face, ring) in enumerate(rings):
+            probe = ring.representative_point()
+            depth = sum(1 for _, other in rings[:idx] if other.contains(probe))
+            if depth % 2 == 0:
+                area += face.area
         return area if math.isfinite(area) and area > 0 else None
-    except (ValueError, TypeError, OverflowError, GEOSException):
+    except (ValueError, TypeError, OverflowError, ShapelyError):
         return None
 
 

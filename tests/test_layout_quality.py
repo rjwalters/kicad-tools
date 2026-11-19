@@ -147,6 +147,73 @@ NAME_ONLY_PCB = """(kicad_pcb
 )
 """
 
+# A 100x50 gr_rect outline with a 10x10 gr_line-ring cutout inside: the
+# cutout must subtract. Regression for the review finding on #9614: the
+# old add/subtract parity never fired because polygonize_full returns the
+# outer face with the hole already punched, so every face sat at depth 0
+# and the gross 5000 mm^2 was reported.
+CUTOUT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+
+  (gr_rect (start 0 0) (end 100 50) (stroke (width 0.1)) (layer "Edge.Cuts"))
+
+  (gr_line (start 20 10) (end 30 10) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start 30 10) (end 30 20) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start 30 20) (end 20 20) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start 20 20) (end 20 10) (stroke (width 0.1)) (layer "Edge.Cuts"))
+)
+"""
+
+# A 20x20 cutout with a 5x5 island inside it: outer - cutout + island.
+NESTED_ISLAND_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+
+  (gr_rect (start 0 0) (end 100 50) (stroke (width 0.1)) (layer "Edge.Cuts"))
+
+  (gr_line (start 15 5) (end 35 5) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start 35 5) (end 35 25) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start 35 25) (end 15 25) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start 15 25) (end 15 5) (stroke (width 0.1)) (layer "Edge.Cuts"))
+
+  (gr_line (start 22 12) (end 27 12) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start 27 12) (end 27 17) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start 27 17) (end 22 17) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start 22 17) (end 22 12) (stroke (width 0.1)) (layer "Edge.Cuts"))
+)
+"""
+
+# A gr_circle hole is not modelled by the segment accessor, so the
+# segment set is incomplete: the documented policy is ``None`` rather
+# than the gross rect area the circle would silently vanish into.
+CIRCLE_CUTOUT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+
+  (gr_rect (start 0 0) (end 100 50) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_circle (center 25 15) (end 30 15) (stroke (width 0.1)) (layer "Edge.Cuts"))
+)
+"""
+
 
 def _load_pcb(text: str) -> PCB:
     import tempfile
@@ -225,6 +292,22 @@ def test_name_only_net_dialect_groups_by_name():
     # Exactly one 90 deg corner on NA; the NB leg meeting at the same
     # vertex is a different net and joins nothing.
     assert report.corners_per_net == {"NA": {"right_angle": 1, "acute": 0, "turn_back": 0}}
+
+
+def test_outline_cutout_subtracts():
+    area = analyze_layout_quality(_load_pcb(CUTOUT_PCB)).outline_area_mm2
+    assert area == pytest.approx(100 * 50 - 10 * 10, abs=1e-6)
+
+
+def test_nested_island_inside_cutout_adds_back():
+    area = analyze_layout_quality(_load_pcb(NESTED_ISLAND_PCB)).outline_area_mm2
+    assert area == pytest.approx(100 * 50 - 20 * 20 + 5 * 5, abs=1e-6)
+
+
+def test_unmodelled_edge_cuts_shape_returns_none():
+    # gr_circle on Edge.Cuts is missing from the segment accessor: refuse
+    # the area instead of reporting the gross rect (docstring policy).
+    assert analyze_layout_quality(_load_pcb(CIRCLE_CUTOUT_PCB)).outline_area_mm2 is None
 
 
 def test_rerun_stability():

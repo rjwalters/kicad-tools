@@ -371,22 +371,24 @@ falling through to another revision:
 
 ```json
 "layout_quality": {
-  "pcb_path": "output/bldc_controller.kicad_pcb",
+  "pcb_path": "output/bldc_controller_routed.kicad_pcb",
   "pcb_sha256": "<SHA-256 of the measured PCB>",
-  "via": {"track": 18, "ground": 42, "total": 60},
+  "via": {"track": 110, "ground": 27, "total": 137},
   "corners": {
-    "right_angle": 34,
-    "acute": 2,
-    "turn_back": 1,
-    "per_net": {"USB_D+": {"right_angle": 6, "acute": 0, "turn_back": 0}}
+    "right_angle": 19,
+    "acute": 6,
+    "turn_back": 6,
+    "per_net": {"GND_SENSE": {"right_angle": 0, "acute": 2, "turn_back": 0}}
   },
-  "total_track_length_mm": 812.4,
-  "outline_area_mm2": 2100.0,
-  "diff_pair_skew": [
-    {"net_positive": "USB_D+", "net_negative": "USB_D-", "skew_mm": 0.42}
-  ]
+  "total_track_length_mm": 1378.344,
+  "outline_area_mm2": 6300.0
 }
 ```
+
+The example is board 05's real block (`per_net` truncated to one net). A
+board with differential pairs additionally carries `diff_pair_skew`, one
+entry per pair:
+`[{"net_positive": "USB_D+", "net_negative": "USB_D-", "skew_mm": 0.42}]`.
 
 | Field | Meaning |
 |---|---|

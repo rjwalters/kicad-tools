@@ -423,6 +423,13 @@ def fingerprint(pcb_path: Path) -> dict[str, Any]:
         f"{'[keepout]' if getattr(z, 'keepout', None) else ''}"
         for z in pcb.zones
     )
+    # The quality block is advisory metadata: a metrics bug must not lose
+    # a routing case as a scorer-failure (board-metrics isolates the same
+    # call the same way). The invariant fingerprint above still raises.
+    try:
+        layout_quality: dict[str, Any] | None = analyze_layout_quality(pcb).to_dict()
+    except Exception:  # noqa: BLE001
+        layout_quality = None
     return {
         "footprints": footprints,
         "pad_nets": pad_nets,
@@ -432,7 +439,7 @@ def fingerprint(pcb_path: Path) -> dict[str, Any]:
         # Reported per case (issue #9594): the layout-quality metric block.
         # compare_fingerprints deliberately does NOT compare it — routing is
         # supposed to change it, that is the metric's point.
-        "layout_quality": analyze_layout_quality(pcb).to_dict(),
+        "layout_quality": layout_quality,
     }
 
 
@@ -1547,11 +1554,9 @@ def print_table(rows: list[dict[str, Any]]) -> None:
         chk = s.get("kct_check") or {}
         sync = s.get("sync") or {}
         lq = (s.get("layout_quality") or {}).get("corners") or {}
-        corners = (
-            f"{lq.get('right_angle', 0)}/{lq.get('acute', 0)}/{lq.get('turn_back', 0)}"
-            if s
-            else "--"
-        )
+        # "--" (like the adjacent cells) when the score carries no
+        # layout_quality block: unknown must not display as zero corners.
+        corners = f"{lq['right_angle']}/{lq['acute']}/{lq['turn_back']}" if lq else "--"
         cells = [
             r["board"], r["tool"], r["outcome"],
             f"{comp['connections_routed']}/{comp['connections_total']}" if comp else "--",
