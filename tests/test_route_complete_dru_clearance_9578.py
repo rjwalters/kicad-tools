@@ -815,6 +815,67 @@ class TestConditionalNetClassRuleFloorsNewCopper:
         assert declared.project_requirement() is None
         assert declared.via_requirement() is None
 
+    def test_ignored_unconditional_rule_does_not_floor(self, tmp_path: Path) -> None:
+        # #9670: the ignore guard used to bind the conditional bucket only,
+        # so a rule that enforces nothing floored every trace at 0.9 mm.
+        pcb = self._board(
+            tmp_path,
+            """(version 1)
+(rule "ignored unconditional"
+  (severity ignore)
+  (constraint clearance (min 0.9mm)))
+""",
+        )
+
+        declared = read_declared_clearance_rules(pcb)
+
+        assert declared.dru_mm is None
+        assert declared.project_requirement() is None
+        assert declared.via_requirement() is None
+
+    def test_ignored_via_scoped_rule_does_not_floor(self, tmp_path: Path) -> None:
+        # Same omission in the via bucket (#9670): KiCad checks nothing
+        # where an ignored via-scoped rule wins, so it must not floor
+        # via_requirement either.
+        pcb = self._board(
+            tmp_path,
+            """(version 1)
+(rule "ignored via clearance"
+  (condition "A.Type == 'Via' || B.Type == 'Via'")
+  (constraint clearance (min 0.9mm))
+  (severity ignore))
+""",
+        )
+
+        declared = read_declared_clearance_rules(pcb)
+
+        assert declared.dru_via_mm is None
+        assert declared.project_requirement() is None
+        assert declared.via_requirement() is None
+
+    def test_ignored_rule_leaves_an_enabled_sibling_in_force(self, tmp_path: Path) -> None:
+        # Skipping the ignored rule must not swallow the enabled one next to
+        # it (#9670).
+        pcb = self._board(
+            tmp_path,
+            """(version 1)
+(rule "ignored unconditional"
+  (severity ignore)
+  (constraint clearance (min 0.9mm)))
+(rule "unconditional clearance"
+  (constraint clearance (min 0.15mm)))
+""",
+        )
+
+        declared = read_declared_clearance_rules(pcb)
+
+        assert declared.dru_mm == pytest.approx(0.15)
+        assert declared.project_requirement() == (
+            pytest.approx(0.15),
+            RuleSource.PROJECT_DRU,
+            None,
+        )
+
     def test_via_scoped_rule_stays_out_of_the_boardwide_floor(self, tmp_path: Path) -> None:
         pcb = self._board(
             tmp_path,

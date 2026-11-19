@@ -316,6 +316,8 @@ class DeclaredClearanceRules:
             in the board's ``.kicad_dru`` sidecar.  Conditional rules are
             carried by :attr:`dru_via_mm` (via-scoped, #6280) and
             :attr:`dru_conditional_mm` (everything else, #9578) instead.
+            ``(severity ignore)`` rules are skipped in all three DRU layers
+            (#9670) -- where one wins, KiCad checks nothing.
         project_min_clearance_mm: ``.kicad_pro``
             ``board.design_settings.rules.min_clearance`` (falling back to
             ``design_settings.defaults.clearance_min``) -- KiCad's hard board
@@ -868,7 +870,9 @@ def _read_dru_clearance(dru_path: Path) -> float | None:
     KiCad enforces every rule it can parse, so a conditional rule that
     requires more than the board-wide floor was invisible to the run and let
     newly committed copper undercut it.  ``physical_clearance`` is a
-    different KiCad constraint and is not read at all.
+    different KiCad constraint and is not read at all.  A rule with
+    ``(severity ignore)`` is skipped, as in every other layer (#9670):
+    where it wins, KiCad checks nothing.
 
     Never raises -- a malformed sidecar yields ``None``.
     """
@@ -1060,8 +1064,9 @@ def _read_dru_clearances(dru_path: Path) -> tuple[float | None, float | None, fl
     the board's own DRC even when the unconditional rule, the board minimum
     and the netclass all sit lower.  A conditional rule that is provably
     false on every such pair -- zone-only, pad-to-pad -- contributes to
-    no board-wide floor, and one with ``(severity ignore)`` is skipped
-    outright: where it wins, KiCad checks nothing.  Never raises.
+    no board-wide floor.  A rule with ``(severity ignore)`` is skipped
+    outright in **all three** layers (#9670): where it wins, KiCad checks
+    nothing.  Never raises.
     """
     try:
         text = dru_path.read_text(encoding="utf-8", errors="replace")
@@ -1102,6 +1107,10 @@ def _read_dru_clearances(dru_path: Path) -> tuple[float | None, float | None, fl
             severity_node is not None
             and str(severity_node.get_first_atom() or "").casefold() == "ignore"
         )
+        if ignored:
+            # Where an ignored rule wins, KiCad checks nothing -- so it
+            # floors no bucket, not just the conditional one (#9670).
+            continue
         for constraint in rule.find_all("constraint"):
             atoms = constraint.get_atoms()
             if not atoms or str(atoms[0]) != "clearance":
@@ -1116,7 +1125,7 @@ def _read_dru_clearances(dru_path: Path) -> tuple[float | None, float | None, fl
                 if best_via is None or value > best_via:
                     best_via = value
             elif conditional:
-                if not ignored and (best_conditional is None or value > best_conditional):
+                if best_conditional is None or value > best_conditional:
                     best_conditional = value
             elif unconditional:
                 if best is None or value > best:

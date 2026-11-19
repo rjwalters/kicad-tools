@@ -406,6 +406,11 @@ def _dispatch_command(args) -> int:
 
         return run_creepage_export_rules_command(args)
 
+    elif args.command == "voltage-map-merge":
+        from .commands.voltage_map_merge import run_voltage_map_merge_command
+
+        return run_voltage_map_merge_command(args)
+
     elif args.command == "sch":
         from .commands.schematic import run_sch_command
 

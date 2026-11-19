@@ -16,6 +16,17 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-19
 
+- **PR #9587**: feat: add kct voltage-map-merge to merge per-scenario voltage maps into one envelope
+- **Issue #9590** (closed): Add kct probe and kct apply --checked: check a batch of proposed copper, then write atomically
+- **PR #9617**: feat: add kct probe and kct apply --checked for batch copper check-then-write
+- **Issue #9578** (closed): route --complete disagrees with the board's custom clearance rules in both directions (clean input reported as defect; new copper breaks a net-class rule)
+- **PR #9588**: fix: honour footprint-scoped and conditional .kicad_dru clearance rules
+- **Issue #9601** (closed): Audit kct route rows 5/6/9: grid choice, order dependence, trunks under fine-pitch ICs
+- **PR #9624**: fix: surface budget-labelled search give-ups in the routing summary
+- **Issue #9517** (closed): fix: lattice own-net pad band (#9018) strands board 05 VCP (no-path at U2.3 stub end)
+- **PR #9538**: fix: accept collinear continuation of a pad-attached stub in the own-net pad band guard
+- **Issue #9599** (closed): Audit kct route rows 1/2/4: partial copper, shove/rip-up of existing copper, stale-write
+- **PR #9629**: fix(route): list replaceable existing copper (kct route) and refuse stale saves (route-auto)
 - **Issue #9524** (closed): Make readiness copper cleanup (optimize-traces/prune) pad-aware so it keeps mask-clean pad escapes
 - **PR #9535**: fix: guard copper cleanup against breaking mask-clean pad escapes
 - **Issue #9638** (closed): CI staging helper returns success and restores empty files when the backup runs out of space
