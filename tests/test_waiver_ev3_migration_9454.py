@@ -468,7 +468,7 @@ class TestLiteralPre9437Digests:
         assert sorted(m.key for m in report.migrated) == sorted(_PRE_9437_DIGESTS)
         for m in report.migrated:
             assert m.new_hash.startswith("ev4:")
-        (loaded,) = [waivers_from_dict(json.loads(waivers.read_text())).entries]
+        loaded = waivers_from_dict(json.loads(waivers.read_text())).entries
         assert len(loaded) == 3
 
 
@@ -509,7 +509,13 @@ class TestSymlinkedWaiversFile:
         link.symlink_to(Path("real") / "w.json")  # relative symlink
         assert link.is_symlink()
 
-        code, out = _migrate(capsys, board, link, "--write")
+        # Issue #9504: the unfixed code only mishandled the *auto-discovered*
+        # sidecar path — an explicit --waivers argument is resolved by the CLI
+        # (check_cmd .resolve()) before the write, so passing it here would
+        # exercise a path that was never broken. Discovery hands migrate the
+        # unresolved link path, so invoke the CLI without --waivers.
+        code = check_cmd.main([str(board), "--migrate-waivers", "--write"])
+        out = capsys.readouterr().out
 
         assert code == 0 and "migrated: 1" in out
         assert link.is_symlink()
