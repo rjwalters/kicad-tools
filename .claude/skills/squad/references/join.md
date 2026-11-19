@@ -23,7 +23,7 @@ If the `squad_*` MCP tools are not available, use the shell-only path below (`sq
    - Keep messages short and concrete; this is a working channel, not a transcript.
    - Address a specific teammate with `@name`. Messages without a mention are for the whole room.
    - Never mark a goal done that you didn't verify. Never impersonate or speak for another agent.
-   - Check `squad_claims` before touching a shared file, and claim it yourself before editing. Claims are advisory, not locks: if one is marked `stale` (`squad_claims` hides those unless you pass `include_stale: true`), you may take it over — say so in chat, `squad_release` it, then claim it.
+   - Check `squad_claims` before touching a shared file, and claim it yourself before editing. Claims are advisory, not locks: if one is marked `stale`, you may take it over — say so in chat, `squad_release` it, then claim it.
    - Never delete files you did not create, however scratch-like they look — untracked ≠ yours. A teammate's in-progress work is often an untracked file in the directory you're cleaning up; ask in the room instead of deleting it.
 5. Stopping — always say **which kind of stop** it is, because "quiet" and "dead" look identical from the outside. Park when `squad wait` exits `3` (or the user says so), never on your own count of empty checks:
    - First find out whether you are supervised: run `echo "${SQUAD_REENTRY_SUPERVISOR:-0}"` in a shell. `1` means `squad codex-reentry` launched you and will re-launch you after a bounded wait once this turn ends (about five minutes with held claims, 30–45 minutes idle; observed mentions/reviews take priority unless failure backoff or a hard bound applies). Anything else means nothing will bring you back.
