@@ -600,13 +600,26 @@ _VARIANT_BOARDS = {
             ("PROBE_NEAR", (39.584619, 44.639523), (65.565381, 29.639523)),
         ],
     ),
-    # A circular board: the ring must reach EdgeClearanceRule as a
-    # tessellated boundary.
+    # A circular footprint outline reaching EdgeClearanceRule as a tessellated
+    # boundary.  Native 10.0.6 treats a lone Edge.Cuts circle as a cutout:
+    # copper *inside* the disk is flagged (actual 0.0 mm) and copper *outside*
+    # it is left clean, while kct's rule is stroke-distance based -- so the
+    # probes sit where both engines provably agree: a crossing track
+    # (violates in both), a track hugging the stroke from inside (native: in
+    # the cutout; kct: inside the 0.5 mm corridor) and a far-exterior track
+    # (clean in both).  A deep-interior "TRACK_IN" probe would assert a
+    # divergence, not parity, and was removed.  The probes must also stay
+    # non-collinear and non-touching: native DRC merges touching collinear
+    # tracks into one cluster attributed to a single (build-dependent) net.
     "fp_circle": _variant_board(
         '\t(footprint "OUTLINE" (layer "F.Cu") (at 60 50)\n'
         "\t\t(attr board_only exclude_from_pos_files exclude_from_bom)\n"
         '\t\t(fp_circle (center 0 0) (end 20 0) (layer "Edge.Cuts")))',
-        [("TRACK_EDGE", (60.0, 50.0), (85.0, 50.0)), ("TRACK_IN", (55.0, 50.0), (60.0, 50.0))],
+        [
+            ("TRACK_EDGE", (60.0, 50.0), (85.0, 50.0)),
+            ("TRACK_NEAR", (40.3, 50.0), (40.3, 52.0)),
+            ("TRACK_OUT", (100.0, 50.0), (105.0, 50.0)),
+        ],
     ),
     # An open cubic closed by an explicit fp_line (the contour native DRC
     # accepts): the tessellated curve plus the closing line bound the board,
@@ -643,10 +656,11 @@ _VARIANT_BOARDS = {
             _VARIANT_BOARDS["fp_circle"],
             {
                 "TRACK_EDGE": ((60.0, 50.0), (85.0, 50.0)),
-                "TRACK_IN": ((55.0, 50.0), (60.0, 50.0)),
+                "TRACK_NEAR": ((40.3, 50.0), (40.3, 52.0)),
+                "TRACK_OUT": ((100.0, 50.0), (105.0, 50.0)),
             },
-            {"TRACK_EDGE"},
-            {"TRACK_IN"},
+            {"TRACK_EDGE", "TRACK_NEAR"},
+            {"TRACK_OUT"},
         ),
         (
             _VARIANT_BOARDS["fp_curve"],
