@@ -86,7 +86,6 @@ Out of scope: copper-to-zone-fill clearance (the zone rules own it) and custom
 from __future__ import annotations
 
 import json
-import math
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -108,10 +107,11 @@ from ..spatial import candidate_pairs
 from ..violations import DRCResults, DRCViolation
 from .base import DRC_TOLERANCE
 from .clearance import (
-    _COLOCATION_EPSILON_MM,
     ClearanceRule,
     CopperElement,
     _calculate_clearance,
+    _is_track_copper,
+    _via_colocated_with_track,
 )
 
 if TYPE_CHECKING:
@@ -239,7 +239,7 @@ def check_netclass_clearance_copper(
             required_class = pair_floor(governing, a.net_number, b.net_number)
             if required_class <= fab_floor + DRC_TOLERANCE:
                 continue
-            if a.element_type != "segment" and b.element_type != "segment":
+            if not _is_track_copper(a) and not _is_track_copper(b):
                 if any(
                     e.element_type == "via"
                     and e.explicit_layers
@@ -247,15 +247,8 @@ def check_netclass_clearance_copper(
                     for e in (a, b)
                 ):
                     continue
-            if {a.element_type, b.element_type} == {"segment", "via"}:
-                seg, via = (a, b) if a.element_type == "segment" else (b, a)
-                sx1, sy1, sx2, sy2, _ = seg.geometry
-                vx, vy = via.geometry[0], via.geometry[1]
-                if (
-                    math.hypot(sx1 - vx, sy1 - vy) < _COLOCATION_EPSILON_MM
-                    or math.hypot(sx2 - vx, sy2 - vy) < _COLOCATION_EPSILON_MM
-                ):
-                    continue
+            if _via_colocated_with_track(a, b):
+                continue
             clearance, x, y = _calculate_clearance(a, b)
             if clearance + DRC_TOLERANCE >= required_class:
                 continue
@@ -326,9 +319,21 @@ def _zone_item(element: CopperElement, layer: str) -> ZoneItem:
     """``element`` as the attach-zone predicate sees it on copper layer ``layer``."""
     from shapely.geometry import LineString, Point, box  # type: ignore[import-untyped]
 
-    if element.element_type == "segment":
-        x1, y1, x2, y2, width = element.geometry
-        shape = LineString([(x1, y1), (x2, y2)]).buffer(width / 2.0)
+    if element.element_type in ("segment", "arc"):
+        if element.element_type == "arc":
+            # Issue #9673: the arc's covering chord polyline, the same copper
+            # ``_calculate_clearance`` measured for the pair.
+            points = list(
+                element.polyline
+                or (
+                    (element.geometry[0], element.geometry[1]),
+                    (element.geometry[2], element.geometry[3]),
+                )
+            )
+            shape = LineString(points).buffer(element.arc_chord_width / 2.0)
+        else:
+            x1, y1, x2, y2, width = element.geometry
+            shape = LineString([(x1, y1), (x2, y2)]).buffer(width / 2.0)
     elif element.element_type == "via":
         shape = Point(element.geometry[0], element.geometry[1]).buffer(element.geometry[2] / 2.0)
     elif element.polygon is not None:

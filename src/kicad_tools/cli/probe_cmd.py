@@ -47,7 +47,12 @@ check-failed disagreement this command exists to prevent, and
 copper.  Arcs are checked through a 1 um-sagitta tessellation appended for
 the check pass only (with the check width inflated by twice the sagitta
 bound so the tessellated copper always covers the arc the board would
-carry); the board itself is written with a real ``(arc ...)`` node.
+carry); the board itself is written with a real ``(arc ...)`` node.  The
+pairwise clearance rule now measures authored ``(arc ...)`` nodes through
+the SAME policy (``ARC_COPPER_SAGITTA_MM``, Issue #9673), so a probed arc
+and the node ``kct check`` sees after ``apply`` answer identically; the
+tessellated append stays because the other probe categories still walk
+straight segments.
 
 Exit codes (both commands): ``0`` clean; ``1`` problems found, bad input, or
 nothing to do; ``2`` refused -- the board changed under us, or a KiCad lock
@@ -104,11 +109,16 @@ PROBE_CHECK_CATEGORIES: tuple[str, ...] = (
     "tht_smd_spacing",
 )
 
-#: Sagitta bound for the check-pass tessellation of proposed arcs.  1 um is
-#: the coordinate quantum :mod:`kicad_tools.validate.copper_refs` keys
-#: findings on, so the tessellated copper is within one quantum of the arc
-#: the board would actually carry.
-_ARC_TESSELLATION_UM = 0.001
+#: Sagitta bound for the check-pass tessellation of proposed arcs, shared
+#: with the pairwise clearance rule's own arc tessellation
+#: (:data:`kicad_tools.validate.rules.clearance.ARC_COPPER_SAGITTA_MM`,
+#: Issue #9673) so a probed arc and the authored ``(arc ...)`` node the
+#: checker measures agree within one coordinate quantum.  1 um is the
+#: coordinate quantum :mod:`kicad_tools.validate.copper_refs` keys
+#: findings on.
+from kicad_tools.validate.rules.clearance import (
+    ARC_COPPER_SAGITTA_MM as _ARC_TESSELLATION_UM,
+)
 
 _ITEM_FIELDS = {
     "type",
@@ -329,15 +339,17 @@ def _net_number(pcb: PCB, name: str) -> int:
 def _append_for_check(pcb: Any, items: list[ProbeItem]) -> dict[str, set[int]]:
     """Append every item to *pcb* for the check pass; returns descriptor -> item indices.
 
-    Arcs are appended as a 1 um-sagitta tessellation of straight segments
-    (the pairwise clearance rules walk ``pcb.segments``; ``(arc ...)`` copper
-    is outside them today, so a real arc node would be silently unchecked).
-    The chords lie on the arc's concave side, so the real copper extends up
-    to one sagitta beyond the tessellation on the convex side; the check
-    width is inflated by twice the sagitta bound so the tessellated copper
-    always *covers* the arc the board would carry (the probe can only be
-    stricter than ``kct check``, never looser -- Issue #9590 review).
-    Everything goes through the public ``PCB.add_trace`` / ``add_via`` APIs.
+    Arcs are appended as a sagitta-bounded tessellation of straight segments
+    whose check width is inflated by twice the sagitta bound, so the
+    tessellated copper always *covers* the arc the board would carry (the
+    probe can only be stricter than ``kct check``, never looser -- Issue
+    #9590 review).  The pairwise clearance rule measures authored
+    ``(arc ...)`` nodes through the same shared policy (Issue #9673), but
+    the other probe categories still walk straight segments, so a real arc
+    node would leave its copper invisible to them -- hence chords here, and
+    one arc node per item at write time (``_append_for_write``), never both
+    representations at once.  Everything goes through the public
+    ``PCB.add_trace`` / ``add_via`` APIs.
     """
     from kicad_tools.schema.pcb import Arc, Segment, Via
     from kicad_tools.validate.copper_refs import segment_ref, via_ref
