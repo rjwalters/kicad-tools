@@ -453,7 +453,9 @@ stale (including ev3 waivers already stale from an outline-only edit, since an
 ev3 digest depends on the board origin: the migration does not carry them, so
 re-review and re-record those), and a key that names no current finding is reported as an orphan (the
 key changed, e.g. per-layer `path_ampacity` keys or geometry-named silk keys);
-neither is touched. The command previews by default and changes no file; add
+neither is touched. A keyed entry whose hash version predates `ev3` (e.g. an
+`ev2:` entry) cannot be recomputed at all: it is listed by key, with its
+version, and left alone too (Issue #9482). The command previews by default and changes no file; add
 `--write` to apply it. It never runs during a normal check, and it needs the
 full finding set, so do not combine it with `--only`/`--skip`.
 (`kct detect-mistakes` `ev3.m1:` waivers are not migrated.) Otherwise,

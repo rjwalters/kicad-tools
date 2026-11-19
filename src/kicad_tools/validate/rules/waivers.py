@@ -1116,7 +1116,14 @@ class WaiverMigrationReport:
     stale: list[WaiverMigrationItem] = field(default_factory=list)
     #: Key names no current finding (the key changed or the defect is gone).
     orphan: list[WaiverMigrationItem] = field(default_factory=list)
-    #: Keyed entries that need no migration (already current version, mistake entries, ...).
+    #: Keyed entries whose evidence-hash version predates the migratable
+    #: ``ev3`` (``ev1`` / ``ev2``): no recipe exists to recompute them, so
+    #: they are listed by key, with their version, and never touched
+    #: (Issue #9482).
+    legacy: list[WaiverMigrationItem] = field(default_factory=list)
+    #: Entries that need no migration and have no key to act on (non-keyed
+    #: legacy entries, already-current versions, mistake entries, missing
+    #: hashes, ...).
     untouched: int = 0
     written: bool = False
 
@@ -1141,7 +1148,10 @@ def migrate_evidence_waivers(
     provably unchanged, so the entry takes the finding's current hash and gains
     ``rebound_at`` / ``rebound_from`` / ``rebound_by``; reviewer, date, reason
     and issue are kept verbatim.  A differing digest is left stale; a key that
-    names no finding is reported as an orphan and never touched.
+    names no finding is reported as an orphan and never touched.  A keyed
+    entry whose hash version predates ``ev3`` (``ev1`` / ``ev2``) cannot be
+    recomputed at all: it is listed by key, with its version, and never
+    touched (Issue #9482).
 
     ``findings`` must be annotated with their current (``ev4``) evidence hash
     and must be the full, unfiltered finding set of the board.  Nothing is
@@ -1174,10 +1184,30 @@ def migrate_evidence_waivers(
             continue
         old_hash = str(raw.get("evidence_hash") or "")
         key = raw["key"]
-        if evidence_hash_version(old_hash) != PRIOR_EVIDENCE_HASH_VERSION or is_mistake_rule(
-            key.split(KEY_SEPARATOR, 1)[0]
-        ):
-            report.untouched += 1
+        rule = key.split(KEY_SEPARATOR, 1)[0]
+        version = evidence_hash_version(old_hash)
+        if version != PRIOR_EVIDENCE_HASH_VERSION or is_mistake_rule(rule):
+            if (
+                not is_mistake_rule(rule)
+                and version is not None
+                and "." not in version
+                and version not in (PRIOR_EVIDENCE_HASH_VERSION, EVIDENCE_HASH_VERSION)
+            ):
+                # Issue #9482: an ``ev1``/``ev2`` entry can never be migrated
+                # (no recomputable recipe); list it instead of counting it.
+                report.legacy.append(
+                    WaiverMigrationItem(
+                        key=key,
+                        old_hash=old_hash,
+                        reason=(
+                            f"evidence version {version} predates {PRIOR_EVIDENCE_HASH_VERSION}"
+                            " (the oldest recipe this build can recompute); re-waive the"
+                            " finding or delete the entry"
+                        ),
+                    )
+                )
+            else:
+                report.untouched += 1
             continue
         matches = by_key.get(key, [])
         if not matches:
@@ -1264,7 +1294,8 @@ def format_waiver_migration(report: WaiverMigrationReport, path: Path, *, write:
         f"Waiver migration ({PRIOR_EVIDENCE_HASH_VERSION} -> {EVIDENCE_HASH_VERSION}) for {path}"
         + ("" if write else " [dry-run: no file changed; add --write to apply]"),
         f"  {verb}: {len(report.migrated)}   stale (left alone): {len(report.stale)}"
-        f"   orphan (left alone): {len(report.orphan)}   untouched: {report.untouched}",
+        f"   orphan (left alone): {len(report.orphan)}   legacy (left alone): {len(report.legacy)}"
+        f"   untouched: {report.untouched}",
     ]
     for it in report.migrated:
         lines.append(f"  {verb}: {it.key}  {it.old_hash} -> {it.new_hash}")
@@ -1276,4 +1307,6 @@ def format_waiver_migration(report: WaiverMigrationReport, path: Path, *, write:
             shown = it.candidates[:_MAX_REWAIVE_HINT_KEYS]
             line += " -> re-waive candidate(s): " + ", ".join(repr(k) for k in shown)
         lines.append(line)
+    for it in report.legacy:
+        lines.append(f"  legacy (left alone): {it.key}  ({it.old_hash}): {it.reason}")
     return lines
