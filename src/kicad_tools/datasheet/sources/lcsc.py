@@ -21,9 +21,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Candidate PDF URLs inside an HTML/JSON body: absolute or protocol-relative
-# links ending in ".pdf" (optionally followed by a query string).
-_PDF_URL_RE = re.compile(r"""(?:https?:)?//[^\s"'<>\\]+?\.pdf(?:\?[^\s"'<>\\]*)?""", re.IGNORECASE)
+# Complete URL tokens (absolute or protocol-relative) inside an HTML/JSON
+# body. The *whole* token is captured — query string included — and the
+# ".pdf" filter is applied afterwards on the parsed path, so a URL that
+# merely contains ".pdf" mid-path (e.g. a ``/cover.pdf.png`` thumbnail) is
+# never truncated into a phantom ``.pdf`` link.
+_URL_TOKEN_RE = re.compile(r"""(?:https?:)?//[^\s"'<>\\]+""", re.IGNORECASE)
 
 # Hosts LCSC serves the real datasheet files from, most preferred first.
 # ``datasheet.lcsc.com`` is what the real viewer page links to (measured on the
@@ -41,7 +44,9 @@ def _resolve_lcsc_pdf_url(html: str, base_url: str) -> str | None:
     escapes). The same page also links LCSC's pdf.js viewer
     (``.../viewer.html?file=<encoded .pdf URL>``), whose ``.pdf`` sits in the
     query string; only URLs whose *path* ends in ``.pdf`` are candidates, so
-    that decoy is ignored regardless of where it appears in the markup.
+    that decoy is ignored regardless of where it appears in the markup. URLs
+    are extracted as complete tokens before that check, so a ``/cover.pdf.png``
+    thumbnail cannot be cut short at its first ``.pdf``.
 
     Args:
         html: Decoded body of the viewer page.
@@ -49,13 +54,18 @@ def _resolve_lcsc_pdf_url(html: str, base_url: str) -> str | None:
             used to resolve protocol-relative links).
 
     Returns:
-        The best candidate PDF URL (preferring ``datasheet.lcsc.com``), or
-        ``None`` if the page embeds no PDF link.
+        The part's PDF URL on an LCSC file host (preferring
+        ``datasheet.lcsc.com``), or ``None`` when the page carries no such
+        product-specific reference — including when it only links third-party
+        PDFs (footer links, related products), so the caller falls through to
+        its next candidate instead of caching an unrelated file.
     """
     text = html.replace("\\u002F", "/").replace("\\/", "/").replace("&amp;", "&")
     candidates: list[str] = []
-    for match in _PDF_URL_RE.findall(text):
-        url = urljoin(base_url, match)
+    for match in _URL_TOKEN_RE.findall(text):
+        # Trim trailing prose punctuation so a sentence-ending "." or closing
+        # ")" cannot break the path check below.
+        url = urljoin(base_url, match.rstrip(".,;:!?)"))
         if (
             url != base_url
             and url not in candidates
@@ -66,7 +76,11 @@ def _resolve_lcsc_pdf_url(html: str, base_url: str) -> str | None:
         for url in candidates:
             if urlparse(url).hostname == host:
                 return url
-    return candidates[0] if candidates else None
+    # No LCSC file-host link: the page names no product-specific datasheet
+    # (the live viewer's previewPdfUrl and datasheet iframe point at these
+    # hosts). Any other PDF link is not evidence of *this* part's datasheet,
+    # so return None instead of handing back the first unrelated file.
+    return None
 
 
 class LCSCDatasheetSource(HTTPDatasheetSource):
