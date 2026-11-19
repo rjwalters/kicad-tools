@@ -406,6 +406,16 @@ def is_unconnected_net_name(net_name: str) -> bool:
     return bool(net_name) and net_name.strip().lower().startswith("unconnected-")
 
 
+def is_auto_net_name(net_name: str) -> bool:
+    """Return True for KiCad's auto-generated net names.
+
+    Covers both name classes KiCad mints itself -- ``unconnected-(...)``
+    for no-connect pins and ``Net-(R1-Pad2)`` for unlabelled copper --
+    which never carry a sheet-path ``/`` prefix.
+    """
+    return bool(net_name) and bool(_AUTO_NET_NAME_RE.match(net_name.strip()))
+
+
 def is_ground_rail_name(net_name: str) -> bool:
     """Name-only heuristic: does *net_name* look like a ground rail?
 

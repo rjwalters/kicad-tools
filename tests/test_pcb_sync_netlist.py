@@ -2753,6 +2753,44 @@ class TestResolveNetNamesForBoard:
         names = self._resolve(tmp_path, ["/A", "GND", "+3V3"], ["/NEW"])
         assert names == ["/NEW"]
 
+    def test_auto_named_nets_excluded_from_census(self, tmp_path):
+        """KiCad auto-named ``Net-(...)`` nets do not outvote label nets.
+
+        Issue #9571: ``Net-(...)`` -- KiCad's other auto-generated name
+        class -- carries no ``/`` prefix but passed all three census
+        exclusions, so a KiCad-native board whose remaining nets are
+        auto-named read as "bare-dominant" and a new label net was
+        added bare.  They are excluded alongside ``unconnected-(...)``.
+        """
+        names = self._resolve(
+            tmp_path,
+            ["/A", "/B", "Net-(C11-Pad2)", "Net-(R1-1)", "Net-(R2-1)", "GND"],
+            ["/NEW"],
+        )
+        assert names == ["/NEW"]
+
+    def test_mixed_auto_and_unconnected_nets_excluded_from_census(self, tmp_path):
+        """``Net-(...)`` and ``unconnected-(...)`` both skip the census."""
+        names = self._resolve(
+            tmp_path,
+            ["/A", "Net-(C11-Pad2)", "unconnected-(U1-Pad1)", "Net-(R2-1)"],
+            ["/NEW"],
+        )
+        assert names == ["/NEW"]
+
+    def test_only_auto_named_board_resolves_bare(self, tmp_path):
+        """A board of only auto-named nets has no convention: tie -> bare.
+
+        With every net excluded the census counts 0 vs 0, so the
+        tie-break keeps the historical bare default (#3370).
+        """
+        names = self._resolve(
+            tmp_path,
+            ["Net-(C11-Pad2)", "Net-(R1-1)", "Net-(R2-1)"],
+            ["/NEW"],
+        )
+        assert names == ["NEW"]
+
     def test_new_net_stripped_on_bare_dominant_board(self, tmp_path):
         """A net new to a kct-style (bare) board is added bare."""
         names = self._resolve(tmp_path, ["A", "B", "GND"], ["/NEW"])
