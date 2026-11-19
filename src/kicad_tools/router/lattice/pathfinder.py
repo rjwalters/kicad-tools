@@ -8867,6 +8867,20 @@ class LatticePathfinder:
                     legs_ok = 0
                     for pol in ("P", "N"):
                         leg_item, leg_reason = legs[pol]
+                        # Issue #9581 (PR #9603 review): each leg is its own
+                        # report link -- the decline below lands under the LEG
+                        # key ``leg_item[0]``, which the attempted-set write in
+                        # the items loop (the parent pair key) never covers,
+                        # so the completion report called a searched leg "not
+                        # attempted".  Every leg of a flushed pair WAS
+                        # searched (the partner-blind baseline computes all
+                        # legs before any deadline check), so record each leg
+                        # in both the cross-pass attempted set and this
+                        # pass's reached set -- the latter also lets the
+                        # prior-decline fold below clear a leg's stale
+                        # earlier decline once a later pass routes it.
+                        attempted_keys.add(leg_item[0])
+                        pass_attempted.add(leg_item[0])
                         if leg_reason is None:
                             legs_ok += 1
                         else:

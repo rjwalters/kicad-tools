@@ -701,10 +701,30 @@ class TestBudgetDerivationLine:
         # before the derivation line and the setup term is 0.
         post_route = route_cmd._post_route_reserve(args, 100.0)
         assert (
-            f"--timeout 100s - setup 0s - auto-fix reserve 0s - post-route reserve {post_route:.0f}s"
-            in text
+            f"--timeout 100s - setup 0s - auto-fix reserve 0s "
+            f"- post-route reserve {route_cmd._fmt_secs(post_route)}s" in text
         )
-        assert f"= routing budget {100.0 - post_route:.1f}s" in text
+        assert f"= routing budget {route_cmd._fmt_secs(100.0 - post_route)}s" in text
+
+    def test_fractional_timeout_precision_preserved(self, capsys):
+        """PR #9603 review: ``:.0f`` terms rounded a fractional ``--timeout``
+        away -- ``120.5`` printed ``--timeout 120s`` and ``0.4`` printed
+        ``--timeout 0s``.  Each term keeps the precision it was given."""
+        from types import SimpleNamespace
+
+        from kicad_tools.cli import route_cmd
+
+        args = SimpleNamespace(timeout=120.5, auto_fix=False, complete=True)
+        route_cmd._set_wall_clock_deadline(args)
+        text = capsys.readouterr().out
+        assert "--timeout 120.5s" in text
+        assert "--timeout 120s" not in text
+
+        args = SimpleNamespace(timeout=0.4, auto_fix=False, complete=True)
+        route_cmd._set_wall_clock_deadline(args)
+        text = capsys.readouterr().out
+        assert "--timeout 0.4s" in text
+        assert "--timeout 0s" not in text
 
     def test_clamped_timeout_leads_with_typed_value(self, monkeypatch, capsys):
         """PR #9603 review: under a supervisor-set invocation deadline the
@@ -729,8 +749,8 @@ class TestBudgetDerivationLine:
         text = capsys.readouterr().out
 
         match = re.search(
-            r"--timeout (\d+)s - setup (\d+)s - auto-fix reserve (\d+)s"
-            r" - post-route reserve (\d+)s = routing budget ([\d.]+)s",
+            r"--timeout ([\d.]+)s - setup ([\d.]+)s - auto-fix reserve ([\d.]+)s"
+            r" - post-route reserve ([\d.]+)s = routing budget ([\d.]+)s",
             text,
         )
         assert match, f"derivation line missing or malformed: {text!r}"
@@ -740,8 +760,8 @@ class TestBudgetDerivationLine:
         # The consumed ~30 s is visible as its own term (bounded: the clock
         # may tick between the test's ``now`` and the function's own read).
         assert 29 <= setup <= 31
-        # The printed equation sums to the displayed budget (each term is
-        # rounded to whole seconds, the budget to a tenth, so allow rounding).
+        # The printed equation sums to the displayed budget (each term
+        # keeps its precision, so only the clock tick slop remains).
         assert typed - setup - auto_fix - post_route == pytest.approx(budget, abs=2.2)
         # The stamp the rest of the run enforces is the clamped budget.
         assert args._wall_clock_deadline is not None

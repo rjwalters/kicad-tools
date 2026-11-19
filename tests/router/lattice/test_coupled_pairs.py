@@ -647,7 +647,7 @@ def test_uncoupled_fallback_routes_both_legs_when_fat_envelope_blocked() -> None
                 assert d >= copper_gap - 1e-6
 
 
-def test_uncoupled_fallback_reports_unroutable_leg_without_emitting_it() -> None:
+def test_uncoupled_fallback_reports_unroutable_leg_without_emitting_it(tmp_path, capsys) -> None:
     # Full-height wall on both layers: neither the pair NOR a single leg can
     # cross (legs are routed with vias allowed, but the wall spans both
     # layers).  Each failing leg is reported under its own key and nothing
@@ -670,6 +670,46 @@ def test_uncoupled_fallback_reports_unroutable_leg_without_emitting_it() -> None
     assert routes == {}
     assert set(pf.failure_reasons) == {(pc.key, "P"), (pc.key, "N")}
     assert stats.routed == 0 and stats.total == 2
+    # PR #9603 review: both legs were SEARCHED (partner-blind, both layers)
+    # -- their decline is geometric, so the attempted-keys set must carry
+    # each leg key, not only the parent pair key the items loop records.
+    leg_keys = {(pc.key, "P"), (pc.key, "N")}
+    assert leg_keys <= set(stats.attempted_keys)
+
+    # Carry the same fixture through the completion report: a declined
+    # fallback leg is an attempted link with its own geometric reason --
+    # never "not attempted", and the printer must not claim the deadline
+    # passed before the link was reached (no deadline is configured at all).
+    from types import SimpleNamespace
+
+    from kicad_tools.cli.route_cmd import (
+        _build_complete_link_report,
+        _print_complete_link_report,
+    )
+
+    router = SimpleNamespace(
+        _lattice_negotiation_stats=stats,
+        _lattice_failure_reasons=dict(pf.failure_reasons),
+        _lattice_attempted_keys=stats.attempted_keys,
+        _lattice_connection_endpoints={
+            (pc.key, "P"): ("J1.1", "U1.1"),
+            (pc.key, "N"): ("J1.1", "U1.1"),
+        },
+        _complete_creepage_refusals=[],
+        net_names={1: "D+", 2: "D-"},
+    )
+    report = _build_complete_link_report(router, tmp_path / "absent.kicad_pcb")
+    assert report is not None
+    assert report["deadline_hit"] is False
+    by_net = {entry["net"]: entry for entry in report["unroutable_links"]}
+    assert set(by_net) == {"D+", "D-"}
+    for name in ("D+", "D-"):
+        assert by_net[name]["attempted"] is True, by_net[name]
+        assert by_net[name]["deadline_hit"] is False, by_net[name]
+        assert by_net[name]["reason"] != "deadline-exceeded", by_net[name]
+    _print_complete_link_report(report)
+    out = capsys.readouterr().out
+    assert "not attempted: the run's deadline passed" not in out
 
 
 def test_uncoupled_fallback_coupled_pair_unchanged() -> None:

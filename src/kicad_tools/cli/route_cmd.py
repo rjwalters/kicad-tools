@@ -736,6 +736,18 @@ def _restore_route_grid(router: "Autorouter", routes: list["Route"]) -> None:
         router.grid.mark_route_usage(route)
 
 
+def _fmt_secs(value: float) -> str:
+    """Format seconds without rounding away fractional precision.
+
+    Issue #9581 (PR #9603 review): the budget derivation line formatted
+    every term with ``:.0f``, so a fractional ``--timeout`` was rounded
+    away before the user's eyes -- ``--timeout 120.5`` printed
+    ``--timeout 120s`` and ``0.4`` printed ``--timeout 0s``.  Each term
+    now keeps the precision it was given (trailing zeros stripped).
+    """
+    return f"{float(value):g}"
+
+
 def _set_wall_clock_deadline(args) -> None:
     """Stamp a monotonic deadline on ``args`` from ``args.timeout``.
 
@@ -802,10 +814,12 @@ def _set_wall_clock_deadline(args) -> None:
             # the clamped remainder as ``--timeout``.
             setup_consumed = max(0.0, typed_timeout - float(timeout))
             print(
-                f"--timeout {typed_timeout:.0f}s - setup {setup_consumed:.0f}s "
-                f"- auto-fix reserve {float(reserve):.0f}s - post-route reserve "
-                f"{float(post_route):.0f}s "
-                f"= routing budget {float(timeout) - float(reserve) - float(post_route):.1f}s"
+                f"--timeout {_fmt_secs(typed_timeout)}s "
+                f"- setup {_fmt_secs(setup_consumed)}s "
+                f"- auto-fix reserve {_fmt_secs(float(reserve))}s "
+                f"- post-route reserve {_fmt_secs(float(post_route))}s "
+                f"= routing budget "
+                f"{_fmt_secs(float(timeout) - float(reserve) - float(post_route))}s"
             )
     else:
         args._wall_clock_deadline = None
