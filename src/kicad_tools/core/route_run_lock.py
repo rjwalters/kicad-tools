@@ -18,6 +18,16 @@ from another host, or one that cannot be parsed, cannot be proven dead and is
 refused; the message names the file so the user can delete it if sure. On
 non-POSIX platforms ``os.kill(pid, 0)`` is not a liveness probe (it would
 terminate the process), so a foreign-pid lock there is also treated as live.
+A pid too large for ``os.kill`` to represent is malformed, not dead.
+
+Stale recovery is serialized per output through a companion ``<lock>.guard``
+file held with ``flock``, so two contenders cannot both steal one stale lock;
+the guard file is never removed (an unlinked flock guard would let a newcomer
+flock a fresh inode beside a waiter on the old one). A supervised run also
+records its worker's process group as a co-owner: the lock stays live until
+the last process able to write the output has exited, even when the recording
+supervisor dies first. Lock identity is the lexically normalized absolute
+path, so ``out`` and ``sub/../out`` share one lock.
 
 This is advisory: it neither prevents a non-kct tool from writing the output
 nor offers cross-host (NFS) guarantees.
@@ -39,6 +49,15 @@ LOCK_POLICY_ENV = "KCT_ROUTE_LOCK_POLICY"
 LOCK_HELD_ENV = "KCT_ROUTE_LOCK_HELD"
 POLICIES = ("error", "warn", "ignore")
 
+# ``os.kill`` raises OverflowError beyond the C ``pid_t`` range; a record
+# carrying such a pid is malformed rather than dead (issue #9628 review).
+_PID_MAX = 2**31 - 1
+
+try:  # pragma: no cover - exercised by platform, not by branch
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no flock
+    fcntl = None  # type: ignore[assignment]
+
 # Locks this process currently holds, keyed by lock path -> its own record.
 # Lets a nested in-process acquire for the same output be a no-op.
 _held: dict[Path, dict] = {}
@@ -57,8 +76,13 @@ class RouteLockHandle:
 
 
 def lock_path_for(output: str | Path) -> Path:
-    """Lock file for ``output``; relative and absolute spellings agree."""
-    destination = Path(output).absolute()
+    """Lock file for ``output``; relative, absolute and dot-dot spellings agree.
+
+    The identity is lexically normalized (``out`` and ``sub/../out`` share one
+    lock, issue #9628 review), so a nested alias of a held output is a no-op
+    reentrant acquire instead of an accidental steal-and-release.
+    """
+    destination = Path(os.path.normpath(Path(output).absolute()))
     return destination.with_name(f".{destination.name}.kct-route.lock")
 
 
@@ -99,6 +123,10 @@ def _read_holder(path: Path) -> dict | None:
     host = data.get("hostname")
     if isinstance(pid, bool) or not isinstance(pid, int) or not isinstance(host, str):
         return None
+    if not 0 < pid <= _PID_MAX:
+        # Unrepresentable in os.kill (OverflowError otherwise); treat as
+        # malformed so refusal and warn still apply (issue #9628 review).
+        return None
     return data
 
 
@@ -106,6 +134,19 @@ def _holder_is_dead(holder: dict | None) -> bool:
     """True only when the holder provably no longer exists."""
     if holder is None or holder["hostname"] != socket.gethostname():
         return False
+    # A supervised run names its worker's process group as a co-owner: that
+    # group can still be writing the output after the recording supervisor
+    # died, so a live group keeps the lock held (issue #9628 review).
+    group = holder.get("owner_pgid")
+    if os.name == "posix" and isinstance(group, int) and not isinstance(group, bool) and group > 0:
+        try:
+            os.killpg(group, 0)
+        except ProcessLookupError:
+            pass  # every writer in the group is gone; the pid check decides
+        except OSError:
+            return False  # exists but is not ours to signal
+        else:
+            return False
     pid = holder["pid"]
     if pid == os.getpid():
         # We hold nothing at this path (checked by the caller), so a record
@@ -151,6 +192,51 @@ def _inherits_parent_lock(lock: Path) -> bool:
     return holder is not None and holder["pid"] == int(pid_text) == os.getppid()
 
 
+@contextlib.contextmanager
+def _steal_guard(lock: Path) -> Iterator[bool]:
+    """Serialize stale-lock recovery per output (issue #9628 review).
+
+    Recovery is a read-decide-unlink sequence; unserialized, two contenders
+    can both decide "dead" and one unlinks a lock the other just re-acquired.
+    The guard file is never removed: an unlinked flock guard would let a
+    newcomer flock a fresh inode beside a waiter still holding the old one.
+    Yields False where ``flock`` is unavailable (non-POSIX best effort).
+    """
+    if fcntl is None:
+        yield False
+        return
+    path = lock.with_name(lock.name + ".guard")
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield True
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def extend_lock_owner(lock_path: Path, *, pgid: int) -> None:
+    """Record ``pgid`` as a co-owner keeping the lock at ``lock_path`` live.
+
+    A supervised run writes its board from a separate process group; when the
+    supervisor is killed, the recorded pid alone looks dead while the worker
+    can still save (issue #9628 review). Best effort: a failed extension
+    leaves the record exactly as it was.
+    """
+    holder = _read_holder(lock_path)
+    if holder is None or holder.get("owner_pgid") == pgid:
+        return
+    holder["owner_pgid"] = pgid
+    try:
+        temporary = lock_path.with_name(f"{lock_path.name}.{os.getpid()}.owner.tmp")
+        with open(temporary, "w", encoding="utf-8") as stream:
+            json.dump(holder, stream)
+        os.replace(temporary, lock_path)
+    except OSError:
+        return
+
+
 def acquire_route_lock(output: str | Path, *, policy: str | None = None) -> RouteLockHandle:
     """Take the run lock for ``output`` or raise :class:`RouteLockError`.
 
@@ -184,14 +270,19 @@ def acquire_route_lock(output: str | Path, *, policy: str | None = None) -> Rout
             lock.parent.mkdir(parents=True, exist_ok=True)
             fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         except FileExistsError:
-            holder = _read_holder(lock)
-            if not _holder_is_dead(holder):
-                return problem(_refusal(destination, lock, holder))
-            # Re-read just before removing so a run that stole it first is kept.
-            if _read_holder(lock) != holder:
-                continue
-            with contextlib.suppress(FileNotFoundError):
-                lock.unlink()
+            with _steal_guard(lock):
+                if not lock.exists():
+                    # Recovered by a contender that held the guard first;
+                    # retry the create so the new holder is checked normally.
+                    continue
+                holder = _read_holder(lock)
+                if not _holder_is_dead(holder):
+                    return problem(_refusal(destination, lock, holder))
+                # Only one contender at a time can be inside this window, so
+                # the unlink cannot race a rival's just-acquired lock away
+                # (issue #9628 review).
+                with contextlib.suppress(FileNotFoundError):
+                    lock.unlink()
             continue
         except OSError as exc:
             return problem(
@@ -214,13 +305,23 @@ def acquire_route_lock(output: str | Path, *, policy: str | None = None) -> Rout
 
 
 def release_route_lock(handle: RouteLockHandle) -> None:
-    """Remove the lock iff ``handle`` acquired it and the file is still ours."""
+    """Remove the lock iff ``handle`` acquired it and the file is still ours.
+
+    Ownership is pid + hostname, not full-record equality: a held lock may
+    legitimately gain fields after acquisition (``extend_lock_owner`` records
+    the supervised worker's group as a co-owner, issue #9628 review).
+    """
     if not handle.acquired or handle.path is None:
         return
     record = _held.pop(handle.path, None)
     if record is None:
         return
-    if _read_holder(handle.path) == record:
+    holder = _read_holder(handle.path)
+    if (
+        holder is not None
+        and holder.get("pid") == record.get("pid")
+        and holder.get("hostname") == record.get("hostname")
+    ):
         with contextlib.suppress(OSError):
             handle.path.unlink()
 

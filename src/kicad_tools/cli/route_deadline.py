@@ -27,6 +27,7 @@ from kicad_tools.core.route_run_lock import (
     LOCK_HELD_ENV,
     RouteLockError,
     acquire_route_lock,
+    extend_lock_owner,
     held_env_value,
     release_route_lock,
 )
@@ -147,7 +148,14 @@ def _output_identity(args) -> dict:
                     "Timed routing requires a separate output path and derived artifacts: "
                     f"{target} aliases protected input {original}"
                 )
-    return {"input": str(source), "output": str(output), "snapshot_saved": False}
+    return {
+        "input": str(source),
+        "output": str(output),
+        "snapshot_saved": False,
+        # Issue #9628 review: a --dry-run writes nothing, so its timeout
+        # handling must not quarantine a canonical board another run owns.
+        "writes_output": not getattr(args, "dry_run", False),
+    }
 
 
 def configure_output(args) -> None:
@@ -231,6 +239,12 @@ def _supervise(
         start_new_session=os.name == "posix",
         creationflags=0 if os.name == "posix" else subprocess.CREATE_NEW_PROCESS_GROUP,  # type: ignore[attr-defined]
     )
+    # Issue #9628 review: the worker's process group writes the board and can
+    # outlive this supervisor; naming it as a co-owner keeps the lock live
+    # until the last process able to write the output has exited.
+    held_path, _, held_pid = (held or "").rpartition(":")
+    if held_path and held_pid.isdigit() and os.name == "posix":
+        extend_lock_owner(Path(held_path), pgid=process.pid)
     timed_out = False
     group_killed = False
     try:
@@ -278,64 +292,69 @@ def _supervise(
         output_name = state.get("output")
         if output_name:
             output = Path(output_name)
-            # Issue #6308: the copper-bearing board is ``snapshot`` (the raw
-            # ``<stem>_partial``); ``unverified_output`` is only the quarantined
-            # canonical output and may hold no copper.  A worker hard-killed
-            # after writing the partial but before recording it must still be
-            # named, so recover it here -- only if written by THIS invocation
-            # and not a torn ``.tmp`` leftover.
-            partial = output.with_stem(output.stem + "_partial")
-            if not state.get("snapshot_saved") and _fresh_partial(partial, launched_at):
-                state["snapshot"] = str(partial)
-                state["snapshot_saved"] = True
-            # Preserve even a pre-existing successful result, but remove its
-            # canonical name so it cannot masquerade as this invocation's result.
-            if output.exists():
-                fd, name = tempfile.mkstemp(
-                    prefix=output.stem + "_timeout_unverified_",
-                    suffix=output.suffix,
-                    dir=output.parent,
-                )
-                os.close(fd)
-                output.replace(name)
-                state["unverified_output"] = name
-                # Issue #8258: the worker prints the checkpoint as the user
-                # typed it (possibly relative); ``output`` is absolute.
-                checkpoint = state.get("checkpoint")
-                if isinstance(checkpoint, str) and checkpoint:
-                    if Path(checkpoint).resolve() == output.resolve():
-                        state["checkpoint"] = name
-                # Keep authored context beside the quarantined checkpoint. It
-                # remains unverified; these copies do not authorize promotion.
-                sidecars = []
-                for suffix in (".kicad_pro", ".kicad_dru"):
-                    source = output.with_suffix(suffix)
-                    if source.exists():
-                        destination = Path(name).with_suffix(suffix)
+            if state.get("writes_output", True):
+                # Issue #6308: the copper-bearing board is ``snapshot`` (the raw
+                # ``<stem>_partial``); ``unverified_output`` is only the quarantined
+                # canonical output and may hold no copper.  A worker hard-killed
+                # after writing the partial but before recording it must still be
+                # named, so recover it here -- only if written by THIS invocation
+                # and not a torn ``.tmp`` leftover.
+                partial = output.with_stem(output.stem + "_partial")
+                if not state.get("snapshot_saved") and _fresh_partial(partial, launched_at):
+                    state["snapshot"] = str(partial)
+                    state["snapshot_saved"] = True
+                # Preserve even a pre-existing successful result, but remove its
+                # canonical name so it cannot masquerade as this invocation's result.
+                if output.exists():
+                    fd, name = tempfile.mkstemp(
+                        prefix=output.stem + "_timeout_unverified_",
+                        suffix=output.suffix,
+                        dir=output.parent,
+                    )
+                    os.close(fd)
+                    output.replace(name)
+                    state["unverified_output"] = name
+                    # Issue #8258: the worker prints the checkpoint as the user
+                    # typed it (possibly relative); ``output`` is absolute.
+                    checkpoint = state.get("checkpoint")
+                    if isinstance(checkpoint, str) and checkpoint:
+                        if Path(checkpoint).resolve() == output.resolve():
+                            state["checkpoint"] = name
+                    # Keep authored context beside the quarantined checkpoint. It
+                    # remains unverified; these copies do not authorize promotion.
+                    sidecars = []
+                    for suffix in (".kicad_pro", ".kicad_dru"):
+                        source = output.with_suffix(suffix)
+                        if source.exists():
+                            destination = Path(name).with_suffix(suffix)
+                            try:
+                                shutil.copyfile(source, destination)
+                                sidecars.append(str(destination))
+                            except OSError as exc:
+                                state.setdefault("quarantine_context_errors", []).append(str(exc))
+                    # Issue #5639: the access-witness sidecar is stem-keyed, so it
+                    # names the board it describes.  MOVE it with the quarantined
+                    # checkpoint -- left behind under the canonical stem it would
+                    # describe an output that no longer exists, and a reader
+                    # discovering it from the quarantined board would find nothing.
+                    witness_source = output.parent / f"{output.stem}{ACCESS_WITNESS_SIDECAR_SUFFIX}"
+                    if witness_source.exists():
+                        quarantined = Path(name)
+                        witness_target = (
+                            quarantined.parent
+                            / f"{quarantined.stem}{ACCESS_WITNESS_SIDECAR_SUFFIX}"
+                        )
                         try:
-                            shutil.copyfile(source, destination)
-                            sidecars.append(str(destination))
+                            os.replace(witness_source, witness_target)
+                            sidecars.append(str(witness_target))
+                            if state.get("access_witness") == str(witness_source):
+                                state["access_witness"] = str(witness_target)
                         except OSError as exc:
                             state.setdefault("quarantine_context_errors", []).append(str(exc))
-                # Issue #5639: the access-witness sidecar is stem-keyed, so it
-                # names the board it describes.  MOVE it with the quarantined
-                # checkpoint -- left behind under the canonical stem it would
-                # describe an output that no longer exists, and a reader
-                # discovering it from the quarantined board would find nothing.
-                witness_source = output.parent / f"{output.stem}{ACCESS_WITNESS_SIDECAR_SUFFIX}"
-                if witness_source.exists():
-                    quarantined = Path(name)
-                    witness_target = (
-                        quarantined.parent / f"{quarantined.stem}{ACCESS_WITNESS_SIDECAR_SUFFIX}"
-                    )
-                    try:
-                        os.replace(witness_source, witness_target)
-                        sidecars.append(str(witness_target))
-                        if state.get("access_witness") == str(witness_source):
-                            state["access_witness"] = str(witness_target)
-                    except OSError as exc:
-                        state.setdefault("quarantine_context_errors", []).append(str(exc))
-                state["unverified_sidecars"] = sidecars
+                    state["unverified_sidecars"] = sidecars
+            # else (issue #9628 review): a --dry-run writes nothing; the
+            # canonical board and its sidecars belong to whichever run holds
+            # the output and are left exactly as found.
             report = output.with_suffix(".timeout.json")
             report.parent.mkdir(parents=True, exist_ok=True)
             report.write_text(json.dumps(state, indent=2) + "\n")
@@ -384,14 +403,31 @@ def _probe_lock_target(argv: list[str]) -> Path | None:
     return _lock_target(parsed)
 
 
+def _early_sigterm_net(signum, frame) -> None:
+    raise KeyboardInterrupt
+
+
+def is_lock_sigterm_net(handler: object) -> bool:
+    """Whether ``handler`` is the lock-safety net another flow may replace.
+
+    Flows that install their own deliberate SIGTERM handler (the lint gate)
+    defer to whatever is installed; this net only covers the window between
+    lock acquisition and the first deliberate handler, so it must not win
+    that deference (issue #9628 review).
+    """
+    return handler is _early_sigterm_net
+
+
 @contextlib.contextmanager
 def _sigterm_as_interrupt():
-    """Let a SIGTERM to the supervisor unwind like Ctrl-C.
+    """Let a SIGTERM to this process unwind like Ctrl-C.
 
-    The default action would kill the supervisor outright, skipping the lock
-    release *and* orphaning the worker, which would keep writing the output
-    with no lock held. ``_supervise`` already turns KeyboardInterrupt into
-    "terminate the worker group", so reuse that.
+    The default action would kill the process outright, skipping the lock
+    release — and, for a supervisor, orphaning the worker, which would keep
+    writing the output with no lock held. ``_supervise`` already turns
+    KeyboardInterrupt into "terminate the worker group"; an unsupervised run
+    instead exits 130 from ``_with_run_lock``, either way after the lock is
+    released (issue #9628 review).
     """
     if (
         threading.current_thread() is not threading.main_thread()
@@ -400,10 +436,7 @@ def _sigterm_as_interrupt():
         yield
         return
 
-    def handler(signum, frame):
-        raise KeyboardInterrupt
-
-    signal.signal(signal.SIGTERM, handler)
+    signal.signal(signal.SIGTERM, _early_sigterm_net)
     try:
         yield
     finally:
@@ -411,11 +444,15 @@ def _sigterm_as_interrupt():
 
 
 def _with_run_lock(
-    output: Path | None, body: Callable[[], RouteAttemptResult], *, supervised: bool = False
+    output: Path | None, body: Callable[[], RouteAttemptResult]
 ) -> RouteAttemptResult:
     """Run ``body()`` holding the output's run lock (issue #9628).
 
-    A refused lock exits 1 before anything touches the output.
+    A refused lock exits 1 before anything touches the output. SIGTERM is
+    unwound like Ctrl-C on every path (supervised or not) for as long as the
+    lock is held, so a supervisor-less run cannot die with the lock in place
+    during the window before the routing signal handler takes over (issue
+    #9628 review).
     """
     if output is None:
         return body()
@@ -425,8 +462,10 @@ def _with_run_lock(
         print(f"Error: {exc}", file=sys.stderr)
         return RouteAttemptResult(1)
     try:
-        with _sigterm_as_interrupt() if supervised else contextlib.nullcontext():
+        with _sigterm_as_interrupt():
             return body()
+    except KeyboardInterrupt:
+        return RouteAttemptResult(130)
     finally:
         release_route_lock(handle)
 
@@ -488,7 +527,7 @@ def run_attempt(argv: list[str] | None = None) -> RouteAttemptResult:
                 _note_skipped_failed_export(parsed, state)
             return RouteAttemptResult(code, disposition)
 
-    return _with_run_lock(_lock_target(parsed), supervised, supervised=True)
+    return _with_run_lock(_lock_target(parsed), supervised)
 
 
 def _note_skipped_failed_export(parsed, state: dict) -> None:
@@ -527,12 +566,30 @@ def _note_skipped_failed_export(parsed, state: dict) -> None:
         pass
 
 
+def _extend_inherited_lock_owner() -> None:
+    """Name this worker's group as co-owner of the inherited lock (#9628 review).
+
+    The supervisor names the group itself right after launch; this covers a
+    supervisor that died inside that window, so the lock stays live until the
+    last process able to write the output has exited.
+    """
+    if os.name != "posix":
+        return
+    held = os.environ.get(LOCK_HELD_ENV)
+    if not held:
+        return
+    name, _, pid_text = held.rpartition(":")
+    if pid_text.isdigit():
+        extend_lock_owner(Path(name), pgid=os.getpgrp())
+
+
 def _worker() -> int:
     from .route_cmd import _in_process_main
 
     signal.signal(signal.SIGTERM, _deadline_signal)
     if hasattr(signal, "SIGBREAK"):
         signal.signal(signal.SIGBREAK, _deadline_signal)
+    _extend_inherited_lock_owner()
     try:
         return _in_process_main(sys.argv[1:])
     except RouteDeadlineExpired:
