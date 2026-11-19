@@ -124,24 +124,30 @@ copper 0 mm²; beside owner excess 0 mm²; ...; opening pad:R1/1; exposed copper
 segment (net VOUT); same-net own-pad entry
 ```
 
-The class is granted for what the copper does, not for touching the pad. All of
-these must hold, otherwise the measurement keeps its verdict:
+The class is granted for what the copper does, not for touching the pad. The
+copper must first be on the pad's identified net — the net pcbnew loads: a
+floating stub touching only one pad loads with that pad's net; a pad with no
+net never qualifies. On same-net copper, all five numbered conditions must
+hold, otherwise the measurement keeps its verdict (these are the conditions
+the `within_own_pad_failed_condition` field names):
 
-- the opening has one owner, a plain `rect`, `roundrect`, `circle` or `oval` pad
-  with a mask margin of 0 or more (custom, padstack, chamfered and
-  solder-mask-defined pads keep their verdict);
-- the copper is on the pad's identified net. That is the net pcbnew loads: a
-  floating stub touching only one pad loads with that pad's net. A pad with no
-  net never qualifies.
-- the copper overlaps the pad's copper by more than the construction budget `u`;
-- **nothing beyond the pad is exposed**. `u` is tolerated once at the pad edge,
-  so a track crossing any positive expansion ring wider than `u` (about 10 µm)
-  stays an error;
-- **nothing beside the pad beyond one clean entry**. The copper under mask within
-  the policy clearance (0.09 mm) of the opening may not exceed what one straight
-  crossing at 45° or steeper puts there (1.45 × track width × clearance). Only a
-  straight segment with exactly one end inside the pad gets that allowance. A
-  segment lying wholly on the pad gets none.
+1. the opening has one owner, a plain `rect`, `roundrect`, `circle` or `oval`
+   pad with a mask margin of 0 or more (custom, padstack, chamfered and
+   solder-mask-defined pads keep their verdict);
+2. direct connection: the copper overlaps the pad's copper by more than the
+   construction budget `u` (both shrunk by `u`);
+3. **nothing beyond the pad is exposed**. `u` is tolerated once at the pad
+   edge, so a track crossing any positive expansion ring wider than `u`
+   (about 10 µm) stays an error;
+4. **nothing beside the pad beyond one clean entry**. The copper under mask
+   within the policy clearance (0.09 mm) of the opening may not exceed what
+   one straight crossing at 45° or steeper puts there (1.45 × track width ×
+   clearance). Only a straight segment with an authored end inside the pad
+   gets that allowance (the other end may exit, sit on the edge or be inside
+   too). A segment with no end inside — lying wholly on it, straddling or
+   passing through — gets none;
+5. for a via, its authored drill lies wholly outside the opening (a via ring
+   touching the pad leaves copper beside the opening).
 
 So these stay errors:
 
@@ -170,10 +176,14 @@ Same-net copper *beside* a pad without touching it is still measured at the
 policy clearance. Each measurement records `exposed_beyond_owner_mm2` (copper
 exposed beyond the pad) and `beside_owner_excess_mm2` (copper beside it in excess
 of one clean entry), so a verdict can be audited. It also records
-`within_own_pad_failed_condition` (issue #9305): the condition number (1-5, as
-listed above) that kept a same-net, single-pad-owner finding at its measured
-verdict — None when the class qualified or was not attempted, e.g. for
-different-net copper or a merged opening. The trailing `same-net own-pad
+`within_own_pad_failed_condition` (issue #9305): the number (1-5) of the
+first numbered condition above that kept a same-net, single-pad-owner
+measurement from downgrading to `within_own_pad` — None when the class
+qualified or was not attempted, e.g. for different-net copper or a merged
+opening. The field names why the downgrade was missed, not the finding's
+final disposition: another classification may still take over afterwards —
+a pad tied to its own pour by thermal spokes fails condition 4 (pour ring
+beside the opening) yet reads `own_pour_thermal` at info. The trailing `same-net own-pad
 entry` / `same-net pass-through` label is triage text from the copper outline
 and can differ from the class for very wide or very short tracks. The class uses
 the track's authored ends. Evidence and per-board counts:

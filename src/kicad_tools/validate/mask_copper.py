@@ -70,9 +70,13 @@ any different-net copper all keep their measured verdict.
 ``exposed_beyond_owner_mm2`` and ``beside_owner_excess_mm2`` record the two
 measured quantities, and ``within_own_pad_failed_condition`` names the
 ``_within_own_pad`` docstring condition (1-5) that kept a same-net,
-single-pad-owner measurement at its measured verdict -- None when the class
-qualified or was not attempted (issue #9305). "Same net" is the net pcbnew
-loads, which assigns a floating stub touching one pad to that pad's net.
+single-pad-owner measurement from downgrading to ``within_own_pad`` -- None
+when the class qualified or was not attempted (issue #9305). The field names
+why the downgrade was missed, not the finding's final disposition: another
+classification may still take over afterwards, e.g. a pad tied to its own
+pour by thermal spokes fails condition 4 yet reads ``own_pour_thermal`` at
+info. "Same net" is the net pcbnew loads, which assigns a floating stub
+touching one pad to that pad's net.
 Evidence: ``docs/research/mask-to-copper-own-pad-8858.md``.
 
 Copper a reinforce wire run exposes on purpose (issue #9315)
@@ -524,6 +528,10 @@ def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearanc
     ``failed_condition`` is the docstring number (1-5) of the first condition
     that failed, or ``None`` when the conductor qualifies (issue #9305: the
     measurement records it so a report names the test that kept the verdict).
+    It names why the downgrade to ``within_own_pad`` was missed, not the
+    finding's final disposition: a later classification may still take over,
+    e.g. a spoke-connected own pour fails condition 4 yet reads
+    ``own_pour_thermal`` at info.
     """
     if owner["kind"] not in _WITHIN_OWN_PAD_OWNER_KINDS or margin < 0:
         return False, None, 1

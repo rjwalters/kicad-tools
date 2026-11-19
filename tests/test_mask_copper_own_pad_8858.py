@@ -697,9 +697,12 @@ def test_fully_enclosed_collinear_redundant_segment_stays_an_error():
 def test_failed_condition_names_the_gate_for_a_pass_through_error():
     """Issue #9305: the field names which within-own-pad condition failed.
 
-    The consumer board's pad overlap errors all fail condition 4 (band copper
-    beside the opening beyond the entry allowance) -- a straight pass-through
-    hits the same gate in a fixture.
+    On the board-03 measurement snapshot (`usb_joystick_routed.kicad_pcb` at
+    `2969a6944`, issue thread 2026-11-18) all 101 pad `overlap` violations
+    failed condition 4 (band copper beside the opening beyond the entry
+    allowance); the consumer run (`936164ce0`) predates this field and leaves
+    the deciding condition unmeasured. A straight pass-through hits the same
+    gate in a fixture.
     """
     result, m = _only(_segment((-1.0, 0.5), (2.0, 0.5)))
     assert m.disposition == "violation"
