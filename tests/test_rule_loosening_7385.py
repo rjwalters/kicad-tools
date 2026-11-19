@@ -871,6 +871,58 @@ def test_one_scope_class_dru_still_probes_the_other_classes_copper(scope):
 
 
 # ---------------------------------------------------------------------------
+# Issue #9499: an In1.Cu-scoped rule masks the other inner layers
+# ---------------------------------------------------------------------------
+
+
+def test_inner_layer_scoped_rule_does_not_mask_the_other_inner_layers():
+    """A rule scoped to ``In1.Cu`` alone must not hide a loosening on In2.Cu.
+
+    ``In1.Cu`` is the only probed inner representative (Issue #9458), so an
+    ``(layer "In1.Cu")`` rule raised it while ``In2.Cu`` really resolves to
+    ``Hand low`` 0.05 (nothing scoped ``outer`` or ``In1.Cu`` matches it) --
+    reported before the fix as ``[]``.
+    """
+    after_text = (
+        '(rule "Hand low"\n  (constraint clearance (min 0.05mm)))\n'
+        '(rule "Outer managed"\n  (layer outer)\n  (constraint clearance (min 0.3mm)))\n'
+        '(rule "In1 only"\n  (layer "In1.Cu")\n  (constraint clearance (min 0.3mm)))\n'
+    )
+    found = rule_loosenings(
+        _dru_state(None),
+        _dru_state(
+            after_text,
+            managed={"Outer managed", "In1 only"},
+            authored=_NETCLASS_015,
+        ),
+    )
+    assert [(item.path, item.after) for item in found] == [("dru.resolved.track_track", 0.05)]
+
+
+def test_probe_skips_every_inner_layer_a_rule_names():
+    """The unmasked inner probe is the smallest ``In<k>.Cu`` no rule names.
+
+    With In1.Cu *and* In2.Cu named by managed rules, In3.Cu is the layer
+    ``Hand low`` still governs -- and it must be probed.
+    """
+    after_text = (
+        '(rule "Hand low"\n  (constraint clearance (min 0.05mm)))\n'
+        '(rule "Outer managed"\n  (layer outer)\n  (constraint clearance (min 0.3mm)))\n'
+        '(rule "In1 only"\n  (layer "In1.Cu")\n  (constraint clearance (min 0.3mm)))\n'
+        '(rule "In2 only"\n  (layer "In2.Cu")\n  (constraint clearance (min 0.3mm)))\n'
+    )
+    found = rule_loosenings(
+        _dru_state(None),
+        _dru_state(
+            after_text,
+            managed={"Outer managed", "In1 only", "In2 only"},
+            authored=_NETCLASS_015,
+        ),
+    )
+    assert [(item.path, item.after) for item in found] == [("dru.resolved.track_track", 0.05)]
+
+
+# ---------------------------------------------------------------------------
 # Issue #9422: router-declared net-class "Reviewed clearance" rules
 # ---------------------------------------------------------------------------
 
