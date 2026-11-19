@@ -235,37 +235,47 @@ def test_lookup_without_a_scope_does_not_read_the_file(monkeypatch, tmp_path):
 
     ``kct sch set-footprint`` resolves library paths with no producer active;
     its best-effort validation sits at the parse, not the lookup (Issue #9526
-    review).  An unreadable file must therefore resolve fine and record
-    nothing, instead of failing the resolution."""
+    review).  A file the lookup would wrongly read must therefore resolve
+    fine and record nothing, instead of failing the resolution.  The guard is
+    injected at the recorder's ``read_bytes`` call site rather than via mode
+    bits, so it holds under uid 0 too (root bypasses DAC -- CI runs as root,
+    Issue #9526 CI review)."""
     root = make_library(tmp_path / "lib")
     fp = root / FP_NAME
     monkeypatch.setenv(kicad_toolchain.KICAD_FOOTPRINT_DIR_ENV, str(root))
-    fp.chmod(0o000)
-    try:
-        assert read_one() == fp
-        assert recorded_library_reads() == ()
-    finally:
-        fp.chmod(0o644)
+    real_read_bytes = Path.read_bytes
+
+    def refuse(self: Path) -> bytes:
+        if self == fp:
+            raise AssertionError("lookup outside a read scope must not read the file")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", refuse)
+    assert read_one() == fp
+    assert recorded_library_reads() == ()
 
 
 def test_pad_count_validation_degrades_on_unreadable_library(monkeypatch, tmp_path):
     """``set-footprint``'s pad-count validator keeps its best-effort contract.
 
-    Resolution outside an evidence run no longer opens the file, so a mode-000
-    library file reaches the parse-side ``try`` and yields "cannot validate"
-    rather than raising ``PermissionError`` out of the lookup (Issue #9526
-    review)."""
-    from kicad_tools.cli.sch_set_footprint import _footprint_pad_count
+    Resolution outside an evidence run no longer opens the file, so an
+    unreadable library file reaches the parse-side ``try`` and yields
+    "cannot validate" rather than raising ``PermissionError`` out of the
+    lookup (Issue #9526 review).  The unreadability is injected at
+    ``load_footprint`` -- the same call the mode-000 file fails inside --
+    because mode bits do not restrict root (CI runs as root, Issue #9526
+    CI review)."""
+    from kicad_tools.cli import sch_set_footprint
 
     root = make_library(tmp_path / "lib")
-    fp = root / FP_NAME
     monkeypatch.setenv(kicad_toolchain.KICAD_FOOTPRINT_DIR_ENV, str(root))
-    fp.chmod(0o000)
-    try:
-        paths = detect_kicad_library_path()
-        assert _footprint_pad_count(paths, "Capacitor_SMD:C_0805_2012Metric") is None
-    finally:
-        fp.chmod(0o644)
+
+    def refuse(_path: object) -> object:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(sch_set_footprint, "load_footprint", refuse)
+    paths = detect_kicad_library_path()
+    assert sch_set_footprint._footprint_pad_count(paths, "Capacitor_SMD:C_0805_2012Metric") is None
 
 
 def test_provenance_is_none_outside_the_toolchain(host_with_pinned_kicad):
