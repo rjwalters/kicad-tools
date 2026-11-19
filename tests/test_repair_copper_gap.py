@@ -107,6 +107,12 @@ TANGENT_SUBUM = _seg("trk-t", (95.0003, 105.3), (105.0003, 105.3)) + (
     '  (via (at 100 105.75) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-t"))\n'
     + LINK
 )
+# The judge's short repro on PR #9396: a same-net B.Cu track attached at the
+# tangent via's position, plus a foreign B.Cu track it would cross once the
+# via snaps onto the F.Cu centreline and drags the attached end with it
+# (signed clearance -0.1351 mm between the two nets).
+N1_BCUT = _seg("trk-n1b", (100, 105.75), (110, 105.75), layer="B.Cu")
+N2_BCUT = _seg("trk-n2b", (103, 103), (103, 105.37), net=2, layer="B.Cu")
 # A track ending at the fan-out via's centre: it must move with the via.
 ATTACHED = _seg("trk-v", (100, 103), (100, 100.9))
 
@@ -226,12 +232,39 @@ def test_via_snaps_to_pad_centre_when_a_process_is_declared(tmp_path):
     assert _via(board, "via-p") == (100.0, 100.0)
 
 
+def test_small_positive_pad_gap_is_repaired_not_treated_as_merged(tmp_path):
+    # Regression (judge note on PR #9396): gaps up to 0.005 mm were treated
+    # as contact, so a real 0.004 mm slit (the real checker reports
+    # 0.004 mm against a 0.15 mm requirement) was declined ``already_merged``
+    # and the via left in place.  Only actual copper contact counts as
+    # merged now.
+    near = _board(tmp_path, PAD_VIA.replace("(at 100 100.9)", "(at 100 100.804)"))
+    repairer = CopperGapRepairer(near)
+    result = repairer.repair_gaps(
+        [_finding([PAD, "Via@100/100.804:F.Cu-B.Cu:d0.3/s0.6"], actual=0.004)],
+        max_displacement=1.0,
+    )
+    assert result.repaired == 1 and result.opened == 1 and not result.unrepaired
+    repairer.save(near)
+    assert _via(near, "via-p") == (100.0, pytest.approx(100.96, abs=0.005))
+
+    # Actual copper contact (the via's edge exactly on the pad's edge) is
+    # still a stale finding.
+    contact = _board(tmp_path, PAD_VIA.replace("(at 100 100.9)", "(at 100 100.8)"))
+    merged = CopperGapRepairer(contact).repair_gaps(
+        [_finding([PAD, "Via@100/100.8:F.Cu-B.Cu:d0.3/s0.6"], actual=0.0)],
+        max_displacement=1.0,
+    )
+    assert merged.repaired == 0
+    assert merged.skipped("already_merged") == 1
+
+
 def test_attached_track_moves_with_the_via_and_undoes(tmp_path):
     board = _board(tmp_path, PAD_VIA + "\n" + ATTACHED)
     repairer = CopperGapRepairer(board)
     result = repairer.repair_gaps([_finding([PAD, VIA_PAD])], max_displacement=1.0)
     assert result.repaired == 1
-    assert result.actions[0].joined == [("trk-v", "end")]
+    assert result.actions[0].joined == [("trk-v", "end", 100.0, 100.9)]
     repairer.save(board)
     assert _end(board, "trk-v", "end")[1] == pytest.approx(100.96, abs=0.005)
     undo = CopperGapRepairer(board)
@@ -239,6 +272,24 @@ def test_attached_track_moves_with_the_via_and_undoes(tmp_path):
     undo.save(board)
     assert _via(board, "via-p") == (100.0, 100.9)
     assert _end(board, "trk-v", "end") == (100.0, 100.9)
+
+
+def test_undo_restores_each_ends_own_original_coordinates(tmp_path):
+    # Regression (judge note on PR #9396): undo wrote the via's old centre to
+    # every joined end, so an end sitting 6 um off the via centre came back
+    # moved.  Each end's original coordinates are recorded and restored now.
+    attached = _seg("trk-v", (100, 103), (100.006, 100.9))
+    board = _board(tmp_path, PAD_VIA + "\n" + attached)
+    repairer = CopperGapRepairer(board)
+    result = repairer.repair_gaps([_finding([PAD, VIA_PAD])], max_displacement=1.0)
+    assert result.repaired == 1
+    assert result.actions[0].joined == [("trk-v", "end", 100.006, 100.9)]
+    repairer.save(board)
+    undo = CopperGapRepairer(board)
+    assert undo.undo_move(result.actions[0])
+    undo.save(board)
+    assert _via(board, "via-p") == (100.0, 100.9)
+    assert _end(board, "trk-v", "end") == (100.006, 100.9)
 
 
 def test_undo_restores_an_unattached_via(tmp_path):
@@ -302,6 +353,52 @@ def test_tangent_track_descriptor_sort_flip_still_resolves(tmp_path):
         ]
     )
     assert result.repaired == 1 and result.snapped_to_track == 1 and not result.unrepaired
+
+
+def test_track_descriptor_resolves_only_on_its_own_layer(tmp_path):
+    # Regression (judge note on PR #9396): segment resolution ignored the
+    # descriptor's layer, so an identical-geometry B.Cu segment on another
+    # net shadowed the named F.Cu segment and the finding was declined
+    # ``not_same_net``.
+    copper = _seg("trk-b2", (95, 105.3), (105, 105.3), net=2, layer="B.Cu") + "\n" + TANGENT
+    board = _board(tmp_path, copper)
+    result = CopperGapRepairer(board).repair_gaps(
+        [_finding([TRACE, VIA_TANGENT], required=0.127, actual=0.05)]
+    )
+    assert result.repaired == 1 and result.snapped_to_track == 1 and not result.unrepaired
+
+
+def test_foreign_layer_twin_is_not_resolved(tmp_path):
+    # Regression (judge note on PR #9396): with only a B.Cu twin present, an
+    # F.Cu descriptor still resolved to it -- even on the same net, the
+    # repair would act on the wrong layer's copper.
+    copper = _seg("trk-t", (95, 105.3), (105, 105.3), layer="B.Cu") + (
+        '  (via (at 100 105.75) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") '
+        '(net 1) (uuid "via-t"))'
+    )
+    board = _board(tmp_path, copper)
+    result = CopperGapRepairer(board).repair_gaps(
+        [_finding([TRACE, VIA_TANGENT], required=0.127, actual=0.05)]
+    )
+    assert result.repaired == 0
+    assert result.skipped("track_not_found") == 1
+
+
+def test_via_descriptor_resolves_only_on_its_named_span(tmp_path):
+    # Regression (judge note on PR #9396): a descriptor naming the span
+    # ``F.Cu-In1.Cu`` resolved to the fixture's through via (``F.Cu-B.Cu``).
+    board = _board(tmp_path, TANGENT)
+    result = CopperGapRepairer(board).repair_gaps(
+        [
+            _finding(
+                [TRACE, "Via@100/105.75:F.Cu-In1.Cu:d0.3/s0.6"],
+                required=0.127,
+                actual=0.05,
+            )
+        ]
+    )
+    assert result.repaired == 0
+    assert result.skipped("via_not_found") == 1
 
 
 def test_dry_run_predicts_without_modifying(tmp_path):
@@ -430,6 +527,28 @@ def test_move_that_crowds_foreign_copper_is_declined(tmp_path):
     assert _via(board, "via-t") == (100.0, 105.75)
 
 
+def test_dragged_track_that_would_short_foreign_copper_is_declined(tmp_path):
+    # Regression (judge note on PR #9396): the clearance gate validated the
+    # via's destination only, so snapping the tangent via dragged its
+    # attached B.Cu track across a foreign B.Cu track (signed clearance
+    # -0.1351 mm) and the short was saved with ``repaired=1``.  The dragged
+    # copper is validated too now and the move is declined.
+    from kicad_tools.manufacturers import get_profile
+
+    rules = get_profile("jlcpcb").get_design_rules(2)
+    board = _board(tmp_path, TANGENT + "\n" + N1_BCUT + "\n" + N2_BCUT)
+    before = board.read_text()
+    result = CopperGapRepairer(board).repair_gaps(
+        [_finding([TRACE, VIA_TANGENT], required=0.127, actual=0.05)],
+        max_displacement=1.0,
+        design_rules=rules,
+    )
+    assert result.repaired == 0
+    assert result.skipped("would_violate_clearance") == 1
+    assert board.read_text() == before
+    assert _via(board, "via-t") == (100.0, 105.75)
+
+
 # ---------------------------------------------------------------------------
 # fix-drc integration: --only copper-gap
 # ---------------------------------------------------------------------------
@@ -532,6 +651,12 @@ def _diff_net_gap_errors(report) -> list:
     ]
 
 
+def _clearance_errors(report) -> list:
+    return [
+        v for v in report.violations if v.type_str == "clearance_segment_segment" and v.is_error
+    ]
+
+
 def _real_report(board: Path):
     report = fix_drc_cmd._run_python_drc(
         board, manufacturer="jlcpcb", layers=2, project_pcb_path=board, copper_gap=True
@@ -598,3 +723,28 @@ def test_real_rule_different_net_gap_is_left_unchanged(tmp_path):
     # The different-net via did not move and its finding remains.
     assert _via(board, "via-n2") == (101.4, 100.0)
     assert len(_diff_net_gap_errors(after)) == 1
+
+
+def test_real_rule_dragged_track_short_is_declined_not_written(tmp_path, capsys):
+    # Regression (judge note on PR #9396), end-to-end on the real rule set:
+    # snapping the tangent via dragged its attached B.Cu track across a
+    # foreign B.Cu track.  Before the fix the saved board's only error was
+    # ``clearance_segment_segment`` at -0.1351 mm between the two nets; the
+    # dragged copper is validated now, the move is declined and the board is
+    # left exactly as it was.
+    board = _board(tmp_path, TANGENT + "\n" + N1_BCUT + "\n" + N2_BCUT)
+    make_assembly_ready(board)
+
+    before = _real_report(board)
+    assert len(_same_net_gap_errors(before)) == 1
+    assert not _clearance_errors(before)
+
+    fix_drc_cmd.main([str(board), "--only", "copper-gap", "--no-connectivity-check"])
+    out = capsys.readouterr().out
+    assert "would_violate_clearance" in out
+
+    # Nothing was written: the via never moved and no short appeared.
+    assert _via(board, "via-t") == (100.0, 105.75)
+    after = _real_report(board)
+    assert not _clearance_errors(after)
+    assert len(_same_net_gap_errors(after)) == 1
