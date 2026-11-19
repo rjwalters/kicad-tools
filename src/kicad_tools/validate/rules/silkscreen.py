@@ -218,7 +218,7 @@ def check_silkscreen_line_width(
                         f"Silkscreen line width {graphic.stroke_width:.2f}mm "
                         f"< minimum {min_width:.2f}mm"
                     ),
-                    location=to_board(graphic.start),
+                    location=to_board(_graphic_anchor(graphic)),
                     layer=graphic.layer,
                     actual_value=graphic.stroke_width,
                     required_value=min_width,
@@ -835,6 +835,20 @@ def _board_frame_shift(pcb: PCB) -> Callable[[tuple[float, float]], tuple[float,
     return to_board
 
 
+def _graphic_anchor(graphic: FootprintGraphic | BoardGraphic) -> tuple[float, float]:
+    """One representative file-frame point per silk shape, for reported locations.
+
+    A parsed ``gr_circle`` / ``fp_circle`` carries its centre in ``center``
+    and leaves ``start`` at the parse default ``(0, 0)``, so reporting
+    ``graphic.start`` sends users to the file origin instead of the shape
+    (Issue #9642).  Every other shape has a real ``start`` -- a poly's is
+    seeded from its first vertex at parse time.
+    """
+    if graphic.graphic_type == "circle" and graphic.center is not None:
+        return graphic.center
+    return graphic.start
+
+
 def _stroke_geometry(
     graphic: FootprintGraphic | BoardGraphic,
     transform: _Transform | None,
@@ -1139,7 +1153,7 @@ def _iter_silk_elements(
             side,
             geom,
             label,
-            to_board(board_graphic.start),
+            to_board(_graphic_anchor(board_graphic)),
             board_graphic.layer,
             board_graphic.uuid,
             _graphic_descriptor("gr", board_graphic),
@@ -1186,7 +1200,7 @@ def iter_unmodeled_silk_graphics(
         yield (
             f"gr_{board_graphic.graphic_type}",
             board_graphic.graphic_type,
-            to_board(board_graphic.start),
+            to_board(_graphic_anchor(board_graphic)),
             board_graphic.layer,
             board_graphic.uuid,
         )

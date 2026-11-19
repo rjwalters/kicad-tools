@@ -175,7 +175,13 @@ def check_silk_pad_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
     from shapely import STRtree
 
     from .clearance import _pad_polygon
-    from .silkscreen import _board_frame_shift, _fp_transform, _silk_side, _stroke_geometry
+    from .silkscreen import (
+        _board_frame_shift,
+        _fp_transform,
+        _graphic_anchor,
+        _silk_side,
+        _stroke_geometry,
+    )
 
     strokes: list[tuple[Any, Any, str, tuple[float, float]]] = []
     for fp in pcb.footprints:
@@ -187,7 +193,7 @@ def check_silk_pad_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
     has_origin = any(getattr(pcb, "_board_origin", (0.0, 0.0)))
     board_xf = to_board if has_origin else None
     strokes.extend(
-        (graphic, board_xf, "board", to_board(graphic.start)) for graphic in pcb.graphics
+        (graphic, board_xf, "board", to_board(_graphic_anchor(graphic))) for graphic in pcb.graphics
     )
     apertures = []
     for fp in pcb.footprints:

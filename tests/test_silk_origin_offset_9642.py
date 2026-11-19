@@ -1,9 +1,10 @@
-"""Board-level silk lines/arcs share the pads' frame on origin-offset boards (Issue #9642).
+"""Board-level silk lines/arcs/circles share the pads' frame on origin-offset boards (Issue #9642).
 
 ``PCB.load`` shifts footprints (and so pads) into the board-relative frame and
 records the shift in ``pcb._board_origin``; board-level ``gr_line`` / ``gr_arc``
-keep the file's sheet-absolute coordinates.  ``silk_pad_clearance`` (and the
-pin-1 marker rule) used to compare the two frames directly.  Follow-up to #8561.
+/ ``gr_circle`` keep the file's sheet-absolute coordinates.  ``silk_pad_clearance``
+(and the pin-1 marker rule) used to compare the two frames directly.  Follow-up
+to #8561.
 """
 
 from __future__ import annotations
@@ -58,6 +59,15 @@ def _arc(x0: float, y0: float, mx: float, my: float, x1: float, y1: float) -> st
     )
 
 
+def _circle(cx: float, cy: float, ex: float, ey: float, layer: str = "F.SilkS") -> str:
+    # A parsed ``gr_circle`` has no ``(start ...)`` node: its centre lives in
+    # ``center`` and ``graphic.start`` stays at the parse default (0, 0).
+    return (
+        f"  (gr_circle (center {cx} {cy}) (end {ex} {ey}) "
+        f'(stroke (width 0.15) (type solid)) (layer "{layer}"))'
+    )
+
+
 def _board(tmp_path: Path, ox: float, oy: float, extra_fn, name: str) -> PCB:
     extra = "\n".join(extra_fn(ox, oy))
     text = _TEMPLATE.format(
@@ -85,43 +95,91 @@ def _on_pad(ox: float, oy: float):
 
 def _false_spot(ox: float, oy: float):
     # File coordinates equal to the pad's *board* position: only on the pad if
-    # the buggy rule forgot to subtract the origin.  Truly in open board.
+    # the buggy rule forgot to subtract the origin.  With the negative origins
+    # below these strokes sit inside the board outline, just away from the pad.
     return [_line(9, 10, 11, 10)]
 
 
-@pytest.mark.parametrize("origin", [(0.0, 0.0), (100.0, 100.0), (50.5, 20.25)])
+# Origins for the false-positive cases: at (100, 100) / (50.5, 20.25) the
+# file-frame (9..11, 10) strokes land in open board outside the outline; at
+# (-5, -4) they land inside the outline, so the zero-finding expectation
+# cannot be explained by "nothing renders there" (Judge review of PR #9653).
+_ON_BOARD_ORIGINS = [(100.0, 100.0), (-5.0, -4.0)]
+
+
+@pytest.mark.parametrize("origin", [(0.0, 0.0), (100.0, 100.0), (50.5, 20.25), (-5.0, -4.0)])
 def test_line_on_pad_is_flagged(tmp_path: Path, origin: tuple[float, float]):
     found = _pad_clearance(_board(tmp_path, *origin, _on_pad, "on"))
     assert [v.items[1] for v in found] == ["J1-1"]
     assert found[0].severity == "error"
 
 
-@pytest.mark.parametrize("origin", [(100.0, 100.0), (50.5, 20.25)])
+@pytest.mark.parametrize("origin", [(100.0, 100.0), (50.5, 20.25), (-5.0, -4.0)])
 def test_line_clear_of_pads_not_flagged(tmp_path: Path, origin: tuple[float, float]):
     assert _pad_clearance(_board(tmp_path, *origin, _false_spot, "clear")) == []
 
 
-def test_arc_on_pad_flagged_and_arc_clear_not(tmp_path: Path):
+@pytest.mark.parametrize("origin", _ON_BOARD_ORIGINS)
+def test_arc_on_pad_flagged_and_arc_clear_not(tmp_path: Path, origin: tuple[float, float]):
     def on(ox, oy):
         return [_arc(ox + 9, oy + 10, ox + 10, oy + 9, ox + 11, oy + 10)]
 
     def clear(ox, oy):
         return [_arc(9, 10, 10, 9, 11, 10)]
 
-    flagged = _pad_clearance(_board(tmp_path, 100, 100, on, "arc_on"))
+    flagged = _pad_clearance(_board(tmp_path, *origin, on, "arc_on"))
     assert [v.items[1] for v in flagged] == ["J1-1"]
-    assert _pad_clearance(_board(tmp_path, 100, 100, clear, "arc_clear")) == []
+    assert _pad_clearance(_board(tmp_path, *origin, clear, "arc_clear")) == []
 
 
-def test_back_silk_side(tmp_path: Path):
+@pytest.mark.parametrize("origin", _ON_BOARD_ORIGINS)
+def test_back_silk_side(tmp_path: Path, origin: tuple[float, float]):
     def on(ox, oy):
         return [_line(ox + 9, oy + 10, ox + 11, oy + 10, "B.SilkS")]
 
     def clear(ox, oy):
         return [_line(9, 10, 11, 10, "B.SilkS")]
 
-    assert [v.items[1] for v in _pad_clearance(_board(tmp_path, 100, 100, on, "b_on"))] == ["J1-1"]
-    assert _pad_clearance(_board(tmp_path, 100, 100, clear, "b_clear")) == []
+    assert [v.items[1] for v in _pad_clearance(_board(tmp_path, *origin, on, "b_on"))] == ["J1-1"]
+    assert _pad_clearance(_board(tmp_path, *origin, clear, "b_clear")) == []
+
+
+@pytest.mark.parametrize("origin", _ON_BOARD_ORIGINS)
+def test_circle_on_pad_flagged_at_its_center(tmp_path: Path, origin: tuple[float, float]):
+    def on(ox, oy):
+        # Ring centred on the pad's board position (10, 10), radius 0.5.
+        return [_circle(ox + 10, oy + 10, ox + 10.5, oy + 10)]
+
+    found = _pad_clearance(_board(tmp_path, *origin, on, "circ_on"))
+    assert [v.items[1] for v in found] == ["J1-1"]
+    # A gr_circle's ``start`` is the parse default (0, 0): the reported
+    # location is the centre, not the file origin (Judge review of PR #9653).
+    assert [tuple(round(c, 3) for c in v.location) for v in found] == [(10.0, 10.0)]
+
+
+def test_line_width_circle_location_is_center(tmp_path: Path):
+    def extra(ox, oy):
+        return [_circle(ox + 20, oy + 20, ox + 20.5, oy + 20).replace("width 0.15", "width 0.05")]
+
+    pcb = _board(tmp_path, 100, 100, extra, "circ_width")
+    widths = check_silkscreen_line_width(pcb, _rules()).violations
+    assert [tuple(round(c, 3) for c in v.location) for v in widths] == [(20.0, 20.0)]
+
+
+def test_circle_overlap_location_is_center(tmp_path: Path):
+    def extra(ox, oy):
+        return [
+            _circle(ox + 20, oy + 20, ox + 21, oy + 20),
+            _circle(ox + 20.5, oy + 20, ox + 21.5, oy + 20),
+        ]
+
+    pcb = _board(tmp_path, 100, 100, extra, "circ_ovl")
+    overlap = check_silk_overlap(pcb, _rules()).violations
+    locs = {tuple(round(c, 3) for c in v.location) for v in overlap}
+    assert locs, "expected the two rings to overlap"
+    # The shared silk traversal reports each shape's anchor: the centres,
+    # never the (0, 0) parse default shifted into the board frame.
+    assert locs <= {(20.0, 20.0), (20.5, 20.0)}
 
 
 def test_offset_board_matches_origin_zero_twin(tmp_path: Path):
