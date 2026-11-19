@@ -50,8 +50,8 @@ All notable changes to this project will be documented in this file.
 
 - **Old fix** (Issue #3000).
 
-[0.22.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.22.0
-[0.21.1]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.21.1
+[0.22.0]: https://github.com/2AMLogic/kicad-tools/releases/tag/v0.22.0
+[0.21.1]: https://github.com/2AMLogic/kicad-tools/releases/tag/v0.21.1
 """
 
 _EXPECTED = """# Changelog
@@ -100,9 +100,9 @@ A summary line.
 
 - **Old fix** (Issue #3000).
 
-[0.23.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.23.0
-[0.22.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.22.0
-[0.21.1]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.21.1
+[0.23.0]: https://github.com/2AMLogic/kicad-tools/releases/tag/v0.23.0
+[0.22.0]: https://github.com/2AMLogic/kicad-tools/releases/tag/v0.22.0
+[0.21.1]: https://github.com/2AMLogic/kicad-tools/releases/tag/v0.21.1
 """
 
 

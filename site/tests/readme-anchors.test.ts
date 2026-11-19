@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
 
-const REPO_LINK = /(?:https:\/\/github\.com\/rjwalters\/kicad-tools|\$\{REPO\})#([A-Za-z0-9_-]+)/g;
+const REPO_LINK = /(?:https:\/\/github\.com\/2AMLogic\/kicad-tools|\$\{REPO\})#([A-Za-z0-9_-]+)/g;
 
 /** GitHub-style heading slug: lowercase, drop punctuation, spaces to hyphens. */
 export function slugify(heading: string): string {
@@ -40,7 +40,7 @@ describe("homepage README anchors", () => {
   const readme = readFileSync(new URL("../../README.md", import.meta.url), "utf8");
   const page = readFileSync(new URL("../src/pages/index.astro", import.meta.url), "utf8");
 
-  it("resolves every github.com/rjwalters/kicad-tools#anchor link to a README heading", () => {
+  it("resolves every github.com/2AMLogic/kicad-tools#anchor link to a README heading", () => {
     const anchors = headingAnchors(readme);
     const links = readmeAnchorLinks(page);
     expect(links.length).toBeGreaterThan(0);
@@ -61,14 +61,14 @@ describe("homepage README anchors", () => {
 
   it("flags a renamed anchor", () => {
     const anchors = headingAnchors("## Python API\n");
-    expect(readmeAnchorLinks("https://github.com/rjwalters/kicad-tools#python-api")
+    expect(readmeAnchorLinks("https://github.com/2AMLogic/kicad-tools#python-api")
       .every((a) => anchors.has(a))).toBe(true);
-    expect(readmeAnchorLinks("https://github.com/rjwalters/kicad-tools#python-apis")
+    expect(readmeAnchorLinks("https://github.com/2AMLogic/kicad-tools#python-apis")
       .every((a) => anchors.has(a))).toBe(false);
   });
 });
 
-const BLOB_LINK = /\$\{DOCS\}\/([A-Za-z0-9_./-]+)|\$\{REPO\}\/blob\/main\/([A-Za-z0-9_./-]+)|https:\/\/github\.com\/rjwalters\/kicad-tools\/blob\/main\/([A-Za-z0-9_./-]+)/g;
+const BLOB_LINK = /\$\{DOCS\}\/([A-Za-z0-9_./-]+)|\$\{REPO\}\/blob\/main\/([A-Za-z0-9_./-]+)|https:\/\/github\.com\/2AMLogic\/kicad-tools\/blob\/main\/([A-Za-z0-9_./-]+)/g;
 
 /** Repository paths a page links to, from literal URLs and the `${DOCS}` / `${REPO}/blob/main` templates. */
 export function blobLinkPaths(source: string): string[] {
@@ -90,6 +90,6 @@ describe("homepage and header documentation links (issue #8101)", () => {
   it("extracts paths from every link form", () => {
     expect(blobLinkPaths("href={`${DOCS}/mcp/README.md`} href={`${REPO}/blob/main/docs/README.md`}"))
       .toEqual(["docs/mcp/README.md", "docs/README.md"]);
-    expect(blobLinkPaths("https://github.com/rjwalters/kicad-tools/blob/main/CHANGELOG.md")).toEqual(["CHANGELOG.md"]);
+    expect(blobLinkPaths("https://github.com/2AMLogic/kicad-tools/blob/main/CHANGELOG.md")).toEqual(["CHANGELOG.md"]);
   });
 });

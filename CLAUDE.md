@@ -135,6 +135,40 @@ high CPU use alone does not distinguish slow progress from a bug. The original
 300–550s observations in #5490 were not reproduced to completion, so this check
 rules coverage overhead *in* — it does not rule every hang out.
 
+## Daemon Judge steps: hand a pending-CI PR back, never wait out the step budget
+
+A daemon-dispatched Judge step (`LOOM_SWEEP_ID=step-judge-<pr>-<epoch>`) gets
+exactly one PR and roughly a 30-minute step budget, and this repository's CI
+does not fit inside that budget: the Actions Test job on PR #9664 alone ran
+about 66 minutes, and in one 8-hour sample about 40% of daemon Judge steps on
+both runtimes were killed at the step timeout (exit 143) mid-wait (issue #9686).
+
+The installed Judge instructions offer two paths when CI is pending: skip and
+continue the batch, or — for a "single-PR / manual invocation" — wait in the
+foreground for up to 1800 s. **In this repository a daemon dispatch is never
+that second path**, even though it serves exactly one PR: a 1800 s foreground
+wait is the whole step budget, so the step is killed before it can record why
+it stopped. Treat a daemon step like the batch path:
+
+1. Take the existing pre-check **before any scratch checkout, venv setup or
+   pytest** — one bounded snapshot,
+   `loom-daemon forge wait-checks <PR> --timeout 20 --settle-red` (the timeout
+   is seconds; one bounded wait, never a loop of short polls).
+2. Ordinary pending CI (`LOOM-CHECKS-TIMEOUT*`, `LOOM-CHECKS-HEAD-MOVED*`,
+   checks queued behind the CI job cap): no review and no verdict on the
+   pending head. Remove `loom:reviewing`, release the lease with
+   `--skip-reason ci-pending`, leave `loom:review-requested` in place, and end
+   the step with `LOOM_STEP_OUTCOME role=judge target=<PR> class=noop
+   reason=ci_pending`. A later dispatch re-draws the PR once CI settles;
+   `ci_pending` does not count toward the no-op repeat cap.
+3. Settled results take the normal paths: `LOOM-CHECKS-RED*` → "When CI
+   Fails"; `GREEN` / `NONE` → review as usual. Approval still requires the
+   verdict gate on the reviewed head.
+4. Ordinary pending CI is not the stale-head case: a head with **zero**
+   check-runs at any age has its own recovery path in the Judge instructions
+   (the `loom:ci-missing-retrigger` procedure), which stays in force. A head
+   with queued or running checks is ordinary pending CI — step 2.
+
 ## "Have we already evaluated X?" -- ask the ecosystem registry
 
 Before researching, benchmarking or reimplementing something a neighbouring
