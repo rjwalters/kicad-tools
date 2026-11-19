@@ -689,8 +689,12 @@ def _reinforce_runs(objects: dict[str, Any], wires: Any) -> list[_ReinforceRun]:
 # record's gauge plus this much flash on each side (#9444). A bigger circle is
 # a board feature, not a wire-end hole, and would excuse unbounded copper.
 # The 0.5 mm is a chosen envelope, not a derived size: ``pcb reinforce`` emits
-# no circular flash (only ``gr_line`` openings), so there is no producer value
-# to match; mid-run circles are hand-drawn board graphics.
+# no circular flash (only ``gr_line`` openings), so mid-run circles are
+# hand-drawn board graphics. The nearest producer value is the anchor pad,
+# ``anchor_pad_for_drill(anchor_drill_for_awg(awg), min_annular_ring_mm)``
+# (drill + 2 x annular ring, sized in ``pcb/reinforce.py``): 1.916 mm for
+# 16 AWG at the fallback 0.25 mm ring, so the envelope sits one 0.25 mm ring
+# per side above that pad (#9490).
 _MID_RUN_CIRCLE_FLASH_MM = 0.5
 _CENTRE_EPS_MM = 1e-6
 
@@ -740,7 +744,11 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs
     nothing (#9315). A same-net ``via`` (a layer change) or a ``gr_circle``
     (a hole no wider than the record's anchor drill plus flash) joins the run
     when its centre lies on an admitted strip piece (#9444), on either mask
-    side; a hole merely beside the strip does not. An anchor-flash ``via`` or ``pad`` must also carry the
+    side; a hole merely beside the strip does not. The ``via`` branch carries
+    no size bound: in a real export a via's mask opening is its pad plus the
+    mask expansion -- a small flash -- so the copper it can excuse stays close
+    to the strip; only the ``gr_circle`` is capped, because a board graphic
+    can be drawn any size (#9490). An anchor-flash ``via`` or ``pad`` must also carry the
     run's net (#9348); board graphics have none to check. Ties between records of one net go
     to the run with the nearest anchor, first recorded winning a tie, so
     attribution is deterministic. ``merged_region`` openings attribute
