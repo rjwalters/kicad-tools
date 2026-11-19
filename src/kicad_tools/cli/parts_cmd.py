@@ -46,7 +46,8 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Search query. A resistance with a unit (8.2Ω, 4k7, 10k, 2.2 ohm) ranks "
             "parts of exactly that value first; this re-ranks only the returned "
-            "page, so raise --limit if no exact match appears"
+            "page, so raise --limit if no exact match appears. Keyword search "
+            "cannot distinguish decades - always read the Description column"
         ),
     )
     search_parser.add_argument("--format", choices=["text", "json", "table"], default="table")
@@ -528,7 +529,7 @@ def _lookup(args) -> int:
     return 0
 
 
-def _rank_by_resistance(parts: list, query: str) -> tuple[list, bool]:
+def _rank_by_resistance(parts: list, query: str) -> tuple[list, bool, int, int]:
     """Stable re-rank of search results by the resistance named in the query.
 
     Keyword search cannot tell ``8.2Ω`` from ``820kΩ``, so a part whose parsed
@@ -536,26 +537,35 @@ def _rank_by_resistance(parts: list, query: str) -> tuple[list, bool]:
     whose nominal cannot be parsed come next (never dropped), and parts with a
     different nominal come last. Order within each tier is preserved.
 
-    Returns ``(parts, has_target)``; ``has_target`` is False when the query
-    carries no parseable resistance, in which case ``parts`` is unchanged.
+    Returns ``(parts, value_query, exact_matches, parseable_parts)``.
+    ``value_query`` is False (and ``parts`` unchanged) when the query carries no
+    parseable resistance. ``exact_matches`` counts parts whose nominal equals a
+    query target. ``parseable_parts`` counts parts with any parsed nominal;
+    0 means nothing on the page is identifiable as a resistor.
     """
-    import math
-
     from ..cost.suggest import candidate_resistances, resistances_in_text
 
     targets = resistances_in_text(query)
     if not targets:
-        return parts, False
+        return parts, False, 0, 0
 
-    def tier(part) -> int:
+    exact = 0
+    parseable = 0
+    tiers: list[tuple] = []
+    for part in parts:
         nominals = candidate_resistances(part)
         if not nominals:
-            return 1
+            tiers.append((part, 1))
+            continue
+        parseable += 1
         if any(math.isclose(n, t, rel_tol=1e-6) for n in nominals for t in targets):
-            return 0
-        return 2
+            exact += 1
+            tiers.append((part, 0))
+        else:
+            tiers.append((part, 2))
 
-    return sorted(parts, key=tier), True
+    ranked = [part for part, tier in sorted(tiers, key=lambda pt: pt[1])]
+    return ranked, True, exact, parseable
 
 
 def _search(args) -> int:
@@ -602,22 +612,16 @@ def _search(args) -> int:
         for diagnostic in results.diagnostics:
             print(diagnostic, file=sys.stderr)
 
-    results.parts, value_query = _rank_by_resistance(results.parts, args.query)
-    if value_query and args.format != "json":
-        from ..cost.suggest import candidate_resistances, resistances_in_text
-
-        wanted = resistances_in_text(args.query)
-        if not any(
-            math.isclose(n, t, rel_tol=1e-6)
-            for p in results.parts
-            for n in candidate_resistances(p)
-            for t in wanted
-        ):
-            print(
-                "Note: no result in this page has the requested resistance; "
-                "re-ranking only reorders the returned page (try a larger --limit).",
-                file=sys.stderr,
-            )
+    results.parts, value_query, exact_matches, parseable_parts = _rank_by_resistance(
+        results.parts, args.query
+    )
+    if value_query and args.format != "json" and parseable_parts and not exact_matches:
+        print(
+            "Note: no result in this page has the requested resistance; "
+            "re-ranking only reorders the returned page (try a larger --limit; "
+            "parts whose description is missing a resistance value never match).",
+            file=sys.stderr,
+        )
 
     if args.format != "json" and any(not p.stock_verified for p in results.parts):
         print("Warning: snapshot/unknown stock is unverified; matches establish identity only.")
