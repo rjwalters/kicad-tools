@@ -21,7 +21,10 @@ This module derives the surcharge REGIONS once per routing grid:
   the body on F.Cu/B.Cu is the failure mode the audit observed),
 * the "local" nets -- every net with a pad on the component.  They are
   exempt: a part's own escape legs and fan-out must be able to move under
-  its own body at normal cost.
+  its own body at normal cost.  A component whose pads are all net 0
+  (no-connect pads, or real nets withheld as net-0 obstacles by the
+  route-auto loader's ``skip_nets`` retry) keeps its region with an EMPTY
+  local set, so every routed net pays the surcharge around it.
 
 The A* cost terms in both backends charge ``rules.cost_under_body *
 rules.cost_straight`` per step inside a region to a net that is NOT local
@@ -102,6 +105,12 @@ def compute_under_body_regions(grid: RoutingGrid) -> list[BodySurchargeRegion]:
     Returns an empty list when the board has no qualifying fine-pitch
     component, so both engines' hot paths stay dormant (and byte-identical
     to pre-#9622 behaviour) on boards without one.
+
+    A component whose pads are ALL net 0 (genuinely no-connect, or real
+    nets withheld as net-0 obstacles by the route-auto loader's
+    ``skip_nets`` retry) still gets a region -- with an empty
+    ``local_nets`` set, so every routed net pays the surcharge around the
+    body instead of splitting it (review of #9635).
     """
     pads = list(grid.pads)
     if not pads:
@@ -136,11 +145,14 @@ def compute_under_body_regions(grid: RoutingGrid) -> list[BodySurchargeRegion]:
         if len(comp_pads) < MIN_BODY_PAD_COUNT:
             continue
 
+        # Net 0 never marks a net local, but it does not void the body
+        # either: a component whose pads are ALL net 0 (genuinely NC, or
+        # real nets withheld as net-0 obstacles by the route-auto loader's
+        # ``skip_nets`` retry) keeps its region with an EMPTY local set, so
+        # every routed net pays the surcharge around it.  Dropping the
+        # region instead let the hierarchical retry route the requested
+        # trunk straight through the body (review of #9635).
         local_nets = frozenset(pad.net for pad in comp_pads if pad.net > 0)
-        if not local_nets:
-            # Only no-connect pads: nothing routes "through" this body in a
-            # meaningful sense; leave the area unpriced.
-            continue
 
         xs = [pad.x for pad in comp_pads]
         ys = [pad.y for pad in comp_pads]

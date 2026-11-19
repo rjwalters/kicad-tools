@@ -201,18 +201,20 @@ def _overlapping_bodies_board(force_python: bool, swap_insertion_order: bool = F
 def _python_charge_map(finder, net: int) -> dict[tuple[int, int, int], float]:
     """Summed per-cell under-body charge the Python A* adds for ``net``.
 
-    Computed from the engine's own state (mask array + per-net non-local
-    bitmask) exactly the way the hot loop does: one penalty per covering
-    region the net is not local to.
+    Computed from the engine's own state (mask planes + per-net non-local
+    bitmasks) exactly the way the hot loop does: one penalty per covering
+    region the net is not local to, summed across planes.
     """
-    masks = finder._under_body_mask_array()
-    assert masks is not None
-    nonlocal_mask, penalty = finder._under_body_net_state(net)
+    planes = finder._under_body_mask_planes()
+    assert planes is not None
+    nonlocal_masks, penalty = finder._under_body_net_state(net)
     charge: dict[tuple[int, int, int], float] = {}
-    for layer, gy, gx in zip(*np.nonzero(masks), strict=True):
-        cover = int(masks[layer, gy, gx]) & nonlocal_mask
-        if cover:
-            charge[(int(layer), int(gy), int(gx))] = cover.bit_count() * penalty
+    for plane, nonlocal_mask in zip(planes, nonlocal_masks, strict=True):
+        for layer, gy, gx in zip(*np.nonzero(plane), strict=True):
+            cover = int(plane[layer, gy, gx]) & nonlocal_mask
+            if cover:
+                key = (int(layer), int(gy), int(gx))
+                charge[key] = charge.get(key, 0.0) + cover.bit_count() * penalty
     return charge
 
 
@@ -229,6 +231,42 @@ def _cpp_charge_map(finder: CppPathfinder, net: int) -> dict[tuple[int, int, int
                 key = (int(budget.layer), gy, gx)
                 charge[key] = charge.get(key, 0.0) + float(budget.overflow_penalty)
     return charge
+
+
+def _many_bodies_board(count: int, force_python: bool, reverse: bool = False) -> Autorouter:
+    """``count`` disjoint QFN-class bodies (four 0.5mm-pitch pads each).
+
+    Bodies tile an 8-column grid with enough spacing that their
+    margin-grown regions stay disjoint; every body carries four private
+    nets, so ``TRUNK_NET`` is local to none of them.
+    """
+    router = Autorouter(width=38.0, height=36.0, force_python=force_python)
+    bodies: list[tuple[str, list[dict]]] = []
+    for idx in range(count):
+        col = idx % 8
+        row = idx // 8
+        x0 = 2.0 + col * 4.0
+        y0 = 2.0 + row * 3.5
+        pads: list[dict] = []
+        for k, (dx, dy) in enumerate(((0.0, 0.0), (0.5, 0.0), (0.0, 0.5), (0.5, 0.5))):
+            net = 2000 + idx * 4 + k
+            pads.append(
+                {
+                    "number": f"{k + 1}",
+                    "x": x0 + dx,
+                    "y": y0 + dy,
+                    "net": net,
+                    "net_name": f"B{net}",
+                    "width": QFN_PAD_SIZE,
+                    "height": QFN_PAD_SIZE,
+                }
+            )
+        bodies.append((f"U{idx + 1}", pads))
+    if reverse:
+        bodies.reverse()
+    for ref, pads in bodies:
+        router.add_component(ref, pads)
+    return router
 
 
 def _segment_crosses_body(x1: float, y1: float, x2: float, y2: float, step: float = 0.05) -> bool:
@@ -315,6 +353,25 @@ class TestRegionDerivation:
         regions = router.grid.under_body_surcharges
         assert [r.ref for r in regions] == ["U1"]
 
+    def test_all_net0_pads_still_get_a_region(self) -> None:
+        """The route-auto ``skip_nets`` shape: every U1 pad lands as net 0
+        (real nets withheld as net-0 obstacles by the loader).  The region
+        must survive with an EMPTY local set -- dropping it let the
+        requested trunk route straight through the body at zero cost
+        (review of #9635)."""
+        router = _qfn_board(force_python=True)
+        netless: list[dict] = []
+        for pad in _qfn_pad_columns(QFN_LEFT_X, QFN_RIGHT_X, 1):
+            netless.append({**pad, "net": 0, "net_name": ""})
+        router.add_component("U9", netless)
+        regions = router.grid.under_body_surcharges
+        by_ref = {r.ref: r for r in regions}
+        assert "U9" in by_ref
+        assert by_ref["U9"].local_nets == frozenset()
+        # A mixed component (one real net + net-0 pads) only exempts the
+        # real net.
+        assert by_ref["U1"].local_nets == set(range(1, 2 * QFN_ROWS + 1))
+
     def test_region_cache_invalidated_by_new_pads(self) -> None:
         router = _qfn_board(force_python=True)
         assert len(router.grid.under_body_surcharges) == 1
@@ -341,8 +398,8 @@ class TestRegionDerivation:
         router = _qfn_board(force_python=True)
         assert router.grid.under_body_surcharges  # regions exist
         router.rules.cost_under_body = 0.0
-        mask = router.router._under_body_mask_array()
-        assert mask is None
+        planes = router.router._under_body_mask_planes()
+        assert planes is None
 
     def test_region_covers_cell_helper(self) -> None:
         region = BodySurchargeRegion(
@@ -366,6 +423,7 @@ class TestRegionDerivation:
 
 
 class TestLocalNetExemption:
+    @requires_cpp
     def test_cpp_budgets_empty_for_local_net(self) -> None:
         router = _qfn_board(force_python=False)
         finder = router.router
@@ -384,16 +442,18 @@ class TestLocalNetExemption:
     def test_python_state_exempts_local_net(self) -> None:
         router = _qfn_board(force_python=True)
         finder = router.router
-        mask = finder._under_body_mask_array()
-        assert mask is not None
-        nonlocal_mask, penalty = finder._under_body_net_state(TRUNK_NET)
-        assert nonlocal_mask == 1  # region 1's bit: the trunk is non-local
+        planes = finder._under_body_mask_planes()
+        assert planes is not None and len(planes) == 1
+        mask = planes[0]
+        nonlocal_masks, penalty = finder._under_body_net_state(TRUNK_NET)
+        assert nonlocal_masks == (1,)  # region 1's bit: the trunk is non-local
         assert penalty == pytest.approx(finder.rules.cost_under_body * finder.rules.cost_straight)
         # The body cells carry the region's bit.
         assert mask[0, int(16.0 / 0.1), int(20.0 / 0.1)] == 1
         nonlocal1, _ = finder._under_body_net_state(1)
-        assert nonlocal1 == 0  # U1's own net is exempt
+        assert nonlocal1 == (0,)  # U1's own net is exempt
 
+    @requires_cpp
     def test_charge_maps_identical_between_backends(self) -> None:
         """The summed per-cell under-body charge must be identical between
         the engines on a board with two OVERLAPPING body regions: the C++
@@ -444,6 +504,71 @@ class TestLocalNetExemption:
             charge_a = _python_charge_map(router_a.router, net)
             charge_b = _python_charge_map(router_b.router, net)
             assert charge_a == charge_b, f"net {net}: charge map changed with add order"
+
+
+# ---------------------------------------------------------------------------
+# Boards with more fine-pitch bodies than one bitmask plane (>64)
+# ---------------------------------------------------------------------------
+
+
+class TestManyFinePitchBodiesNoCap:
+    """Boards with more fine-pitch bodies than one int64 bitmask plane
+    (review of #9635): the Python 64-region slice left body 65+ unpriced
+    AND made the charged set depend on component insertion order, while
+    the C++ budget adapter installs every region.  Every region must stay
+    priced on both engines."""
+
+    @pytest.mark.parametrize("count,expected_planes", [(64, 1), (65, 2)])
+    def test_plane_count_at_the_64_65_boundary(self, count: int, expected_planes: int) -> None:
+        router = _many_bodies_board(count, force_python=True)
+        finder = router.router
+        assert len(finder._under_body_regions()) == count
+        planes = finder._under_body_mask_planes()
+        assert planes is not None
+        assert len(planes) == expected_planes
+        # Cache identity on the unchanged grid: consecutive calls return
+        # the SAME tuple (the truncating slice defeated the identity check
+        # and rebuilt different planes on every call).
+        assert finder._under_body_mask_planes() is planes
+
+    def test_unrelated_net_charged_in_every_body_beyond_64(self) -> None:
+        router = _many_bodies_board(65, force_python=True)
+        finder = router.router
+        penalty = finder.rules.cost_under_body * finder.rules.cost_straight
+        charge = _python_charge_map(finder, TRUNK_NET)
+        regions = finder._under_body_regions()
+        # Every region's centre cell carries exactly one penalty for a net
+        # local to no body -- including the 65th, which the old 64-region
+        # slice left free in one insertion order and priced in the other.
+        for region in regions:
+            cx = (region.gx1 + region.gx2) // 2
+            cy = (region.gy1 + region.gy2) // 2
+            assert charge.get((0, cy, cx), 0.0) == pytest.approx(penalty), region.ref
+        # Complete coverage: the regions are disjoint, so the charged cell
+        # count is exactly the summed region area over both outer layers.
+        expected_cells = sum(
+            (r.gx2 - r.gx1 + 1) * (r.gy2 - r.gy1 + 1) * len(r.layers) for r in regions
+        )
+        assert len(charge) == expected_cells
+
+    def test_beyond_64_charge_is_insertion_order_independent(self) -> None:
+        router_a = _many_bodies_board(65, force_python=True)
+        router_b = _many_bodies_board(65, force_python=True, reverse=True)
+        charge_a = _python_charge_map(router_a.router, TRUNK_NET)
+        charge_b = _python_charge_map(router_b.router, TRUNK_NET)
+        assert charge_a == charge_b
+
+    @requires_cpp
+    def test_beyond_64_charge_matches_cpp(self) -> None:
+        py_finder = _many_bodies_board(65, force_python=True).router
+        cpp_finder = _many_bodies_board(65, force_python=False).router
+        assert isinstance(cpp_finder, CppPathfinder)
+        # The C++ adapter installs EVERY region (one budget per region per
+        # outer layer) -- the parity the Python mirror must hold beyond
+        # the 64th body too.
+        budgets = cpp_finder._under_body_budgets_for_net(TRUNK_NET)
+        assert len(budgets) == 65 * 2
+        assert _python_charge_map(py_finder, TRUNK_NET) == _cpp_charge_map(cpp_finder, TRUNK_NET)
 
 
 # ---------------------------------------------------------------------------
@@ -605,9 +730,13 @@ class TestRouteAutoAvoidsBody:
         from kicad_tools.schema.pcb import PCB
 
         routed = PCB.load(str(out))
-        for seg in routed.segments:
-            if getattr(seg, "net", None) != TRUNK_NET:
-                continue
+        # The parsed Segment exposes ``net_number`` / ``start`` / ``end``
+        # (schema/pcb.py): the earlier ``getattr(seg, "net", ...)`` filter
+        # matched nothing, so the body-crossing check below never ran
+        # (review of #9635).
+        trunk_segments = [s for s in routed.segments if s.net_number == TRUNK_NET]
+        assert trunk_segments, "the saved board must contain trunk copper"
+        for seg in trunk_segments:
             assert not _segment_crosses_body(
-                float(seg.x1), float(seg.y1), float(seg.x2), float(seg.y2)
+                float(seg.start[0]), float(seg.start[1]), float(seg.end[0]), float(seg.end[1])
             ), f"route-auto put trunk copper through the body: {seg}"
