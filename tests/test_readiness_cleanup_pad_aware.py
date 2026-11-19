@@ -263,15 +263,16 @@ class TestRewriteKeepsPadEscapes:
         new = [_seg(90.0, 50.0, 110.0, 50.0, layer=Layer.B_CU)]
         assert not rewrite_keeps_pad_escapes(old, new, zones, TOL)
 
-    def test_same_net_skirt_crossing_is_allowed(self):
-        """The boundary the Kelvin suite pins (Issue #9524 AC4): new same-net
-        copper may clip an opening's corner when every endpoint stays outside
-        it and the copper misses the pad centre -- the optimizer's corner
-        chamfer landing on a sibling branch's route, pre-existing behaviour."""
+    def test_same_net_crossing_without_terminating_is_vetoed(self):
+        """A same-net crossing that keeps every endpoint outside the opening
+        and misses the pad centre is still a ``same-net pass-through``
+        exposure once its copper enters the opening: vetoed (the re-review
+        of #9524 measured exactly this shape -- the optimizer's corner
+        chamfer running across a sibling pad -- as a new exposure)."""
         zones = [_zone(100.0, 50.0)]
         old = [_seg(95.0, 56.5, 105.0, 46.5)]  # misses the opening entirely
         new = [_seg(95.0, 56.0, 105.0, 46.0)]  # clips the corner, misses centre
-        assert rewrite_keeps_pad_escapes(old, new, zones, TOL)
+        assert not rewrite_keeps_pad_escapes(old, new, zones, TOL)
 
     def test_same_net_straightened_across_pad_centre_is_vetoed(self):
         """The SMD shape of AC1: straightened copper across a same-net pad
@@ -483,6 +484,46 @@ PASS_THROUGH_BOARD = _BOARD.format(n1a="99 50", n1b="100 50", n1c="100 50", n1d=
 # plus an inert segment away from every pad.
 CLEAN_BOARD = _BOARD.format(n1a="102 52", n1b="100 50", n1c="120 55", n1d="124 55")
 
+# A sibling same-net pad whose opening sits inside the sweep of the N1
+# corner's 0.5 mm chamfer: the corner (100,50) chamfers to (99.5,50)--
+# (100,50.5), crossing PAD_SIB's opening [99.35,99.75] x [50.1,50.5] while
+# both chamfer endpoints stay outside it and the copper misses the pad
+# centre by ~0.177 mm -- the re-review's measured ``same-net pass-through``
+# shape.  The terminating entry keeps the pad a genuine sibling terminal.
+CHAMFER_SWEEP_BOARD = """\
+(kicad_pcb
+\t(version 20240108)
+\t(generator "test")
+\t(generator_version "8.0")
+\t(general (thickness 1.6) (legacy_teardrops no))
+\t(paper "A4")
+\t(layers
+\t\t(0 "F.Cu" signal)
+\t\t(31 "B.Cu" signal)
+\t\t(44 "Edge.Cuts" user)
+\t)
+\t(setup (pad_to_mask_clearance 0))
+\t(net 0 "")
+\t(net 1 "N1")
+\t(gr_rect (start 90 30) (end 160 80)
+\t\t(stroke (width 0.1) (type default))
+\t\t(fill none) (layer "Edge.Cuts") (uuid "edge-rect"))
+\t(footprint "PAD_SIB"
+\t\t(layer "F.Cu") (uuid "fp-pad-sib")
+\t\t(at 99.55 50.3)
+\t\t(property "Reference" "S1" (at 0 -1.5) (layer "F.SilkS") (uuid "ref-s1"))
+\t\t(property "Value" "X" (at 0 1.5) (layer "F.Fab") (uuid "val-s1"))
+\t\t(pad "1" smd rect (at 0 0) (size 0.4 0.4) (layers "F.Cu" "F.Paste" "F.Mask")
+\t\t\t(net 1 "N1")))
+\t(segment (start 94 50) (end 100 50) (width 0.25) (layer "F.Cu") (net 1)
+\t\t(uuid "seg-n1-leg-a"))
+\t(segment (start 100 50) (end 100 56) (width 0.25) (layer "F.Cu") (net 1)
+\t\t(uuid "seg-n1-leg-b"))
+\t(segment (start 99.55 52) (end 99.55 50.3) (width 0.25) (layer "F.Cu") (net 1)
+\t\t(uuid "seg-n1-sib"))
+)
+"""
+
 
 def _sheet_absolute_zones(pcb_path: Path) -> list[PadMaskZone]:
     """Zones in the segment-text coordinate space (schema + board origin)."""
@@ -553,6 +594,32 @@ class TestCleanupChainKeepsPadEscapes:
                 assert ((99.0, 50.0), (101.0, 50.0)) not in by_ends
             # Behaviour away from pads is unchanged: the far pair merges.
             assert ((110.0, 60.0), (114.0, 60.0)) in by_ends
+
+    def test_optimize_traces_chamfer_sweep_over_sibling_pad_does_not_grow_exposure(self, tmp_path):
+        """AC3 regression (the #9524 re-review's finding): a corner chamfer
+        whose sweep crosses a *sibling same-net pad's* opening -- the shape
+        the removed skirt exemption let through -- is refused, so the
+        exposure count does not grow."""
+        from kicad_tools.cli import optimize_cmd
+
+        src = tmp_path / "chamfer-sweep.kicad_pcb"
+        src.write_text(CHAMFER_SWEEP_BOARD)
+        before = _exposure_count(src)
+        assert before == 0
+
+        out = tmp_path / "chamfer-sweep-out.kicad_pcb"
+        rc = optimize_cmd.main([str(src), "-o", str(out), "--format", "json", "-q"])
+        assert rc == 0
+
+        assert _exposure_count(out) <= before
+
+        segments = [seg for segs in parse_segments(out.read_text()).values() for seg in segs]
+        by_ends = {((s.x1, s.y1), (s.x2, s.y2)) for s in segments}
+        # The corner is not chamfered through the sibling pad's opening: the
+        # L keeps its corner and no diagonal replaces it.
+        assert ((94.0, 50.0), (100.0, 50.0)) in by_ends
+        assert ((100.0, 50.0), (100.0, 56.0)) in by_ends
+        assert all(abs(s.x1 - s.x2) < 0.01 or abs(s.y1 - s.y2) < 0.01 for s in segments)
 
     def test_prune_snaps_onto_pad_centre_and_leaves_escape_alone(self, tmp_path):
         """AC2 (prune side) + AC3: the N3 spur snaps onto its own pad centre

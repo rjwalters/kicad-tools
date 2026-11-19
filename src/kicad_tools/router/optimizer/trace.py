@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 
 from ..layers import Layer
 from ..pairwise_clearance import (
@@ -501,6 +502,10 @@ class TraceOptimizer:
         # Issue #9524: pad mask-opening zones (all nets), set by
         # ``set_pad_zones``; a rewrite may not break a pad's mask-clean escape.
         self._pad_zones: list[PadMaskZone] = []
+        # True only inside :meth:`defer_pad_guard`: the Kelvin board gate
+        # (#6889) vets a branch rewrite before the pad guard re-applies to
+        # what it accepts, so its report still fires when both would refuse.
+        self._pad_guard_deferred = False
         self._protected_vertices: list[tuple[float, float]] = []
 
         # Initialize via optimizer with matching config
@@ -657,13 +662,41 @@ class TraceOptimizer:
         self._other_copper = []
         return all_optimized
 
+    def defer_pad_guard(self) -> AbstractContextManager[None]:
+        """Suspend :meth:`_keeps_pad_escapes` for the wrapped call (issue #9524).
+
+        The Kelvin board gate vets a branch rewrite *before* the pad guard:
+        while deferred, ``optimize_segments`` returns the proposal the passes
+        actually want, so the Kelvin gate sees -- and, when it refuses,
+        reports -- rewrites that would also break a pad escape.  The caller
+        re-applies the pad guard to whatever the Kelvin gate accepts; the
+        guard is never skipped, only re-ordered.
+        """
+        return self._Deferral(self)
+
+    class _Deferral:
+        """Instance-state deferral (re-entrant by saving/restoring)."""
+
+        def __init__(self, optimizer: TraceOptimizer) -> None:
+            self._optimizer = optimizer
+
+        def __enter__(self) -> None:
+            self._prev = self._optimizer._pad_guard_deferred
+            self._optimizer._pad_guard_deferred = True
+
+        def __exit__(self, *exc: object) -> None:
+            self._optimizer._pad_guard_deferred = self._prev
+
     def _keeps_pad_escapes(self, old: list[Segment], new: list[Segment]) -> bool:
         """True if *new* does not break a pad's mask-clean escape (Issue #9524).
 
         Delegates to :func:`~.geometry.rewrite_keeps_pad_escapes` over the
         zones registered via :meth:`set_pad_zones`; always True when none
-        were set.
+        were set, and while :meth:`defer_pad_guard` has the guard suspended
+        (the Kelvin gate's caller re-applies it to what it accepts).
         """
+        if self._pad_guard_deferred:
+            return True
         if not self._pad_zones or not old or old == new:
             return True
         return rewrite_keeps_pad_escapes(old, new, self._pad_zones, self.config.tolerance)
@@ -994,6 +1027,12 @@ class TraceOptimizer:
             dry_run=dry_run,
             on_net_optimized=on_net_optimized,
             net_anchors_by_name=net_anchors_by_name,
+            # Issue #9524: on a Kelvin net the board gate vets a branch
+            # rewrite first (its veto is the reportable one); the pad guard
+            # is deferred around its proposal and re-applied to what it
+            # accepts, never skipped.
+            pad_guard=self._keeps_pad_escapes,
+            defer_pad_guard=self.defer_pad_guard,
         )
 
     # =========================================================================

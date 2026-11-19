@@ -115,8 +115,11 @@ def test_rewrite_onto_another_terminals_pad_is_rejected(tmp_path, capsys):
     assert "Kelvin branch isolation: 1 route(s)" in capsys.readouterr().err
 
 
-def test_non_kelvin_board_unchanged(tmp_path):
-    """An ordinary net with the same copper is optimized exactly as before."""
+def test_non_kelvin_board_no_kelvin_gate(tmp_path, capsys):
+    """An ordinary net gets no Kelvin gate (no advisory), and the chamfer
+    through U1's pad opening is refused by the pad-escape guard (#9524):
+    the net stays two branches near that pad."""
     text = star_pcb("PWM_TEST")
     out = _optimize(tmp_path, text)
-    assert branch_count(out, "PWM_TEST") == 1  # same-net merge is fine here
+    assert branch_count(out, "PWM_TEST") == 2
+    assert "Kelvin branch isolation" not in capsys.readouterr().err
