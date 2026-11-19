@@ -604,6 +604,20 @@ def _doubled_ampacity_pcb(width_b: float, width_f: float) -> PCB:
     return pcb
 
 
+def _same_layer_doubled_ampacity_pcb(width: float, offset: float) -> PCB:
+    """The issue #9542 shape: one straight F.Cu track plus a stepped F.Cu
+    copy ``offset`` mm sideways, overlapping it along the whole run."""
+    pcb = PCB.create(width=100, height=100, center=False)
+    _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+    _add_pad_footprint(pcb, ref="J2", x=32, y=50, net="NET1")
+    y = 50 - offset
+    pcb.add_trace(("J1", "1"), ("J2", "1"), width=width, layer="F.Cu", net="NET1")
+    pcb.add_trace(("J1", "1"), (22, y), width=width, layer="F.Cu", net="NET1")
+    pcb.add_trace((22, y), (30, y), width=width, layer="F.Cu", net="NET1")
+    pcb.add_trace((30, y), ("J2", "1"), width=width, layer="F.Cu", net="NET1")
+    return pcb
+
+
 class TestDoubledCopper:
     def test_doubled_pair_meeting_summed_requirement_passes(self) -> None:
         # 15 A needs ~6.29 mm at 2 oz; 2 x 3.5 mm carries it, 1 x 3.5 mm would not.
@@ -633,6 +647,27 @@ class TestDoubledCopper:
         pcb.add_trace(("J1", "1"), ("J2", "1"), width=3.5, layer="B.Cu", net="NET1")
         rule = PathAmpacityRule(specs=[_trunk_spec(15.0)])
         assert rule.check(pcb, _design_rules_2oz()).errors
+
+
+class TestSameLayerDoubledCopper:
+    """Overlapping same-layer tracks are one conductor of merged width (#9542)."""
+
+    def test_overlapping_pair_passes_at_merged_width(self) -> None:
+        # 15 A needs ~6.29 mm at 2 oz; the merged bar is 3.0 + 2 x 1.75 = 6.5 mm.
+        rule = PathAmpacityRule(specs=[_trunk_spec(15.0)])
+        results = rule.check(_same_layer_doubled_ampacity_pcb(3.5, 3.0), _design_rules_2oz())
+        assert results.errors == []
+
+    def test_overlapping_pair_is_judged_on_merged_not_summed_width(self) -> None:
+        # Merged 1.0 + 2 x 1.75 = 4.5 mm is under the ~6.29 mm requirement,
+        # even though the summed-width reading (2 x 3.5 mm) would pass.
+        rule = PathAmpacityRule(specs=[_trunk_spec(15.0)])
+        results = rule.check(_same_layer_doubled_ampacity_pcb(3.5, 1.0), _design_rules_2oz())
+        assert len(results.errors) == 1
+        message = results.errors[0].message
+        assert "parallel group" in message
+        assert "merged width 4.500mm" in message
+        assert "summed width" not in message
 
 
 # --------------------------------------------------------------------------

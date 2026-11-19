@@ -264,7 +264,7 @@ BLOCKED_DEVELOPMENT_CHECKPOINT = (
     REPO_ROOT / "boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb"
 )
 BLOCKED_DEVELOPMENT_CHECKPOINT_SHA256 = (
-    "aa07b0a4a277ab569cfb66f56225c94c67fe0424457bf097eac63c600acc95e3"
+    "2d82bb1bb9df65cf373bb9c62aa41ea64acba686f44abc4aede7e16d74842f45"
 )
 
 ARTIFACTS = [

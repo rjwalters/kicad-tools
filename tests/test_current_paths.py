@@ -1200,6 +1200,26 @@ def _test_point_stub_pcb(*, stub_layers: tuple[str, ...] = ("F.Cu",)):
     return pcb
 
 
+def _same_layer_bars_pcb(*offsets: float, width: float = 1.0, straight_width: float | None = None):
+    """J1 (20,50) -> J2 (32,50): a straight F.Cu track plus one stepped F.Cu
+    copy per ``offset`` -- each steps sideways, runs parallel, and rejoins at
+    the pad, the reporter's widened-conductor shape (issue #9542). The copies
+    overlap the straight track (one contiguous bar) while ``offset`` is under
+    half the summed widths, and sit behind a real gap beyond it."""
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.create(width=100, height=100, center=False)
+    _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+    _add_pad_footprint(pcb, ref="J2", x=32, y=50, net="NET1")
+    pcb.add_trace((20, 50), (32, 50), width=straight_width or width, layer="F.Cu", net="NET1")
+    for offset in offsets:
+        y = 50 - offset
+        pcb.add_trace((20, 50), (22, y), width=width, layer="F.Cu", net="NET1")
+        pcb.add_trace((22, y), (30, y), width=width, layer="F.Cu", net="NET1")
+        pcb.add_trace((30, y), (32, 50), width=width, layer="F.Cu", net="NET1")
+    return pcb
+
+
 class TestParallelGroups:
     def test_doubled_run_resolves_and_names_group(self) -> None:
         r = resolve_current_path(_doubled_pcb(), _j_spec())
@@ -1320,6 +1340,61 @@ class TestParallelGroups:
         assert tuple(r.witness["start"]) in loop_points
         assert tuple(r.witness["end"]) in loop_points
         assert tuple(r.witness["start"]) != tuple(r.witness["end"])
+
+    def test_overlapping_same_layer_pair_resolves_as_merged_copper(self) -> None:
+        """Issue #9542: two F.Cu tracks that overlap along their run between
+        the same two junctions are one piece of copper, not a loop."""
+        r = resolve_current_path(_same_layer_bars_pcb(0.6), _j_spec())
+        assert r.status == "resolved", r.reason
+        (group,) = r.parallel_groups
+        assert {branch[0].layer for branch in group.branches} == {"F.Cu"}
+        found = r.min_width
+        assert found is not None
+        # 0.6 mm centreline offset + two half-widths: 1.6 mm of merged
+        # copper, not the 2.0 mm a summed-width reading would report.
+        assert found.width_mm == pytest.approx(1.6)
+        assert found.parallel_group is True
+
+    def test_gapped_same_layer_pair_stays_ambiguous_and_names_it(self) -> None:
+        """A same-layer pair with a real gap keeps today's fail-closed
+        ambiguity, but the reason names the case and the alternatives."""
+        r = resolve_current_path(_same_layer_bars_pcb(1.6), _j_spec())
+        assert r.status == "ambiguous"
+        assert "parallel same-layer copper" in r.reason
+        assert "overlapping tracks" in r.reason and "zone" in r.reason
+        assert "two-layer parallel group" in r.reason
+        # The stepped branch reaches the witness series-merged out of path
+        # order; it must still render its true pad-to-pad span.
+        rendered = describe_witness(r.witness)
+        assert "[blocking branches: " in rendered
+        assert rendered.count("(20.000, 50.000)->(32.000, 50.000) on F.Cu") == 2
+
+    def test_touching_same_layer_pair_is_not_an_overlap(self) -> None:
+        """Offset exactly one track width: the edges meet along one line
+        with no shared area, so it stays unsupported like a gap."""
+        r = resolve_current_path(_same_layer_bars_pcb(1.0), _j_spec())
+        assert r.status == "ambiguous"
+        assert "parallel same-layer copper" in r.reason
+
+    def test_three_overlapping_same_layer_bars_resolve(self) -> None:
+        r = resolve_current_path(_same_layer_bars_pcb(0.3, 0.6), _j_spec())
+        assert r.status == "resolved", r.reason
+        (group,) = r.parallel_groups
+        assert len(group.branches) == 3
+        found = r.min_width
+        assert found is not None
+        # The extreme pair sits 0.6 mm apart: same merged extent as the pair.
+        assert found.width_mm == pytest.approx(1.6)
+
+    def test_mixed_width_overlapping_pair_merges_at_union_extent(self) -> None:
+        r = resolve_current_path(
+            _same_layer_bars_pcb(1.0, width=1.0, straight_width=2.0), _j_spec()
+        )
+        assert r.status == "resolved", r.reason
+        found = r.min_width
+        assert found is not None
+        # 1.0 mm offset + 2.0/2 + 1.0/2 = 2.5 mm of merged copper.
+        assert found.width_mm == pytest.approx(2.5)
 
 
 # --------------------------------------------------------------------------
