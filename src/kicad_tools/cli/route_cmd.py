@@ -23089,11 +23089,16 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
             retry_rc = _main_impl(retry_argv)
             if staged.is_file():
                 after = _open_nets(staged)
-        except BaseException as exc:
-            print(
-                f"  Coarser-grid retry failed ({type(exc).__name__}: {exc}); "
-                "keeping the first result"
-            )
+        except Exception as exc:
+            # Exception only: RouteDeadlineExpired and KeyboardInterrupt
+            # subclass BaseException on purpose (route_deadline.py) and must
+            # keep unwinding -- the finally below still restores the receipt
+            # and supervisor control, and the outer finally discards staging.
+            if not quiet:
+                print(
+                    f"  Coarser-grid retry failed ({type(exc).__name__}: {exc}); "
+                    "keeping the first result"
+                )
             retry_rc, after = None, before
         finally:
             route_receipt._current.set(outer_invocation)

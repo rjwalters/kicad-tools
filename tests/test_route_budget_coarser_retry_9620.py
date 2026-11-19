@@ -23,6 +23,7 @@ import pytest
 from kicad_tools.cli import route_cmd
 from kicad_tools.cli.parser import create_parser
 from kicad_tools.cli.route_cmd import _budget_retry_argv, _chain_budget_coarser_pass
+from kicad_tools.cli.route_deadline import RouteDeadlineExpired
 from kicad_tools.mcp.tools.routing import _resolve_route_auto_grid
 from kicad_tools.router.stuck_classifier import write_search_failures_sidecar
 
@@ -146,6 +147,32 @@ def test_exception_in_retry_restores_output(board, monkeypatch):
     monkeypatch.setattr(route_cmd, "_main_impl", boom)
     assert _chain_budget_coarser_pass(_args(board), None, 2) == 2
     assert board.read_text() == "negotiated"
+
+
+@pytest.mark.parametrize(
+    "signal",
+    [RouteDeadlineExpired, KeyboardInterrupt],
+    ids=["deadline", "interrupt"],
+)
+def test_retry_propagates_deadline_and_interrupt(board, monkeypatch, signal):
+    """RouteDeadlineExpired / KeyboardInterrupt must unwind, not be swallowed.
+
+    Both subclass BaseException on purpose (route_deadline.py): no except
+    Exception handler may stop them.  The retry's except must not either --
+    a swallowed deadline would let the run continue into the chained
+    completion pass and the lint gate after --timeout expired.
+    """
+
+    def boom(argv):
+        raise signal()
+
+    _stub_open(monkeypatch, [["VCP"]])
+    monkeypatch.setattr(route_cmd, "_main_impl", boom)
+    with pytest.raises(signal):
+        _chain_budget_coarser_pass(_args(board), None, 2)
+    # -o was never touched and staging was discarded by the outer finally.
+    assert board.read_text() == "negotiated"
+    assert not board.with_name(board.stem + ".coarser" + board.suffix).exists()
 
 
 # --- kct route: the retry must NOT fire ------------------------------------
