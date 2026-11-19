@@ -240,7 +240,19 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "sub-1.0 mm fan-out vias as the hole side. A pad shape the rule "
         "cannot measure now reports `tht_smd_spacing_incomplete` at info instead of "
         "vanishing. Fab-view gated -- runs only when the effective --mfr is exactly "
-        "`jlcpcb`. Observed 5 danger.",
+        "`jlcpcb`. Observed 5 danger. Thresholds are 2.032 mm error / 3.05 mm "
+        "warning since #9421 (were 2.0 / 2.7): the fab rated two pairs at 2.00 and "
+        "2.025 mm danger that the 2.0 mm floor passed. 2.032 mm (80 mil) is the "
+        'likely real limit; the fab\'s "2.03" display fits either, so this is '
+        "one-board evidence, not confirmed. Source: jlcdfm.com Alert value panel, "
+        "read 2026-11-17/18, 4-layer, 2 oz outer copper. Same-panel values kct "
+        "does not gate: via-to-pad 0.1 / 0.15 mm (danger / warning) is "
+        "**not gated, observed** -- a single-board observation, and the "
+        "`via_at_pad_edge` advisory already warns on that geometry, so no new rule "
+        "or flag was added; pad-to-line 0.1 / 0.15 mm and mask-opening-exposing-"
+        "trace 0.08 / 0.15 mm are recorded here only. Gerber export: toggling "
+        "aperture macros changes how the fab reads pads; `kct export` writes "
+        "macros off (detail in the #8858 comment 6970004546).",
     ),
     ParityRow(
         "silkscreen_to_pad",
@@ -263,7 +275,12 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "Threshold is 0 mm, so a silk-to-hole gap narrower than JLCDFM's clearance "
         "but not touching is still unchecked, and text is tested as its bounding box "
         "rather than glyph outlines. Observed 75 danger, not reproduced against the "
-        "live tool.",
+        "live tool. Fab thresholds read 2026-11-17/18 (jlcdfm.com Alert value "
+        "panel, 4-layer, 2 oz outer copper): danger 0.13 mm / warning 0.18 mm "
+        "silk-to-hole, against kct's overlap-only threshold of 0 -- 27 kct "
+        "warnings vs 50 fab danger on that board. `SILK_HOLE_CLEARANCE_MM` is "
+        "shared with the silkscreen repair tool, so it is deliberately unchanged "
+        "(#9421).",
     ),
     ParityRow(
         "annular_ring",
