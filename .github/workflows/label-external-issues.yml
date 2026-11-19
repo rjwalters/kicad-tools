@@ -26,7 +26,7 @@ jobs:
             const username = author.login;
 
             // Verified Loom fleet GitHub App accounts (writer app ID 4486636,
-            // owned by rjwalters; reader Apps documented in
+            // owned by 2AMLogic; reader Apps documented in
             // .loom/docs/github-authentication.md, forge.identities).
             // App installation actors do not pass the user collaborator API.
             // Pin the immutable account ID as well as login/type: other bots
@@ -86,7 +86,7 @@ jobs:
               '',
               '**Note**: External issues require manual triage before being assigned. We appreciate your patience while we review your submission.',
               '',
-              'For questions or discussions, please use [GitHub Discussions](https://github.com/rjwalters/kicad-tools/discussions).',
+              'For questions or discussions, please use [GitHub Discussions](https://github.com/2AMLogic/kicad-tools/discussions).',
             ].join('\n');
             await github.rest.issues.createComment({
               owner: context.repo.owner,

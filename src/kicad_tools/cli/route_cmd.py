@@ -1852,7 +1852,7 @@ def _write_routed_pcb(
                 "reference dialect the parser could not resolve). The output "
                 f"file {output_path} was left UNCHANGED to prevent data "
                 "loss. Please report this at "
-                "https://github.com/rjwalters/kicad-tools/issues (ref #4413)."
+                "https://github.com/2AMLogic/kicad-tools/issues (ref #4413)."
             )
 
     # Atomic write: tmp file -> fsync -> rename.  Sibling-in-same-dir
