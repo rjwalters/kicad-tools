@@ -794,7 +794,9 @@ class TestConditionalNetClassRuleFloorsNewCopper:
             assert rc == 0, capsys.readouterr().out
             gap = _min_line_to_neut_pad_gap_mm(out)
             assert gap is not None, "no /LINE copper was written"
-            assert gap >= 1.0 - 0.02, f"{'explicit' if explicit else 'default'}: gap {gap:.3f}"
+            # Checker-side comparison: KiCad's own DRC flags a shortfall of
+            # ~600 nm, so allow at most 500 nm below the 1.0 mm rule (#9619).
+            assert gap >= 1.0 - 5e-4, f"{'explicit' if explicit else 'default'}: gap {gap:.4f}"
 
     def test_severity_ignore_rule_does_not_floor(self, tmp_path: Path) -> None:
         pcb = self._board(
