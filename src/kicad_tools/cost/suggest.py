@@ -17,6 +17,8 @@ if TYPE_CHECKING:
     from ..parts.models import Part
     from ..schema.bom import BOM
 
+from ..parts.models import PartCategory
+
 logger = logging.getLogger(__name__)
 
 
@@ -163,6 +165,15 @@ _RESISTANCE_DESCRIPTION = re.compile(
 )
 _RESISTANCE_SHORT_TOKEN = re.compile(r"(?<![\w.])(?:\d+(?:\.\d+)?[kKMG]|\d+[RrKkM]\d*)(?![\w.])")
 
+# Categories whose catalogue text must not be read for resistance nominals:
+# derived as "everything but RESISTOR/OTHER" so a category added to
+# ``PartCategory`` later is excluded too rather than silently parsing.
+_NON_RESISTOR_CATEGORIES = frozenset(
+    category
+    for category in PartCategory
+    if category not in (PartCategory.RESISTOR, PartCategory.OTHER)
+)
+
 
 def _resistor_core(value: str) -> tuple[str, str]:
     """Separate a parseable nominal/tolerance from whitespace annotations."""
@@ -175,21 +186,43 @@ def _resistor_core(value: str) -> tuple[str, str]:
     return value, ""
 
 
-def _candidate_resistances(part: Part) -> list[float]:
-    """Read nominal resistance without substring or MPN-number matching."""
+def resistances_in_text(text: str) -> list[float]:
+    """Return every unit-bearing resistance nominal found in free text.
+
+    Recognises ``8.2Ω``, ``2.2 ohm``, ``10kΩ`` and the short forms ``4R7`` /
+    ``4k7`` / ``10k``. Bare numbers (packages such as ``2512``, voltages, digits
+    inside a manufacturer part number) are never read as a resistance.
+    """
+    values: list[float] = []
+    multipliers = {"": 1.0, "m": 1e-3, "k": 1e3, "K": 1e3, "M": 1e6, "G": 1e9}
+    for match in _RESISTANCE_DESCRIPTION.finditer(text):
+        values.append(float(match["number"]) * multipliers[match["scale"]])
+    # Short tokens such as 4R7 or 16k are also common in catalog descriptions.
+    for match in _RESISTANCE_SHORT_TOKEN.finditer(text):
+        parsed = parse_component_value(match.group(), "R")
+        if parsed.numeric_value is not None:
+            values.append(parsed.numeric_value)
+    return values
+
+
+def candidate_resistances(part: Part) -> list[float]:
+    """Read nominal resistance without substring or MPN-number matching.
+
+    Returns ``[]`` for parts in a known non-resistor category: LED colour
+    temperatures (``6500K``), CCT ranges (``13172K~100000K``) and MOSFET
+    ``Rds(on)`` figures (``47mΩ@1.8V``) parse as ohms otherwise, and crystal
+    pages false-positive on MPN/ESR tokens (#9551). ``RESISTOR`` and ``OTHER``
+    parse as before, because ``_categorize_part`` is a description-keyword
+    heuristic and many real resistors fall through to ``OTHER``.
+    """
+    if part.category in _NON_RESISTOR_CATEGORIES:
+        return []
     values = []
     if part.value:
         parsed = parse_component_value(part.value, "R")
         if parsed.numeric_value is not None:
             values.append(parsed.numeric_value)
-    multipliers = {"": 1.0, "m": 1e-3, "k": 1e3, "K": 1e3, "M": 1e6, "G": 1e9}
-    for match in _RESISTANCE_DESCRIPTION.finditer(part.description):
-        values.append(float(match["number"]) * multipliers[match["scale"]])
-    # Short tokens such as 4R7 or 16k are also common in catalog descriptions.
-    for match in _RESISTANCE_SHORT_TOKEN.finditer(part.description):
-        parsed = parse_component_value(match.group(), "R")
-        if parsed.numeric_value is not None:
-            values.append(parsed.numeric_value)
+    values.extend(resistances_in_text(part.description))
     return values
 
 
@@ -623,7 +656,7 @@ class PartSuggester:
                     continue
 
                 if parsed.component_type == ComponentType.RESISTOR:
-                    resistances = _candidate_resistances(part)
+                    resistances = candidate_resistances(part)
                     if parsed.numeric_value is None:
                         continue
                     if not resistances or not all(

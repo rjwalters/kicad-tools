@@ -1104,6 +1104,10 @@ class WaiverMigrationItem:
     reason: str = ""
     #: Current finding keys that look like the same finding (``orphan`` items only).
     candidates: tuple[str, ...] = ()
+    #: The entry's rule produced no findings because it was inactive this run
+    #: (e.g. ``ampacity`` without a net-class-map; issue #9504) -- ``orphan``
+    #: items only.
+    rule_inactive: bool = False
 
 
 @dataclass
@@ -1116,9 +1120,31 @@ class WaiverMigrationReport:
     stale: list[WaiverMigrationItem] = field(default_factory=list)
     #: Key names no current finding (the key changed or the defect is gone).
     orphan: list[WaiverMigrationItem] = field(default_factory=list)
-    #: Keyed entries that need no migration (already current version, mistake entries, ...).
+    #: Keyed entries whose evidence-hash version predates the migratable
+    #: ``ev3`` (``ev1`` / ``ev2``): no recipe exists to recompute them, so
+    #: they are listed by key, with their version, and never touched
+    #: (Issue #9482).
+    legacy: list[WaiverMigrationItem] = field(default_factory=list)
+    #: Entries that need no migration and are not listed separately (non-keyed
+    #: legacy entries, already-current or forward versions, mistake entries,
+    #: missing hashes, ...).
     untouched: int = 0
+    #: Names of the untouched entries that have one (issue #9504): the key of
+    #: an ``ev4:``/``ev5:`` (or non-``evN``) entry, or the rule name of a
+    #: legacy ``rule``/``items`` entry. Pre-``ev3`` keys live in ``legacy``
+    #: (issue #9482), not here. Keyless malformed entries are only counted.
+    untouched_keys: list[str] = field(default_factory=list)
     written: bool = False
+
+
+def _is_pre_recipe_evidence_version(version: str) -> bool:
+    """True for ``ev1``/``ev2``: older than the oldest recomputable recipe.
+
+    Issue #9482. A forward version (``ev5``) or a non-``evN`` prefix is not
+    "pre-recipe" -- nothing here can date it, so such entries stay untouched.
+    """
+    digits = version.removeprefix("ev")
+    return digits.isdigit() and int(digits) < int(PRIOR_EVIDENCE_HASH_VERSION.removeprefix("ev"))
 
 
 def migrate_evidence_waivers(
@@ -1129,6 +1155,7 @@ def migrate_evidence_waivers(
     write: bool = False,
     tool_version: str = "",
     date: str | None = None,
+    inactive_rules: Iterable[str] = (),
 ) -> WaiverMigrationReport:
     """Re-bind ``ev3`` evidence-bound waivers in ``path`` to ``ev4`` (Issue #9454).
 
@@ -1141,18 +1168,28 @@ def migrate_evidence_waivers(
     provably unchanged, so the entry takes the finding's current hash and gains
     ``rebound_at`` / ``rebound_from`` / ``rebound_by``; reviewer, date, reason
     and issue are kept verbatim.  A differing digest is left stale; a key that
-    names no finding is reported as an orphan and never touched.
+    names no finding is reported as an orphan and never touched.  A keyed
+    entry whose hash version predates ``ev3`` (``ev1`` / ``ev2``) cannot be
+    recomputed at all: it is listed by key, with its version, and never
+    touched (Issue #9482).
 
     ``findings`` must be annotated with their current (``ev4``) evidence hash
     and must be the full, unfiltered finding set of the board.  Nothing is
     written unless ``write`` is true; a file that fails validation is never
     clobbered.  ``kct detect-mistakes`` entries (``ev3.m1:``) are not handled.
 
+    ``inactive_rules`` (issue #9504) names rules that could not produce
+    findings this run for lack of input (e.g. ``ampacity`` without a
+    net-class-map, ``path_ampacity`` without ``--current-paths``); an orphan
+    naming such a rule is reported as ``rule_inactive`` so the report can say
+    the rule was not evaluated instead of implying the key changed.
+
     Raises:
         ValueError: when the file cannot be parsed or fails validation.
     """
     if prior_context.recipe != PRIOR_EVIDENCE_HASH_VERSION:
         raise ValueError("migrate_evidence_waivers needs a prior-recipe EvidenceContext")
+    inactive = frozenset(inactive_rules)
     try:
         data = json.loads(path.read_text())
     except json.JSONDecodeError as e:
@@ -1171,13 +1208,40 @@ def migrate_evidence_waivers(
     for idx, raw in enumerate(raw_entries):
         if not (isinstance(raw, dict) and isinstance(raw.get("key"), str)):
             report.untouched += 1
+            # Issue #9504: name what we can -- a legacy ``rule``/``items``
+            # entry by its rule name; a truly malformed entry is only counted.
+            if isinstance(raw, dict):
+                rule = raw.get("rule")
+                if isinstance(rule, str) and rule:
+                    report.untouched_keys.append(f"{rule} (legacy rule/items entry)")
             continue
         old_hash = str(raw.get("evidence_hash") or "")
         key = raw["key"]
-        if evidence_hash_version(old_hash) != PRIOR_EVIDENCE_HASH_VERSION or is_mistake_rule(
-            key.split(KEY_SEPARATOR, 1)[0]
-        ):
-            report.untouched += 1
+        rule = key.split(KEY_SEPARATOR, 1)[0]
+        version = evidence_hash_version(old_hash)
+        if version != PRIOR_EVIDENCE_HASH_VERSION or is_mistake_rule(rule):
+            if (
+                not is_mistake_rule(rule)
+                and version is not None
+                and "." not in version
+                and _is_pre_recipe_evidence_version(version)
+            ):
+                # Issue #9482: an ``ev1``/``ev2`` entry can never be migrated
+                # (no recomputable recipe); list it instead of counting it.
+                report.legacy.append(
+                    WaiverMigrationItem(
+                        key=key,
+                        old_hash=old_hash,
+                        reason=(
+                            f"evidence version {version} predates {PRIOR_EVIDENCE_HASH_VERSION}"
+                            " (the oldest recipe this build can recompute); re-waive the"
+                            " finding or delete the entry"
+                        ),
+                    )
+                )
+            else:
+                report.untouched += 1
+                report.untouched_keys.append(key)
             continue
         matches = by_key.get(key, [])
         if not matches:
@@ -1189,11 +1253,18 @@ def migrate_evidence_waivers(
                 issue="",
                 key=key,
             )
+            rule_inactive = shim.rule in inactive
             report.orphan.append(
                 WaiverMigrationItem(
                     key=key,
                     old_hash=old_hash,
-                    reason="key names no current finding (the key changed or the defect is gone)",
+                    reason=(
+                        "key names no current finding and the rule was not evaluated "
+                        "in this run (its required input was absent)"
+                        if rule_inactive
+                        else "key names no current finding (the key changed or the defect is gone)"
+                    ),
+                    rule_inactive=rule_inactive,
                     candidates=tuple(
                         _path_ampacity_layer_candidates(shim, current)
                         or _rewaive_candidates(shim, current)
@@ -1243,15 +1314,21 @@ def migrate_evidence_waivers(
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    """Write via a same-directory temp file and ``os.replace`` (no truncated file)."""
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    """Write via a same-directory temp file and ``os.replace`` (no truncated file).
+
+    Issue #9504: ``path`` is resolved first (``os.path.realpath``) and the
+    temp file is created beside the *target*, so a symlinked waivers file is
+    updated through its link instead of being replaced by a regular file.
+    """
+    target = Path(os.path.realpath(path))
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as fh:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
-        shutil.copymode(path, tmp)
-        os.replace(tmp, path)
+        shutil.copymode(target, tmp)
+        os.replace(tmp, target)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
@@ -1264,7 +1341,8 @@ def format_waiver_migration(report: WaiverMigrationReport, path: Path, *, write:
         f"Waiver migration ({PRIOR_EVIDENCE_HASH_VERSION} -> {EVIDENCE_HASH_VERSION}) for {path}"
         + ("" if write else " [dry-run: no file changed; add --write to apply]"),
         f"  {verb}: {len(report.migrated)}   stale (left alone): {len(report.stale)}"
-        f"   orphan (left alone): {len(report.orphan)}   untouched: {report.untouched}",
+        f"   orphan (left alone): {len(report.orphan)}   legacy (left alone): {len(report.legacy)}"
+        f"   untouched: {report.untouched}",
     ]
     for it in report.migrated:
         lines.append(f"  {verb}: {it.key}  {it.old_hash} -> {it.new_hash}")
@@ -1272,8 +1350,14 @@ def format_waiver_migration(report: WaiverMigrationReport, path: Path, *, write:
         lines.append(f"  stale: {it.key}  ({it.old_hash}): {it.reason}")
     for it in report.orphan:
         line = f"  orphan (no current finding): {it.key}  ({it.old_hash})"
+        if it.rule_inactive:
+            line += " [rule not evaluated in this run]"
         if it.candidates:
             shown = it.candidates[:_MAX_REWAIVE_HINT_KEYS]
             line += " -> re-waive candidate(s): " + ", ".join(repr(k) for k in shown)
         lines.append(line)
+    for it in report.legacy:
+        lines.append(f"  legacy (left alone): {it.key}  ({it.old_hash}): {it.reason}")
+    for key in report.untouched_keys:
+        lines.append(f"  untouched (no migration needed): {key}")
     return lines

@@ -3041,7 +3041,11 @@ def _add_pcb_parser(subparsers) -> None:
         help="Sync PCB footprints from schematic netlist",
         description="Compare schematic components against PCB footprints. "
         "Adds missing footprints (placed at board edge), detects renamed "
-        "references, and reports orphaned footprints.",
+        "references, and reports orphaned footprints. Assigns pad nets from "
+        "the schematic netlist, annotates pad pin functions/types, and "
+        "copies schematic values onto matched footprints. Footprint lib ID "
+        "drift is reported, not swapped (kct sync --apply owns swaps); "
+        "exits 1 while a footprint difference is unresolved.",
     )
     pcb_sync_netlist.add_argument("pcb", help="Path to .kicad_pcb file")
     pcb_sync_netlist.add_argument(
@@ -3353,7 +3357,15 @@ def _add_pcb_parser(subparsers) -> None:
         dest="batch_map",
         help="JSON map for batch moves; x/y are board-relative by default "
         "(or absolute page coords with --absolute), "
-        'e.g. \'{"J2": {"x": 10, "y": 10}}\'',
+        'e.g. \'{"J2": {"x": 10, "y": 10}}\'. '
+        'An entry may add "side": "front"|"back": a part not already on that '
+        "side is flipped about its anchor first, then x/y/rotation are applied. "
+        "With a side change, rotation is the stored KiCad angle written AFTER "
+        "the flip (omitted: the flip's 180 - theta), not a front-view angle. "
+        "Explicit rotation: pads land where that same stored angle puts them "
+        "on the front (anchor-at-pad-1 diode, rotation 0: pad 2 at +7.62 mm "
+        "on either face). Omitted rotation: the 180 - theta rewrite mirrors "
+        "pads about the anchor (that diode: pad 2 at -7.62 mm)",
     )
     pcb_move_fp.add_argument(
         "-o",

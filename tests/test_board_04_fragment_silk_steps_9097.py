@@ -30,10 +30,15 @@ _BOARD = """(kicad_pcb (version 20240108) (generator "pcbnew") (generator_versio
 """
 
 
-def _seg(a: tuple[float, float], b: tuple[float, float], width: float = 0.2) -> str:
+def _seg(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    width: float = 0.2,
+    layer: str = "F.Cu",
+) -> str:
     return (
         f"  (segment (start {a[0]} {a[1]}) (end {b[0]} {b[1]}) (width {width}) "
-        f'(layer "F.Cu") (net 1) (uuid "{abs(hash((a, b))) % 10**8:08d}-0000-4000-8000-000000000000"))'
+        f'(layer "{layer}") (net 1) (uuid "{abs(hash((a, b, layer))) % 10**8:08d}-0000-4000-8000-000000000000"))'
     )
 
 
@@ -158,8 +163,10 @@ def test_merge_fragment_runs_names_the_reason_for_a_boundary_run(
     assert "no neighbour on both sides" not in out
 
 
-def test_main_wires_fragment_merge_and_silk_clip_before_the_refill() -> None:
-    """Source-pin: both steps run after the staircase pass and before ``fill_zones``."""
+def test_main_wires_fragment_merge_and_silk_gate_before_the_refill() -> None:
+    """Source-pin: the merge and the silk-vs-hole gate run after the staircase pass
+    and before ``fill_zones``; the via slide runs ahead of every copper-tidy pass
+    (Issue #9455), and no step edits footprint silk (#5744)."""
     source = RECIPE.read_text()
     main_body = source[source.index("def main()") :]
     order = [
@@ -167,8 +174,155 @@ def test_main_wires_fragment_merge_and_silk_clip_before_the_refill() -> None:
         for call in (
             "compress_staircases(routed_path)",
             "merge_fragment_runs(routed_path)",
-            "clip_silk_to_holes(routed_path)",
+            "check_silk_clear_of_holes(routed_path)",
             "fill_zones(routed_path)",
         )
     ]
     assert order == sorted(order)
+    assert main_body.index("slide_vias_off_silk(routed_path)") < main_body.index(
+        "quantize_escapes(routed_path)"
+    )
+    assert "repair_silkscreen import" not in source  # nothing edits footprint silk
+
+
+# --- slide_vias_off_silk / check_silk_clear_of_holes behaviour (Issue #9540) ---
+#
+# The source-pin above only proves wiring; these tests execute the silk steps
+# on a ~20-line synthetic board (no routing).  The fixture: footprint J1 at
+# (54, 50) carries horizontal 0.12 mm F.SilkS strokes through the footprint
+# origin, and a 0.3 mm drill via sits on it.  A drill clears a stroke only
+# from more than 0.15 + 0.06 = 0.21 mm away, so the nearest clearing grid
+# point of the 0.05 mm slide grid is 0.25 mm off the stroke.
+
+_BAR_AT = (54.0, 50.0)
+
+
+def _silk_fp(at: tuple[float, float], dys: tuple[float, ...] = (0.0,)) -> str:
+    """Footprint J1 whose only silk is horizontal 0.12 mm strokes at local dy offsets."""
+    strokes = "\n".join(
+        f"    (fp_line (start -1.5 {dy}) (end 1.5 {dy})"
+        f' (stroke (width 0.12) (type solid)) (layer "F.SilkS")'
+        f' (uuid "{abs(hash(("silk", dy))) % 10**8:08d}-0000-4000-8000-000000000000"))'
+        for dy in dys
+    )
+    return (
+        f'  (footprint "Test:SilkBar" (layer "F.Cu")'
+        f' (uuid "{abs(hash(("fp", dys))) % 10**8:08d}-0000-4000-8000-000000000000")\n'
+        f"    (at {at[0]} {at[1]})\n"
+        f'    (property "Reference" "J1" (at 0 -3) (layer "F.Fab")\n'
+        f"      (effects (font (size 1 1) (thickness 0.15))))\n"
+        f"{strokes}\n  )\n"
+    )
+
+
+def _silk_via(x: float, y: float) -> str:
+    return (
+        f'  (via (at {x} {y}) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1)'
+        f' (uuid "{abs(hash(("via", x, y))) % 10**8:08d}-0000-4000-8000-000000000000"))\n'
+    )
+
+
+def _bar_items() -> str:
+    """One 0.12 mm stroke over the via, plus its F.Cu feed."""
+    return _silk_fp(_BAR_AT) + _silk_via(54.0, 50.0) + _seg((54.0, 50.0), (56.0, 50.0))
+
+
+def _silk_projection(pcb) -> list[tuple[str, str, str]]:
+    from kicad_tools.validate.rules.silkscreen import _iter_silk_geometries
+
+    return [
+        (side, label, geom.wkt)
+        for side, geom, label, _loc, _layer, _uuid in _iter_silk_geometries(pcb)
+    ]
+
+
+def test_slide_moves_the_via_to_the_nearest_clearing_grid_point(recipe, tmp_path: Path) -> None:
+    """The slide scan is nearest grid point first: +x/-x are tried before +y, but
+    both stay under the 1.5 mm stroke until 0.25 mm out, so the via lands on
+    +y at the first clearing k: (54, 50) -> (54, 50.25)."""
+    from kicad_tools.schema.pcb import PCB
+
+    pcb_path = tmp_path / "slide.kicad_pcb"
+    pcb_path.write_text(_BOARD.format(items=_bar_items()))
+
+    assert recipe["slide_vias_off_silk"](pcb_path) is True
+
+    (via,) = PCB.load(pcb_path).vias
+    assert via.position == pytest.approx((54.0, 50.25))
+
+
+def test_slide_never_edits_footprint_silk(recipe, tmp_path: Path) -> None:
+    """The #5744 invariant this step exists to keep: routing moves the copper,
+    footprint ink keeps its count and geometry stroke for stroke."""
+    from kicad_tools.schema.pcb import PCB
+
+    pcb_path = tmp_path / "silk_intact.kicad_pcb"
+    pcb_path.write_text(_BOARD.format(items=_bar_items()))
+    before = _silk_projection(PCB.load(pcb_path))
+    assert len(before) == 1  # the fixture has exactly one silk element
+
+    assert recipe["slide_vias_off_silk"](pcb_path) is True
+
+    assert _silk_projection(PCB.load(pcb_path)) == before
+
+
+def test_boxed_in_via_has_no_legal_slide_and_stays_put(
+    recipe, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Strokes every 0.35 mm leave no candidate 0.21 mm clear of them all, so the
+    step reports False and leaves both the via and the copper untouched."""
+    from kicad_tools.schema.pcb import PCB
+
+    items = _silk_fp(_BAR_AT, dys=(0.0, -0.35, 0.35, -0.7, 0.7)) + _silk_via(54.0, 50.0)
+    pcb_path = tmp_path / "boxed_in.kicad_pcb"
+    pcb_path.write_text(_BOARD.format(items=items))
+
+    assert recipe["slide_vias_off_silk"](pcb_path) is False
+
+    board = PCB.load(pcb_path)
+    (via,) = board.vias
+    assert via.position == pytest.approx((54.0, 50.0))
+    assert board.segments == []  # no bridging stub for a via that never moved
+    assert "has no legal slide off the silk" in capsys.readouterr().out
+
+
+def test_gate_flags_before_and_clears_after_the_slide(recipe, tmp_path: Path) -> None:
+    """``check_silk_clear_of_holes`` is the read-only gate: False on the fixture,
+    True once the slide has moved the drill off the stroke."""
+    pcb_path = tmp_path / "gate.kicad_pcb"
+    pcb_path.write_text(_BOARD.format(items=_bar_items()))
+
+    assert recipe["check_silk_clear_of_holes"](pcb_path) is False
+    assert recipe["slide_vias_off_silk"](pcb_path) is True
+    assert recipe["check_silk_clear_of_holes"](pcb_path) is True
+
+
+def test_slide_bridges_old_and_new_on_each_connected_layer(recipe, tmp_path: Path) -> None:
+    """The move keeps connectivity: one stub per connected layer, from the old
+    position to the new one, at the thinnest connected track's width."""
+    from kicad_tools.schema.pcb import PCB
+
+    items = (
+        _silk_fp(_BAR_AT)
+        + _silk_via(54.0, 50.0)
+        + _seg((54.0, 50.0), (56.0, 50.0))
+        + _seg((54.0, 50.0), (52.0, 48.0), layer="B.Cu")
+    )
+    pcb_path = tmp_path / "stubs.kicad_pcb"
+    pcb_path.write_text(_BOARD.format(items=items))
+
+    assert recipe["slide_vias_off_silk"](pcb_path) is True
+
+    segments = PCB.load(pcb_path).segments
+    assert len(segments) == 4  # the two feeds + one bridging stub per layer
+    stubs = [
+        s
+        for s in segments
+        if {
+            (round(s.start[0], 4), round(s.start[1], 4)),
+            (round(s.end[0], 4), round(s.end[1], 4)),
+        }
+        == {(54.0, 50.0), (54.0, 50.25)}
+    ]
+    assert {s.layer for s in stubs} == {"F.Cu", "B.Cu"}
+    assert all(s.width == pytest.approx(0.2) for s in stubs)

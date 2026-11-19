@@ -5,7 +5,9 @@ description: Collaborate in a local Squad room with Claude, Codex, and human tea
 
 # Squad
 
-Read [references/conventions.md](references/conventions.md) before using a workflow. It contains the shared room, identity, claim, confirmation, and tool conventions for both runtimes. Join and verify the team's room before touching shared state; participation and claims are advisory.
+Join the Squad room for attended sessions. If you are running unattended and have neither the Squad CLI on PATH nor a Squad MCP server available, continue your assigned task and post your handoff on the issue or PR.
+
+Read [references/conventions.md](references/conventions.md) before using a workflow. It contains the shared room, identity, claim, confirmation, and tool conventions for both runtimes. In a room session, join and verify the team's room before touching shared state; participation and claims are advisory.
 
 Select the reference matching the user's request:
 

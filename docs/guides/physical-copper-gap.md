@@ -45,9 +45,37 @@ is judged once its drill reaches `ANCHOR_DRILL_MM` (1.0 mm, just under 18 AWG
 wire). Judging *every* via is still wrong -- it produced 176 to 1,068 findings
 per board on this repo's routed boards, against 0 to 6 at the 1.0 mm default,
 where every via drills 0.15-0.3 mm. A THT or SMD pad whose `shape` the rule
-cannot reproduce exactly (`custom`, `trapezoid`) reports
-`tht_smd_spacing_incomplete` at *info* rather than being dropped silently, so
-missing coverage never looks like a cleared pad.
+cannot reproduce exactly (`trapezoid`; a `custom` pad whose primitives the
+outline builder refuses) reports `tht_smd_spacing_incomplete` at *info* rather
+than being dropped silently, so missing coverage never looks like a cleared
+pad. A `custom` pad the builder *can* reproduce is measured by its
+anchor-plus-primitives copper (Issue #9498).
+
+`clearance_incomplete` -- the clearance rule's own finding for a refused
+`custom` pad -- is *info* by design (Issue #9539), though the sibling
+`physical_copper_gap_incomplete` is blocking for the same class of gap. The
+passes answer differently shaped questions: the physical-gap pass asserts a
+layer-wide minimum among *all* copper, so unmodelled copper would make a
+clean verdict itself unsound, and it refuses to answer rather than answer
+from a subset; the clearance rule measures pairs of known copper, so a
+refused pad degrades to its measured anchor, every pair it does report is
+still real, and the unmodelled remainder is named in the finding rather than
+silently cleared. Raising it to blocking would gate most real custom-pad
+boards on a coverage gap, not a defect: the stock-library census counted more
+refused pads than exactly-evaluated ones, the blocking incomplete on custom
+pads is itself the open report #9477 / #9528, and no tracked `boards/` file
+contains a custom pad, so neither severity changes a committed verdict. The
+residual missed-violation risk is covered by native DRC, which is the
+authority for refused primitives: on the SOT-89 fixture family kicad-cli
+reported `shorting_items` for a track overlapping a refused `gr_circle`
+primitive's copper and a `clearance` error (actual 0.150 mm against the
+0.200 mm rule) for a different track merely approaching it, while agreeing
+with `kct check` on the supported gr_poly tab (measured 2026-11-19,
+kicad-cli 10.0.7 with the pinned config tables; CI's pinned 10.0.6 image was
+unavailable on the measuring host). KiCad loads only well-formed `gr_circle`
+primitives (`center` plus `end`) -- the test fixture's centre-only token is a
+kct-test spelling kicad-cli refuses to load -- so the probe used the
+well-formed form, the only one a real board can carry.
 
 An **exposed via annulus** also counts as the "SMD" side (Issue #8925): JLCDFM
 flagged a 1.9 mm / 1.3 mm-drill anchor via 1.5 mm from an ordinary 0.8 mm /
@@ -103,11 +131,13 @@ layer; a filled-zone UUID can represent multiple boundary regions.
 The checker uses stroked track widths, modern start/mid/end copper arcs, rotated
 circle/oval/rect/roundrect pads, via copper, footprint copper polygons and stored
 filled-zone polygons. It retains source identities separately from the union. Zone
-outlines are not copper: refill zones first. Unfilled zones, custom/unsupported pad
-shapes, unsupported copper graphics and malformed arcs emit blocking
-`physical_copper_gap_incomplete` findings rather than silently claiming full
-coverage. Keepout areas do not add copper. Footprint-library metadata and unplated
-drill holes are not copper.
+outlines are not copper: refill zones first. Unfilled zones, custom pads whose
+primitives the outline builder refuses (named, with the primitive kind --
+Issue #9498; a reproducible custom pad contributes its anchor-plus-primitives
+copper), other unsupported pad shapes, unsupported copper graphics and malformed
+arcs emit blocking `physical_copper_gap_incomplete` findings rather than
+silently claiming full coverage. Keepout areas do not add copper.
+Footprint-library metadata and unplated drill holes are not copper.
 
 A footprint copper polygon (`fp_poly` on a `.Cu` layer) is modeled on the layer the
 polygon itself declares, with the footprint's placement applied: a filled polygon

@@ -73,13 +73,24 @@ def test_opt_in_and_resources_and_artifact_retention():
 @pytest.mark.parametrize("board07", ["true", "false"])
 def test_existing_workflow_command_and_failure_propagation(tmp_path, group, board07):
     # Execute the actual YAML bash body, substituting ONLY the uv executable.
-    # Its exit7 must survive serial tee pipelines and the disabled wrapper.
+    # Since issue #9340 the step delegates the check to the shared job script
+    # (scripts/ci/jobs/test.sh), so the body first runs the script's
+    # `kct build-native` (exit 0 through the fake) and then the group's
+    # check command, whose exit 7 must survive the wrapper and the serial
+    # tee pipelines.
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    args_file = tmp_path / "argv.json"
+    argv_log = tmp_path / "argv.jsonl"
     uv = bin_dir / "uv"
     uv.write_text(
-        f"#!{sys.executable}\nimport sys,json\nfrom pathlib import Path\nPath({str(args_file)!r}).write_text(json.dumps(sys.argv[1:]))\nraise SystemExit(7)\n"
+        f"#!{sys.executable}\n"
+        "import sys, json\n"
+        "from pathlib import Path\n"
+        "args = sys.argv[1:]\n"
+        f"Path({str(argv_log)!r}).open('a').write(json.dumps(args) + chr(10))\n"
+        "# The per-job script's native-backend build succeeds; every check\n"
+        "# command fails with the sentinel exit the test asserts on.\n"
+        "raise SystemExit(0 if 'build-native' in args else 7)\n"
     )
     uv.chmod(0o755)
     step = next(s for s in JOB["steps"] if s.get("name") == GROUPS[group])
@@ -98,7 +109,10 @@ def test_existing_workflow_command_and_failure_propagation(tmp_path, group, boar
         text=True,
     )
     assert result.returncode == 7, result.stdout + result.stderr
-    actual = json.loads(args_file.read_text())
+    recorded = [json.loads(line) for line in argv_log.read_text().splitlines()]
+    # First the shared script's native-backend build, then the check itself.
+    assert recorded[0][:3] == ["run", "kct", "build-native"], recorded
+    actual = recorded[-1]
     common = ["-o", "addopts=", "--benchmark-disable", "--timeout=60", "-m", "not slow"]
     expected = {
         "board05": ["run", "pytest", "tests/test_board_05_drc_allowlist.py", *common],
@@ -148,8 +162,6 @@ def test_existing_workflow_command_and_failure_propagation(tmp_path, group, boar
             "not slow and not ci_extended",
             # Issue #7327: slowest-test visibility for the time-budget step.
             "--durations=30",
-            "--junitxml",
-            str(tmp_path / "junit/bulk.xml"),
             *[
                 "--ignore=tests/" + name
                 for name in [
@@ -167,10 +179,16 @@ def test_existing_workflow_command_and_failure_propagation(tmp_path, group, boar
                     "conformance",
                 ]
             ],
+            # Issue #9340: the shared script owns the selection; the workflow
+            # step forwards the artifact path, which lands last.
+            "--junitxml",
+            str(tmp_path / "junit/bulk.xml"),
         ],
     }[group]
     if group == "bulk" and board07 != "true":
-        expected.append("--ignore=tests/test_board_07_matchgroup_test.py")
+        # The conditional ignore sits with the script's own ignore list,
+        # before the workflow-forwarded junitxml pair.
+        expected.insert(-2, "--ignore=tests/test_board_07_matchgroup_test.py")
     assert actual == expected
     assert not (tmp_path / "native-observer").exists()
 
