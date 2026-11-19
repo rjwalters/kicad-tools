@@ -452,6 +452,14 @@ class RefusedOpening:
     required_mm: float
     actual_mm: float
     obstacle_net: str = ""
+    #: Blocking feature (#9649): its copper layer, or ``"through"`` for a
+    #: plated feature on every layer (via, PTH pad).
+    obstacle_layer: str = ""
+    #: ``track`` / ``via`` / ``pad`` / ``zone`` (#9649).
+    obstacle_kind: str = ""
+    #: Board-relative point on the obstacle nearest the exposed run --
+    #: also where the leg would have to be split to open around it (#9649).
+    obstacle_at: tuple[float, float] | None = None
 
 
 @dataclass
@@ -1181,6 +1189,14 @@ class _Violation:
     required_mm: float
     actual_mm: float
     obstacle_net: str = ""
+    #: Obstacle attribution (#9649, mask-opening test only): copper layer
+    #: the blocking feature sits on, or ``"through"`` for a plated feature
+    #: that spans every layer (via, PTH pad). Empty when unattributed.
+    obstacle_layer: str = ""
+    #: ``track`` / ``via`` / ``pad`` / ``zone`` (#9649). Empty when unattributed.
+    obstacle_kind: str = ""
+    #: Board-relative point on the obstacle nearest the failing sample (#9649).
+    obstacle_at: tuple[float, float] | None = None
 
 
 @dataclass
@@ -1325,6 +1341,13 @@ class _OtherNetCopper:
     net_names: dict[int, str] = field(default_factory=dict)
     #: ``(x, y, drill_mm)`` of every via and PTH pad, same-net included.
     all_drills: list[tuple[float, float, float]] = field(default_factory=list)
+    #: Copper grouped by its own layer, then net (#9649): tracks, zone
+    #: fills and SMD pads. Read by the layer-aware mask-opening test; the
+    #: layer-agnostic anchor test keeps using ``by_net``.
+    by_layer: dict[str, dict[int, _NetCopper]] = field(default_factory=dict)
+    #: Plated features spanning every copper layer, by net (#9649): vias
+    #: and PTH pads. On the opening's creepage path whatever face it is on.
+    through: dict[int, _NetCopper] = field(default_factory=dict)
 
 
 @dataclass
@@ -1352,11 +1375,20 @@ def _collect_other_net_copper(
     def group(net_number: int) -> _NetCopper:
         return other.by_net.setdefault(net_number, _NetCopper())
 
+    def layer_group(layer: str, net_number: int) -> _NetCopper:
+        return other.by_layer.setdefault(layer, {}).setdefault(net_number, _NetCopper())
+
+    def through_group(net_number: int) -> _NetCopper:
+        return other.through.setdefault(net_number, _NetCopper())
+
     for seg in pcb.segments:
         if seg.net_number == target_net:
             continue
         (sx, sy), (ex, ey) = seg.start, seg.end
         group(seg.net_number).tracks.append(_TrackObstacle(sx, sy, ex, ey, seg.width))
+        layer_group(seg.layer, seg.net_number).tracks.append(
+            _TrackObstacle(sx, sy, ex, ey, seg.width)
+        )
 
     for via in pcb.vias:
         vx, vy = via.position
@@ -1370,6 +1402,9 @@ def _collect_other_net_copper(
         if via.net_number == target_net:
             continue
         group(via.net_number).vias.append((vx, vy, via.size, via.net_number))
+        # Every via is plated through whatever its span says (#9649): on the
+        # opening's creepage path on both faces (tenting is not tracked).
+        through_group(via.net_number).vias.append((vx, vy, via.size, via.net_number))
 
     for fp in pcb.footprints:
         for pad in fp.pads:
@@ -1384,13 +1419,26 @@ def _collect_other_net_copper(
             # Effective bounding radius of the pad (disc model).
             radius = max(pad.size) / 2.0 if pad.size else 0.0
             group(pad.net_number).pads.append((px, py, radius, pad.net_number))
+            if pad.drill > 0 or pad.type == "thru_hole" or "*.Cu" in pad.layers:
+                # Plated through (or wildcard copper): on every layer (#9649).
+                through_group(pad.net_number).pads.append((px, py, radius, pad.net_number))
+            else:
+                for pad_layer in pad.layers:
+                    if pad_layer.endswith(".Cu"):
+                        layer_group(pad_layer, pad.net_number).pads.append(
+                            (px, py, radius, pad.net_number)
+                        )
 
     for zone in pcb.zones:
         if zone.net_number == target_net:
             continue
-        for poly in zone.filled_polygons:
+        for i, poly in enumerate(zone.filled_polygons):
             if len(poly) >= 3:
-                group(zone.net_number).filled_polygons.append(_FilledPolyObstacle(list(poly)))
+                obstacle = _FilledPolyObstacle(list(poly))
+                group(zone.net_number).filled_polygons.append(obstacle)
+                layer_group(zone.filled_polygon_layer(i), zone.net_number).filled_polygons.append(
+                    obstacle
+                )
 
     return other
 
@@ -2313,19 +2361,74 @@ def _sub_polyline(
     return out
 
 
+#: Opening-test obstacle kinds in check order, mapped to the
+#: :class:`_NetCopper` list that holds them (#9649).
+_OPENING_OBSTACLE_KINDS: tuple[tuple[str, str], ...] = (
+    ("track", "tracks"),
+    ("via", "vias"),
+    ("pad", "pads"),
+    ("zone", "filled_polygons"),
+)
+
+
+def _nearest_point_on_segment(
+    p: tuple[float, float], a: tuple[float, float], b: tuple[float, float]
+) -> tuple[float, float]:
+    """The point of segment ``a``-``b`` nearest ``p``."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    seg2 = dx * dx + dy * dy
+    if seg2 <= 1e-18:
+        return a
+    t = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / seg2))
+    return (a[0] + t * dx, a[1] + t * dy)
+
+
+def _nearest_obstacle_point(
+    kind: str, group: _NetCopper, x: float, y: float
+) -> tuple[float, float] | None:
+    """Point of ``group``'s ``kind`` obstacles nearest ``(x, y)`` (#9649)."""
+    p = (x, y)
+    if kind == "track":
+        return min(
+            (
+                _nearest_point_on_segment(p, (t.start_x, t.start_y), (t.end_x, t.end_y))
+                for t in group.tracks
+            ),
+            key=lambda q: math.dist(p, q),
+            default=None,
+        )
+    if kind == "via":
+        return min(((v[0], v[1]) for v in group.vias), key=lambda q: math.dist(p, q), default=None)
+    if kind == "pad":
+        return min(((d[0], d[1]) for d in group.pads), key=lambda q: math.dist(p, q), default=None)
+    best: tuple[float, float] | None = None
+    best_d = math.inf
+    for poly in group.filled_polygons:
+        pts = [(float(px), float(py)) for px, py in poly.points]
+        for a, b in zip(pts, pts[1:] + pts[:1], strict=False):
+            q = _nearest_point_on_segment(p, a, b)
+            d = math.dist(p, q)
+            if d < best_d:
+                best, best_d = q, d
+    return best
+
+
 def _opening_violation(
     run: list[tuple[float, float]],
     exposed_width: float,
     other: _OtherNetCopper,
     policy: _ClearancePolicy,
+    layer: str,
 ) -> _Violation | None:
     """Creepage test of an exposed run, modelled as a chain of discs.
 
     The exposed copper has half-width ``exposed_width / 2``; each obstacle
     net must keep ``policy.required(net)`` (``max(class floor, creepage @
-    |dV|)`` with a voltage map) from it. Layer-agnostic like the anchor test:
-    other-net copper on the far side is treated as an obstacle too
-    (conservative).
+    |dV|)`` with a voltage map) from it. Layer-aware (#9649): only copper
+    on the opening's own face (``layer``) and through-plated features
+    (vias, PTH pads) are on the strip's creepage path -- far-side copper
+    sits under laminate, not on it. The anchor-hole test stays
+    layer-agnostic: a barrel and its fillet are on both faces.
     """
     step = max(0.05, min(_MASK_SAMPLE_STEP_MM, exposed_width / 2.0))
     samples: list[tuple[float, float]] = []
@@ -2333,18 +2436,38 @@ def _opening_violation(
         n = max(1, math.ceil(math.hypot(x1 - x0, y1 - y0) / step))
         samples.extend((x0 + (x1 - x0) * k / n, y0 + (y1 - y0) * k / n) for k in range(n))
     samples.append(run[-1])
-    for net_number, group in other.by_net.items():
+    same_face = other.by_layer.get(layer, {})
+    for net_number in other.by_net:
         net = other.net_names.get(net_number, "")
         required, rule = policy.required(net)
-        for x, y in samples:
-            if not _group_clear(x, y, exposed_width, required, group):
-                tag = (
-                    RULE_MASK_OPENING_PAIRWISE
-                    if rule == RULE_VOLTAGE_MAP_PAIRWISE
-                    else RULE_MASK_OPENING_CLEARANCE
-                )
-                gap = _actual_gap(x, y, exposed_width, required, group)
-                return _Violation(tag, required, gap, net)
+        for source, group in (
+            (layer, same_face.get(net_number)),
+            ("through", other.through.get(net_number)),
+        ):
+            if group is None:
+                continue
+            for kind, field_name in _OPENING_OBSTACLE_KINDS:
+                items = getattr(group, field_name)
+                if not items:
+                    continue
+                single = _NetCopper(**{field_name: items})
+                for x, y in samples:
+                    if not _group_clear(x, y, exposed_width, required, single):
+                        tag = (
+                            RULE_MASK_OPENING_PAIRWISE
+                            if rule == RULE_VOLTAGE_MAP_PAIRWISE
+                            else RULE_MASK_OPENING_CLEARANCE
+                        )
+                        gap = _actual_gap(x, y, exposed_width, required, single)
+                        return _Violation(
+                            tag,
+                            required,
+                            gap,
+                            net,
+                            source,
+                            kind,
+                            _nearest_obstacle_point(kind, single, x, y),
+                        )
     return None
 
 
@@ -2371,12 +2494,17 @@ def _plan_mask_opening(
     # half-width max(opening, wire diameter) / 2.
     if policy.pairwise is not None:
         exposed = max(width, bare_copper_diameter_mm(result.wire_gauge_awg))
-        v = _opening_violation(run, exposed, other, policy)
+        v = _opening_violation(run, exposed, other, policy, leg.layer)
         if v is not None:
+            obstacle = ""
+            if v.obstacle_kind:
+                obstacle = f"{v.obstacle_kind} on {v.obstacle_layer}"
+                if v.obstacle_at is not None:
+                    obstacle += f" at ({v.obstacle_at[0]:.3f}, {v.obstacle_at[1]:.3f}) mm -- "
             leg.mask_status = MASK_REFUSED
             leg.mask_reason = (
                 f"exposed run would be {v.actual_mm:.3f} mm from net {v.obstacle_net!r} "
-                f"(need {v.required_mm:.3f} mm, {v.rule}); no opening written"
+                f"({obstacle}need {v.required_mm:.3f} mm, {v.rule}); no opening written"
             )
             result.refused_openings.append(
                 RefusedOpening(
@@ -2387,6 +2515,9 @@ def _plan_mask_opening(
                     required_mm=v.required_mm,
                     actual_mm=v.actual_mm,
                     obstacle_net=v.obstacle_net,
+                    obstacle_layer=v.obstacle_layer,
+                    obstacle_kind=v.obstacle_kind,
+                    obstacle_at=v.obstacle_at,
                 )
             )
             return

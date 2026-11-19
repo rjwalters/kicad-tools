@@ -3180,6 +3180,25 @@ def _mask_lines(pcb: PCB, layer: str):
     return [g for g in pcb.graphic_lines if g.layer == layer]
 
 
+def _back_straight_run_pcb(net: str = "FUSED_LINE") -> PCB:
+    """A single straight horizontal run on the BACK copper (#9649 fixtures)."""
+    pcb = PCB.create(width=200, height=100, center=False)
+    x0, y = 20.0, 50.0
+    for i in range(4):
+        pcb.add_trace(
+            (x0 + 25.0 * i, y), (x0 + 25.0 * (i + 1), y), width=2.0, layer="B.Cu", net=net
+        )
+    return pcb
+
+
+def _hv_pairwise_table():
+    from kicad_tools.router.pairwise_clearance import build_pairwise_clearance_table
+
+    return build_pairwise_clearance_table(
+        {"FUSED_LINE": 150.0, "OTHER": 3.3}, dru=0.0, hv_threshold=30.0
+    )
+
+
 class TestMaskOpening:
     def test_straight_run_opens_full_span_on_own_side(self, tmp_path):
         pcb = _straight_run_pcb(length=100.0)
@@ -3271,6 +3290,117 @@ class TestMaskOpening:
         assert ref.actual_mm < required
         assert ref.obstacle_net == "OTHER"
         assert result.legs[0].mask_status == "refused"
+
+    def test_opposite_face_track_crossing_still_opens(self):
+        """#9649: far-face copper under laminate is not on the opening's
+        creepage path -- the whole leg opens. The anchor test stays
+        layer-agnostic (barrel + fillet on both faces)."""
+        pcb = _back_straight_run_pcb()
+        pcb.add_trace((60, 52.54), (70, 52.54), width=0.2, layer="F.Cu", net="OTHER")
+        result = reinforce_net(pcb, "FUSED_LINE", pairwise_clearance=_hv_pairwise_table())
+        assert result.placed_count == 2
+        assert result.legs[0].mask_status == "opened"
+        assert not result.refused_openings
+        assert len(_mask_lines(pcb, "B.Mask")) == 1
+
+    def test_opposite_face_zone_fill_and_smd_pad_ignored(self):
+        """#9649: a zone fill and an SMD pad on the far face do not block."""
+        from kicad_tools.schema.pcb import Zone
+
+        pcb = _back_straight_run_pcb()
+        net = pcb.add_net("OTHER")
+        zone = Zone(
+            net.number,
+            "OTHER",
+            "F.Cu",
+            polygon=[(55, 50), (75, 50), (75, 56), (55, 56)],
+        )
+        zone.filled_polygons = [[(55.0, 51.0), (75.0, 51.0), (75.0, 55.0), (55.0, 55.0)]]
+        pcb._zones.append(zone)
+        _add_shaped_pad_footprint(
+            pcb, ref="U1", x=65.0, y=51.5, net="OTHER", shape="circle", size=(1.0, 1.0)
+        )
+        result = reinforce_net(pcb, "FUSED_LINE", pairwise_clearance=_hv_pairwise_table())
+        assert result.placed_count == 2
+        assert result.legs[0].mask_status == "opened"
+        assert not result.refused_openings
+        assert len(_mask_lines(pcb, "B.Mask")) == 1
+
+    def test_same_face_track_refused_with_obstacle_location(self):
+        """#9649: a same-face crossing still refuses, and now locates the
+        obstacle (layer, kind, coordinates)."""
+        pcb = _back_straight_run_pcb()
+        pcb.add_trace((60, 52.54), (70, 52.54), width=0.2, layer="B.Cu", net="OTHER")
+        result = reinforce_net(pcb, "FUSED_LINE", pairwise_clearance=_hv_pairwise_table())
+        assert result.placed_count == 2
+        assert not result.openings and not _mask_lines(pcb, "B.Mask")
+        (ref,) = result.refused_openings
+        assert ref.rule == "mask_opening_voltage_map_pairwise"
+        assert ref.obstacle_net == "OTHER"
+        assert ref.obstacle_layer == "B.Cu"
+        assert ref.obstacle_kind == "track"
+        assert ref.obstacle_at is not None
+        assert 60.0 <= ref.obstacle_at[0] <= 70.0
+        assert ref.obstacle_at[1] == pytest.approx(52.54)
+        assert result.legs[0].mask_status == "refused"
+        assert "track on B.Cu at (" in result.legs[0].mask_reason
+
+    def test_through_via_refused_as_through(self):
+        """#9649: a via's ring is on every face -- still an obstacle."""
+        pcb = _back_straight_run_pcb()
+        pcb.add_via(65.0, 52.2, size=0.6, drill=0.3, net="OTHER")
+        result = reinforce_net(pcb, "FUSED_LINE", pairwise_clearance=_hv_pairwise_table())
+        assert not result.openings
+        (ref,) = result.refused_openings
+        assert ref.obstacle_kind == "via"
+        assert ref.obstacle_layer == "through"
+        assert ref.obstacle_at == pytest.approx((65.0, 52.2))
+        assert "via on through at (" in result.legs[0].mask_reason
+
+    def test_pth_pad_refused_as_through(self):
+        """#9649: a PTH pad's copper spans every layer -- still an obstacle
+        for a back-face opening."""
+        pcb = _back_straight_run_pcb()
+        _add_shaped_pad_footprint(
+            pcb,
+            ref="U1",
+            x=65.0,
+            y=52.4,
+            net="OTHER",
+            shape="circle",
+            size=(1.0, 1.0),
+            layers=("*.Cu", "*.Mask"),
+            pad_type="thru_hole",
+            drill=0.5,
+        )
+        result = reinforce_net(pcb, "FUSED_LINE", pairwise_clearance=_hv_pairwise_table())
+        assert not result.openings
+        (ref,) = result.refused_openings
+        assert ref.obstacle_kind == "pad"
+        assert ref.obstacle_layer == "through"
+        assert ref.obstacle_at == pytest.approx((65.0, 52.4))
+        assert "pad on through at (" in result.legs[0].mask_reason
+
+    def test_cli_json_refused_opening_locates_obstacle(self, tmp_path, capsys):
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        pcb = _back_straight_run_pcb()
+        pcb.add_trace((60, 52.54), (70, 52.54), width=0.2, layer="B.Cu", net="OTHER")
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb.save(pcb_path)
+        vm = tmp_path / "vm.json"
+        vm.write_text(json.dumps({"FUSED_LINE": 150.0, "OTHER": 3.3}))
+        rc = run_pcb_command(
+            _reinforce_args(pcb_path, format="json", dry_run=True, voltage_map=str(vm))
+        )
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        (entry,) = data["refused_openings"]
+        assert entry["obstacle_layer"] == "B.Cu"
+        assert entry["obstacle_kind"] == "track"
+        assert entry["obstacle_at"] is not None
+        assert 60.0 <= entry["obstacle_at"][0] <= 70.0
+        assert entry["obstacle_at"][1] == pytest.approx(52.54)
 
     def test_cli_json_lists_openings_and_dry_run_writes_nothing(self, tmp_path, capsys):
         from kicad_tools.cli.commands.pcb import run_pcb_command
