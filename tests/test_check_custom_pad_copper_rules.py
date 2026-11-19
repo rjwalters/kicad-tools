@@ -47,7 +47,7 @@ PLACEMENTS = [
 
 # The refused-primitive fixture: the most common stock-library refusal after
 # stroked gr_poly (issue evidence), and the one #9501 tracks first.
-GR_CIRCLE_PRIMITIVE = "(gr_circle (center 1.0 0.0) (width 0.2) (fill yes))"
+GR_CIRCLE_PRIMITIVE = "(gr_circle (center 1.0 0.0) (end 2.0 0.0) (width 0.2) (fill yes))"
 
 TAB_POLY = (
     f"(gr_poly (pts (xy {TAB_NEAR} -{TAB_HALF_HEIGHT}) (xy {TAB_FAR} -{TAB_HALF_HEIGHT}) "

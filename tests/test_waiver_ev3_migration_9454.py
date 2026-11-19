@@ -672,6 +672,29 @@ class TestInactiveRuleOrphans:
         assert f"orphan (no current finding): {key}" in out
         assert "[rule not evaluated in this run]" in out
 
+    def test_ampacity_orphan_with_declared_but_unmapped_currents_says_not_evaluated(
+        self, tmp_path, capsys
+    ):
+        """Issue #9552: ``project.kct`` declares currents but no net class
+        carries ``target_ampacity``, so coverage is ``unknown
+        needs_input:target_ampacity``, not ``skipped``.  The rule still
+        cannot have produced the waived finding (empty specs), so the orphan
+        keeps saying "not evaluated" instead of implying the key changed."""
+        board = _write_board(tmp_path)
+        (tmp_path / "project.kct").write_text(
+            "requirements:\n  electrical:\n    input:\n      current: 2.0\n"
+        )
+        key = "ampacity|GND||F.Cu"
+        waivers = _write_waivers(tmp_path, [_entry(key, "ev3:0123456789abcdef")])
+        before = waivers.read_text()
+
+        code, out = _migrate(capsys, board, waivers, "--write")
+
+        assert code == 0
+        assert f"orphan (no current finding): {key}" in out
+        assert "[rule not evaluated in this run]" in out
+        assert waivers.read_text() == before
+
     def test_inactive_rules_parameter_marks_only_the_named_rules(self, tmp_path):
         board = _write_board(tmp_path)
         findings, pcb = _findings(board)
@@ -750,7 +773,11 @@ class TestInactiveRulesFromCoverage:
         skipped_names = {name for name, cov in self._coverage().items() if cov.state == "skipped"}
         assert check_cmd._inactive_rules_from_coverage(self._coverage()) == skipped_names
 
-    def test_unknown_states_are_not_inactive_the_rule_ran_and_may_find(self):
+    def test_needs_input_unknown_states_are_inactive_the_rule_never_ran(self):
+        """Issue #9552: an ``unknown`` whose reason is ``needs_input:<X>``
+        means the rule never evaluated the board at all -- the absent input
+        is a prerequisite for *any* finding of that category -- so an orphan
+        naming it says "not evaluated" like a skip does."""
         from kicad_tools.validate.coverage import unknown
 
         coverage = {
@@ -759,6 +786,22 @@ class TestInactiveRulesFromCoverage:
                 "needs_input:target_ampacity (project.kct declares 1 current requirement(s))",
             ),
             "sch_fields": unknown("sch_fields", "needs_input:schematic"),
+            "diffpair_length_skew": unknown(
+                "diffpair_length_skew", "needs_input:net_class_map (2 diff-pair net(s))"
+            ),
+            "doc_drift": unknown("doc_drift", "needs_input:pcb_path"),
+        }
+        assert check_cmd._inactive_rules_from_coverage(coverage) == frozenset(coverage)
+
+    def test_partial_unknown_states_are_not_inactive_the_rule_ran_and_may_find(self):
+        """The other ``unknown`` reasons: the rule evaluated the board
+        partially, so an orphan naming it keeps the generic wording."""
+        from kicad_tools.validate.coverage import unknown
+
+        coverage = {
+            "segment_zone": unknown("segment_zone", "zone_fills_absent (2 unfilled zone(s))"),
+            "impedance": unknown("impedance", "diff_pair_unmeasurable (P/N)"),
+            "netclass_floor": unknown("netclass_floor", "unreadable_kicad_pro"),
         }
         assert check_cmd._inactive_rules_from_coverage(coverage) == frozenset()
 
