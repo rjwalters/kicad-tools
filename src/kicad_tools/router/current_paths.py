@@ -821,6 +821,13 @@ class ParallelGroup:
         layers = [branch[0].layer for branch in self.branches]
         return len(layers) != len(set(layers))
 
+    def _branches_by_layer(self) -> dict[str, list[tuple[Segment, ...]]]:
+        """The per-layer grouping both :meth:`layer_widths` and :attr:`shape` read."""
+        by_layer: dict[str, list[tuple[Segment, ...]]] = {}
+        for branch in self.branches:
+            by_layer.setdefault(branch[0].layer, []).append(branch)
+        return by_layer
+
     def layer_widths(self) -> dict[str, float]:
         """Effective conductor width this group provides, per copper layer.
 
@@ -833,17 +840,33 @@ class ParallelGroup:
         inside another's shadow therefore under-reports, the fail-closed
         direction.
         """
-        by_layer: dict[str, list[tuple[Segment, ...]]] = {}
-        for branch in self.branches:
-            by_layer.setdefault(branch[0].layer, []).append(branch)
         widths: dict[str, float] = {}
-        for layer, layer_branches in by_layer.items():
+        for layer, layer_branches in self._branches_by_layer().items():
             widths[layer] = (
                 _merged_same_layer_width(layer_branches)
                 if len(layer_branches) > 1
                 else _branch_min_width(layer_branches[0])
             )
         return widths
+
+    @property
+    def shape(self) -> str:
+        """How :attr:`width_mm` is composed (issue #9560).
+
+        ``"summed"`` -- branches sit on pairwise distinct layers, so the
+        figure is the sum of per-layer widths. ``"merged"`` -- every branch
+        shares one copper layer, so the figure is a single bar's union
+        extent. ``"merged+summed"`` -- both at once: some layer carries an
+        overlapping pair while another carries a branch of its own, so the
+        figure is merged within a layer and summed across layers, and
+        neither word alone describes it. Derived from the same per-layer
+        grouping :meth:`layer_widths` uses, so the label both surfaces
+        print can never disagree with the figure it decorates.
+        """
+        by_layer = self._branches_by_layer()
+        if all(len(branches) == 1 for branches in by_layer.values()):
+            return "summed"
+        return "merged" if len(by_layer) == 1 else "merged+summed"
 
     @property
     def width_mm(self) -> float:
@@ -939,16 +962,18 @@ class MinimumWidth:
         position: Midpoint of that segment, in **board** coordinates (mm).
         parallel_group: True when ``width_mm`` is a group's effective width,
             so a reader never mistakes it for one trace's width.
-        merged: True when that group width is a same-layer union extent
-            (:attr:`ParallelGroup.same_layer`) rather than a sum across
-            layers; meaningful only when ``parallel_group`` is True (#9557).
+        shape: The group's width composition (:attr:`ParallelGroup.shape` --
+            ``"merged"`` / ``"summed"`` / ``"merged+summed"``) when
+            ``parallel_group`` is True, so both label surfaces print the
+            same derivation the figure was computed with; ``None`` for a
+            single segment, whose width is its own (#9557, #9560).
     """
 
     width_mm: float
     layer: str
     position: tuple[float, float]
     parallel_group: bool = False
-    merged: bool = False
+    shape: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1273,7 +1298,7 @@ class PathResolution:
                 layer=pinch.layer,
                 position=_segment_midpoint(pinch),
                 parallel_group=True,
-                merged=group.same_layer,
+                shape=group.shape,
             )
 
         candidates: list[MinimumWidth] = []

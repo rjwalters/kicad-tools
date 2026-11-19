@@ -669,6 +669,23 @@ class TestSameLayerDoubledCopper:
         assert "merged width 4.500mm" in message
         assert "summed width" not in message
 
+    def test_mixed_group_names_merged_and_summed(self) -> None:
+        """Issue #9560: merged within F.Cu, summed with B.Cu -- say both.
+
+        0.6 + 2 x 1.0 = 2.6 mm of merged F.Cu copper plus 2.0 mm on B.Cu;
+        plain "merged" would read the 4.6 mm figure as one contiguous bar.
+        """
+        pcb = _same_layer_doubled_ampacity_pcb(2.0, 0.6)
+        pcb.add_trace(("J1", "1"), ("J2", "1"), width=2.0, layer="B.Cu", net="NET1")
+        rule = PathAmpacityRule(specs=[_trunk_spec(15.0)])
+        results = rule.check(pcb, _design_rules_2oz())
+        assert len(results.errors) == 1
+        message = results.errors[0].message
+        assert "merged+summed width 4.600mm" in message
+        # Not the plain merged noun: "merged width" is absent (the mixed
+        # wording embeds "summed width", so it cannot double as the negative).
+        assert "merged width" not in message
+
 
 # --------------------------------------------------------------------------
 # A width-swap via between doubled stretches (Issue #8950 part b)

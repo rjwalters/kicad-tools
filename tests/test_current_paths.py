@@ -1396,6 +1396,51 @@ class TestParallelGroups:
         # 1.0 mm offset + 2.0/2 + 1.0/2 = 2.5 mm of merged copper.
         assert found.width_mm == pytest.approx(2.5)
 
+    def test_group_shape_names_merged_summed_and_mixed(self) -> None:
+        """``shape`` names exactly how ``width_mm`` is composed (issue #9560)."""
+        merged = resolve_current_path(_same_layer_bars_pcb(0.6), _j_spec())
+        assert merged.ok, merged.reason
+        assert merged.parallel_groups[0].shape == "merged"
+        summed = resolve_current_path(_doubled_pcb(), _j_spec())
+        assert summed.ok, summed.reason
+        assert summed.parallel_groups[0].shape == "summed"
+
+    def test_mixed_group_is_merged_per_layer_summed_across_layers(self) -> None:
+        """Issue #9560: a same-layer F.Cu pair plus a B.Cu branch does both.
+
+        The figure is 1.4 mm of merged F.Cu copper *plus* 1.0 mm on B.Cu --
+        labelling it plainly "merged" invites reading 2.4 mm as one
+        contiguous bar.
+        """
+        pcb = _same_layer_bars_pcb(0.4)
+        pcb.add_trace((20, 50), (32, 50), width=1.0, layer="B.Cu", net="NET1")
+        r = resolve_current_path(pcb, _j_spec())
+        assert r.status == "resolved", r.reason
+        (group,) = r.parallel_groups
+        assert len(group.branches) == 3
+        assert group.shape == "merged+summed"
+        assert group.layer_widths() == pytest.approx({"F.Cu": 1.4, "B.Cu": 1.0})
+        assert group.width_mm == pytest.approx(2.4)
+
+    def test_two_merged_layers_still_read_as_merged_and_summed(self) -> None:
+        """Edge: every layer carries an overlapping pair (test plan).
+
+        One group of four branches -- merged within each layer, summed
+        across the two -- so the shape says both.
+        """
+        pcb = _same_layer_bars_pcb(0.4)
+        y = 50 - 0.4
+        pcb.add_trace((20, 50), (32, 50), width=1.0, layer="B.Cu", net="NET1")
+        pcb.add_trace((20, 50), (22, y), width=1.0, layer="B.Cu", net="NET1")
+        pcb.add_trace((22, y), (30, y), width=1.0, layer="B.Cu", net="NET1")
+        pcb.add_trace((30, y), (32, 50), width=1.0, layer="B.Cu", net="NET1")
+        r = resolve_current_path(pcb, _j_spec())
+        assert r.status == "resolved", r.reason
+        (group,) = r.parallel_groups
+        assert len(group.branches) == 4
+        assert group.shape == "merged+summed"
+        assert group.width_mm == pytest.approx(2.8)
+
 
 # --------------------------------------------------------------------------
 # Witness rendering (issue #8928)

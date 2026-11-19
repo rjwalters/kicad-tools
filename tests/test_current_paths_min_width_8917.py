@@ -167,7 +167,7 @@ class TestMinWidthResolver:
         assert found.width_mm == pytest.approx(2.0)
         assert found.parallel_group is True
         # Distinct layers: the group width is a sum, not a union extent (#9557).
-        assert found.merged is False
+        assert found.shape == "summed"
 
     def test_merged_same_layer_group_flags_the_shape(self) -> None:
         """Two overlapping F.Cu tracks are merged copper, not a sum (#9557)."""
@@ -177,7 +177,23 @@ class TestMinWidthResolver:
         assert found is not None
         assert found.width_mm == pytest.approx(1.6)
         assert found.parallel_group is True
-        assert found.merged is True
+        assert found.shape == "merged"
+
+    def test_mixed_group_names_the_merged_plus_summed_shape(self) -> None:
+        """Issue #9560: a merged F.Cu pair plus a B.Cu branch is both.
+
+        The record carries the same ``shape`` the two label surfaces print,
+        so the audit's line can never disagree with the group it measures.
+        """
+        pcb = _same_layer_bars_pcb(0.4)
+        pcb.add_trace((20, 50), (32, 50), width=1.0, layer="B.Cu", net="NET1")
+        resolution = resolve_current_path(pcb, _spec())
+        assert resolution.ok, resolution.reason
+        found = resolution.min_width
+        assert found is not None
+        assert found.width_mm == pytest.approx(2.4)
+        assert found.parallel_group is True
+        assert found.shape == "merged+summed"
 
     def test_summed_group_matches_the_path_ampacity_expression(self) -> None:
         """The audit and ``path_ampacity`` must not print two different figures.
@@ -353,6 +369,22 @@ class TestMinWidthAuditText:
         assert "min width 1.600 mm on F.Cu" in out
         assert "(merged parallel group)" in out
         assert "summed parallel group" not in out
+
+    def test_text_output_marks_a_merged_plus_summed_group(
+        self, tmp_path, capsys, monkeypatch
+    ) -> None:
+        """A group merged within F.Cu and summed with B.Cu says both (#9560).
+
+        Plain "merged" would read 2.4 mm as one contiguous bar; it is
+        1.4 mm of merged F.Cu copper plus 1.0 mm on B.Cu.
+        """
+        pcb = _same_layer_bars_pcb(0.4)
+        pcb.add_trace((20, 50), (32, 50), width=1.0, layer="B.Cu", net="NET1")
+        _run_audit_cli(pcb, _spec(), tmp_path, monkeypatch, output_format="text")
+        out = capsys.readouterr().out
+        assert "min width 2.400 mm on" in out
+        assert "(merged+summed parallel group)" in out
+        assert "(merged parallel group)" not in out
 
     def test_text_output_omits_the_line_when_unresolved(
         self, tmp_path, capsys, monkeypatch

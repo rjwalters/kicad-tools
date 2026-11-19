@@ -302,7 +302,7 @@ class PathAmpacityRule(DRCRule):
             return None
         first = group.branches[0][0]
         loc_x, loc_y = self._segment_midpoint(first)
-        noun = "merged width" if group.same_layer else "summed width"
+        noun = f"{group.shape} width"
         return DRCViolation(
             rule_id=self.rule_id,
             severity="error",
