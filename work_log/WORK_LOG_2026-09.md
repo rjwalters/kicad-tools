@@ -2,6 +2,29 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-19
+
+- **PR #5588**: docs(routing-plan): fix understated elapsed_s claim in Cost section
+- **PR #5585**: fix(ci): compare whole copper nodes, not header lines, in the route-determinism gate
+- **PR #5583**: test(ci): size the partial-placement route budget against the native-permit queue (#5579)
+- **Issue #5582** (closed): docs(routing-plan): "Cost" section understates the measured plan-stage elapsed_s by ~60x
+- **PR #5581**: feat(router): run the report-only routing plan stage on every default route (+ --no-routing-plan)
+- **Issue #5580** (closed): ci: board_route_determinism_smoke.sh normalize_copper() compares copper element COUNTS, not geometry
+- **Issue #5579** (closed): flake: test_route_partial_placement_cli deadline-exceeded failures redden the Test job on main
+- **PR #5577**: perf(board06): spatially prune the pour-repair obstacle clearance scans
+- **PR #5576**: fix(ci): credit native-slot wait back to the waiting test's pytest-timeout budget
+- **PR #5574**: fix(judge): restore draft-PR fallback exclusion reverted by installed-surface resync
+- **PR #5573**: test(ci): add evidence-sized pytest-timeout overrides to the three 60s-reaped test groups
+- **Issue #5572** (closed): CI: native-slot wait from KCT_NATIVE_MAX_CONCURRENCY=1 is charged to the waiting test's pytest-timeout budget
+- **PR #5571**: perf(router): hoist loop-invariant clearance lookups in validate_routes
+- **PR #5570**: fix(router): persist add_obstacle keepouts across grid resets
+- **Issue #5567** (closed): Flaky >60s pytest-timeout in tests/router/lattice/test_post_pass_gating.py CLI tests
+- **Issue #5557** (closed): judge-fallback-guard.sh: exclude draft PRs from fallback evaluation
+- **Issue #5556** (closed): CI: Test job flakes on a fixed 60s pytest-timeout hitting an arbitrary test (seen on main and PRs)
+- **Issue #5555** (closed): router: _reset_for_new_trial drops add_obstacle keepouts, silently reopening the grid
+- **Issue #5552** (closed): chore: resync installed Loom surfaces silently reverted merged fix #5543 (draft-PR fallback exclusion)
+- **Issue #5513** (closed): [Epic #5509] Phase 1a: kicad-cli clearance conformance oracle (report-only) with four adapters and named fixtures
+
 ### 2026-09-18
 
 - **PR #5568**: fix(router): sum both edge directions in RoutingPlan edge entries
