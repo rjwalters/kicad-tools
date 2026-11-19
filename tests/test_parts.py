@@ -696,7 +696,60 @@ class TestCategorization:
 
         assert _categorize_part("Red LED 0603", "0603") == PartCategory.LED
         assert _categorize_part("Green LED SMD", "") == PartCategory.LED
-        # Note: "Light Emitting Diode" matches "diode" first due to check order
+        assert _categorize_part("Light Emitting Diode", "0805") == PartCategory.LED
+
+    def test_categorize_led_indication_not_inductor(self):
+        # C26545/C34499 supplier wording: "Indication" must not substring-match
+        # the inductor abbreviation, and a description naming both a diode and
+        # an LED must land on LED.
+        from kicad_tools.parts.lcsc import _categorize_part
+
+        assert (
+            _categorize_part("Discrete Diode LED Indication - Discrete", "0402") == PartCategory.LED
+        )
+        assert _categorize_part("LED Indication - Discrete", "0603") == PartCategory.LED
+
+    def test_categorize_non_led_negation_not_led(self):
+        # C385834-style RJ45 wording: the negated "Non-LED" mention must not
+        # categorize the connector as an LED.
+        from kicad_tools.parts.lcsc import _categorize_part
+
+        assert (
+            _categorize_part(
+                "Non-LED Shielded cat5e - Ethernet Connectors / Modular Connectors (RJ45 RJ11) ROHS",
+                "",
+            )
+            == PartCategory.CONNECTOR
+        )
+        assert (
+            _categorize_part("Non-LED Phosphor bronze RJ45 Jack Right Angle Unshielded", "")
+            == PartCategory.CONNECTOR
+        )
+
+    def test_categorize_led_mention_keeps_host_category(self):
+        # Positive "With LED ..." RJ45 magjack and LED-driver-regulator
+        # wording: a part that only *mentions* an LED keeps its own category.
+        from kicad_tools.parts.lcsc import _categorize_part
+
+        assert (
+            _categorize_part(
+                "With LED Shielded cat5e - Ethernet Connectors / Modular Connectors (RJ45 RJ11) ROHS",
+                "",
+            )
+            == PartCategory.CONNECTOR
+        )
+        assert _categorize_part("RJ45 Jack with LED Right Angle", "") == PartCategory.CONNECTOR
+        assert _categorize_part("USB Type-C connector with LED", "") == PartCategory.CONNECTOR
+        assert (
+            _categorize_part("Constant Current LED Driver Regulator SOT-23-6", "SOT-23-6")
+            == PartCategory.IC
+        )
+
+    def test_categorize_inductor_and_diode_still_match(self):
+        from kicad_tools.parts.lcsc import _categorize_part
+
+        assert _categorize_part("Power Inductors 10uH", "0805") == PartCategory.INDUCTOR
+        assert _categorize_part("Rectifier Diode", "SMA") == PartCategory.DIODE
 
     def test_categorize_switch(self):
         from kicad_tools.parts.lcsc import _categorize_part
@@ -1124,6 +1177,62 @@ class TestLCSCClientCheckBOM:
             # U1: Not found
             u1 = next(i for i in result.items if i.reference == "U1")
             assert u1.error == "Part not found"
+
+    def test_check_bom_real_bom_items(self, tmp_path):
+        """Regression #9377: real BOMItem objects must not raise AttributeError.
+
+        schema.bom.BOMItem is a single placed designator and carries no
+        ``quantity`` attribute; check_bom must default quantity_needed to 1.
+        """
+        from kicad_tools.parts import LCSCClient, Part, PartsCache
+        from kicad_tools.schema.bom import BOMItem
+
+        items = [
+            BOMItem(reference="R1", value="10k", footprint="0402", lib_id="R", lcsc="C123456"),
+            BOMItem(reference="C1", value="100nF", footprint="0402", lib_id="C", lcsc=""),
+        ]
+
+        cache = PartsCache(db_path=tmp_path / "cache.db")
+        client = LCSCClient(cache=cache)
+
+        with patch.object(client, "lookup_many") as mock_lookup:
+            mock_lookup.return_value = {
+                "C123456": Part(lcsc_part="C123456", mfr_part="R1", stock=5000),
+            }
+
+            result = client.check_bom(items)
+
+        assert len(result.items) == 2
+        r1 = next(i for i in result.items if i.reference == "R1")
+        assert r1.quantity_needed == 1
+        assert r1.matched is True
+        c1 = next(i for i in result.items if i.reference == "C1")
+        assert c1.quantity_needed == 1
+        assert c1.error == "No LCSC part number"
+
+    def test_check_bom_propagates_quantity_attr(self, tmp_path):
+        """Items that do carry a ``quantity`` attribute keep it."""
+        from kicad_tools.parts import LCSCClient, Part, PartsCache
+
+        class GroupedItem:
+            def __init__(self):
+                self.reference = "R1"
+                self.value = "10k"
+                self.footprint = "0402"
+                self.lcsc = "C123456"
+                self.quantity = 5
+
+        cache = PartsCache(db_path=tmp_path / "cache.db")
+        client = LCSCClient(cache=cache)
+
+        with patch.object(client, "lookup_many") as mock_lookup:
+            mock_lookup.return_value = {
+                "C123456": Part(lcsc_part="C123456", mfr_part="R1", stock=5000),
+            }
+
+            result = client.check_bom([GroupedItem()])
+
+        assert result.items[0].quantity_needed == 5
 
 
 class TestRequiresRequestsDecorator:

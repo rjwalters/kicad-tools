@@ -735,7 +735,7 @@
         "2": "GND"
       },
       "xy": [
-        55.15,
+        55.2,
         29
       ],
       "mpn": "CC0603KRX7R9BB104",
@@ -1191,5 +1191,30 @@
   ],
   "status": "routed development circuit; native refill and independent checks required",
   "hardware_tested": false,
-  "manufacturing_ready": false
+  "manufacturing_ready": false,
+  "toolchain": {
+    "kicad_version": "10.0.6",
+    "footprint_library": {
+      "source": "env",
+      "sha256": "6ede0d8a7f644b4568fb65a2697a49e8354974fed4141cc3a1565bc51b5f6f00",
+      "files": [
+        "Capacitor_SMD.pretty/C_0603_1608Metric.kicad_mod",
+        "Capacitor_SMD.pretty/C_1206_3216Metric.kicad_mod",
+        "Connector_PinHeader_2.54mm.pretty/PinHeader_1x06_P2.54mm_Vertical.kicad_mod",
+        "Connector_USB.pretty/USB_C_Receptacle_HRO_TYPE-C-31-M-12.kicad_mod",
+        "Diode_SMD.pretty/D_SOD-123.kicad_mod",
+        "Fuse.pretty/Fuse_1206_3216Metric.kicad_mod",
+        "LED_SMD.pretty/LED_0603_1608Metric.kicad_mod",
+        "Package_DFN_QFN.pretty/QFN-24-1EP_4x4mm_P0.5mm_EP2.6x2.6mm.kicad_mod",
+        "Package_SO.pretty/MSOP-10_3x3mm_P0.5mm.kicad_mod",
+        "Package_SO.pretty/SOIC-8_3.9x4.9mm_P1.27mm.kicad_mod",
+        "Package_TO_SOT_SMD.pretty/SOT-23.kicad_mod",
+        "Package_TO_SOT_SMD.pretty/TSOT-23-6.kicad_mod",
+        "Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod",
+        "Resistor_SMD.pretty/R_1206_3216Metric.kicad_mod",
+        "Resistor_SMD.pretty/R_Shunt_Vishay_WSK2512_6332Metric_T1.19mm.kicad_mod",
+        "TerminalBlock_Phoenix.pretty/TerminalBlock_Phoenix_MKDS-1,5-2-5.08_1x02_P5.08mm_Horizontal.kicad_mod"
+      ]
+    }
+  }
 }

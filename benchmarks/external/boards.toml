@@ -72,6 +72,46 @@ license = "CC-BY-4.0"
 [beagleconnect_freedom.deep_pcb_reference]
 airwires = 414
 
+# --- PCBJam blind-PCB study boards (Issue #9595) ---
+# PCBJam's blind PCB study (repo https://github.com/PCBJam/blind-pcb-runs,
+# MIT) publishes stripped boards, briefs and host-side scoring for
+# like-for-like agent-layout comparisons and explicitly invites other tools
+# to run the same boards. Like the srj18 dataset boards below, these are
+# `opt_in = true`: a bare `fetch_boards.py` / `normalize.py` /
+# `kct bench external` run does NOT cover them; name them with
+# `--board pcbjam_<slug>`. The pinned commit is the study repo's HEAD when
+# the entry was added (2026-11-19); each board keeps its upstream licence in
+# its own `boards/<board>/LICENSE*` at that commit. PCBJam's own published
+# runs are place+route; a route-only run of the same board uses their
+# generic 4-layer brief (`sandbox/briefs/route-4layer.md`) with the same
+# host-side scoring (`scoring/score.sh`, `sandbox/report.cjs`).
+
+[pcbjam_m2_pcie_adapter]
+name = "Antmicro M.2 to PCIe x4 adapter (PCBJam blind-PCB study)"
+repo_url = "https://github.com/PCBJam/blind-pcb-runs"
+vcs = "github"
+commit = "b5a047f3d8e7963bca46da485b05c6a7041d9cfb"
+board_path = "boards/m2-pcie-adapter/m2-pcie-adapter.kicad_pcb"
+# boards/m2-pcie-adapter/LICENSE at the pinned commit: Apache-2.0
+# (upstream antmicro/m2-pcie-adapter at commit 11844f1, upgraded to KiCad 10
+# by PCBJam before the study -- per boards/README.md there). Verified
+# 2026-11-19.
+license = "Apache-2.0"
+opt_in = true
+
+[pcbjam_m2_pcie_adapter.pcbjam_reference]
+# PCBJam's published Fable 5.2 run of this board (place+route mode,
+# `runs/m2-place-bt-20261113-1037` in the pinned repo, report.json): KiCad 10
+# DRC with zones refilled, on the board the agent saved. Kept here for the
+# side-by-side table in docs/research/pcbjam-blind-pcb-results.md; this key
+# is not read by fetch_boards.py (only `deep_pcb_reference` is).
+mode = "place+route"
+seconds = 1333
+drc_errors = 0
+unconnected = 0
+track_mm = 886
+vias = 218
+
 # --- tscircuit dataset-srj18 source boards (Issue #5848) ---
 # The dataset repo has no LICENSE, so we pin the *source* boards it was derived
 # from. Licenses read from each repo's LICENSE file via the GitHub license API

@@ -45,6 +45,12 @@ Correct provenance instead:
   previous commit, ``origin/main``) could silently skip a board changed
   earlier in the batch.
 
+* ``merge_group`` events -- verify every routed PCB in the combined queue
+  tree, including boards inherited from main and every member PR. Diff
+  against the **empty tree**, rather than a moving ``origin/main`` ref or
+  one member's PR head, so selection cannot silently omit part of the tree
+  the queue is deciding whether to merge.
+
 Git failures (unresolvable revision, non-zero ``git diff`` exit code) are
 distinct from a genuinely empty match: the former raises and the CLI exits
 non-zero; the latter returns an empty result and the CLI exits 0. The caller
@@ -103,9 +109,9 @@ INFRA_TRIGGER_PATHS = frozenset(
 
 ZERO_SHA = "0" * 40
 
-# Events that run CI against main itself rather than a PR (issue #5986). They
-# carry no before/after pair, so selection scans the whole tree.
-FULL_SCAN_EVENTS = frozenset({"schedule", "workflow_dispatch"})
+# Main verification (issue #5986) and merge-queue verification both scan the
+# entire checked-out tree rather than selecting one PR's changes.
+FULL_SCAN_EVENTS = frozenset({"schedule", "workflow_dispatch", "merge_group"})
 
 
 class SelectionError(RuntimeError):
@@ -298,8 +304,8 @@ def select_routed_pcbs(
     elif event_name in FULL_SCAN_EVENTS:
         base = resolve_full_scan_base(repo_root, head_sha)
     else:
-        # ci.yml triggers on pull_request, schedule and workflow_dispatch
-        # (push kept above for a manual/legacy push trigger). Handled
+        # ci.yml's pull_request and full-scan events are handled above
+        # (push is retained for a manual/legacy push trigger). Handled
         # explicitly (rather than left to error out deep inside git) so an
         # unexpected future trigger fails with an attributable message
         # instead of a confusing git error.

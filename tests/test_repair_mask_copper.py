@@ -3,11 +3,17 @@
 Fixtures are synthetic boards: one rect pad (R1/1, net N1) centred at (100, 100)
 spanning x 99..101, y 99.5..100.5.  The mask findings are built directly (the
 native assessment needs kicad-cli); ``fix-drc`` end-to-end runs stub the
-re-check so the revert path is exercised without it.
+re-check so the revert path is exercised without it.  The baseline-comparison
+regression tests at the bottom drive the real ``kct check`` rule set on both
+sides of the move instead (PR #9369 review): a stub cannot observe that this
+engine names a track by its geometry and reports a closest-approach location,
+both of which shift with the copper.
 """
 
 from __future__ import annotations
 
+import argparse
+import json
 from pathlib import Path
 
 import pytest
@@ -313,3 +319,143 @@ def test_fix_drc_dry_run_leaves_the_board_alone(tmp_path, monkeypatch):
     original = board.read_text()
     _run(monkeypatch, board, [_report(_finding("trk-a"))], extra=("--dry-run",))
     assert board.read_text() == original
+
+
+# ---------------------------------------------------------------------------
+# Issue #9365: net-class clearance gate (post-save) and double-fault revert
+# ---------------------------------------------------------------------------
+
+
+def _clearance_error(
+    x: float = 99.0, y: float = 100.3, items: list[str] | None = None
+) -> DRCViolation:
+    return DRCViolation(
+        type=ViolationType.from_string("clearance"),
+        type_str="clearance",
+        severity=Severity.ERROR,
+        message="Clearance violation (0.150mm < 0.200mm)",
+        locations=[Location(x_mm=x, y_mm=y, layer="F.Cu")],
+        items=items if items is not None else ["Track [N1] on F.Cu", "Track [N2] on F.Cu"],
+        nets=["N1", "N2"],
+        required_value_mm=0.2,
+        actual_value_mm=0.15,
+    )
+
+
+def test_fix_drc_reverts_a_move_that_creates_a_new_clearance_error(tmp_path, monkeypatch, capsys):
+    board = _board(tmp_path, ENTRY)
+    before = _report(_finding("trk-a"))
+    after = _report(_clearance_error())  # mask finding cleared, new net-class error beside it
+    clean = _report()
+    # calls: detection, mask verification, baseline with the move undone, final re-check
+    _run(monkeypatch, board, [before, after, clean, after])
+    assert _end(board, "trk-a")[1] == (100.7, 100.3)  # reverted
+    assert "new_drc_error" in capsys.readouterr().out
+
+
+def test_fix_drc_keeps_a_move_when_the_error_was_already_there(tmp_path, monkeypatch):
+    board = _board(tmp_path, ENTRY)
+    before = _report(_finding("trk-a"))
+    # The same pre-existing error as the real engine reports it on each side
+    # of the move: the entry's descriptor names its geometry (so it changes
+    # with the move) and the location is the closest-approach point (which
+    # shifts with it).  Feeding one hand-built object to both runs would
+    # assume the very identity stability under test (PR #9369 review).
+    moved_entry = "Trace@F.Cu:w0.2:95/100.3~100/100"
+    undone_entry = "Trace@F.Cu:w0.2:95/100.3~100.7/100.3"
+    n2 = "Trace@F.Cu:w0.2:95/100.55~96/100.55"
+    after = _report(_clearance_error(x=96.5, y=100.35, items=[moved_entry, n2]))
+    baseline = _report(_clearance_error(x=96.675, y=100.425, items=[undone_entry, n2]))
+    code = _run(monkeypatch, board, [before, after, baseline, after])
+    assert _end(board, "trk-a")[1] == (100.0, 100.0)
+    assert code != 0  # the pre-existing error is still reported, not hidden
+
+
+def test_fix_drc_keeps_a_move_when_the_new_error_is_far_from_it(tmp_path, monkeypatch):
+    board = _board(tmp_path, ENTRY)
+    before = _report(_finding("trk-a"))
+    elsewhere = _report(_clearance_error(x=50.0, y=50.0))
+    clean = _report()
+    _run(monkeypatch, board, [before, elsewhere, clean, elsewhere])
+    assert _end(board, "trk-a")[1] == (100.0, 100.0)
+
+
+def test_fix_drc_restores_the_snapshot_when_undo_action_fails(tmp_path, monkeypatch, capsys):
+    board = _board(tmp_path, ENTRY)
+    original = board.read_text()
+    before = _report(_finding("trk-a"))
+    still = _report(_finding("trk-a"))  # forces the revert, whose undo then fails
+    monkeypatch.setattr(MaskCopperRepairer, "undo_action", lambda self, action: False)
+    _run(monkeypatch, board, [before, still, still])
+    assert _end(board, "trk-a")[1] == (100.7, 100.3)  # the move is not left in the file
+    assert board.read_text() == original  # restored byte for byte
+    assert "could not revert mask recentre" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# PR #9369 review: the baseline comparison against the real rule set
+# ---------------------------------------------------------------------------
+
+
+def _recheck(board: Path) -> DRCReport:
+    """``kct check``'s real rule set on the board as saved (move applied)."""
+    after = fix_drc_cmd._run_python_drc(board, project_pcb_path=board)
+    assert after is not None
+    return after
+
+
+def _flagged(board: Path, after: DRCReport, actions: list) -> set[str]:
+    """``_moves_with_new_errors``'s verdict; its own baseline run is real too."""
+    return fix_drc_cmd._moves_with_new_errors(
+        after=after,
+        actions=actions,
+        output_path=board,
+        pcb_path=board,
+        args=argparse.Namespace(mfr="jlcpcb", layers=None),
+    )
+
+
+def test_a_preexisting_error_keeps_the_move_on_the_real_engine(tmp_path):
+    # The entry already runs 0.05 mm (floor: 0.127 mm) beside an N2 track on
+    # its untouched outside portion: a clearance error the re-centre did not
+    # cause.  With the real rule set naming the track by its geometry, the
+    # finding's items and location differ between the two runs, so an
+    # item-keyed baseline would classify it as new and revert the move.
+    board = _board(tmp_path, ENTRY + "\n" + _seg("trk-n2", (95, 100.55), (96, 100.55), net=2))
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_finding("trk-a")], max_displacement=1.0)
+    assert result.repaired == 1
+    repairer.save(board)
+    after = _recheck(board)
+    assert any(v.type_str == "clearance_segment_segment" for v in after.violations)
+    assert _flagged(board, after, result.actions) == set()
+
+
+def test_a_move_between_floors_is_flagged_on_the_real_engine(tmp_path):
+    # N1 carries an authored 0.25 mm net class; the re-centred line keeps
+    # 0.149 mm to the N2 stub -- above the fab floor (0.127 mm, so the
+    # repairer's own gate does not decline the move) but below the class,
+    # exactly the gap this gate exists to catch.  With the move undone the
+    # gap is 0.3 mm, so the baseline run reports no such error.
+    project = {
+        "meta": {"filename": "b.kicad_pro", "version": 3},
+        "board": {"design_settings": {"rules": {"min_clearance": 0.1}}},
+        "net_settings": {
+            "meta": {"version": 4},
+            "classes": [
+                {"name": "Default", "clearance": 0.1, "priority": 2147483647},
+                {"name": "N1cls", "clearance": 0.25, "priority": 0},
+            ],
+            "netclass_assignments": None,
+            "netclass_patterns": [{"netclass": "N1cls", "pattern": "N1"}],
+        },
+    }
+    board = _board(tmp_path, ENTRY + "\n" + _seg("trk-n2", (96.5, 99.8), (97.5, 99.8), net=2))
+    board.with_suffix(".kicad_pro").write_text(json.dumps(project))
+    repairer = MaskCopperRepairer(board)
+    result = repairer.repair([_finding("trk-a")], max_displacement=1.0)
+    assert result.repaired == 1
+    repairer.save(board)
+    after = _recheck(board)
+    assert any(v.type_str == "netclass_clearance_copper" and v.is_error for v in after.violations)
+    assert _flagged(board, after, result.actions) == {"trk-a"}

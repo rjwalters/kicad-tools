@@ -105,8 +105,12 @@ class JLCPCBBOMFormatter(BOMFormatter):
         if self.config.group_by_value:
             grouped = self._group_items(filtered)
         else:
+            # One row per item: the reference must be part of the key or
+            # parts sharing (value, footprint, lcsc) collide and every
+            # designator but the last is silently dropped (issue #9382).
             grouped = {
-                (item.value, item.footprint, getattr(item, "lcsc", "")): [item] for item in filtered
+                (item.value, item.footprint, getattr(item, "lcsc", ""), item.reference): [item]
+                for item in filtered
             }
 
         output = io.StringIO()
@@ -115,11 +119,15 @@ class JLCPCBBOMFormatter(BOMFormatter):
 
         rows = []
         for key, group_items in grouped.items():
-            value, footprint, lcsc = key
+            value, footprint, lcsc = key[:3]
             designators = ",".join(sorted(item.reference for item in group_items))
             if lcsc:
                 # Merged across differing Value texts: list them all.
-                value = "; ".join(sorted({item.value for item in group_items}))
+                # Empty/blank values are omitted so the Comment never gets a
+                # leading "; " (issue #9380); an all-empty group stays "".
+                value = "; ".join(
+                    sorted({item.value for item in group_items if item.value.strip()})
+                )
             rows.append((value, footprint, lcsc, designators))
         # Sort like the old (value, footprint, lcsc) key order, extended
         # deterministically to merged rows.
@@ -187,14 +195,17 @@ class PCBWayBOMFormatter(BOMFormatter):
         if self.config.group_by_value:
             grouped = self._group_items(filtered)
         else:
-            grouped = {(item.value, item.footprint): [item] for item in filtered}
+            # One row per item: the reference must be part of the key or
+            # parts sharing (value, footprint) collide and every designator
+            # but the last is silently dropped (issue #9382).
+            grouped = {(item.value, item.footprint, item.reference): [item] for item in filtered}
 
         output = io.StringIO()
         writer = csv.writer(output, lineterminator="\n")
         writer.writerow(self.get_headers())
 
         for idx, (key, group_items) in enumerate(sorted(grouped.items()), 1):
-            value, footprint = key
+            value, footprint = key[:2]
             designators = ",".join(sorted(item.reference for item in group_items))
             qty = len(group_items)
             manufacturer = getattr(group_items[0], "manufacturer", "")

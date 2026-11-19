@@ -113,6 +113,14 @@ keeps the measured verdict, which is an error for an overlap. Sweeps (in
   at the time; #9085's declaration is the route for a reviewed own pour). Since
   #9284 a pad joined to its own pour by thermal spokes is `own_pour_thermal`
   info; see "Family B revisited" below;
+- pads of one footprint: since #9420 a single plain-pad opening that overlaps
+  only same-net pads of its own footprint (every owner and the exposed pad on
+  one identical non-empty net) is `within_own_footprint` info. This is
+  presentation-only: the fab, located by position on the #9420 board (one
+  export setting), rates the two 0.19 mm pad pairs Good under Pad spacing,
+  reports Soldermask bridge empty board-wide, and lists none of the pads in
+  the two soldermask warning rows (see the last section), but it cannot see
+  footprints or nets, so the finding stays listed with its distance;
 - custom, padstack and chamfered pads;
 - solder-mask-defined pads;
 - any expansion ring wider than `u`.
@@ -362,9 +370,12 @@ mask exposure of the ring beside the opening, so family C stays an error.
 - Pour clearance is not fab-judged (#8938), but that result is about pour gaps.
   It is not about pour beside a mask opening, which is why B fails closed.
 - Fab parity table row `solder_mask_opening_exposing_trace`; #9284 added the
-  `own_pour_thermal` class and the different-net parity check. The table has no
+  `own_pour_thermal` class and the different-net parity check; #9420 added
+  `within_own_footprint` (presentation-only; located fab rows at the pads: Good under
+  Pad spacing, Soldermask bridge empty board-wide, no item in either soldermask
+  warning row, per #9420 comments 6990135461 and 6992534766). The table has no
   integer version: `fab_dfm_parity.TABLE_VERSION` is a content hash of the rows
-  (`3559f167` as of 2026-11-18 on main `f2347f38d`; re-read
+  (`6904fddd` as of 2026-11-18 on main `6adc2b69e`; re-read
   `fab_dfm_parity.TABLE_VERSION` for the current value).
 - JLCDFM result for board 01's Gerbers, own pour and via ring: #8858, 2026-11-17.
 
@@ -494,3 +505,104 @@ seed-42 regeneration of board 06:
 The other four skips stay: board 07's matchgroup gate, `check_routed_drc.py`
 (the release surface) and `board_05_unattended.py` await their own
 per-board increments.
+
+## Board 07's matchgroup gate baselined by net signature; its skip removed (2026-11-18, main `163f4a175`)
+
+The same authorisation chain as board 06's increment above (#7270 Q3,
+#8858's curated acceptance criteria, the Curator's 2026-11-18 re-curation
+"Remove them only per board, once that board's residual is repaired or
+baselined"; the operator ruling's "no allowance entries" condition still
+governs only the release surface — `check_routed_drc.py` keeps its skip).
+The board 07 skip was the largest of the three left (the issue title's
+"543 findings" predates the #9108 rule rework).
+
+**Measurement environment.** The gate is host-sensitive through its pour
+pipeline: on a worker whose kicad-cli is reached through
+`KCT_KICAD_DOCKER=1`, the seed-42 regen carries 17 extra via-population
+errors (11 `hole_to_hole_clearance`, 6 `physical_copper_gap` GND) that
+CI's in-container regen does not produce; measured both ways. The
+`mask_to_copper` population is not affected by that divergence: the
+identical 19 net signatures and per-net counts (54 errors) reproduce
+under both kicad-cli modes. The authoritative numbers below are from the
+CI-exact environment — the pinned image `kicad/kicad@sha256:18693567392b…`
+(the digest CI's `KICAD_IMAGE` pins), kicad-cli **10.0.6**, python 3.12,
+`PYTHONHASHSEED=42`, the gate's own re-route then the raw check:
+
+- **54 `mask_to_copper` errors** (52 violation / 2 uncertain), all
+  same-net: same-net pass-throughs and entries whose copper sits beside
+  the opening beyond the one clean crossing — the #8914 fab-danger
+  shapes that #9108 keeps at error. 19 net signatures: +1V8 18, GND 8,
+  DQ0–DQ7 and DM0 2 each, A0/A7 2 each, A2/A3/A5/MIPI_CLK_P/TMDS_D2_P/
+  TMDS_D2_N 1 each.
+- **Stability**: three independent regenerations (two in the pinned
+  image, one worker regen) reproduced every signature and per-net count
+  exactly. The findings' coordinates shift by a constant board-origin
+  offset between environments; the net signatures do not.
+- **Gate**: `check_matchgroup_coverage.py` drops the skip; the 19
+  signatures join `MATCHGROUP_FIXTURE_ALLOWED_FINDINGS`, each citing
+  #8858. On the in-container regen the gate's non-mask error count is 0
+  (the worker's 17 via findings do not exist in the CI-exact
+  environment), so after the change: 54 errors, 54 identity-allowed,
+  0 unallowed, 0 stale; reach 31/31, match-group rule exercised, pour
+  audit OK. The stale ratchet is enforced on both CI paths (the
+  matchgroup job's regen and the E2E job's `--skip-route` bundle).
+- **Wall, `kct check` on the fresh board 07 PCB** (worker, one run
+  each): ~75 s with the pass (54 mask findings judged by the native
+  geometry pass); the gate's own re-route step is the dominant cost
+  (~4-5 min), unchanged by this increment.
+
+The remaining two skips stay: `check_routed_drc.py` (the release surface)
+and `board_05_unattended.py` await their own per-board increments.
+
+
+## 2026-11-18: the release-surface increment — `check_routed_drc.py` drops the skip
+
+Main `ea0c5e2a1` (post-#9394), pinned image kicad-cli 10.0.6
+(`KCT_KICAD_DOCKER=1`), one `kct check <pcb> --mfr <tier> --format json`
+per committed release PCB. #9292 (thermal-spoke own pour -> info) had
+landed since the last re-curation, so the counts were re-measured rather
+than reused:
+
+| board | m2c errors | net signatures | other blocking errors |
+|---|---:|---:|---|
+| 00 | 0 | 0 | 0 |
+| 01 | 2 | 1 | 0 |
+| 02 | 29 | 8 | 13 physical_copper_gap + 1 tht_smd_spacing (tracked #9325/#9332) |
+| 03 | 78 | 23 | 0 |
+| 04 | 21 (generic path) | — | paid-drill validator does not run m2c (77 rules, absent) |
+| 05 | 83 | 21 | 0 |
+| 06 (output) | 48 | 14 | 0 |
+| 07 (output) | 67 | 16 | 29 physical_copper_gap (pre-existing gate failure) |
+
+**Mechanism.** The skip is removed from `count_errors`; the residual
+population is excepted by identity in a new `identity_allowances:` block
+of `.github/routed-drc-tolerance.yml` (83 entries across boards
+01/02/03/05/06/07, each citing #8858), parsed by
+`load_identity_allowances` and applied by `identity_outcome` in the gate.
+The block lives in the YAML, not the script, because the script is the
+consumer-vendored artifact (#8134's no-reference-board-logic test pins
+that). The verdict compares only findings no entry covers; an entry whose
+net stops carrying the finding fails the gate as stale until deleted
+(the #7270 Q3 model, same as the coverage gates); `tolerances:` stays
+empty.
+
+**Verdict parity, measured by running the gate itself on every board:**
+01 OK (2 identity-allowed), 02 FAIL (14 unallowed, all pre-existing
+non-m2c — identical to main's verdict), 03 OK (78 allowed), 05 OK (83
+allowed), 06 OK (48 allowed), 07 FAIL (29 unallowed physical_copper_gap,
+pre-existing). Board 04's native dispatch never ran m2c before or after.
+So no board's release-gate verdict changes; three boards that passed only
+because the skip hid their m2c population (01/03/05 — and 06) now pass
+with that population explicitly allowed, and a NEW mask finding on any
+net of any board fails the gate from here on.
+
+The committed board 07 regression fixture carries 162 m2c errors on 22
+signatures — a different population from the matchgroup gate's regen
+allowance (9 uncovered / 6 stale against it), because that gate measures
+the fresh re-route, not the committed snapshot.
+`tests/test_kct_check_parity.py` excludes the committed fixture's
+population with a test-local signature list so its family pins keep
+measuring what they always measured.
+
+Remaining under #8858: `board_05_unattended.py` (fresh seed routes,
+0-warnings gate, and the with/without `kct check` timing AC).

@@ -17,12 +17,63 @@ that mode the board origin is subtracted before assignment so the setter's
 re-addition nets out and the footprint lands at exactly (x, y) on the sheet.
 On a board with no detectable outline the origin is ``(0, 0)`` and the two
 modes agree.
+
+Side (``--map`` only)
+---------------------
+A batch entry may carry an optional ``"side": "front" | "back"``.  When the
+footprint is not already on that side it is flipped *first* (the same
+KiCad-verified left/right mirror about the footprint anchor that
+``pcb-modify flip`` applies), then ``x`` / ``y`` / ``rotation`` are applied.
+``rotation`` is the **stored KiCad footprint angle written after the flip**
+(what KiCad's Properties dialog shows for the back-side part), not an angle
+as seen from the front.  With an explicit ``rotation`` the pads land at the
+same board coordinates that stored angle gives on the front: a two-pad THT
+diode anchored at pad 1 (pad 2 local ``+7.62, 0``) moved to ``(50, 40)``
+with ``"rotation": 0`` has pad 2 at ``(57.62, 40)`` on either face.  With
+``rotation`` omitted the flip rewrites the stored angle ``theta -> 180 -
+theta``, which mirrors the pads about the anchor: the same diode without a
+``rotation`` key lands at a stored ``180`` degrees with pad 2 at
+``(42.38, 40)``.  A part already on the requested side is left alone; an
+entry without ``side`` never flips.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+
+_VALID_SIDES = ("front", "back")
+
+
+def _footprint_side(layer: str) -> str | None:
+    """Return ``"front"`` / ``"back"`` for an ``F.*`` / ``B.*`` layer, else None."""
+    if layer.startswith("F."):
+        return "front"
+    if layer.startswith("B."):
+        return "back"
+    return None
+
+
+def _flip_footprint(pcb, reference: str) -> str | None:
+    """Flip one footprint to the other side; return an error message or None.
+
+    Reuses the exact call ``pcb-modify flip`` makes
+    (``StrategyApplicator`` with a ``MIRROR_COMPONENT`` strategy) so there is a
+    single flip transform.  Mutates ``pcb`` in memory; the caller saves once.
+    """
+    from kicad_tools.recovery.applicator import StrategyApplicator
+    from kicad_tools.recovery.types import Action, Difficulty, ResolutionStrategy, StrategyType
+
+    result = StrategyApplicator().apply_strategy(
+        pcb,
+        ResolutionStrategy(
+            type=StrategyType.MIRROR_COMPONENT,
+            difficulty=Difficulty.EASY,
+            confidence=1.0,
+            actions=[Action(type="mirror", target=reference)],
+        ),
+    )
+    return None if result.success else result.message
 
 
 def run_move_footprint(
@@ -57,7 +108,8 @@ def run_move_footprint(
             coincident (within ``drag_tolerance``) with each moved pad by that
             pad's delta, so routed copper follows the footprint instead of being
             stranded.  First slice is translation-only: dragging is skipped (with
-            a warning) for any footprint whose ``rotation`` also changes.
+            a warning) for any footprint whose ``rotation`` changes or whose
+            side changes.
         drag_tolerance: Endpoint-coincidence match radius in mm (default 0.05).
 
     Returns:
@@ -73,6 +125,8 @@ def run_move_footprint(
 
     # Build list of moves: [(ref, x, y, rotation_or_None), ...]
     moves: list[tuple[str, float, float, float | None]] = []
+    # Requested side per reference (batch ``"side"`` key); absent => no flip.
+    sides: dict[str, str] = {}
 
     if batch_map is not None:
         for ref, spec in batch_map.items():
@@ -83,6 +137,15 @@ def run_move_footprint(
                 )
                 return 1
             rot = spec.get("rotation")
+            if "side" in spec:
+                side = spec["side"]
+                if not isinstance(side, str) or side not in _VALID_SIDES:
+                    _print_error(
+                        f"Invalid side {side!r} for '{ref}': must be 'front' or 'back'",
+                        output_format,
+                    )
+                    return 1
+                sides[ref] = side
             moves.append((ref, float(spec["x"]), float(spec["y"]), rot))
     elif reference is not None and to is not None:
         moves.append((reference, to[0], to[1], rotation))
@@ -116,23 +179,55 @@ def run_move_footprint(
         if not fp:
             _print_error(f"Footprint {ref} not found in PCB", output_format)
             return 1
+        if ref in sides:
+            # A side flip applies through StrategyApplicator (the single
+            # MIRROR_COMPONENT transform), which refuses an ambiguous authored
+            # reference.  Reject it here -- before any dry-run report or
+            # mutation -- so preview and apply fail identically instead of
+            # previewing a flip that apply then rejects.
+            n_matches = sum(f.reference == ref for f in pcb.footprints)
+            if n_matches > 1:
+                _print_error(
+                    f"Ambiguous footprint reference {ref!r}: {n_matches} footprints "
+                    "share it; 'side' requires a unique reference",
+                    output_format,
+                )
+                return 1
         # fp.position is stored board-relative; report old + new in the same
         # coordinate space the user requested so they are directly comparable.
         old_x, old_y = fp.position
         if absolute:
             old_x, old_y = old_x + ox, old_y + oy
-        move_details.append(
-            {
-                "reference": ref,
-                "footprint": fp.name,
-                "old_position": [old_x, old_y],
-                "old_rotation": fp.rotation,
-                # new_position is reported in the coordinate space the user
-                # requested (see coordinate_space for which one that is).
-                "new_position": [x, y],
-                "new_rotation": rot if rot is not None else fp.rotation,
-            }
-        )
+        new_rotation = rot if rot is not None else fp.rotation
+        old_side = _footprint_side(str(fp.layer))
+        side_change = False
+        if ref in sides:
+            if old_side is None:
+                _print_error(
+                    f"Footprint {ref} is on layer '{fp.layer}', which is not a "
+                    "front/back footprint layer; cannot apply 'side'",
+                    output_format,
+                )
+                return 1
+            side_change = old_side != sides[ref]
+            if side_change and rot is None:
+                # The flip rewrites the stored angle (theta -> 180 - theta).
+                new_rotation = (180.0 - fp.rotation) % 360.0
+        detail = {
+            "reference": ref,
+            "footprint": fp.name,
+            "old_position": [old_x, old_y],
+            "old_rotation": fp.rotation,
+            # new_position is reported in the coordinate space the user
+            # requested (see coordinate_space for which one that is).
+            "new_position": [x, y],
+            "new_rotation": new_rotation,
+        }
+        if ref in sides:
+            detail["old_side"] = old_side
+            detail["new_side"] = sides[ref]
+            detail["side_changed"] = side_change
+        move_details.append(detail)
 
         if drag_endpoints:
             # Board-relative delta of a pure translation: the difference between
@@ -159,6 +254,7 @@ def run_move_footprint(
                 {
                     "delta": delta,
                     "rotation_changed": rotation_changed,
+                    "side_changed": side_change,
                     "pads": pads,
                 }
             )
@@ -184,8 +280,13 @@ def run_move_footprint(
     if drag_endpoints:
         total_dragged = 0
         for md, plan in zip(move_details, drag_plans, strict=True):
-            if plan["rotation_changed"]:
-                md["drag_skipped_rotation"] = True
+            if plan["rotation_changed"] or plan["side_changed"]:
+                # Report each reason separately so JSON consumers can tell a
+                # side change from an angle change.
+                if plan["rotation_changed"]:
+                    md["drag_skipped_rotation"] = True
+                if plan["side_changed"]:
+                    md["drag_skipped_side"] = True
                 md["drag"] = []
                 continue
             dx, dy = plan["delta"]
@@ -224,6 +325,15 @@ def run_move_footprint(
         result["endpoints_dragged"] = total_dragged
 
     if not dry_run:
+        # Flip first so x/y/rotation below land on the already-flipped part.
+        for detail in move_details:
+            if detail.get("side_changed"):
+                flip_ref = str(detail["reference"])
+                error = _flip_footprint(pcb, flip_ref)
+                if error:
+                    _print_error(f"Failed to flip {flip_ref}: {error}", output_format)
+                    return 1
+
         for ref, x, y, rot in moves:
             fp = pcb.get_footprint(ref)
             # fp existence already validated above
@@ -264,11 +374,19 @@ def run_move_footprint(
                 f"    Position [{coord_space}]: "
                 f"({old_pos[0]}, {old_pos[1]}) -> ({new_pos[0]}, {new_pos[1]})"
             )
+            if "old_side" in md:
+                verb = "flipped" if md["side_changed"] else "unchanged"
+                print(f"    Side: {md['old_side']} -> {md['new_side']} ({verb})")
             if md["old_rotation"] != md["new_rotation"]:
                 print(f"    Rotation: {md['old_rotation']} -> {md['new_rotation']}")
+            skip_reasons = []
             if md.get("drag_skipped_rotation"):
+                skip_reasons.append("rotation changed")
+            if md.get("drag_skipped_side"):
+                skip_reasons.append("side changed")
+            if skip_reasons:
                 print(
-                    "    Drag endpoints: SKIPPED (rotation changed; "
+                    f"    Drag endpoints: SKIPPED ({' and '.join(skip_reasons)}; "
                     "rotation-aware dragging not supported in this slice)"
                 )
             elif "drag" in md:

@@ -240,12 +240,17 @@ def verify_pcb_write(
         )
 
 
-def load_footprint(path: str | Path) -> SExp:
+def load_footprint(path: str | Path, *, text: str | None = None) -> SExp:
     """
     Load a KiCad footprint file.
 
     Args:
         path: Path to .kicad_mod file
+        text: Optional footprint text to parse instead of reading *path*;
+            the path is still used for error context.  Callers that already
+            hold the file's bytes pass them here so the parsed content is
+            exactly the bytes they inspected (Issue #9526 evidence
+            snapshots).
 
     Returns:
         Parsed SExp tree
@@ -258,17 +263,18 @@ def load_footprint(path: str | Path) -> SExp:
         Supports both KiCad 5 ("module") and KiCad 6+ ("footprint") formats.
     """
     path = Path(path)
-    if not path.exists():
-        raise KiCadFileNotFoundError(
-            "Footprint file not found",
-            context={"file": str(path)},
-            suggestions=[
-                "Check that the file path is correct",
-                "Ensure the file has a .kicad_mod extension",
-            ],
-        )
+    if text is None:
+        if not path.exists():
+            raise KiCadFileNotFoundError(
+                "Footprint file not found",
+                context={"file": str(path)},
+                suggestions=[
+                    "Check that the file path is correct",
+                    "Ensure the file has a .kicad_mod extension",
+                ],
+            )
 
-    text = read_text_exact(path)
+        text = read_text_exact(path)
     sexp = parse_string(text)
 
     # KiCad 5 uses "module", KiCad 6+ uses "footprint"

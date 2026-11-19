@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import shutil
 import sys
 import tempfile
@@ -1237,6 +1238,146 @@ def _run_single_pass(
     return clearance_result, drill_result, copper_result
 
 
+_MASK_RULE_TYPES = (ViolationType.MASK_TO_COPPER, ViolationType.MASK_TO_COPPER_INCOMPLETE)
+
+
+def _error_class(v: DRCViolation) -> tuple:
+    """Class of a ``kct check`` finding: its rule plus its net pair.
+
+    Deliberately free of ``items`` and exact locations.  This engine names a
+    track in ``items`` by its geometry (``Trace@F.Cu:w0.2:...``, issue
+    #6088) -- clearance findings carry no uuids to key on, the way
+    ``new_mask_finding`` names a mask finding by uuid -- and a clearance
+    error's ``locations`` hold the closest-approach point, so both move with
+    the copper for exactly the errors the re-centre touches (Issue #9365).
+    Rule and net pair survive the move; position is compared separately,
+    with a move-scale tolerance, by :func:`_new_errors`.
+    """
+    return (v.type_str, tuple(sorted(v.nets)))
+
+
+def _new_errors(
+    after: list[DRCViolation],
+    baseline: list[DRCViolation],
+    tolerance_mm: float,
+) -> list[DRCViolation]:
+    """After-run errors with no baseline counterpart of the same class nearby.
+
+    An after error matches a baseline error when they share a class and one
+    of the after error's reported points lies within ``tolerance_mm`` of one
+    of the baseline error's -- close enough that the mask moves' displacement
+    can account for the shift.  Each baseline error matches at most one after
+    error, so a class whose count grew always leaves its surplus flagged.
+    """
+    remaining: dict[tuple, list[DRCViolation]] = {}
+    for v in baseline:
+        remaining.setdefault(_error_class(v), []).append(v)
+    new: list[DRCViolation] = []
+    for v in after:
+        bucket = remaining.get(_error_class(v), [])
+        index = None
+        if not v.locations:
+            # Unlocatable: only an equally unlocatable baseline error of the
+            # same class can be it.
+            index = next((i for i, b in enumerate(bucket) if not b.locations), None)
+        else:
+            index = next(
+                (
+                    i
+                    for i, b in enumerate(bucket)
+                    if b.locations
+                    and any(
+                        math.hypot(a.x_mm - c.x_mm, a.y_mm - c.y_mm) <= tolerance_mm
+                        for a in v.locations
+                        for c in b.locations
+                    )
+                ),
+                None,
+            )
+        if index is None:
+            new.append(v)
+        else:
+            del bucket[index]
+    return new
+
+
+def _moves_with_new_errors(
+    *,
+    after: DRCReport,
+    actions: list,
+    output_path: Path,
+    pcb_path: Path,
+    args: argparse.Namespace,
+) -> set[str]:
+    """Segment uuids of mask moves that a new non-mask error sits next to.
+
+    The mask repairer gates a move on the manufacturer's clearance floor, which
+    is below a net class's clearance, so a move can land between the two and
+    only ``kct check`` sees it (Issue #9365).  The baseline is ``kct check`` on
+    the board with this pass's moves undone, so both sides come from the same
+    engine.  A pre-existing error is recognised by class (rule + net pair) and
+    a location within the moves' displacement of its baseline counterpart; an
+    error without such a counterpart is attributed to the moves whose copper
+    is within reach of its location, or to every move when it has no location.
+
+    Cost: one extra pure-Python rule-set run per mask pass whose re-check
+    reports any non-mask error (the common case on a board being repaired);
+    cheaper than the re-check, which also runs kicad-cli twice for the mask
+    assessment.
+    """
+    candidates = [v for v in after.violations if v.is_error and v.type not in _MASK_RULE_TYPES]
+    if not candidates or not actions:
+        return set()
+
+    baseline_errors: list[DRCViolation] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        undo = MaskCopperRepairer(output_path)
+        if all(undo.undo_action(act) for act in actions):
+            base_path = Path(tmp) / output_path.name
+            undo.save(base_path)
+            baseline = _run_python_drc(
+                base_path,
+                manufacturer=args.mfr,
+                layers=args.layers,
+                project_pcb_path=pcb_path,
+            )
+            if baseline is not None:
+                baseline_errors = [
+                    v for v in baseline.violations if v.is_error and v.type not in _MASK_RULE_TYPES
+                ]
+    # A pre-existing error's closest-approach point shifts by at most the
+    # copper's own displacement (plus the engine's rounding); anything farther
+    # from every baseline counterpart of its class is new.  A failed baseline
+    # run or undo leaves ``baseline_errors`` empty, so every candidate reads
+    # as new and the moves revert: fail closed.
+    tolerance_mm = max(a.displacement_mm for a in actions) + 0.1
+    new_errors = _new_errors(candidates, baseline_errors, tolerance_mm)
+    if not new_errors:
+        return set()
+
+    from shapely.geometry import Point  # type: ignore[import-untyped]
+
+    moved = MaskCopperRepairer(output_path)
+    geometry = {act.uuid: moved.moved_geometry(act) for act in actions}
+    flagged: set[str] = set()
+    for v in new_errors:
+        if not v.locations:
+            return set(geometry)  # cannot attribute it, so keep none of the moves
+        # Attribution radius: the error's own requirement when the rule states
+        # one (copper can miss it by that much from the moved edge), floored
+        # at 0.25 mm (a rule without a requirement still sits within about a
+        # trace width of the copper that caused it) plus 0.1 mm because the
+        # reported point lies between the two copper edges, not on either.
+        reach = max(v.required_value_mm or 0.0, 0.25) + 0.1
+        flagged |= {
+            uuid
+            for uuid, geom in geometry.items()
+            if geom is None
+            or any(geom.distance(Point(loc.x_mm, loc.y_mm)) <= reach for loc in v.locations)
+        }
+    return flagged
+
+
 def _run_mask_pass(
     *,
     report: DRCReport,
@@ -1254,11 +1395,15 @@ def _run_mask_pass(
     board is re-checked with ``kct check``'s rules (Issue #9334).  A move is
     reverted when the segment still carries a ``mask_to_copper`` error, or when
     a finding appears that was not in ``report`` and names the moved segment or
-    its pad.  If the re-check cannot run, every move of this pass is reverted:
-    an unverified move is never kept.
+    its pad.  It is also reverted when a non-mask error appears that the
+    pre-move board did not have and sits next to the moved copper: the
+    repairer's own gate uses the manufacturer floor, which is below a net
+    class's clearance (Issue #9365).  If the re-check cannot run, every move of
+    this pass is reverted: an unverified move is never kept.
     """
     result = MaskRepairResult()
     saved = False
+    snapshot: bytes | None = None
     try:
         load_path = pcb_path
         if not args.dry_run and output_path.exists() and (pass_number > 1 or earlier_saved):
@@ -1272,6 +1417,9 @@ def _run_mask_pass(
         )
         if args.dry_run or result.repaired == 0:
             return result
+        # Byte-exact copy of the board this pass started from, for the
+        # double-fault path below.
+        snapshot = load_path.read_bytes()
         repairer.save(output_path)
         saved = True
 
@@ -1293,6 +1441,17 @@ def _run_mask_pass(
         new_keys = {finding_key(v) for v in after_errors} - before_keys
         touched = {u for key in new_keys for u in key}
         persisting = {key[-1] for key in (finding_key(v) for v in after_errors) if key}
+        regressed = (
+            _moves_with_new_errors(
+                after=after,
+                actions=result.actions,
+                output_path=output_path,
+                pcb_path=pcb_path,
+                args=args,
+            )
+            if after is not None
+            else set()
+        )
 
         keep = []
         revert = []
@@ -1303,6 +1462,8 @@ def _run_mask_pass(
                 revert.append((act, "finding_not_cleared"))
             elif act.uuid in touched or act.pad_uuid in touched:
                 revert.append((act, "new_mask_finding"))
+            elif act.uuid in regressed:
+                revert.append((act, "new_drc_error"))
             else:
                 keep.append(act)
         if revert:
@@ -1316,15 +1477,19 @@ def _run_mask_pass(
             result.repaired = len(keep)
     except Exception as e:
         print(f"Error during mask-to-copper repair: {e}", file=sys.stderr)
-        if saved:
-            # Saved but not verified: never keep an unverified move.
+        if saved and snapshot is not None:
+            # Saved but not verified: never keep an unverified move.  Restore
+            # the board this pass started from rather than undoing move by
+            # move: ``undo_action`` can return False, which would leave a move
+            # in the file that the result reports as not made.
             try:
-                undo = MaskCopperRepairer(output_path)
-                for act in result.actions:
-                    undo.undo_action(act)
-                undo.save(output_path)
-            except Exception as undo_error:
-                print(f"Error reverting mask-to-copper moves: {undo_error}", file=sys.stderr)
+                output_path.write_bytes(snapshot)
+            except OSError as undo_error:
+                print(
+                    f"Error reverting mask-to-copper moves: {undo_error}; "
+                    f"{output_path} may still contain {len(result.actions)} unverified move(s)",
+                    file=sys.stderr,
+                )
             result.actions = []
             result.repaired = 0
     return result
@@ -1538,6 +1703,28 @@ def _attempt_granular_rollback(
         return (True, 0, [])
 
 
+def _waived_report_indices(report_path: Path, violation_count: int) -> set[int]:
+    """Indices of ``kct check`` JSON findings marked waived (Issue #9326).
+
+    The report file is the source of truth: ``_parse_kct_check_json``
+    deliberately leaves ``DRCViolation.waived`` false so a re-parsed finding
+    stays severity-keyed for the ``kct audit`` manufacturing gate (Issue
+    #4417).  Positional matching is safe because that parser emits exactly
+    one violation per JSON entry; when the counts disagree (another schema,
+    or unparseable content) nothing is matched and the report is used as-is.
+    """
+    try:
+        data = json.loads(report_path.read_text())
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    items = data.get("violations")
+    if not isinstance(items, list) or len(items) != violation_count:
+        return set()
+    return {i for i, item in enumerate(items) if isinstance(item, dict) and item.get("waived")}
+
+
 def _get_drc_report(
     drc_report_path: str | None,
     pcb_path: Path,
@@ -1563,10 +1750,27 @@ def _get_drc_report(
             print(f"Error: DRC report not found: {report_path}", file=sys.stderr)
             return None
         try:
-            return DRCReport.load(report_path)
+            report = DRCReport.load(report_path)
         except Exception as e:
             print(f"Error loading DRC report: {e}", file=sys.stderr)
             return None
+        # Issue #9326: a ``kct check`` JSON report marks waived findings with
+        # a per-finding ``waived`` flag; those findings must not become
+        # repair targets (the no-report path already drops waived results --
+        # see ``_run_python_drc``).  The flag is read from the report file
+        # itself, not from ``DRCViolation.waived``: the shared parser keeps
+        # ``waived`` false on re-parse so severity-keyed consumers (the
+        # ``kct audit`` manufacturing gate, Issue #4417) still block on it.
+        # Reports without the flag are unchanged.
+        waived_idx = _waived_report_indices(report_path, len(report.violations))
+        if waived_idx:
+            report.violations = [v for i, v in enumerate(report.violations) if i not in waived_idx]
+            print(
+                f"Skipping {len(waived_idx)} waived finding(s) from the DRC report "
+                f"(waivers are not repair targets).",
+                file=sys.stderr,
+            )
+        return report
 
     # Try to run DRC using kicad-cli
     try:

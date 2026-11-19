@@ -1297,6 +1297,25 @@ def _add_check_parser(subparsers) -> None:
             "this flag is omitted (Issue #4417)."
         ),
     )
+    # Issue #9454: ev3 -> ev4 waiver migration.  Declared on BOTH parsers +
+    # forwarded by the shim (parser-drift guard, issue #4633).
+    check_parser.add_argument(
+        "--migrate-waivers",
+        dest="migrate_waivers",
+        action="store_true",
+        help=(
+            "Re-bind evidence-bound waivers recorded under the previous "
+            "evidence version (ev3) to the current one (ev4) without "
+            "re-recording them (Issue #9454). Previews by default; add "
+            "--write to apply. Run it without --only/--skip."
+        ),
+    )
+    check_parser.add_argument(
+        "--write",
+        dest="migrate_write",
+        action="store_true",
+        help="With --migrate-waivers: apply the migration to the waivers file",
+    )
     # Issue #3061: per-board auto-derive of the pad_grid tolerance is the
     # default for the CLI.  --pad-grid-strict opts back into the PR #3057
     # fixed-0.05mm constant; --pad-grid-tolerance pins a custom value.
@@ -2610,7 +2629,7 @@ def _add_pcb_parser(subparsers) -> None:
     pcb_reinforce.add_argument("pcb", help="Path to .kicad_pcb file")
     pcb_reinforce.add_argument(
         "--net",
-        help="Net name to reinforce (must have routed copper; required unless --list-wires)",
+        help="Net name to reinforce (must have routed copper; required unless --list-wires or --adopt)",
     )
     pcb_reinforce.add_argument(
         "--list-wires",
@@ -2618,6 +2637,16 @@ def _add_pcb_parser(subparsers) -> None:
         action="store_true",
         help="Read-only: print the wire list from BOARD's .reinforcement.json sidecar "
         "(#8744) and exit; --net filters it. Honours --format json.",
+    )
+    pcb_reinforce.add_argument(
+        "--adopt",
+        action="store_true",
+        help="Record the wires ALREADY on BOARD in its .reinforcement.json sidecar "
+        "(#9419): each solder-mask strip chain between two same-net anchor holes of a "
+        "wire gauge's drill becomes a record (net, layer, anchors, length). Moves no "
+        "copper and writes no board; --net restricts it, --dry-run reports without "
+        "writing. Wires already in the sidecar are kept; strips that cannot be "
+        "resolved are reported, never guessed.",
     )
     pcb_reinforce.add_argument(
         "--wire-gauge",
@@ -3012,7 +3041,11 @@ def _add_pcb_parser(subparsers) -> None:
         help="Sync PCB footprints from schematic netlist",
         description="Compare schematic components against PCB footprints. "
         "Adds missing footprints (placed at board edge), detects renamed "
-        "references, and reports orphaned footprints.",
+        "references, and reports orphaned footprints. Assigns pad nets from "
+        "the schematic netlist, annotates pad pin functions/types, and "
+        "copies schematic values onto matched footprints. Footprint lib ID "
+        "drift is reported, not swapped (kct sync --apply owns swaps); "
+        "exits 1 while a footprint difference is unresolved.",
     )
     pcb_sync_netlist.add_argument("pcb", help="Path to .kicad_pcb file")
     pcb_sync_netlist.add_argument(
@@ -3212,7 +3245,8 @@ def _add_pcb_parser(subparsers) -> None:
         "--sides",
         default="front,back",
         help="Sides to populate: 'front', 'back', 'front,back' or 'populated' "
-        "(sides that carry BOM parts). Default: front,back",
+        "(sides that carry at least one SMD BOM part; through-hole-only sides are "
+        "skipped). Default: front,back",
     )
     pcb_add_fid.add_argument("--count", type=int, default=3, help="Fiducials per side (default: 3)")
     pcb_add_fid.add_argument(
@@ -3323,7 +3357,15 @@ def _add_pcb_parser(subparsers) -> None:
         dest="batch_map",
         help="JSON map for batch moves; x/y are board-relative by default "
         "(or absolute page coords with --absolute), "
-        'e.g. \'{"J2": {"x": 10, "y": 10}}\'',
+        'e.g. \'{"J2": {"x": 10, "y": 10}}\'. '
+        'An entry may add "side": "front"|"back": a part not already on that '
+        "side is flipped about its anchor first, then x/y/rotation are applied. "
+        "With a side change, rotation is the stored KiCad angle written AFTER "
+        "the flip (omitted: the flip's 180 - theta), not a front-view angle. "
+        "Explicit rotation: pads land where that same stored angle puts them "
+        "on the front (anchor-at-pad-1 diode, rotation 0: pad 2 at +7.62 mm "
+        "on either face). Omitted rotation: the 180 - theta rewrite mirrors "
+        "pads about the anchor (that diode: pad 2 at -7.62 mm)",
     )
     pcb_move_fp.add_argument(
         "-o",

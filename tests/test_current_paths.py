@@ -1183,6 +1183,43 @@ def _j_spec() -> CurrentPathSpec:
     )
 
 
+def _test_point_stub_pcb(*, stub_layers: tuple[str, ...] = ("F.Cu",)):
+    """J1 (20,50) -> J2 (32,50): wide bars on F.Cu and B.Cu, plus a 0.4 mm
+    stub from the mid-bar point (26,50) to a through-hole test point TP1
+    (26,61), drawn on ``stub_layers`` only (issue #9492)."""
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.create(width=100, height=100, center=False)
+    _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+    _add_pad_footprint(pcb, ref="J2", x=32, y=50, net="NET1")
+    _add_pad_footprint(pcb, ref="TP1", x=26, y=61, net="NET1")
+    for layer in ("F.Cu", "B.Cu"):
+        pcb.add_trace((20, 50), (32, 50), width=2.0, layer=layer, net="NET1")
+    for layer in stub_layers:
+        pcb.add_trace((26, 50), (26, 61), width=0.4, layer=layer, net="NET1")
+    return pcb
+
+
+def _same_layer_bars_pcb(*offsets: float, width: float = 1.0, straight_width: float | None = None):
+    """J1 (20,50) -> J2 (32,50): a straight F.Cu track plus one stepped F.Cu
+    copy per ``offset`` -- each steps sideways, runs parallel, and rejoins at
+    the pad, the reporter's widened-conductor shape (issue #9542). The copies
+    overlap the straight track (one contiguous bar) while ``offset`` is under
+    half the summed widths, and sit behind a real gap beyond it."""
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.create(width=100, height=100, center=False)
+    _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+    _add_pad_footprint(pcb, ref="J2", x=32, y=50, net="NET1")
+    pcb.add_trace((20, 50), (32, 50), width=straight_width or width, layer="F.Cu", net="NET1")
+    for offset in offsets:
+        y = 50 - offset
+        pcb.add_trace((20, 50), (22, y), width=width, layer="F.Cu", net="NET1")
+        pcb.add_trace((22, y), (30, y), width=width, layer="F.Cu", net="NET1")
+        pcb.add_trace((30, y), (32, 50), width=width, layer="F.Cu", net="NET1")
+    return pcb
+
+
 class TestParallelGroups:
     def test_doubled_run_resolves_and_names_group(self) -> None:
         r = resolve_current_path(_doubled_pcb(), _j_spec())
@@ -1249,6 +1286,160 @@ class TestParallelGroups:
         pcb.add_trace(("U3", "1"), ("J2", "1"), width=2.0, layer="F.Cu", net="NET1")
         r = resolve_current_path(pcb, _j_spec())
         assert r.status == "ambiguous"
+
+    def test_dead_end_stub_to_test_point_resolves(self) -> None:
+        """Issue #9492: the stub is a tree branch carrying no path current --
+        the two-layer bar still forms one parallel group, the stub is not part
+        of it, and the path resolves instead of reporting ambiguous."""
+        pcb = _test_point_stub_pcb()
+        r = resolve_current_path(pcb, _j_spec())
+        assert r.status == "resolved"
+        assert len(r.parallel_groups) == 1
+        group = r.parallel_groups[0]
+        assert len(group.branches) == 2
+        assert {branch[0].layer for branch in group.branches} == {"F.Cu", "B.Cu"}
+        assert {s.width for s in group.segments} == {2.0}
+        stub = [s for s in pcb.segments if s.width == 0.4]
+        assert len(stub) == 1
+        assert stub[0] not in r.segments
+
+    def test_multi_segment_stub_resolves(self) -> None:
+        """A stub routed as a chain of segments prunes leaf by leaf."""
+        pcb = _test_point_stub_pcb()
+        pcb.add_trace((26, 61), (30, 61), width=0.4, layer="F.Cu", net="NET1")
+        r = resolve_current_path(pcb, _j_spec())
+        assert r.status == "resolved"
+        assert len(r.parallel_groups) == 1
+
+    def test_two_stubs_on_one_junction_resolve(self) -> None:
+        pcb = _test_point_stub_pcb()
+        _add_pad_footprint(pcb, ref="TP2", x=26, y=39, net="NET1")
+        pcb.add_trace((26, 50), (26, 39), width=0.4, layer="F.Cu", net="NET1")
+        r = resolve_current_path(pcb, _j_spec())
+        assert r.status == "resolved"
+        assert len(r.parallel_groups) == 1
+
+    def test_dangling_stub_without_pad_resolves(self) -> None:
+        """A stub ending on bare track copper (no pad at the far end) is
+        still a leaf, not a loop."""
+        pcb = _doubled_pcb()
+        pcb.add_trace((26, 50), (26, 61), width=0.4, layer="F.Cu", net="NET1")
+        r = resolve_current_path(pcb, _j_spec())
+        assert r.status == "resolved"
+        assert len(r.parallel_groups) == 1
+
+    def test_stub_loop_through_test_point_stays_ambiguous(self) -> None:
+        """The same stub on both layers closes a real loop through the TH
+        test point: still ambiguous, and the witness names the looping
+        branch -- a stub segment -- not a segment of the healthy bar."""
+        r = resolve_current_path(_test_point_stub_pcb(stub_layers=("F.Cu", "B.Cu")), _j_spec())
+        assert r.status == "ambiguous"
+        assert r.witness
+        assert r.witness.get("kind") == "segment"
+        loop_points = {(26.0, 50.0), (26.0, 61.0), (20.0, 50.0)}
+        assert tuple(r.witness["start"]) in loop_points
+        assert tuple(r.witness["end"]) in loop_points
+        assert tuple(r.witness["start"]) != tuple(r.witness["end"])
+
+    def test_overlapping_same_layer_pair_resolves_as_merged_copper(self) -> None:
+        """Issue #9542: two F.Cu tracks that overlap along their run between
+        the same two junctions are one piece of copper, not a loop."""
+        r = resolve_current_path(_same_layer_bars_pcb(0.6), _j_spec())
+        assert r.status == "resolved", r.reason
+        (group,) = r.parallel_groups
+        assert {branch[0].layer for branch in group.branches} == {"F.Cu"}
+        found = r.min_width
+        assert found is not None
+        # 0.6 mm centreline offset + two half-widths: 1.6 mm of merged
+        # copper, not the 2.0 mm a summed-width reading would report.
+        assert found.width_mm == pytest.approx(1.6)
+        assert found.parallel_group is True
+
+    def test_gapped_same_layer_pair_stays_ambiguous_and_names_it(self) -> None:
+        """A same-layer pair with a real gap keeps today's fail-closed
+        ambiguity, but the reason names the case and the alternatives."""
+        r = resolve_current_path(_same_layer_bars_pcb(1.6), _j_spec())
+        assert r.status == "ambiguous"
+        assert "parallel same-layer copper" in r.reason
+        assert "overlapping tracks" in r.reason and "zone" in r.reason
+        assert "two-layer parallel group" in r.reason
+        # The stepped branch reaches the witness series-merged out of path
+        # order; it must still render its true pad-to-pad span.
+        rendered = describe_witness(r.witness)
+        assert "[blocking branches: " in rendered
+        assert rendered.count("(20.000, 50.000)->(32.000, 50.000) on F.Cu") == 2
+
+    def test_touching_same_layer_pair_is_not_an_overlap(self) -> None:
+        """Offset exactly one track width: the edges meet along one line
+        with no shared area, so it stays unsupported like a gap."""
+        r = resolve_current_path(_same_layer_bars_pcb(1.0), _j_spec())
+        assert r.status == "ambiguous"
+        assert "parallel same-layer copper" in r.reason
+
+    def test_three_overlapping_same_layer_bars_resolve(self) -> None:
+        r = resolve_current_path(_same_layer_bars_pcb(0.3, 0.6), _j_spec())
+        assert r.status == "resolved", r.reason
+        (group,) = r.parallel_groups
+        assert len(group.branches) == 3
+        found = r.min_width
+        assert found is not None
+        # The extreme pair sits 0.6 mm apart: same merged extent as the pair.
+        assert found.width_mm == pytest.approx(1.6)
+
+    def test_mixed_width_overlapping_pair_merges_at_union_extent(self) -> None:
+        r = resolve_current_path(
+            _same_layer_bars_pcb(1.0, width=1.0, straight_width=2.0), _j_spec()
+        )
+        assert r.status == "resolved", r.reason
+        found = r.min_width
+        assert found is not None
+        # 1.0 mm offset + 2.0/2 + 1.0/2 = 2.5 mm of merged copper.
+        assert found.width_mm == pytest.approx(2.5)
+
+    def test_group_shape_names_merged_summed_and_mixed(self) -> None:
+        """``shape`` names exactly how ``width_mm`` is composed (issue #9560)."""
+        merged = resolve_current_path(_same_layer_bars_pcb(0.6), _j_spec())
+        assert merged.ok, merged.reason
+        assert merged.parallel_groups[0].shape == "merged"
+        summed = resolve_current_path(_doubled_pcb(), _j_spec())
+        assert summed.ok, summed.reason
+        assert summed.parallel_groups[0].shape == "summed"
+
+    def test_mixed_group_is_merged_per_layer_summed_across_layers(self) -> None:
+        """Issue #9560: a same-layer F.Cu pair plus a B.Cu branch does both.
+
+        The figure is 1.4 mm of merged F.Cu copper *plus* 1.0 mm on B.Cu --
+        labelling it plainly "merged" invites reading 2.4 mm as one
+        contiguous bar.
+        """
+        pcb = _same_layer_bars_pcb(0.4)
+        pcb.add_trace((20, 50), (32, 50), width=1.0, layer="B.Cu", net="NET1")
+        r = resolve_current_path(pcb, _j_spec())
+        assert r.status == "resolved", r.reason
+        (group,) = r.parallel_groups
+        assert len(group.branches) == 3
+        assert group.shape == "merged+summed"
+        assert group.layer_widths() == pytest.approx({"F.Cu": 1.4, "B.Cu": 1.0})
+        assert group.width_mm == pytest.approx(2.4)
+
+    def test_two_merged_layers_still_read_as_merged_and_summed(self) -> None:
+        """Edge: every layer carries an overlapping pair (test plan).
+
+        One group of four branches -- merged within each layer, summed
+        across the two -- so the shape says both.
+        """
+        pcb = _same_layer_bars_pcb(0.4)
+        y = 50 - 0.4
+        pcb.add_trace((20, 50), (32, 50), width=1.0, layer="B.Cu", net="NET1")
+        pcb.add_trace((20, 50), (22, y), width=1.0, layer="B.Cu", net="NET1")
+        pcb.add_trace((22, y), (30, y), width=1.0, layer="B.Cu", net="NET1")
+        pcb.add_trace((30, y), (32, 50), width=1.0, layer="B.Cu", net="NET1")
+        r = resolve_current_path(pcb, _j_spec())
+        assert r.status == "resolved", r.reason
+        (group,) = r.parallel_groups
+        assert len(group.branches) == 4
+        assert group.shape == "merged+summed"
+        assert group.width_mm == pytest.approx(2.8)
 
 
 # --------------------------------------------------------------------------

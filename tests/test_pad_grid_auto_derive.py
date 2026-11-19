@@ -341,6 +341,96 @@ class TestAutoDeriveIntegration:
 
 
 # ---------------------------------------------------------------------------
+# Issue #9434: a part's verdict must not depend on where other parts sit.
+
+
+def _independence_board(fiducials: list[tuple[float, float]], bulk_pads: int = 200) -> str:
+    """Bulk on-grid part U1, untouched part U2 (0.0707 mm off), plus fiducials.
+
+    With the old board-wide p99 the fiducial positions decided whether U2's
+    pad was flagged (threshold 0.0757 with off-grid fiducials, 0.05 with
+    on-grid ones).
+    """
+    bulk = [(str(i), 0.5 * (i % 10), 0.5 * (i // 10)) for i in range(bulk_pads)]
+    footprints = [
+        ("Test:Bulk", "U1", 100.0, 100.0, 0.0, bulk),
+        ("Test:B", "U2", 150.05, 150.05, 0.0, [("1", 0.0, 0.0)]),
+    ]
+    for k, (fx, fy) in enumerate(fiducials):
+        footprints.append(("Fiducial:F", f"FID{k + 1}", fx, fy, 0.0, [("1", 0.0, 0.0)]))
+    return _pcb_with_pads(footprints)
+
+
+def _u2_findings(
+    tmp_path: Path, text: str, name: str
+) -> list[tuple[str, str, float, float | None]]:
+    pcb = _write_pcb(tmp_path, text, name)
+    report = check_pad_grid_alignment(pcb, grid_resolution=0.1, auto_derive_threshold=True)
+    return [
+        (p.ref, p.pin, round(p.offset_mm, 6), p.threshold_mm)
+        for p in report.off_grid_pads
+        if p.ref == "U2"
+    ]
+
+
+class TestPerComponentIndependence:
+    """Issue #9434: findings on part B are independent of part A."""
+
+    OFF = [(10.05, 10.05), (20.05, 10.05), (30.05, 10.05)]
+    ON = [(10.0, 10.0), (20.0, 10.0), (30.0, 10.0)]
+
+    def test_moving_fiducials_does_not_change_untouched_part(self, tmp_path: Path) -> None:
+        off = _u2_findings(tmp_path, _independence_board(self.OFF), "off.kicad_pcb")
+        on = _u2_findings(tmp_path, _independence_board(self.ON), "on.kicad_pcb")
+        assert off == on
+
+    def test_adding_or_removing_parts_does_not_change_untouched_part(self, tmp_path: Path) -> None:
+        none = _u2_findings(tmp_path, _independence_board([]), "none.kicad_pcb")
+        some = _u2_findings(tmp_path, _independence_board(self.OFF), "some.kicad_pcb")
+        small = _u2_findings(tmp_path, _independence_board(self.ON, bulk_pads=3), "small.kicad_pcb")
+        assert none == some == small
+
+    def test_whole_part_placement_error_still_flags(self, tmp_path: Path) -> None:
+        """U2's origin sits 0.05/0.05 off-grid: its 0.0707 mm error flags
+        against its own 0.05 mm floor, whatever else is on the board."""
+        findings = _u2_findings(tmp_path, _independence_board(self.OFF), "f.kicad_pcb")
+        assert len(findings) == 1
+        assert findings[0][2] == pytest.approx(0.0707107, abs=1e-5)
+        assert findings[0][3] == AUTO_DERIVED_TOLERANCE_FLOOR_MM
+
+    def test_tolerance_is_per_footprint(self, tmp_path: Path) -> None:
+        """A fine-pitch part carries its own lifted tolerance; its neighbour keeps the floor."""
+        pads = [(str(i), 0.5 * i + 0.05, 0.05) for i in range(10)]
+        text = _pcb_with_pads(
+            [
+                ("Package_QFP:LQFP", "U1", 100.0, 100.0, 0.0, pads),
+                ("Test:Plain", "U2", 120.0, 120.0, 0.0, [("1", 0.0, 0.0)]),
+            ]
+        )
+        pcb = _write_pcb(tmp_path, text)
+        from kicad_tools.router.io import load_pads_for_analysis
+        from kicad_tools.router.preflight import compute_component_pad_grid_tolerances
+
+        tols = compute_component_pad_grid_tolerances(load_pads_for_analysis(pcb))
+        assert tols["U1"] > AUTO_DERIVED_TOLERANCE_FLOOR_MM
+        assert tols["U2"] == AUTO_DERIVED_TOLERANCE_FLOOR_MM
+
+    def test_rotated_footprint_intrinsic_offset_is_rotation_invariant(self, tmp_path: Path) -> None:
+        """Rotating a footprint about an on-grid origin keeps its pads clear."""
+        pads = [(str(i), 0.5 * i + 0.03, 0.0) for i in range(10)]
+        for rot in (0.0, 90.0, 180.0, 270.0):
+            text = _pcb_with_pads([("Package_QFP:LQFP", "U1", 100.0, 100.0, rot, pads)])
+            pcb = _write_pcb(tmp_path, text, f"rot{int(rot)}.kicad_pcb")
+            report = check_pad_grid_alignment(pcb, grid_resolution=0.1, auto_derive_threshold=True)
+            assert report.passed, f"rot={rot}: {report.summary()}"
+
+    def test_single_pad_board_uses_floor(self, tmp_path: Path) -> None:
+        text = _pcb_with_pads([("Test:FP", "U1", 100.0, 100.0, 0.0, [("1", 0.0, 0.0)])])
+        pcb = _write_pcb(tmp_path, text)
+        assert compute_pad_grid_tolerance(pcb) == AUTO_DERIVED_TOLERANCE_FLOOR_MM
+
+
+# ---------------------------------------------------------------------------
 # Backwards compatibility: auto_derive_threshold=False must reproduce
 # PR #3057's behaviour exactly.
 

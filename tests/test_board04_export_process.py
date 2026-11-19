@@ -94,7 +94,7 @@ def test_paid_gate_reports_failure_from_json_when_stderr_empty(monkeypatch, tmp_
 
     monkeypatch.setattr(gate.subprocess, "run", check)
     with pytest.raises(RuntimeError, match="STALE"):
-        gate._run_paid_drill_check(tmp_path / "board.kicad_pcb")
+        gate._run_paid_drill_check(tmp_path / "board.kicad_pcb", None)
 
 
 def test_portable_capacitor_preserves_cached_symbol_and_instance_fields(tmp_path):

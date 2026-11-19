@@ -79,10 +79,16 @@ The supported surface is deliberately narrow, and everything outside it refuses
 rather than approximating:
 
 - anchors: `rect`, or `circle` with equal size;
-- primitives: valid, simple filled `gr_poly` with zero stroke width;
-- refused: any other primitive (`gr_circle`, `gr_line`, `gr_arc`, `gr_curve`,
-  `gr_rect`), invalid or self-intersecting polygons, unfilled or unrecognized
-  fills, non-zero stroke widths,
+- primitives (#9501): valid, simple `gr_poly`, filled and/or stroked (a
+  stroke buffers the outline by half its width with round joins, on top of
+  the fill or alone around an unfilled outline), and `gr_circle` (a filled
+  disc grown to `radius + width/2`, an unfilled ring between
+  `radius +/- width/2`), both area-verified against the pinned image's own
+  `PAD::GetEffectivePolygon` to 1e-4 mm^2 at 0/90/180/30 degrees, front and
+  back;
+- refused: any other primitive (`gr_rect`, `gr_line`, `gr_arc`, `gr_curve`),
+  invalid or self-intersecting polygons, unrecognized fills, an unfilled
+  primitive whose copper would be empty (zero stroke width),
   layer-specific padstacks, non-positive sizes, pads with no copper layer, and a
   copper layer absent from the routing stack.
 

@@ -61,7 +61,7 @@ Evidence-bound waivers (schema ``version == 3``, Issue #5946)::
       "waivers": [
         {
           "key": "courtyards_overlap|C52,U10||F.Cu",
-          "evidence_hash": "ev3:3f0c9a1d2b7e4c55",
+          "evidence_hash": "ev4:3f0c9a1d2b7e4c55",
           "reason": "EE-mandated tight decoupling",
           "reviewer": "rjwalters",
           "date": "2026-10-06"
@@ -102,14 +102,22 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import os
 import re
+import shutil
+import tempfile
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from kicad_tools.validate.evidence import (
+    EVIDENCE_HASH_VERSION,
     KEY_SEPARATOR,
+    PRIOR_EVIDENCE_HASH_VERSION,
+    EvidenceContext,
+    compute_evidence_hash,
     current_evidence_hash_version,
     evidence_hash_version,
     is_outdated_evidence_hash,
@@ -472,6 +480,9 @@ class Waiver:
         date: ISO date of the review (required on keyed entries).
         rebound_at: ISO date the entry was re-bound to a new evidence-hash
             version with an unchanged digest (Issue #8614); optional.
+        rebound_from: The evidence hash the entry carried before a
+            ``--migrate-waivers`` re-bind (Issue #9454); optional.
+        rebound_by: ``kct <version>`` that performed that re-bind; optional.
     """
 
     rule: str
@@ -484,6 +495,8 @@ class Waiver:
     reviewer: str | None = None
     date: str | None = None
     rebound_at: str | None = None
+    rebound_from: str | None = None
+    rebound_by: str | None = None
 
     def matches_normalized(
         self,
@@ -685,6 +698,8 @@ def _parse_keyed_entry(where: str, raw: dict) -> Waiver:
             _dt.date.fromisoformat(rebound_at)
         except ValueError as e:
             raise ValueError(f"{where} 'rebound_at' must be an ISO date (YYYY-MM-DD): {e}") from e
+    rebound_from = _optional_str(where, raw, "rebound_from")
+    rebound_by = _optional_str(where, raw, "rebound_by")
     rule = key.split("|", 1)[0]
     if not rule:
         raise ValueError(f"{where} 'key' must start with a rule id")
@@ -699,6 +714,8 @@ def _parse_keyed_entry(where: str, raw: dict) -> Waiver:
         reviewer=reviewer,
         date=date,
         rebound_at=rebound_at,
+        rebound_from=rebound_from,
+        rebound_by=rebound_by,
     )
 
 
@@ -909,6 +926,14 @@ def apply_waivers(
                     " upgrade, so every older waiver goes stale once even if the"
                     " board is unchanged; re-review the finding and re-waive it"
                     f" ({waive_command}) to record the new hash."
+                    + (
+                        " If the board's evidence is unchanged, `kct check BOARD"
+                        " --migrate-waivers` re-binds the waiver to the new hash"
+                        " without re-recording it (previews first; add --write)."
+                        if evidence_hash_version(entry.evidence_hash) == PRIOR_EVIDENCE_HASH_VERSION
+                        and not is_mistake_rule(entry.rule)
+                        else ""
+                    )
                 )
             else:
                 message = (
@@ -1060,3 +1085,279 @@ def write_keyed_waivers(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n")
     return len(new_entries)
+
+
+# ---------------------------------------------------------------------------
+# ev3 -> ev4 migration (Issue #9454)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WaiverMigrationItem:
+    """One keyed waiver entry's outcome in a :class:`WaiverMigrationReport`."""
+
+    key: str
+    old_hash: str
+    #: The ``ev4`` hash the entry is (or would be) re-bound to; ``None`` unless migrated.
+    new_hash: str | None = None
+    #: Why an entry was left alone (``stale`` / ``orphan`` items only).
+    reason: str = ""
+    #: Current finding keys that look like the same finding (``orphan`` items only).
+    candidates: tuple[str, ...] = ()
+    #: The entry's rule produced no findings because it was inactive this run
+    #: (e.g. ``ampacity`` without a net-class-map; issue #9504) -- ``orphan``
+    #: items only.
+    rule_inactive: bool = False
+
+
+@dataclass
+class WaiverMigrationReport:
+    """What :func:`migrate_evidence_waivers` did, or would do (dry-run)."""
+
+    migrated: list[WaiverMigrationItem] = field(default_factory=list)
+    #: Key still names a finding but its recomputed ``ev3`` digest differs from
+    #: the recorded one: the evidence changed, so the waiver stays stale.
+    stale: list[WaiverMigrationItem] = field(default_factory=list)
+    #: Key names no current finding (the key changed or the defect is gone).
+    orphan: list[WaiverMigrationItem] = field(default_factory=list)
+    #: Keyed entries whose evidence-hash version predates the migratable
+    #: ``ev3`` (``ev1`` / ``ev2``): no recipe exists to recompute them, so
+    #: they are listed by key, with their version, and never touched
+    #: (Issue #9482).
+    legacy: list[WaiverMigrationItem] = field(default_factory=list)
+    #: Entries that need no migration and are not listed separately (non-keyed
+    #: legacy entries, already-current or forward versions, mistake entries,
+    #: missing hashes, ...).
+    untouched: int = 0
+    #: Names of the untouched entries that have one (issue #9504): the key of
+    #: an ``ev4:``/``ev5:`` (or non-``evN``) entry, or the rule name of a
+    #: legacy ``rule``/``items`` entry. Pre-``ev3`` keys live in ``legacy``
+    #: (issue #9482), not here. Keyless malformed entries are only counted.
+    untouched_keys: list[str] = field(default_factory=list)
+    written: bool = False
+
+
+def _is_pre_recipe_evidence_version(version: str) -> bool:
+    """True for ``ev1``/``ev2``: older than the oldest recomputable recipe.
+
+    Issue #9482. A forward version (``ev5``) or a non-``evN`` prefix is not
+    "pre-recipe" -- nothing here can date it, so such entries stay untouched.
+    """
+    digits = version.removeprefix("ev")
+    return digits.isdigit() and int(digits) < int(PRIOR_EVIDENCE_HASH_VERSION.removeprefix("ev"))
+
+
+def migrate_evidence_waivers(
+    path: Path,
+    findings: Iterable[DRCViolation],
+    prior_context: EvidenceContext,
+    *,
+    write: bool = False,
+    tool_version: str = "",
+    date: str | None = None,
+    inactive_rules: Iterable[str] = (),
+) -> WaiverMigrationReport:
+    """Re-bind ``ev3`` evidence-bound waivers in ``path`` to ``ev4`` (Issue #9454).
+
+    ``ev4`` changed one field of the evidence (footprint positions are hashed
+    in sheet coordinates), so every ``ev3`` waiver reports stale after the
+    upgrade.  For each keyed ``ev3:`` entry whose key names a current finding,
+    this recomputes that finding's **``ev3``** digest on the current board
+    (``prior_context`` must be ``EvidenceContext(pcb, recipe="ev3")``).  When
+    it equals the recorded digest the evidence the reviewer signed off is
+    provably unchanged, so the entry takes the finding's current hash and gains
+    ``rebound_at`` / ``rebound_from`` / ``rebound_by``; reviewer, date, reason
+    and issue are kept verbatim.  A differing digest is left stale; a key that
+    names no finding is reported as an orphan and never touched.  A keyed
+    entry whose hash version predates ``ev3`` (``ev1`` / ``ev2``) cannot be
+    recomputed at all: it is listed by key, with its version, and never
+    touched (Issue #9482).
+
+    ``findings`` must be annotated with their current (``ev4``) evidence hash
+    and must be the full, unfiltered finding set of the board.  Nothing is
+    written unless ``write`` is true; a file that fails validation is never
+    clobbered.  ``kct detect-mistakes`` entries (``ev3.m1:``) are not handled.
+
+    ``inactive_rules`` (issue #9504) names rules that could not produce
+    findings this run for lack of input (e.g. ``ampacity`` without a
+    net-class-map, ``path_ampacity`` without ``--current-paths``); an orphan
+    naming such a rule is reported as ``rule_inactive`` so the report can say
+    the rule was not evaluated instead of implying the key changed.
+
+    Raises:
+        ValueError: when the file cannot be parsed or fails validation.
+    """
+    if prior_context.recipe != PRIOR_EVIDENCE_HASH_VERSION:
+        raise ValueError("migrate_evidence_waivers needs a prior-recipe EvidenceContext")
+    inactive = frozenset(inactive_rules)
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        raise ValueError(f"parsing waivers JSON {path}: {e}") from e
+    waivers_from_dict(data)  # validate before touching it
+    raw_entries = list(data.get("waivers", []))
+
+    current = [f for f in findings if isinstance(f, DRCViolation)]
+    counts = Counter(f.key for f in current)
+    by_key: dict[str, list[DRCViolation]] = {}
+    for f in current:
+        by_key.setdefault(f.key, []).append(f)
+
+    day = date or _dt.date.today().isoformat()
+    report = WaiverMigrationReport()
+    for idx, raw in enumerate(raw_entries):
+        if not (isinstance(raw, dict) and isinstance(raw.get("key"), str)):
+            report.untouched += 1
+            # Issue #9504: name what we can -- a legacy ``rule``/``items``
+            # entry by its rule name; a truly malformed entry is only counted.
+            if isinstance(raw, dict):
+                rule = raw.get("rule")
+                if isinstance(rule, str) and rule:
+                    report.untouched_keys.append(f"{rule} (legacy rule/items entry)")
+            continue
+        old_hash = str(raw.get("evidence_hash") or "")
+        key = raw["key"]
+        rule = key.split(KEY_SEPARATOR, 1)[0]
+        version = evidence_hash_version(old_hash)
+        if version != PRIOR_EVIDENCE_HASH_VERSION or is_mistake_rule(rule):
+            if (
+                not is_mistake_rule(rule)
+                and version is not None
+                and "." not in version
+                and _is_pre_recipe_evidence_version(version)
+            ):
+                # Issue #9482: an ``ev1``/``ev2`` entry can never be migrated
+                # (no recomputable recipe); list it instead of counting it.
+                report.legacy.append(
+                    WaiverMigrationItem(
+                        key=key,
+                        old_hash=old_hash,
+                        reason=(
+                            f"evidence version {version} predates {PRIOR_EVIDENCE_HASH_VERSION}"
+                            " (the oldest recipe this build can recompute); re-waive the"
+                            " finding or delete the entry"
+                        ),
+                    )
+                )
+            else:
+                report.untouched += 1
+                report.untouched_keys.append(key)
+            continue
+        matches = by_key.get(key, [])
+        if not matches:
+            shim = Waiver(
+                rule=key.split(KEY_SEPARATOR, 1)[0],
+                items=frozenset(),
+                nets=frozenset(),
+                reason="",
+                issue="",
+                key=key,
+            )
+            rule_inactive = shim.rule in inactive
+            report.orphan.append(
+                WaiverMigrationItem(
+                    key=key,
+                    old_hash=old_hash,
+                    reason=(
+                        "key names no current finding and the rule was not evaluated "
+                        "in this run (its required input was absent)"
+                        if rule_inactive
+                        else "key names no current finding (the key changed or the defect is gone)"
+                    ),
+                    rule_inactive=rule_inactive,
+                    candidates=tuple(
+                        _path_ampacity_layer_candidates(shim, current)
+                        or _rewaive_candidates(shim, current)
+                    ),
+                )
+            )
+            continue
+        target = next(
+            (
+                f
+                for f in matches
+                if compute_evidence_hash(f, prior_context, multiplicity=counts[key]) == old_hash
+            ),
+            None,
+        )
+        if target is None or not target.evidence_hash:
+            report.stale.append(
+                WaiverMigrationItem(
+                    key=key,
+                    old_hash=old_hash,
+                    reason=(
+                        "the recorded ev3 digest no longer matches the board: the evidence "
+                        "under the finding changed, or the outline/board origin moved since "
+                        "the waiver was recorded (the tool cannot tell which). Re-review the "
+                        "finding and re-record the waiver; the migration does not carry it"
+                    ),
+                )
+            )
+            continue
+        rebound = dict(raw)
+        rebound["evidence_hash"] = target.evidence_hash
+        rebound["rebound_at"] = day
+        rebound["rebound_from"] = old_hash
+        if tool_version:
+            rebound["rebound_by"] = f"kct {tool_version}"
+        raw_entries[idx] = rebound
+        report.migrated.append(
+            WaiverMigrationItem(key=key, old_hash=old_hash, new_hash=target.evidence_hash)
+        )
+
+    if write and report.migrated:
+        new_data = {**data, "waivers": raw_entries}
+        waivers_from_dict(new_data)  # never write a file this build cannot read back
+        _atomic_write_text(path, json.dumps(new_data, indent=2) + "\n")
+        report.written = True
+    return report
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write via a same-directory temp file and ``os.replace`` (no truncated file).
+
+    Issue #9504: ``path`` is resolved first (``os.path.realpath``) and the
+    temp file is created beside the *target*, so a symlinked waivers file is
+    updated through its link instead of being replaced by a regular file.
+    """
+    target = Path(os.path.realpath(path))
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        shutil.copymode(target, tmp)
+        os.replace(tmp, target)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def format_waiver_migration(report: WaiverMigrationReport, path: Path, *, write: bool) -> list[str]:
+    """Human-readable lines for a :class:`WaiverMigrationReport`."""
+    verb = "migrated" if write else "would migrate"
+    lines = [
+        f"Waiver migration ({PRIOR_EVIDENCE_HASH_VERSION} -> {EVIDENCE_HASH_VERSION}) for {path}"
+        + ("" if write else " [dry-run: no file changed; add --write to apply]"),
+        f"  {verb}: {len(report.migrated)}   stale (left alone): {len(report.stale)}"
+        f"   orphan (left alone): {len(report.orphan)}   legacy (left alone): {len(report.legacy)}"
+        f"   untouched: {report.untouched}",
+    ]
+    for it in report.migrated:
+        lines.append(f"  {verb}: {it.key}  {it.old_hash} -> {it.new_hash}")
+    for it in report.stale:
+        lines.append(f"  stale: {it.key}  ({it.old_hash}): {it.reason}")
+    for it in report.orphan:
+        line = f"  orphan (no current finding): {it.key}  ({it.old_hash})"
+        if it.rule_inactive:
+            line += " [rule not evaluated in this run]"
+        if it.candidates:
+            shown = it.candidates[:_MAX_REWAIVE_HINT_KEYS]
+            line += " -> re-waive candidate(s): " + ", ".join(repr(k) for k in shown)
+        lines.append(line)
+    for it in report.legacy:
+        lines.append(f"  legacy (left alone): {it.key}  ({it.old_hash}): {it.reason}")
+    for key in report.untouched_keys:
+        lines.append(f"  untouched (no migration needed): {key}")
+    return lines

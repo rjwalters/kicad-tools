@@ -244,3 +244,80 @@ def test_parallel_short_leg_is_recorded_and_cleared(tmp_path):
     assert run_pcb_command(_args(p, clear=True)) == 0
     assert not any(s.layer == "B.Cu" for s in PCB.load(p).segments)
     assert load_wires(sidecar_path(p)) == []
+
+
+# ------------------------------------------------------- --adopt (Issue #9419)
+
+
+def _reinforced_board_without_sidecar(tmp_path: Path):
+    """A board ``pcb reinforce`` has already wired (strips + anchors), sidecar deleted."""
+    p = _board(tmp_path)
+    assert run_pcb_command(_args(p, "NET_A")) == 0
+    original = load_wires(sidecar_path(p))
+    sidecar_path(p).unlink()
+    return p, original
+
+
+def _board_in(directory: Path) -> Path:
+    directory.mkdir()
+    q, _ = _reinforced_board_without_sidecar(directory)
+    return q
+
+
+def test_adopt_records_wires_already_on_the_board(tmp_path, capsys):
+    p, original = _reinforced_board_without_sidecar(tmp_path)
+    pcb_before = p.read_bytes()
+    capsys.readouterr()
+    assert run_pcb_command(_args(p, net=None, adopt=True)) == 0
+    # Nothing on the board moves, and the board file is not rewritten.
+    assert p.read_bytes() == pcb_before
+    wires = load_wires(sidecar_path(p))
+    assert len(wires) == len(original) == 1
+    w, o = wires[0], original[0]
+    assert (w["net"], w["layer"], w["wire_gauge_awg"]) == (o["net"], o["layer"], 16)
+    assert w["status"] == "adopted"
+    assert sorted((a["x"], a["y"]) for a in w["anchors"]) == sorted(
+        (a["x"], a["y"]) for a in o["anchors"]
+    )
+    assert abs(w["straight_line_mm"] - o["straight_line_mm"]) < 1e-3
+    assert w["bare_diameter_mm"] == round(bare_copper_diameter_mm(16), 4)
+    # --list-wires prints it.
+    capsys.readouterr()
+    assert run_pcb_command(_args(p, net=None, list_wires=True)) == 0
+    assert "NET_A" in capsys.readouterr().out
+
+
+def test_adopt_is_idempotent_and_keeps_existing_records(tmp_path):
+    p = _board(tmp_path)
+    assert run_pcb_command(_args(p, "NET_A")) == 0
+    before = sidecar_path(p).read_bytes()
+    # The richer reinforce record (path name, leg ends) is not shadowed.
+    assert run_pcb_command(_args(p, net=None, adopt=True)) == 0
+    assert sidecar_path(p).read_bytes() == before
+    q = _board_in(tmp_path / "again")
+    assert run_pcb_command(_args(q, net=None, adopt=True)) == 0
+    first = sidecar_path(q).read_bytes()
+    assert run_pcb_command(_args(q, net=None, adopt=True)) == 0
+    assert sidecar_path(q).read_bytes() == first
+
+
+def test_adopt_dry_run_and_net_filter_write_nothing_extra(tmp_path):
+    p, _ = _reinforced_board_without_sidecar(tmp_path)
+    assert run_pcb_command(_args(p, net=None, adopt=True, dry_run=True)) == 0
+    assert not sidecar_path(p).exists()
+    assert run_pcb_command(_args(p, net="NET_B", adopt=True)) == 0
+    assert not sidecar_path(p).exists()
+    assert run_pcb_command(_args(p, net="NO_SUCH", adopt=True)) == 1
+
+
+def test_adopt_reports_a_strip_without_anchor_holes(tmp_path, capsys):
+    p = _board(tmp_path)
+    pcb = PCB.load(str(p))
+    # A bare mask strip along NET_B's trace with no anchor holes at its ends.
+    pcb.add_graphic_line((30.0, 70.0), (90.0, 70.0), "F.Mask", width=2.0)
+    pcb.save(p)
+    capsys.readouterr()
+    assert run_pcb_command(_args(p, net=None, adopt=True)) == 0
+    out = capsys.readouterr().out
+    assert "Adopted 0 wire(s)" in out and "Not adopted" in out
+    assert not sidecar_path(p).exists()

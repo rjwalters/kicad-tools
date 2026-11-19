@@ -204,3 +204,79 @@ def test_kct_check_findings_share_the_pad_frame(capsys):
     )
     nets = evidence_payload(v, EvidenceContext(PCB.load(FIXTURE)))["nets"]
     assert "C2.2" in {row[0] for row in nets["GND"]}
+
+
+# ---------------------------------------------------------------------------
+# Issue #9431: an Edge.Cuts-only edit must not move any evidence hash.
+#
+# ``PCB.load()`` stores footprint positions board-relative, so hashing
+# ``fp.position`` directly (ev3) made every footprint-bearing hash move when
+# the outline's top-left corner moved, un-waiving reviewed findings although
+# no copper changed.
+# ---------------------------------------------------------------------------
+
+_OUTLINE = "(gr_rect (start 100 100) (end 180 160)"
+
+
+def _widen_outline(text: str, left: float = 7.0, right: float = 7.0) -> str:
+    """Widen only the Edge.Cuts rectangle, moving its top-left corner."""
+    assert _OUTLINE in text
+    return text.replace(
+        _OUTLINE, f"(gr_rect (start {100 - left:g} 100) (end {180 + right:g} 160)", 1
+    )
+
+
+def _rule_finding(rule_id: str, location: tuple[float, float]) -> DRCViolation:
+    return DRCViolation(
+        rule_id=rule_id,
+        severity="error",
+        message="x",
+        location=location,
+        layer="F.Cu",
+        actual_value=0.1,
+        required_value=0.2,
+        items=("C1-2", "C2-2"),
+        nets=("GND",),
+    )
+
+
+@pytest.mark.parametrize(
+    "rule_id",
+    [
+        "clearance_pad_segment",  # local-radius rule
+        "netclass_clearance_copper",  # the rule family reported in #9431
+        "edge_clearance_pad",  # edge rule
+        "solder_mask_bridge",  # mask rule
+        "ampacity",  # whole-net rule
+    ],
+)
+class TestOutlineOnlyEditKeepsEvidence:
+    def test_hash_invariant_under_outline_only_change(self, rule_id, tmp_path):
+        text = FIXTURE.read_text()
+        before = PCB.load(FIXTURE)
+        after = _load(_widen_outline(text), tmp_path, "widened")
+        # The outline edit really moved the origin, and nothing else did.
+        assert after.board_origin != before.board_origin
+        assert _sheet_position(_widen_outline(text), "C1") == _sheet_position(text, "C1")
+
+        v = _rule_finding(rule_id, (115.48, 120.0))
+        assert evidence_payload(v, EvidenceContext(after)) == evidence_payload(
+            v, EvidenceContext(before)
+        )
+        assert _hash(after, v) == _hash(before, v)
+
+    def test_moving_a_named_footprint_still_changes_hash(self, rule_id, tmp_path):
+        text = FIXTURE.read_text()
+        before = PCB.load(FIXTURE)
+        moved = _load(_move(_widen_outline(text), "C1", 0.2, 0.0), tmp_path, "moved")
+        v = _rule_finding(rule_id, (115.48, 120.0))
+        assert _hash(moved, v) != _hash(before, v)
+
+
+def test_footprint_at_is_sheet_absolute():
+    pcb = PCB.load(FIXTURE)
+    text = FIXTURE.read_text()
+    v = _rule_finding("clearance_pad_segment", (115.48, 120.0))
+    at = evidence_payload(v, EvidenceContext(pcb))["footprints"]["C1"]["at"]
+    sx, sy = _sheet_position(text, "C1")
+    assert at == [round(sx, 3), round(sy, 3)]

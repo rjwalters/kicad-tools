@@ -894,6 +894,120 @@ def test_native_repeated_pad_numbers_do_not_share_owner_exclusion(tmp_path, nati
     assert all(m.exposed_area_mm2 > 0.59 for m in result.measurements)
 
 
+def _reinforced_board_with_foreign_copper(tmp_path):
+    """Board whose wire strip was laid by production ``pcb reinforce``, plus foreign copper.
+
+    ``PWR`` carries one B.Cu run that ``pcb reinforce`` anchors and strips. A
+    0.1 mm mask margin makes the far-side (F.Mask) anchor opening reach past the
+    via pad, and an ``OTHER`` F.Cu trace just outside that pad lands in it.
+    Returns ``(board_path, production_records)``; the sidecar is removed so the
+    caller decides which records to hand the checker.
+    """
+    import argparse
+
+    from kicad_tools.cli.commands.pcb import run_pcb_command
+    from kicad_tools.pcb.reinforcement_sidecar import load_wires, sidecar_path
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.create(width=60, height=40, center=False)
+    pcb.add_trace((10.0, 20.0), (50.0, 20.0), width=0.5, layer="B.Cu", net="PWR")
+    pcb.add_trace((10.0, 24.0), (50.0, 24.0), width=0.25, layer="B.Cu", net="OTHER")
+    path = tmp_path / "reinforced.kicad_pcb"
+    pcb.save(path)
+    args = argparse.Namespace(
+        pcb_command="reinforce",
+        pcb=str(path),
+        net="PWR",
+        wire_gauge=16,
+        layer=None,
+        output=None,
+        format="text",
+        dry_run=False,
+    )
+    assert run_pcb_command(args) == 0
+    production = load_wires(sidecar_path(path))
+    sidecar_path(path).unlink()
+    board = PCB.load(str(path))
+    board.add_trace((8.0, 21.1), (16.0, 21.1), width=0.2, layer="F.Cu", net="OTHER")
+    board.save(path)
+    path.write_text(
+        path.read_text().replace("(pad_to_mask_clearance 0)", "(pad_to_mask_clearance 0.1)")
+    )
+    return path, production
+
+
+def test_native_adopted_records_match_production_records_end_to_end(tmp_path, native_options):
+    """``pcb reinforce --adopt`` records drive ``check_mask_to_copper`` like production ones (#9443).
+
+    The two halves of #9419 were only tested apart. Here one real native
+    export is judged three ways: with no records, with the records production
+    ``pcb reinforce`` wrote, and with the records ``--adopt`` reads back from
+    the same board after the sidecar is gone. Adopted records set a leg's ends
+    to the strip chain's ends rather than the track's, so this pins that the
+    difference changes no attribution: same-net copper stays excused and the
+    different-net copper in the far-side opening stays an error.
+    """
+    import argparse
+
+    from kicad_tools.cli.commands.pcb import run_pcb_command
+    from kicad_tools.pcb.reinforcement_sidecar import load_wires, sidecar_path
+
+    path, production = _reinforced_board_with_foreign_copper(tmp_path)
+    adopt = argparse.Namespace(
+        pcb_command="reinforce",
+        pcb=str(path),
+        net=None,
+        adopt=True,
+        wire_gauge=16,
+        layer=None,
+        output=None,
+        format="text",
+        dry_run=False,
+    )
+    assert run_pcb_command(adopt) == 0
+    adopted = load_wires(sidecar_path(path))
+    assert len(adopted) == len(production) == 1
+    assert adopted[0]["status"] == "adopted"
+    assert adopted[0]["anchors"] == production[0]["anchors"]
+    # The divergence this test exists to neutralise: adopted legs end at the
+    # strip chain's ends, production legs at the track's. Without this the
+    # comparison below could go vacuous unnoticed (#9457).
+    assert (adopted[0]["leg_start"], adopted[0]["leg_end"]) != (
+        production[0]["leg_start"],
+        production[0]["leg_end"],
+    )
+
+    def run(label, records):
+        options = dict(native_options, artifact_dir=native_options["artifact_dir"] / label)
+        result = check_mask_to_copper(path, POLICY, reinforce_wires=records, **options)
+        assert result.coverage == "complete", result.reasons
+        return result
+
+    def profile(result):
+        return sorted(
+            (m.conductor_uuid, m.mask_side, m.conductor_net, m.disposition, m.exposed_area_mm2)
+            for m in result.measurements
+        )
+
+    bare = run("bare", [])
+    from_production = run("production", production)
+    from_adopt = run("adopted", adopted)
+
+    # Without any record the strip's own-net copper is an error, so the
+    # records are what the other two runs are being judged on.
+    assert any(m.disposition == "violation" and m.conductor_net == "PWR" for m in bare.measurements)
+    # Different-net copper in a far-side opening survives both record sources.
+    for result in (from_production, from_adopt):
+        errors = [m for m in result.measurements if m.disposition == "violation"]
+        assert {(m.conductor_net, m.mask_side) for m in errors} == {("OTHER", "F.Mask")}
+        assert {m.disposition for m in result.measurements if m.conductor_net == "PWR"} == {
+            "within_reinforce_run"
+        }
+        assert not result.passed
+    # Same measurements, same dispositions: adopted records are interchangeable.
+    assert profile(from_adopt) == profile(from_production)
+
+
 def test_actual_native_cli_serializes_exposure_and_report_binding(tmp_path, native_options, capsys):
     from kicad_tools.cli.check_cmd import main
     from kicad_tools.drc.report import DRCReport
@@ -1297,6 +1411,12 @@ def test_refilled_zone_fill_pinch_repairs_instead_of_dropping(monkeypatch, tmp_p
     The extraction used to drop the whole layer for such a zone
     (``invalid native object polygon``) and then flag the per-object/full-layer
     mismatch, capping every board 05 finding at a provisional warning.
+
+    The fake export supplies the full-layer unions for both copper layers, so
+    the per-object/full-layer comparison actually executes: the ``material
+    mismatch`` assertion pins the repaired geometry against the layer union
+    (falsifiable via a wrong union), and ``B.Cu`` being present but empty must
+    not false-positive.
     """
     from shapely.validation import explain_validity
 
@@ -1329,6 +1449,12 @@ def test_refilled_zone_fill_pinch_repairs_instead_of_dropping(monkeypatch, tmp_p
             rules_sha256=None,
             native_version=_QUALIFIED_VERSION,
             export_identity={},
+            # Full-layer unions consistent with the repaired payload: F.Cu is
+            # the extraction's own repair product, B.Cu is authored empty.
+            # Without these, layers defaults to {} and the per-object/full-layer
+            # comparison skips both layers, leaving the "material mismatch"
+            # assertion below vacuous (issue #9103).
+            layers={"F.Cu": repaired, "B.Cu": Polygon()},
         ),
     )
 
