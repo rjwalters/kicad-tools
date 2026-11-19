@@ -16,6 +16,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-19
 
+- **PR #9494**: fix: prune dead-end stubs before parallel-group reduction in current paths
+- **PR #9493**: test: pin the mid-run gr_circle size envelope in mask_to_copper
+- **PR #9487**: fix: give every child of a placed library footprint a fresh uuid
+- **Issue #9492** (closed): path_ampacity: a dead-end stub to a test point makes a declared current path 'ambiguous'
+- **Issue #9490** (closed): mask_to_copper: pin and justify the mid-run gr_circle size envelope on reinforce runs
+- **Issue #9485** (closed): create-pcb copies library child uuids into every footprint instance; kct check then cannot complete mask_to_copper
 - **PR #9488**: fix(tht-smd-spacing): print distance at 4 decimals to avoid 'x < x' at band edge
 - **PR #9131**: fix(board04): clear fragment, silk-over-drill and staircase findings from the fresh regen
 - **Issue #9483** (closed): tht_smd_spacing: message rounds the measured distance into the limit at the band edge (and a 103-char docstring line)
