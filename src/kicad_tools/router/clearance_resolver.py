@@ -62,12 +62,17 @@ the same "raise, never replace" footing as ``rules.min_clearance``
 a board that declares *less* than the router's target from being loosened.
 
 What is still deliberately **not** read: ``.kicad_dru`` rules carrying a
-``(condition …)`` (see :attr:`DeclaredClearanceRules.dru_mm`), with one
-narrow exception -- a condition that is purely a copper-*type* test naming a
-via (``A.Type == 'Via' || B.Type == 'Via'``) is recognised as a via-scoped
-rule and feeds ``via_clearance`` (:attr:`DeclaredClearanceRules.dru_via_mm`,
-#6280) -- and KiCad's ``physical_clearance`` constraint, which is a
-different rule family.
+``(condition …)`` per *pair* -- the #9578 change floors the run at the
+strictest conditional ``clearance`` minimum
+(:attr:`DeclaredClearanceRules.dru_conditional_mm`), because KiCad enforces
+such a rule on every pair it selects and routing below it fails the board's
+own DRC -- but no per-pair resolution comes from a condition here: that is
+:class:`~kicad_tools.router.board_clearance_rules.BoardClearanceRules`' job
+(the kept-copper audit's evaluator).  One narrow exception recognises a
+condition that is purely a copper-*type* test naming a via
+(``A.Type == 'Via' || B.Type == 'Via'``) as a via-scoped rule and feeds
+``via_clearance`` (:attr:`DeclaredClearanceRules.dru_via_mm`, #6280); and
+KiCad's ``physical_clearance`` constraint is a different rule family.
 
 Precedence
 ----------
@@ -274,6 +279,10 @@ class RuleSource(Enum):
     PAIR_MATRIX = "pair-matrix"
     VIA_CLEARANCE = "via-clearance"
     TRACE_BASE = "trace-base"
+    #: The strictest conditional ``.kicad_dru`` ``clearance`` rule (#9578).
+    #: Appended last so exact ties keep provenance stable with pre-#9578
+    #: resolutions.
+    PROJECT_DRU_CONDITIONAL = "project-dru-conditional"
 
 
 #: Ordering used to break exact ties between equal-valued terms.
@@ -298,10 +307,9 @@ class DeclaredClearanceRules:
 
     Attributes:
         dru_mm: Strictest unconditional ``(constraint clearance (min …))``
-            in the board's ``.kicad_dru`` sidecar.  **Conditional** rules
-            (those carrying a ``(condition …)``) are deliberately ignored --
-            honouring them needs a DRC-expression evaluator this repo does
-            not have, and guessing would be worse than naming the gap.
+            in the board's ``.kicad_dru`` sidecar.  Conditional rules are
+            carried by :attr:`dru_via_mm` (via-scoped, #6280) and
+            :attr:`dru_conditional_mm` (everything else, #9578) instead.
         project_min_clearance_mm: ``.kicad_pro``
             ``board.design_settings.rules.min_clearance`` (falling back to
             ``design_settings.defaults.clearance_min``) -- KiCad's hard board
@@ -328,6 +336,17 @@ class DeclaredClearanceRules:
             B.Type == 'Track'``, …).  It governs only pairs with a via on one
             side, so it feeds :meth:`via_requirement` and never the board-wide
             trace base (#6280).
+        dru_conditional_mm: Strictest **other conditional** ``(constraint
+            clearance (min …))`` in the ``.kicad_dru`` -- a net-class rule
+            (``A.NetClass == 'HV' || B.NetClass == 'HV'``), a footprint-scoped
+            one, anything else with a condition (#9578).  KiCad enforces such
+            a rule on every pair it selects, so its minimum is a floor on
+            what the board can require of *some* pair: both
+            :meth:`project_requirement` and :meth:`via_requirement` carry it,
+            and a run routed below it can fail the board's own DRC even when
+            the unconditional rule, the board minimum and the netclass all
+            sit lower.  ``(severity ignore)`` rules contribute nothing --
+            where one wins, KiCad checks nothing.
     """
 
     dru_mm: float | None = None
@@ -337,6 +356,7 @@ class DeclaredClearanceRules:
     board_net_class_mm: float | None = None
     board_net_class_name: str | None = None
     dru_via_mm: float | None = None
+    dru_conditional_mm: float | None = None
 
     def via_requirement(self) -> tuple[float, RuleSource, str | None] | None:
         """The strictest declared rule that applies to a **via** pair (#6280).
@@ -361,6 +381,7 @@ class DeclaredClearanceRules:
         candidates: tuple[tuple[float | None, RuleSource, str | None], ...] = (
             (self.dru_mm, RuleSource.PROJECT_DRU, None),
             (self.dru_via_mm, RuleSource.PROJECT_DRU_VIA, None),
+            (self.dru_conditional_mm, RuleSource.PROJECT_DRU_CONDITIONAL, None),
             (self.board_net_class_mm, RuleSource.BOARD_NET_CLASS, self.board_net_class_name),
             (self.project_min_clearance_mm, RuleSource.PROJECT_MIN_CLEARANCE, None),
             (self.net_class_clearance_mm, RuleSource.PROJECT_NET_CLASS, self.net_class_name),
@@ -398,6 +419,7 @@ class DeclaredClearanceRules:
             winner = (self.dru_mm, RuleSource.PROJECT_DRU, None)
 
         candidates: tuple[tuple[float | None, RuleSource, str | None], ...] = (
+            (self.dru_conditional_mm, RuleSource.PROJECT_DRU_CONDITIONAL, None),
             (self.project_min_clearance_mm, RuleSource.PROJECT_MIN_CLEARANCE, None),
             (self.net_class_clearance_mm, RuleSource.PROJECT_NET_CLASS, self.net_class_name),
         )
@@ -829,11 +851,14 @@ def _project_net_class(data: dict) -> tuple[str, float] | None:
 def _read_dru_clearance(dru_path: Path) -> float | None:
     """Strictest **unconditional** ``clearance`` minimum in a ``.kicad_dru``.
 
-    A rule carrying a ``(condition …)`` is skipped: evaluating a KiCad DRC
-    expression is out of scope for this phase, and applying a conditional
-    rule board-wide would over-constrain every pair the condition excludes.
-    ``physical_clearance`` is a different KiCad constraint and is likewise
-    not read here.
+    A rule carrying a ``(condition …)`` is skipped here -- this helper feeds
+    the unconditional layer only.  Conditional rules reach the resolution
+    through :attr:`DeclaredClearanceRules.dru_conditional_mm` (#9578), which
+    floors the board-wide and via requirements at the strictest of them:
+    KiCad enforces every rule it can parse, so a conditional rule that
+    requires more than the board-wide floor was invisible to the run and let
+    newly committed copper undercut it.  ``physical_clearance`` is a
+    different KiCad constraint and is not read at all.
 
     Never raises -- a malformed sidecar yields ``None``.
     """
@@ -960,38 +985,53 @@ def _is_via_scoped_condition(expression: str) -> bool:
     return bool(types) and "via" in types and all(kind in _VIA_PEER_TYPES for kind in types)
 
 
-def _read_dru_clearances(dru_path: Path) -> tuple[float | None, float | None]:
-    """Both ``.kicad_dru`` clearance layers, from one parse of the file.
+def _read_dru_clearances(dru_path: Path) -> tuple[float | None, float | None, float | None]:
+    """The three ``.kicad_dru`` clearance layers, from one parse of the file.
 
-    Returns ``(unconditional_mm, via_scoped_mm)``: the strictest
-    unconditional ``(constraint clearance (min …))`` (see
-    :func:`_read_dru_clearance`) and the strictest one whose condition is
-    via-scoped (:func:`_is_via_scoped_condition`, #6280).  Never raises.
+    Returns ``(unconditional_mm, via_scoped_mm, conditional_mm)``: the
+    strictest unconditional ``(constraint clearance (min …))`` (see
+    :func:`_read_dru_clearance`), the strictest one whose condition is
+    via-scoped (:func:`_is_via_scoped_condition`, #6280), and -- #9578 --
+    the strictest remaining conditional one.  KiCad enforces a conditional
+    rule on every pair its condition selects, so the largest of those
+    minima is a floor on what the board can require of *some* pair; routing
+    below it can fail the board's own DRC even when the unconditional rule,
+    the board minimum and the netclass all sit lower.  A conditional rule
+    with ``(severity ignore)`` is skipped: where it wins, KiCad checks
+    nothing.  Never raises.
     """
     try:
         text = dru_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return (None, None)
+        return (None, None, None)
     if "clearance" not in text:
-        return (None, None)
+        return (None, None, None)
 
     try:
         from kicad_tools.sexp import parse_string
 
         tree = parse_string("(rules " + text + ")")
     except Exception:
-        return (None, None)
+        return (None, None, None)
 
     best: float | None = None
     best_via: float | None = None
+    best_conditional: float | None = None
     for rule in tree.find_all("rule"):
         condition = rule.find_child("condition")
         via_scoped = False
+        conditional = False
         if condition is not None:
             expression = condition.get_first_atom()
             if expression is None or not _is_via_scoped_condition(str(expression)):
-                continue
-            via_scoped = True
+                conditional = True
+            else:
+                via_scoped = True
+        severity_node = rule.find_child("severity")
+        ignored = (
+            severity_node is not None
+            and str(severity_node.get_first_atom() or "").casefold() == "ignore"
+        )
         for constraint in rule.find_all("constraint"):
             atoms = constraint.get_atoms()
             if not atoms or str(atoms[0]) != "clearance":
@@ -1005,9 +1045,12 @@ def _read_dru_clearances(dru_path: Path) -> tuple[float | None, float | None]:
             if via_scoped:
                 if best_via is None or value > best_via:
                     best_via = value
+            elif conditional:
+                if not ignored and (best_conditional is None or value > best_conditional):
+                    best_conditional = value
             elif best is None or value > best:
                 best = value
-    return (best, best_via)
+    return (best, best_via, best_conditional)
 
 
 def _parse_length_mm(raw: object) -> float | None:
@@ -1057,7 +1100,7 @@ def read_declared_clearance_rules(
     path = Path(pcb_path)
 
     project_minimum, project_net_class = _read_project_clearances(path.with_suffix(".kicad_pro"))
-    dru_mm, dru_via_mm = _read_dru_clearances(path.with_suffix(".kicad_dru"))
+    dru_mm, dru_via_mm, dru_conditional_mm = _read_dru_clearances(path.with_suffix(".kicad_dru"))
 
     board_net_class = (
         strictest_net_class_clearance(board_net_classes) if board_net_classes else None
@@ -1071,6 +1114,7 @@ def read_declared_clearance_rules(
         board_net_class_mm=board_net_class[1] if board_net_class else None,
         board_net_class_name=board_net_class[0] if board_net_class else None,
         dru_via_mm=dru_via_mm,
+        dru_conditional_mm=dru_conditional_mm,
     )
 
 
