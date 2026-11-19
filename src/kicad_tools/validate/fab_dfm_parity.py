@@ -163,7 +163,14 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "pair per layer (closest measurement wins -- measured on the #9034 "
         "fixture), so it cannot come from per-edge inflation within a pair. "
         "No fab-sourced edge justifies a threshold change, so the stricter "
-        "same-net error stays (#8938). Zone-fill (pour) gaps are "
+        "same-net error stays (#8938). One narrow exception (#9420): two pads of "
+        "the SAME footprint on one identical non-empty net in the 2 oz pad "
+        "mask-bridge check report at info (still listed). Located fab evidence "
+        "on the consumer board: the fab measured the two 0.19 mm pad pairs "
+        "(round 0.81 mm pads of RF_Module:ESP32-C3-WROOM-02's ground array) "
+        "and rated them Good under pad spacing, and its Soldermask bridge row "
+        "was empty for the whole board (2026-11-18). Different footprints, "
+        "different nets and every other pair keep the error. Zone-fill (pour) gaps are "
         "kct's own advisory only and report at info, not tiered: JLCDFM does "
         "not judge pour clearance -- 1,516 pour-to-pad gaps at 0.10-0.13 mm "
         "went unflagged on the #8938 board -- so kct's warning count for this "
@@ -366,7 +373,13 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "`silkscreen_text_thickness` (text) enforce JLCPCB's published >= 0.15 mm. "
         "Not covered: JLCDFM flags silk that meets that floor (#8844: 63 "
         "warnings on gerbers with no silk stroke below 0.150 mm). How JLCDFM "
-        "selects the items it flags is unknown (#8943).",
+        "selects the items it flags is unknown (#8943). Text height is a separate "
+        "floor: JLCPCB publishes 1.0 mm (40 mil) minimum character height "
+        "(pcb-capabilities, verified 2026-11-18) and `silkscreen_text_height` "
+        "enforces it; a project may declare a smaller reference-designator height "
+        "(`silkscreen_min_reference_height_mm`, >= 0.8 mm, #9448) which relaxes "
+        "that floor for designators only and is reported by `kct readiness` as a "
+        "declared deviation -- the fab's own limit is unchanged.",
     ),
     ParityRow(
         "fiducial",

@@ -1,6 +1,7 @@
 """THT / via to SMD-pad spacing (Issue #8843): error / warning / clean bands."""
 
 import math
+import re
 
 import pytest
 
@@ -107,6 +108,19 @@ def test_message_states_the_exact_limit(gap, limit_text):
     """Issue #9421: the printed limit must be the threshold the code applies."""
     (v,) = check_tht_smd_spacing(board(tht(), smd(gap))).violations
     assert limit_text in v.message
+
+
+@pytest.mark.parametrize(
+    ("gap", "severity"),
+    [(2.0315, "error"), (2.0319, "error"), (3.0495, "warning"), (3.0499, "warning")],
+)
+def test_message_distance_is_strictly_below_printed_limit_at_band_edge(gap, severity):
+    """Issue #9483: a gap within 0.5 um of an edge must not print ``x < x``."""
+    (v,) = check_tht_smd_spacing(board(tht(), smd(gap))).violations
+    assert v.severity == severity
+    match = re.search(r"spacing ([\d.]+)mm < ([\d.]+)mm", v.message)
+    assert match is not None, v.message
+    assert float(match.group(1)) < float(match.group(2)), v.message
 
 
 def test_back_side_smd_pad_is_measured():

@@ -1809,6 +1809,18 @@ def write_drc_constraints(
     if write_dru:
         from .dru_generator import merge_dru_floors
 
+        # Issue #9448: a project-declared designator height splits the
+        # silkscreen-height rule.  Probe the board being written, then the
+        # authored source board (``-o <scratch>`` must not drop it).
+        if rules.declared_reference_height_mm is None:
+            from kicad_tools.sync.discover import resolve_declared_reference_height_for_pcb
+
+            declared_height = resolve_declared_reference_height_for_pcb(pcb_path)
+            if declared_height is None and source_pcb_path is not None:
+                declared_height = resolve_declared_reference_height_for_pcb(source_pcb_path)
+            if declared_height is not None:
+                rules = replace(rules, declared_reference_height_mm=declared_height)
+
         dru_path = pcb_path.with_suffix(".kicad_dru")
         # Name in diagnostics (#9430): the real sidecar when ``pcb_path`` is a
         # scratch copy (``export --dry-run``), so messages never cite a temp dir.

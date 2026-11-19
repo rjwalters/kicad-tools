@@ -63,6 +63,10 @@ class CopperSource:
     net: str
     identity: str
     kind: str = ""
+    # Issue #9420: position of the owning footprint in ``pcb.footprints`` (pads
+    # only; "" for tracks/vias/zones).  An index, not the reference or uuid, so
+    # two footprints sharing a reference or a hand-duplicated uuid never alias.
+    footprint: str = ""
 
 
 @dataclass(frozen=True)
@@ -464,7 +468,7 @@ def _collect(pcb):
                 segment_ref(segment, origin),
             )
         )
-    for fp in pcb.footprints:
+    for fp_index, fp in enumerate(pcb.footprints):
         # Filled/stroked footprint copper polygons -- a standard net tie joins
         # its pads with exactly this primitive (issue #5817). Net membership is
         # irrelevant to a physical gap, and an fp_poly carries no net, so the
@@ -500,6 +504,7 @@ def _collect(pcb):
                             net_name(pad.net_number),
                             pad.uuid or f"{fp.reference}:pad:{index}",
                             "pad",
+                            str(fp_index),
                         )
                     )
     for index, via in enumerate(pcb.vias):
@@ -935,12 +940,28 @@ def check_pad_mask_bridge(pcb, copper_oz: float | None) -> DRCResults:
 
                 a, b = nearest_points(pad.geometry, other.geometry)
                 ids = tuple(sorted((pad.identity, other.identity)))
+                # Issue #9420: two pads of ONE footprint on ONE identical,
+                # non-empty net are the land pattern (a stock module's ground
+                # pad array), which a consumer cannot edit.  Still listed, at
+                # info, with distance and items intact.  Any other pair --
+                # different footprints, different nets, no net -- keeps the
+                # error.  Located fab evidence (#9420): JLCDFM measured these
+                # pairs at 0.19 mm and rated them Good under pad spacing, with
+                # an empty soldermask-bridge row for the whole board.
+                own_footprint = bool(
+                    pad.footprint
+                    and pad.footprint == other.footprint
+                    and pad.net
+                    and pad.net == other.net
+                )
                 results.add(
                     DRCViolation(
                         "physical_copper_gap",
-                        "error",
+                        "info" if own_footprint else "error",
                         f"Pad mask bridge {distance:.4f}mm < {limit:.4f}mm on "
-                        f"{copper_oz:g} oz copper; closest boundaries "
+                        f"{copper_oz:g} oz copper"
+                        f"{' (same-net pads of one footprint: land pattern)' if own_footprint else ''}"
+                        f"; closest boundaries "
                         f"({a.x + ox:.6f}, {a.y + oy:.6f}) and ({b.x + ox:.6f}, {b.y + oy:.6f})",
                         location=((a.x + b.x) / 2, (a.y + b.y) / 2),
                         layer=layer,

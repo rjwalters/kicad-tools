@@ -14,8 +14,55 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-19
+
+- **PR #9505**: fix: consider every fragment run in a chain, not just the first
+- **PR #9500**: test: bound pr-only audit-marker check to the job's own ci.yml body
+- **PR #9442**: fix: honour (justify ...) in silk text bounding boxes
+- **Issue #9497** (closed): test_ci_merge_group_invariants: audit-marker block bound never matches, so the marker check spans to EOF
+- **Issue #9433** (closed): Silkscreen checks report findings on left-justified board text that KiCad's DRC accepts (0.29.0)
+- **Issue #9133** (closed): board04 merge_fragment_runs: only the chain's FIRST sub-threshold run is considered, so an earlier stray short segment hard-fails the recipe
+- **Issue #8948** (closed): kct's own managed .kicad_dru makes mask_to_copper incomplete: admit physical_hole_clearance, text_thickness and text_height to the native context allowlist
+- **Issue #8939** (closed): mask_to_copper cannot run on a KiCad 10 board on macOS: /usr/bin/python3 has no pcbnew, Gerber reader rejects KiCad's zero-size aperture and fill regions
+- **PR #9494**: fix: prune dead-end stubs before parallel-group reduction in current paths
+- **PR #9493**: test: pin the mid-run gr_circle size envelope in mask_to_copper
+- **PR #9487**: fix: give every child of a placed library footprint a fresh uuid
+- **Issue #9492** (closed): path_ampacity: a dead-end stub to a test point makes a declared current path 'ambiguous'
+- **Issue #9490** (closed): mask_to_copper: pin and justify the mid-run gr_circle size envelope on reinforce runs
+- **Issue #9485** (closed): create-pcb copies library child uuids into every footprint instance; kct check then cannot complete mask_to_copper
+- **PR #9488**: fix(tht-smd-spacing): print distance at 4 decimals to avoid 'x < x' at band edge
+- **PR #9131**: fix(board04): clear fragment, silk-over-drill and staircase findings from the fresh regen
+- **Issue #9483** (closed): tht_smd_spacing: message rounds the measured distance into the limit at the band edge (and a 103-char docstring line)
+- **Issue #9097** (closed): Board 04 fresh regen: raw route carries 13 advisory warnings (pour_slot x10, staircase, fragments, silk_hole_overlap) - reviewed gate leg 3 red
+- **PR #9486**: test: compare design-source parity by sha256 so drift names the file
+- **PR #9479**: fix: treat only SMD-bearing faces as populated for add-fiducials
+- **PR #9458**: fix: probe concrete copper layers in the DRU loosening gate for split-floor profiles
+- **PR #9456**: feat: add kct check --migrate-waivers to re-bind ev3 waivers to ev4
+- **PR #9451**: feat: let projects declare a smaller reference-designator silk height
+- **Issue #9481** (closed): Design-source parity tests fail as an opaque 60s pytest-timeout instead of naming the drifted file
+- **Issue #9472** (closed): add-fiducials --sides populated adds back-side fiducials when the back carries only through-hole parts
+- **Issue #9448** (closed): Silkscreen: default to smaller reference designators (0.8 mm) with larger functional labels, and let a project declare it
+- **Issue #9422** (closed): kct export refuses a 2 oz board: merge_dru_floors wants to write the 1 oz clearance floor (0.1016 mm) over a project at 0.15 mm
+- **PR #9478**: test: pin ci.yml merge_group gates and concurrency invariants
+- **Issue #9307** (closed): Declare merge_group in select_routed_pcbs.py and pin the merge-group CI invariants with a test
+- **PR #9496**: docs: note the same-footprint same-net mask-bridge info exemption
+- **Issue #9484** (closed): docs: physical-copper-gap guide omits the same-footprint same-net pad mask-bridge info class
+- **PR #9469**: chore(boards): put board 09 C6 on the 0.1 mm grid; update per-footprint pad_grid docstrings
+- **PR #9446**: fix: attribute mid-run vias and anchor-size holes on a reinforce strip to the run
+- **Issue #9444** (closed): mask_to_copper after #9419: same-net untented vias on a recorded reinforce run are not attributed to it
+- **PR #9462**: fix: report same-footprint same-net pad mask bridges at info
+- **Issue #9420** (closed): Same-net pads inside one library footprint are reported as errors by physical_copper_gap and mask_to_copper (stock RF_Module:ESP32-C3-WROOM-02 ground pad array)
+- **PR #9429**: fix: raise tht_smd_spacing thresholds to 2.032/3.05 mm and record fab DFM values
+- **Issue #9421** (closed): Fab DFM limits that differ from the parity table: tht to smd 2.03/3.05 mm, a separate via-to-pad row, silk-to-hole clearance
+- **PR #9463**: docs: cite located JLCDFM rows in the within_own_footprint parity entry
+- **Issue #9450** (closed): Parity entry for within_own_footprint predates the located fab evidence on #9420
+- **PR #9460**: test: assert adopted vs production leg endpoints diverge in native chain test
+- **Issue #9457** (closed): Pin the adopted-vs-production leg-endpoint divergence the #9443 native chain test exists to cover
+
 ### 2026-11-18
 
+- **PR #9438**: fix: derive pad_grid auto tolerance per footprint, not board-wide
+- **Issue #9434** (closed): pad_grid flags parts that did not move when other parts move onto round coordinates (percentile threshold)
 - **PR #9449**: fix: print sch_field_offset threshold at full precision
 - **Issue #9447** (closed): sch_field_offset message rounds a user-supplied --sch-field-threshold to 1 dp
 - **PR #9445**: test: chain pcb reinforce --adopt records through check_mask_to_copper on a native export
