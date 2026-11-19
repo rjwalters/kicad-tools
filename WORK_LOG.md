@@ -16,6 +16,49 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-19
 
+- **PR #9556**: test: pin that mask_to_copper refuses boards whose footprints share a uuid
+- **PR #9549**: fix: judge overlapping same-layer parallel copper at its merged width
+- **PR #9547**: docs: document clearance_incomplete's info severity and its kicad-cli parity
+- **PR #9546**: test: execute board 04's via slide and silk gate on synthetic boards
+- **PR #9543**: test: pin legacy/untouched classification of non-ev3 waiver hash prefixes
+- **PR #9541**: chore(boards): regenerate board 09 readiness receipt on the pinned toolchain
+- **PR #9537**: fix(board04): slide vias off footprint silk instead of trimming the silk
+- **PR #9534**: fix: derive migrate-waivers inactive rules from coverage skip states, not hand-mirrored conditions
+- **PR #9532**: fix: skip copper-less pads in custom-pad coverage rules
+- **PR #9531**: chore: refresh Squad block and skill so unattended roles do not stop
+- **PR #9525**: fix: probe the smallest unnamed inner layer in the DRU loosening gate
+- **PR #9521**: fix: list pre-ev3 legacy waiver entries by key in the migration report
+- **PR #9520**: feat: name the failed within-own-pad condition on mask_to_copper findings
+- **PR #9516**: docs: name group-membership repair in the 9485 changelog fragment
+- **PR #9509**: fix: migrate-waivers keeps symlinked waivers files, honest orphan reasons, untouched entries listed by key
+- **PR #9508**: fix: measure custom-pad primitive copper in kct check rules
+- **PR #9502**: fix: run board 09 producers on the pinned KiCad toolchain
+- **PR #9476**: feat: add per-reference side key to pcb move-footprint --map
+- **PR #9475**: fix: resolve LCSC datasheet viewer page to the real PDF
+- **PR #9470**: fix: let kct check evaluate custom pads by placement and real copper
+- **Issue #9545** (closed): kct check: custom pads built from gr_circle primitives raise a blocking physical_copper_gap_incomplete (stock Mounting_Wuerth footprint)
+- **Issue #9542** (closed): path_ampacity: overlapping same-layer tracks (one wide conductor) are reported as an ambiguous loop
+- **Issue #9540** (closed): Unit-test board 04's slide_vias_off_silk (new #9455 recipe step has no CI-executed coverage)
+- **Issue #9539** (closed): clearance_incomplete is info, so a refused custom pad's unjudged copper does not block the gate
+- **Issue #9529** (closed): migrate-waivers: derive inactive rules from coverage states, not two hand-mirrored conditions
+- **Issue #9528** (closed): kct check reports paste-only custom pads as unmeasured copper (blocking physical_copper_gap_incomplete)
+- **Issue #9527** (closed): kct check --migrate-waivers: a forward or non-evN waiver hash is reported as "predates ev3" with a delete hint
+- **Issue #9519** (closed): Refresh board 09 readiness after the pinned producer change in #9502
+- **Issue #9512** (closed): changelog.d/9485.fixed.md omits the group-membership repair that shipped with it
+- **Issue #9504** (closed): kct check --migrate-waivers: symlinked waivers file, atomic-write test, orphan hints (follow-ups to #9456)
+- **Issue #9499** (closed): DRU loosening gate: an In1.Cu-scoped rule masks the other inner layers (residual of #9422)
+- **Issue #9498** (closed): kct check misses shorts and clearance violations against custom-pad primitive copper (anchor-only model)
+- **Issue #9495** (closed): Board 09 producers call a bare kicad-cli: committed artifacts depend on the host's KiCad release and footprint library
+- **Issue #9482** (closed): Harden the ev3->ev4 waiver migration report: pin genuine ev3 digests, test the orphan-candidate path, list non-ev3 legacy entries
+- **Issue #9477** (closed): kct check still cannot gate a custom-pad board: physical_copper_gap_incomplete is an error on 'custom' pads (follow-up to #9468)
+- **Issue #9473** (closed): kct datasheet download fails when LCSC serves an HTML page instead of the PDF
+- **Issue #9471** (closed): pcb move-footprint --map has no side key and there is no batch flip command
+- **Issue #9468** (closed): kct check aborts with ValueError on stock SOT-89-3 footprint (custom pad geometry)
+- **Issue #9466** (closed): within_own_footprint keys on parent_uuid in mask_to_copper but on a list index in physical_copper_gap
+- **Issue #9455** (closed): board04: publish the #9097 recipe regen (re-pin readiness, resolve #5744 silk conflict and pinned-geometry tests)
+- **Issue #9453** (closed): test flake: test_allowed_layers_untouched_with_explicit_opt_out times out (>60s) on the Test job
+- **Issue #9452** (closed): Re-check the original 2 oz board's RuleLooseningError after #9422's export floor fix
+- **Issue #9305** (closed): mask_to_copper: decide whether an area tolerance belongs on the 'beyond owner pad copper' test (112 of 144 consumer errors are sub-1e-6 mm² residue)
 - **PR #9513**: test: correct exact-cap gr_circle docstring and relax strip-side pin
 - **Issue #9511** (closed): test_mask_copper_reinforce_9444: exact-cap docstring names the wrong mechanism, and the pin rests on an 8e-6 overlay margin
 - **PR #9506**: fix: ignore DNP SMD parts when deciding which sides need fiducials
