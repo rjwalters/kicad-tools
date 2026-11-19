@@ -7,9 +7,15 @@ reached openings at a confirmed anchor or strip pieces. They are continuous with
 the strip, so they belong to the run; copper that is not the run's does not.
 """
 
+import pytest
 from shapely.geometry import box
 
-from kicad_tools.validate.mask_copper import MaskCopperPolicy, assess_attributed_geometry
+from kicad_tools.physics.wire_gauge import anchor_drill_for_awg, anchor_pad_for_drill
+from kicad_tools.validate.mask_copper import (
+    _MID_RUN_CIRCLE_FLASH_MM,
+    MaskCopperPolicy,
+    assess_attributed_geometry,
+)
 from tests.test_mask_copper_reinforce_9419 import A, B, _disk, _geometry, _record
 
 POLICY = MaskCopperPolicy(0.1, "order", "process", "rev")
@@ -270,3 +276,107 @@ def test_far_side_chain_grows_only_through_strip_pieces():
     assert far
     assert {m.disposition for m in far} == {"violation"}
     assert all(m.owner_run is None for m in far)
+
+
+# --- The size envelope itself (#9490) ---------------------------------------
+#
+# The 6 mm circle above is far above any plausible envelope; these pin the
+# cap's boundary (sizes derived from the checker's constants, so they track
+# it) and its value (pinned to the producer's anchor pad, so it cannot drift
+# silently).
+
+
+def _cap_mm():
+    """Mid-run circle cap for the record's gauge (16 AWG)."""
+    return anchor_drill_for_awg(16) + 2 * _MID_RUN_CIRCLE_FLASH_MM
+
+
+def _circle_of_diameter(diameter):
+    """``gr_circle`` opening of ``diameter`` mm centred ON the strip at MID."""
+    radius = diameter / 2
+    return (
+        "gr_circle",
+        "",
+        {"F.Mask": _disk(MID[0], MID[1], radius), "B.Mask": _disk(MID[0], MID[1], radius)},
+    )
+
+
+def _near_run_track():
+    """Same-net copper 0.5-0.9 mm off the run, inside an envelope-size circle.
+
+    It sits outside the strip (y > 10.25), so the circle's opening is the only
+    thing that can expose -- and, when attributed, excuse -- it.
+    """
+    return (
+        "segment",
+        "PWR",
+        {"B.Cu": box(18.0, 10.5, 22.0, 10.9), "F.Cu": box(18.0, 10.5, 22.0, 10.9)},
+    )
+
+
+def test_gr_circle_just_under_the_cap_is_attributed():
+    cap = _cap_mm()
+    result = _run(_run_pieces() + [_circle_of_diameter(cap - 0.02), _near_run_track()])
+    assert result.passed
+    exposed = _near(result, (20.0, 10.7), radius=0.3)
+    assert exposed
+    assert {m.mask_side for m in exposed} == {"F.Mask", "B.Mask"}
+    assert {m.disposition for m in exposed} == {"within_reinforce_run"}
+    assert {m.owner_run for m in exposed} == {"HS_POWER"}
+
+
+def test_gr_circle_exactly_at_the_cap_is_attributed_on_the_far_side_only():
+    """The cap's inclusive edge is the far side; the strip side may refuse it (#9490).
+
+    At exactly ``drill + 2 x flash`` the circle attributes where it is the
+    whole native opening (F.Mask here, the far side a doubled net is exposed
+    on): the refusal is strictly-greater with a ``2 * _CENTRE_EPS_MM`` (2e-6)
+    slack. On the strip's own side (B.Mask) the opening's material is
+    ``native.intersection(shape.buffer(uncertainty))`` with ``native`` the
+    circle union the strip, so the buffer dilation survives the clip. The
+    ``uncertainty`` here is NOT 0.0: ``mask_copper.py`` builds it as
+    ``2 * max_error_mm_per_construction + 0.000004``, and this fixture's
+    ``max_error`` is 0, leaving the 4e-6 mm floor. Measured: the circle's hull
+    span is 2.416000 on F.Mask and 2.416008 on B.Mask, the 7.99e-6 mm excess
+    being ``2 x 3.995e-6`` (a 4e-6 buffer's 64-gon excursion at the circle's
+    left/right extremes, which the strip interior leaves unclipped).
+
+    That 7.99e-6 clears the 2e-6 slack, so the strip side normally stays
+    unattributed and keeps its measured verdict. Fragility: the margin is the
+    size of ``uncertainty``'s floor against a 2e-6 slack, not a geometric
+    property of the cap; a smaller floor, or a different buffer resolution,
+    would attribute B.Mask too. So only the far side is pinned; the strip side
+    is deliberately not required to be (un)attributed here.
+    """
+    result = _run(_run_pieces() + [_circle_of_diameter(_cap_mm()), _near_run_track()])
+    exposed = _near(result, (20.0, 10.7), radius=0.3)
+    far = [m for m in exposed if m.mask_side == "F.Mask"]
+    assert far
+    assert {m.disposition for m in far} == {"within_reinforce_run"}
+    assert {m.owner_run for m in far} == {"HS_POWER"}
+
+
+def test_gr_circle_just_over_the_cap_is_not_attributed():
+    cap = _cap_mm()
+    result = _run(_run_pieces() + [_circle_of_diameter(cap + 0.02), _near_run_track()])
+    assert not result.passed
+    exposed = _near(result, (20.0, 10.7), radius=0.3)
+    assert exposed
+    assert {m.disposition for m in exposed} == {"violation"}
+    assert all(m.owner_run is None for m in exposed)
+
+
+def test_mid_run_circle_cap_is_one_ring_per_side_above_the_anchor_pad():
+    """The envelope's value is pinned to the producer's anchor pad (#9490).
+
+    ``pcb reinforce`` sizes the anchor pad at ``drill + 2 x min_annular_ring``
+    (1.916 mm for 16 AWG at the fallback 0.25 mm ring); the checker's cap sits
+    one more ring per side above it (2.416 mm). No producer emits mid-run
+    circles, so the boundary tests above would silently track a bare bump of
+    the flash constant -- this one goes red instead.
+    """
+    from kicad_tools.pcb.reinforce import _FALLBACK_DESIGN_RULES
+
+    ring = _FALLBACK_DESIGN_RULES.min_annular_ring_mm
+    pad = anchor_pad_for_drill(anchor_drill_for_awg(16), ring)
+    assert anchor_drill_for_awg(16) + 2 * _MID_RUN_CIRCLE_FLASH_MM == pytest.approx(pad + 2 * ring)
