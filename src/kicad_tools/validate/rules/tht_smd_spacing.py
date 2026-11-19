@@ -99,7 +99,10 @@ no-net sentinel, not a shared net).
 
 A pad whose ``shape`` this rule cannot measure is **reported as unmeasured**
 (``tht_smd_spacing_incomplete``, info) rather than silently dropped: a shape the
-rule cannot judge must not look like a pad it cleared (Issue #8914).
+rule cannot judge must not look like a pad it cleared (Issue #8914).  A
+``custom`` pad is measured by its anchor-plus-primitives copper whenever the
+shared outline builder produces it, and is reported unmeasured -- with the
+refusing primitive kind named -- only when that builder refuses (Issue #9498).
 """
 
 from __future__ import annotations
@@ -109,7 +112,7 @@ from typing import Any
 
 from ..copper_refs import board_origin, via_ref
 from ..violations import DRCResults, DRCViolation
-from .clearance import _pad_on_layer, _pad_polygon
+from .clearance import _pad_on_layer, _pad_polygon, _transform_pad_position
 from .silkscreen import _via_is_tented
 
 TOLERANCE = 0.001
@@ -128,8 +131,11 @@ ANCHOR_DRILL_MM = 1.0
 _MASK_SIDE = {"F.Cu": "F", "B.Cu": "B"}
 
 #: Pad shapes whose true copper outline :func:`_pad_polygon` reproduces.  Any
-#: other shape (``custom``, ``trapezoid``) would be approximated by its
-#: bounding rectangle, so it is reported unmeasured instead of mismeasured.
+#: other shape (``trapezoid``) would be approximated by its bounding
+#: rectangle, so it is reported unmeasured instead of mismeasured.  A
+#: ``custom`` pad is NOT listed because it has its own path (Issue #9498): it
+#: is measured by the shared outline builder's anchor-plus-primitives copper
+#: when that succeeds, and reported unmeasured only when the builder refuses.
 MEASURABLE_SHAPES = frozenset({"circle", "rect", "oval", "obround", "roundrect"})
 
 #: Cap on the pad identities listed in one ``tht_smd_spacing_incomplete``
@@ -184,7 +190,19 @@ def check_tht_smd_spacing(
             if pad.type not in {"smd", "thru_hole"}:
                 continue
             identity = pad.uuid or f"{fp.reference}:{pad.number}:pad:{index}"
-            if pad.shape not in MEASURABLE_SHAPES:
+            if pad.shape == "custom":
+                # Issue #9498: a custom pad is measurable whenever the shared
+                # outline builder produced its anchor-plus-primitives copper;
+                # the incomplete finding below is only for pads the builder
+                # refused (the label then names the refusing primitive kind).
+                from kicad_tools.geometry.copper import custom_pad_outline_detail
+
+                geometry, refusal = custom_pad_outline_detail(pad, _transform_pad_position(pad, fp))
+                if geometry is None:
+                    label = f"custom: {refusal or 'source pad node unavailable'}"
+                    unmeasured.setdefault(label, []).append(identity)
+                    continue
+            elif pad.shape not in MEASURABLE_SHAPES:
                 unmeasured.setdefault(pad.shape, []).append(identity)
                 continue
             geom = _pad_polygon(pad, fp)
@@ -203,6 +221,13 @@ def check_tht_smd_spacing(
         listed = ", ".join(identities[:_MAX_LISTED_IDENTITIES])
         if len(identities) > _MAX_LISTED_IDENTITIES:
             listed += f", +{len(identities) - _MAX_LISTED_IDENTITIES} more"
+        if shape.startswith("custom: "):
+            subject = (
+                f"{len(identities)} custom pad(s) the outline builder refused "
+                f"({shape[len('custom: ') :]})"
+            )
+        else:
+            subject = f"{len(identities)} pad(s) of shape {shape!r}"
         results.add(
             DRCViolation(
                 "tht_smd_spacing_incomplete",
@@ -210,9 +235,10 @@ def check_tht_smd_spacing(
                 # shape is missing coverage, not a defect of the board, so it
                 # must not block a board whose other pads are all clean.
                 "info",
-                f"THT/SMD spacing coverage incomplete: {len(identities)} pad(s) of "
-                f"shape {shape!r} were not measured (this rule reproduces only "
-                f"{', '.join(sorted(MEASURABLE_SHAPES))}); spacing around them is "
+                f"THT/SMD spacing coverage incomplete: {subject} were not "
+                f"measured (this rule reproduces only "
+                f"{', '.join(sorted(MEASURABLE_SHAPES))} plus a custom pad's "
+                f"anchor-plus-primitives copper); spacing around them is "
                 f"unjudged, not cleared: {listed}",
             )
         )

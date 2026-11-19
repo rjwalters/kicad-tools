@@ -167,12 +167,18 @@ def test_via_copper_touching_an_smd_pad_stays_via_in_pad_territory():
 
 def test_unmeasurable_pad_shape_is_reported_not_cleared():
     """Issue #8914: a shape the rule cannot measure must not look like a cleared pad."""
+    # Issue #9498: a custom pad is measurable through the shared outline
+    # builder, so the refused shape here is one carrying an unsupported
+    # primitive (``gr_circle``) -- the builder names it in the finding.
     custom = """(footprint "T" (layer "F.Cu") (at 0 0) (property "Reference" "J2")
       (pad "1" thru_hole custom (at 0 0) (size 1.6 1.6) (drill 0.9)
-        (layers "*.Cu" "*.Mask") (net 1 "A") (uuid "odd")))"""
+        (layers "*.Cu" "*.Mask") (net 1 "A") (uuid "odd")
+        (options (anchor circle))
+        (primitives (gr_circle (center 0 0) (width 0.2) (fill yes)))))"""
     found = check_tht_smd_spacing(board(custom, smd(1.5))).violations
     assert [(v.rule_id, v.severity) for v in found] == [("tht_smd_spacing_incomplete", "info")]
     assert "custom" in found[0].message
+    assert "gr_circle" in found[0].message
     assert "odd" in found[0].message
     # A measurable pad on the same board is still judged.
     both = check_tht_smd_spacing(board(custom, tht(), smd(1.5))).violations
