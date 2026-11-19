@@ -6547,6 +6547,30 @@ class PCB:
             if legacy_stamp is not None:
                 pad_node.remove(legacy_stamp)
 
+        # Stock library footprints may ship ``(uuid ...)`` / legacy
+        # ``(tstamp ...)`` on graphic children (fp_line, fp_circle, fp_poly,
+        # fp_text, property, ...). Copied verbatim, N placements repeat the
+        # same value N times, which kicad-cli never does and which makes
+        # ``mask_to_copper`` abort on a duplicate source UUID (#9485). Mint a
+        # fresh deterministic value for each remaining one; nodes without an
+        # identity are left alone. The footprint's own uuid and the pad uuids
+        # above are already fresh, so skip them.
+        handled = {id(n) for n in fp_sexp.children if not n.is_atom and n.name == "uuid"}
+        handled.update(
+            id(n)
+            for pad_node in fp_sexp.find_all("pad")
+            for n in pad_node.children
+            if not n.is_atom and n.name == "uuid"
+        )
+        child_index = 0
+        for node in fp_sexp.iter_all():
+            if node is fp_sexp or node.is_atom or node.name not in ("uuid", "tstamp"):
+                continue
+            if id(node) in handled or node.get_first_atom() is None:
+                continue
+            node.set_value(0, self.mint_uuid("child", new_uuid, child_index))
+            child_index += 1
+
         # Update layer first (at node must come after layer)
         layer_node = fp_sexp.find("layer")
         if layer_node:
