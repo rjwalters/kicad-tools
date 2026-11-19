@@ -939,12 +939,16 @@ class MinimumWidth:
         position: Midpoint of that segment, in **board** coordinates (mm).
         parallel_group: True when ``width_mm`` is a group's effective width,
             so a reader never mistakes it for one trace's width.
+        merged: True when that group width is a same-layer union extent
+            (:attr:`ParallelGroup.same_layer`) rather than a sum across
+            layers; meaningful only when ``parallel_group`` is True (#9557).
     """
 
     width_mm: float
     layer: str
     position: tuple[float, float]
     parallel_group: bool = False
+    merged: bool = False
 
 
 @dataclass(frozen=True)
@@ -1269,6 +1273,7 @@ class PathResolution:
                 layer=pinch.layer,
                 position=_segment_midpoint(pinch),
                 parallel_group=True,
+                merged=group.same_layer,
             )
 
         candidates: list[MinimumWidth] = []

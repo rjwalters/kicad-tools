@@ -2142,9 +2142,15 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                 narrowest = r.min_width
                 if narrowest is not None:
                     nx, ny = _sheet(narrowest.position)
-                    # Say when the figure is a group's summed width, so
-                    # 2.0 mm is not misread as one trace's width (#8917).
-                    doubled = " (summed parallel group)" if narrowest.parallel_group else ""
+                    # Say when the figure is a group's effective width, so
+                    # 2.0 mm is not misread as one trace's width (#8917) --
+                    # naming the shape: merged same-layer copper or a sum
+                    # across layers (#9557).
+                    if narrowest.parallel_group:
+                        shape = "merged" if narrowest.merged else "summed"
+                        doubled = f" ({shape} parallel group)"
+                    else:
+                        doubled = ""
                     print(
                         f"      min width {narrowest.width_mm:.3f} mm on "
                         f"{narrowest.layer} at ({nx:.3f}, {ny:.3f}){doubled}"

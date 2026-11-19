@@ -8,7 +8,8 @@ narrowest copper, so a 0.2 mm neck at a through-hole power-transistor pin on a
 Covers both tiers the feature spans:
 
 * the resolver -- :attr:`PathResolution.min_width`, in **board** coordinates,
-  measuring a :class:`ParallelGroup` as one conductor by its summed width;
+  measuring a :class:`ParallelGroup` as one conductor by its effective width
+  (merged within a layer, summed across layers);
 * the CLI -- ``min_width_mm`` / ``min_width_at`` / ``min_width_layer``
   (plus ``min_width_parallel_group``) in ``--format json`` and the text line,
   in **sheet** coordinates like the audit's layer-change positions (#8798).
@@ -32,7 +33,7 @@ from kicad_tools.router.current_paths import (
 )
 from kicad_tools.schema.pcb import PCB
 
-from .test_current_paths import _add_pad_footprint
+from .test_current_paths import _add_pad_footprint, _same_layer_bars_pcb
 
 # --------------------------------------------------------------------------
 # Fixtures
@@ -165,6 +166,18 @@ class TestMinWidthResolver:
         # 2 x 1.0 mm counts as one 2.0 mm conductor, not twice as 1.0 mm.
         assert found.width_mm == pytest.approx(2.0)
         assert found.parallel_group is True
+        # Distinct layers: the group width is a sum, not a union extent (#9557).
+        assert found.merged is False
+
+    def test_merged_same_layer_group_flags_the_shape(self) -> None:
+        """Two overlapping F.Cu tracks are merged copper, not a sum (#9557)."""
+        resolution = resolve_current_path(_same_layer_bars_pcb(0.6), _spec())
+        assert resolution.ok, resolution.reason
+        found = resolution.min_width
+        assert found is not None
+        assert found.width_mm == pytest.approx(1.6)
+        assert found.parallel_group is True
+        assert found.merged is True
 
     def test_summed_group_matches_the_path_ampacity_expression(self) -> None:
         """The audit and ``path_ampacity`` must not print two different figures.
@@ -322,6 +335,24 @@ class TestMinWidthAuditText:
         out = capsys.readouterr().out
         assert "min width 2.000 mm on" in out
         assert "(summed parallel group)" in out
+
+    def test_text_output_marks_a_merged_group(self, tmp_path, capsys, monkeypatch) -> None:
+        """A same-layer merged group is a union extent, not a sum (#9557).
+
+        1.0 mm F.Cu pair at 0.6 mm offset: 1.6 mm of merged copper that
+        must not read as two summed tracks.
+        """
+        _run_audit_cli(
+            _same_layer_bars_pcb(0.6),
+            _spec(),
+            tmp_path,
+            monkeypatch,
+            output_format="text",
+        )
+        out = capsys.readouterr().out
+        assert "min width 1.600 mm on F.Cu" in out
+        assert "(merged parallel group)" in out
+        assert "summed parallel group" not in out
 
     def test_text_output_omits_the_line_when_unresolved(
         self, tmp_path, capsys, monkeypatch
