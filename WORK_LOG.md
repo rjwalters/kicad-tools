@@ -16,6 +16,15 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-20
 
+- **PR #9769**: fix: pcb prune and readiness cleanup honour the board's current-paths sidecar
+- **Issue #9747** (closed): readiness --generate: the cleanup's prune step ignores the board's current-paths sidecar, removes one layer of deliberately doubled power copper, and the run then fails its own path_ampacity check
+- **PR #9768**: perf: bucket junction candidates in layout-quality corner counting
+- **Issue #9658** (closed): layout_quality corner counting is quadratic in per-net segment count
+- **PR #9765**: chore: refresh board 04 readiness evidence for updated project.kct
+- **Issue #9762** (closed): Refresh board 04 readiness after #9614 changed project.kct
+- **PR #9764**: docs: name I alongside | as full-advance glyphs in silk bearings comment
+- **Issue #9761** (closed): Silk bearings comment: '|' is not the only single-stroke glyph ('I' is too)
+- **Issue #9772** (closed): custom_pad_copper: decide per-layer padstack semantics (carried forward from #9752)
 - **Issue #9754** (closed): Silk text box: unmeasured glyphs fall back to the widest *measured* advance, not a proven bound
 - **PR #9756**: fix: measure silk text advances for remaining ASCII punctuation glyphs
 - **Issue #9751** (closed): EdgeClearanceRule outline scan is O(copper x outline) and tessellated arcs make the outline 100-400x denser
