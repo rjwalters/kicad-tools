@@ -316,10 +316,15 @@ def test_stale_output_not_published_by_this_run_not_retried(board, monkeypatch, 
     assert board.read_text() == "negotiated"
 
 
-@pytest.mark.parametrize("mtime", [time.time() + 5, time.time() - 0.5, 0])
-def test_exit1_fresh_mtime_alone_is_not_a_publication(board, monkeypatch, mtime):
+@pytest.mark.parametrize("mtime_offset", [5.0, -0.5, None], ids=["future", "just-past", "epoch"])
+def test_exit1_fresh_mtime_alone_is_not_a_publication(board, monkeypatch, mtime_offset):
     """A board timestamped around the run's start is still not retried
-    without a receipt publication record -- mtime alone proved forgeable."""
+    without a receipt publication record -- mtime alone proved forgeable.
+
+    The clock is read inside the body, never in the decorator: a
+    collection-time ``time.time()`` differs per xdist worker, so the ids would
+    differ and xdist would abort the whole run."""
+    mtime = 0 if mtime_offset is None else time.time() + mtime_offset
     os.utime(board, (mtime, mtime))
     _stub_open(monkeypatch, [["VCP"]])
     monkeypatch.setattr(route_cmd, "_main_impl", lambda a: pytest.fail("must not run"))
