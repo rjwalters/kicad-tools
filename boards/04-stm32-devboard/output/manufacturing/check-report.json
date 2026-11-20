@@ -433,7 +433,7 @@
     "schematic_missing": false,
     "incomplete_categories": [],
     "schematic": {
-      "path": "/tmp/refresh-bundles-f4ak35em/04-stm32-devboard/output/stm32_devboard.kicad_sch",
+      "path": "stm32_devboard.kicad_sch",
       "source": "--schematic"
     }
   },
