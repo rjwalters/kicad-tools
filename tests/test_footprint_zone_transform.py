@@ -223,6 +223,41 @@ def test_footprint_rule_areas_follow_the_move():
     assert (min(xs), max(xs), min(ys), max(ys)) == pytest.approx((121, 127, 117, 123))
 
 
+_KEEPOUT_MOD = """(footprint "Keepout"
+  (layer "F.Cu")
+  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask"))
+  (zone (net 0) (net_name "") (layer "F.Cu") (hatch edge 0.5)
+    (keepout (tracks not_allowed) (vias not_allowed) (pads allowed)
+      (copperpour not_allowed) (footprints allowed))
+    (polygon (pts (xy -3 -1) (xy 3 -1) (xy 3 -4) (xy -3 -4)))
+  )
+)
+"""
+
+
+@pytest.mark.parametrize(
+    ("rotation", "layer", "expected"),
+    [
+        (0, "F.Cu", [(-3, -1), (3, -1), (3, -4), (-3, -4)]),
+        (90, "F.Cu", [(-1, 3), (-1, -3), (-4, -3), (-4, 3)]),
+        (90, "B.Cu", [(1, 3), (1, -3), (4, -3), (4, 3)]),
+    ],
+)
+def test_add_footprint_from_file_places_zones_with_the_footprint(
+    tmp_path, rotation, layer, expected
+):
+    """A library zone lands at the placed footprint, not at the sheet origin (Issue #8958)."""
+    mod = tmp_path / "Keepout.kicad_mod"
+    mod.write_text(_KEEPOUT_MOD, encoding="utf-8")
+    pcb = PCB.create(width=100, height=100)
+    fp = pcb.add_footprint_from_file(mod, "U1", 50, 50, rotation=rotation, layer=layer)
+    ax, ay = fp.sheet_position
+    [zone] = fp._sexp_node.find_children("zone")
+    xys = zone.find_child("polygon").find_child("pts")
+    pts = [(xy.get_float(0), xy.get_float(1)) for xy in xys]
+    _assert_points(pts, [(ax + x, ay + y) for x, y in expected], TOL)
+
+
 def test_written_coordinates_keep_six_decimals(tmp_path):
     """The generic serializer's 6 significant digits would write 124.598."""
     pcb = PCB.load(str(BASE))
