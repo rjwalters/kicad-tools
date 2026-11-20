@@ -24,6 +24,7 @@ from .fixtures import (
     board_cross_face_bore_source,
     board_cross_face_edge_wrap_source,
     board_cross_face_slot_source,
+    board_cross_face_two_bore_both_faces_source,
     board_same_face_with_bore_source,
     board_source,
 )
@@ -250,3 +251,22 @@ def test_thickness_from_stackup_when_present(tmp_path):
     # 1.4 + 1.57 + 0.75 = 3.72 mm through the bore.
     pair = _conductor_pair(report, "GND")
     assert pair.creepage_mm == pytest.approx(3.72, abs=0.01)
+
+
+@pytest.mark.parametrize("short_first", [True, False])
+def test_both_faces_two_bores_shorter_binds_regardless_of_order(tmp_path, short_first):
+    # Both nets carry copper on both faces; the 2.6 mm bore must bind whether
+    # the face ordering that finds it runs first or last (it used to be
+    # overwritten by the later ordering's 5.0 mm path).
+    pcb = _load(tmp_path, board_cross_face_two_bore_both_faces_source(short_first=short_first))
+    hv = resolve_hv_nets(pcb, "HV", _hv_map())
+    report = _census(pcb, hv)
+
+    pair = _conductor_pair(report, "GND")
+    assert pair.creepage_mm == pytest.approx(2.6, abs=0.01)
+    assert pair.via_bore == "MHA.1"
+    assert not pair.passed
+
+    # A bound between the two paths must still FAIL (no false pass on 5.0 mm).
+    report3 = compute_creepage_census(pcb, hv, min_mm=3.0, board="board.kicad_pcb")
+    assert not report3.passed

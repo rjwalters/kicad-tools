@@ -257,6 +257,46 @@ def board_cross_face_slot_source() -> str:
     return "".join(parts)
 
 
+def board_cross_face_two_bore_both_faces_source(*, short_first: bool = True) -> str:
+    """Both nets on BOTH outer faces, two bores of different path length (#9704).
+
+    ``MHA`` (110,110) has copper 0.5 mm from its rim on each face
+    (0.5 + 1.6 + 0.5 = 2.6 mm); ``MHB`` (130,110) has copper 1.7 mm from its
+    rim (1.7 + 1.6 + 1.7 = 5.0 mm).  Which face ordering finds the short path
+    depends on ``short_first``: True puts L_MAINS on F.Cu at ``MHA``
+    (ordering (F.Cu, B.Cu)); False puts L_MAINS on B.Cu there, so the short
+    path is found by the other ordering.  Same-face gaps are >12 mm, so both
+    candidates beat the existing row and the orderings must minimise.
+    """
+    hv_a, gnd_a = ("F.Cu", "B.Cu") if short_first else ("B.Cu", "F.Cu")
+    hv_b, gnd_b = gnd_a, hv_a  # the long bore uses the opposite faces
+
+    def pad(x: float, layer: str, num: int, name: str) -> str:
+        return (
+            f'  (footprint "test:pad" (layer "{layer}") (at {x} 110)\n'
+            f'    (pad "1" smd rect (at 0 0) (size 1 1) (layers "{layer}")\n'
+            f'      (net {num} "{name}"))\n'
+            "  )\n"
+        )
+
+    parts = [_HEADER, _OUTLINE]
+    for ref, x in (("MHA", 110), ("MHB", 130)):
+        parts.append(
+            f'  (footprint "test:mhole" (layer "F.Cu") (at {x} 110)\n'
+            f'    (property "Reference" "{ref}" (at 0 0 0) (layer "F.SilkS"))\n'
+            '    (pad "1" np_thru_hole circle (at 0 0) (size 3.2 3.2) (drill 3.2)\n'
+            '      (layers "*.Cu" "*.Mask"))\n'
+            "  )\n"
+        )
+    # Rim at x=108.4 / 111.6 (A) and 128.4 / 131.6 (B); pad half-width 0.5.
+    parts.append(pad(107.4, hv_a, 1, "L_MAINS"))
+    parts.append(pad(112.6, gnd_a, 2, "GND"))
+    parts.append(pad(126.2, hv_b, 1, "L_MAINS"))
+    parts.append(pad(133.8, gnd_b, 2, "GND"))
+    parts.append(")\n")
+    return "".join(parts)
+
+
 def board_same_face_with_bore_source() -> str:
     """The classic same-face pair plus an off-path NPTH bore (#9704, AC3).
 

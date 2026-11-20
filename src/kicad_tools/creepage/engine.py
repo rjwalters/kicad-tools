@@ -2557,6 +2557,12 @@ def compute_creepage_census(
                         else:
                             req_creep = required_creepage_mm or 0.0
                         bound = max(min_mm or 0.0, req_creep) - _PASS_TOLERANCE
+                    # The other face ordering may already have stored a
+                    # candidate for this pair: only a strictly shorter path
+                    # replaces it, so the orderings minimise.
+                    earlier = cross_best.get(key)
+                    if earlier is not None:
+                        bound = min(bound, earlier[0])
                     best_cand = math.inf
                     best_label: str | None = None
                     for k, (rim, label, joint) in enumerate(rims):
