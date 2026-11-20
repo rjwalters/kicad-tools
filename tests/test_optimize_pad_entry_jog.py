@@ -1,4 +1,9 @@
-"""Pad-entry jog straightening and the matching connectivity-gate radius (Issue #8325)."""
+"""Pad-entry jog straightening and the matching connectivity-gate radius (Issue #8325).
+
+Also the pad-escape mask guard cases raised by issue #9748: an on-axis pad
+entry may not be re-angled into an off-axis one, and same-net copper may not
+be slid into the mask-clearance band around another pad's opening.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +12,7 @@ import math
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.optimizer.algorithms import straighten_pad_entry_pass
 from kicad_tools.router.optimizer.config import OptimizationConfig
+from kicad_tools.router.optimizer.geometry import PadMaskZone, rewrite_keeps_pad_escapes
 from kicad_tools.router.optimizer.pcb import _free_end_count, connectivity_preserved
 from kicad_tools.router.optimizer.trace import TraceOptimizer
 from kicad_tools.router.primitives import Segment, Via
@@ -114,3 +120,90 @@ def test_anchor_only_the_dropped_copper_covers_blocks_rewrite():
     tap = (mx - k, my + k)  # on the far side of the 1.62 mm run from the new line
     out = straighten_pad_entry_pass(chain, _cfg(), lambda s: True, [(0, 0), pad, tap], [pad])
     assert out == chain
+
+
+# ---------------------------------------------------------------------------
+# Issue #9748: the mask guard must keep pad escapes mask-clean
+# ---------------------------------------------------------------------------
+
+
+def _zone_9748(**kw):
+    """A flat SMD pad zone at (100, 50): 1.2 x 0.6 mm copper, no margin."""
+    kw.setdefault("x", 100.0)
+    kw.setdefault("y", 50.0)
+    kw.setdefault("half_w", 0.6)
+    kw.setdefault("half_h", 0.3)
+    kw.setdefault("margin", 0.0)
+    kw.setdefault("net_name", "N")
+    kw.setdefault("layers", ("F.Cu",))
+    return PadMaskZone(layers=frozenset(kw.pop("layers")), **kw)
+
+
+class TestMaskEscapeGuard9748:
+    def test_on_axis_entry_rewrite_is_kept(self):
+        """AC: a straight on-axis entry stays; only its tail is trimmed."""
+        zones = [_zone_9748()]
+        old = [_seg(97.0, 50.0, 100.2, 50.0)]
+        new = [_seg(97.5, 50.0, 100.2, 50.0)]
+        assert rewrite_keeps_pad_escapes(old, new, zones, TOL)
+
+    def test_on_axis_entry_is_not_re_angled_off_axis(self):
+        """The #9748 leak: a re-angle that still ends in the pad copper and
+        runs past its centre, but crosses the opening edge at ~31 degrees --
+        the shallow crossing leaves copper beside the pad that the one clean
+        entry allowance does not cover (a ``same-net own-pad entry`` error).
+        The pre-#9748 guard (terminating end + centre proximity) let it by."""
+        zones = [_zone_9748()]
+        on_axis = [_seg(97.0, 50.0, 100.2, 50.0)]
+        # Line through the pad centre at slope 0.6 (atan(0.6) ~ 31 degrees),
+        # ending inside the copper past the centre.
+        off_axis = [_seg(99.1, 49.46, 100.3, 50.18)]
+        assert rewrite_keeps_pad_escapes(on_axis, on_axis, zones, TOL)
+        assert not rewrite_keeps_pad_escapes(on_axis, off_axis, zones, TOL)
+
+    def test_clean_45_degree_entry_is_still_allowed(self):
+        """45 degrees is the one-clean-entry boundary, not a veto."""
+        zones = [_zone_9748()]
+        old = [_seg(97.0, 52.05, 100.0, 50.0)]
+        new = [_seg(98.0, 52.05, 100.05, 50.0)]
+        assert rewrite_keeps_pad_escapes(old, new, zones, TOL)
+
+    def test_same_net_track_not_moved_into_mask_clearance_band(self):
+        """The #9748 disjoint class: a same-net track slid to ~0.05 mm from a
+        neighbouring same-net pad's opening never touches the opening, yet
+        sits inside the fab's mask-to-copper clearance band.  With the band
+        engaged (the jlcpcb policy floor) the move is vetoed; without a
+        policy the pre-#9748 opening-only guard applies."""
+        zones = [_zone_9748(x=110.0, half_w=0.6, half_h=0.6, margin=0.05)]
+        old = [
+            _seg(100.0, 50.8, 106.0, 50.8, w=0.25),
+            _seg(106.0, 50.8, 112.0, 50.8, w=0.25),
+        ]
+        merged = [_seg(100.0, 50.8, 112.0, 50.8, w=0.25)]
+        # Opening spans y in [49.35, 50.65]; the merged capsule's near edge
+        # reaches y = 50.675: outside the opening, 0.025 mm inside the band.
+        assert rewrite_keeps_pad_escapes(old, merged, zones, TOL)
+        assert not rewrite_keeps_pad_escapes(old, merged, zones, TOL, 0.09)
+
+    def test_band_veto_spares_a_terminating_entry_on_that_pad(self):
+        """A same-net entry onto the band's own pad keeps its exemption: the
+        steep crossing's band copper stays inside the one-entry allowance."""
+        zones = [_zone_9748(x=110.0, half_w=0.6, half_h=0.6, margin=0.05)]
+        old = [_seg(108.0, 52.0, 110.0, 50.0)]
+        new = [_seg(108.5, 51.5, 110.0, 50.0)]
+        assert rewrite_keeps_pad_escapes(old, new, zones, TOL, 0.09)
+
+    def test_optimizer_passes_respect_the_band(self):
+        """The TraceOptimizer wiring: collinear copper running past a pad's
+        opening band is not merged into one segment when the jlcpcb
+        clearance is registered (Issue #9748's optimize-traces path)."""
+        zone = _zone_9748(x=110.0, half_w=0.6, half_h=0.6, margin=0.05, net_name="N")
+        chain = [
+            _seg(100.0, 50.8, 106.0, 50.8, w=0.25),
+            _seg(106.0, 50.8, 112.0, 50.8, w=0.25),
+        ]
+        opt_plain = TraceOptimizer(_cfg(), collision_checker=_Clear())
+        assert len(opt_plain.optimize_segments(list(chain))) == 1
+        opt_band = TraceOptimizer(_cfg(), collision_checker=_Clear())
+        opt_band.set_pad_zones([zone], danger_clearance=0.09)
+        assert len(opt_band.optimize_segments(list(chain))) == 2

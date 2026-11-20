@@ -217,6 +217,7 @@ class TestDrcRollback:
             copper_oz,
             min_clearance_mm=None,
             project_path=None,
+            mask_screen=None,
         ):
             nonlocal call_count
             call_count += 1
@@ -287,7 +288,13 @@ class TestDrcRollback:
 
         # Issue #3138: optimizer now uses _run_drc_error_count_by_category.
         def mock_drc(
-            pcb_text, manufacturer, layers, copper_oz, min_clearance_mm=None, project_path=None
+            pcb_text,
+            manufacturer,
+            layers,
+            copper_oz,
+            min_clearance_mm=None,
+            project_path=None,
+            mask_screen=None,
         ):
             nonlocal call_count
             call_count += 1
@@ -358,7 +365,13 @@ class TestDrcRollback:
 
         # Issue #3138: optimizer now uses _run_drc_error_count_by_category.
         def mock_drc(
-            pcb_text, manufacturer, layers, copper_oz, min_clearance_mm=None, project_path=None
+            pcb_text,
+            manufacturer,
+            layers,
+            copper_oz,
+            min_clearance_mm=None,
+            project_path=None,
+            mask_screen=None,
         ):
             # Always return 0 errors -- optimization is safe
             return {"__total__": 0}
@@ -429,7 +442,13 @@ class TestCategoryAwareRollback:
         call_count = 0
 
         def mock_drc(
-            pcb_text, manufacturer, layers, copper_oz, min_clearance_mm=None, project_path=None
+            pcb_text,
+            manufacturer,
+            layers,
+            copper_oz,
+            min_clearance_mm=None,
+            project_path=None,
+            mask_screen=None,
         ):
             nonlocal call_count
             call_count += 1
@@ -512,7 +531,13 @@ class TestCategoryAwareRollback:
         call_count = 0
 
         def mock_drc(
-            pcb_text, manufacturer, layers, copper_oz, min_clearance_mm=None, project_path=None
+            pcb_text,
+            manufacturer,
+            layers,
+            copper_oz,
+            min_clearance_mm=None,
+            project_path=None,
+            mask_screen=None,
         ):
             nonlocal call_count
             call_count += 1

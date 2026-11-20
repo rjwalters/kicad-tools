@@ -10,7 +10,7 @@ import tempfile
 from collections import Counter
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from ...core.layers import kicad_read_via_layers, warn_normalised_vias
 from ..layers import Layer
@@ -514,6 +514,11 @@ _PAD_VIOLATION_CATEGORIES = frozenset(
         "clearance_via_zone",
         "clearance_pad_zone",
         "clearance_net0_bridge",
+        # Issue #9748: mask exposure.  The conservative geometric screen (see
+        # ``router.optimizer.mask_screen``) keys its error-class findings
+        # here; growth must force the per-net rollback even at a flat total,
+        # exactly like a pad clearance swap.
+        "mask_to_copper",
     }
 )
 
@@ -531,6 +536,7 @@ def _run_drc_error_count_by_category(
     copper_oz: float,
     min_clearance_mm: float | None = None,
     project_path: Path | None = None,
+    mask_screen: Any | None = None,
 ) -> dict[str, int]:
     """Run DRC and return a dict of error counts keyed by rule id.
 
@@ -555,6 +561,14 @@ def _run_drc_error_count_by_category(
     ``.kicad_pro`` carries the net-class clearances.  It is staged beside the
     scratch board so ``netclass_clearance_copper`` -- which ``kct check``
     enforces -- is counted too.  ``None`` skips the check.
+
+    Issue #9748: ``mask_screen`` (a
+    :class:`~kicad_tools.router.optimizer.mask_screen.MaskExposureScreen`)
+    adds a conservative ``mask_to_copper`` count over the pure-Python mask
+    snapshot, so the rollback gate can see mask exposure the way ``kct check
+    --mfr`` reports it.  ``None`` (the default) keeps the pre-#9748 referee;
+    a screen that cannot model the board contributes nothing and reports
+    ``not_evaluated`` through its ``status``.
     """
     import shutil
     from dataclasses import replace
@@ -572,6 +586,11 @@ def _run_drc_error_count_by_category(
         pro = Path(project_path).with_suffix(".kicad_pro")
         if pro.is_file():
             shutil.copy2(pro, Path(tmp_path).with_suffix(".kicad_pro"))
+        # Issue #9748: a custom-rules file makes the mask snapshot honestly
+        # incomplete (native-only rule evaluation), so stage it too.
+        dru = Path(project_path).with_suffix(".kicad_dru")
+        if dru.is_file():
+            shutil.copy2(dru, Path(tmp_path).with_suffix(".kicad_dru"))
 
     try:
         pcb = PCB.load(tmp_path)
@@ -619,6 +638,15 @@ def _run_drc_error_count_by_category(
                 continue
             counts[v.rule_id] = counts.get(v.rule_id, 0) + 1
             counts["__total__"] += 1
+        # Issue #9748: the conservative mask screen over the pure snapshot --
+        # the referee's stand-in for the native ``mask_to_copper`` check.  It
+        # counts nothing when the snapshot cannot model the board, and says so
+        # through the screen's ``status`` (read by the summary line).
+        if mask_screen is not None:
+            mask_findings = mask_screen.count(tmp_path, pcb)
+            if mask_findings:
+                counts["mask_to_copper"] = counts.get("mask_to_copper", 0) + mask_findings
+                counts["__total__"] += mask_findings
         return counts
     finally:
         shutil.rmtree(scratch_dir, ignore_errors=True)
@@ -1203,10 +1231,15 @@ def optimize_pcb(
     after optimization. Any net whose optimized segments increase the
     total DRC error count is rolled back to its original segments.  The
     gate runs the clearance, dimension and segment/via-vs-zone-fill checks;
-    growth in a pad- or short-class category also triggers rollback.  If
-    the rollback loop cannot reach baseline, nets are re-admitted one at a time
-    and only those that keep the board at baseline are kept (Issue #8367); if
-    none qualifies, all changed nets are reverted.
+    growth in a pad- or short-class category also triggers rollback.  With
+    a manufacturer mask policy (JLCPCB family) the referee additionally
+    screens ``mask_to_copper`` conservatively over the pure mask snapshot
+    (Issue #9748), and growth in that category rolls back the same way --
+    or the summary reports the rule not evaluated when the snapshot cannot
+    model the board.  If the rollback loop cannot reach baseline, nets are
+    re-admitted one at a time and only those that keep the board at
+    baseline are kept (Issue #8367); if none qualifies, all changed nets
+    are reverted.
 
     Args:
         pcb_path: Path to input .kicad_pcb file.
@@ -1262,7 +1295,14 @@ def optimize_pcb(
 
     # DRC baseline (when drc_aware is enabled)
     baseline_counts: dict[str, int] = {"__total__": 0}
+    mask_screen: Any | None = None
     if config.drc_aware and config.drc_manufacturer:
+        # Issue #9748: the referee's conservative mask_to_copper screen, from
+        # the same manufacturer policy ``kct check --mfr`` engages by default.
+        # ``None`` (no cited policy) keeps the pre-#9748 referee.
+        from .mask_screen import mask_exposure_screen_for_manufacturer
+
+        mask_screen = mask_exposure_screen_for_manufacturer(config.drc_manufacturer)
         baseline_counts = _run_drc_error_count_by_category(
             pcb_text,
             manufacturer=config.drc_manufacturer,
@@ -1270,8 +1310,13 @@ def optimize_pcb(
             copper_oz=config.drc_copper_oz,
             min_clearance_mm=config.drc_clearance_mm,
             project_path=config.drc_project_path,
+            mask_screen=mask_screen,
         )
         stats.drc_errors_before = baseline_counts["__total__"]
+        # Snapshot completeness does not change between referee calls
+        # (``replace_segments`` only rewrites track blocks), so the baseline
+        # status is every later call's status too.
+        stats.drc_mask_screen = mask_screen.status if mask_screen is not None else "off"
 
     # Issue #6889: the rewrites below ignore same-net copper, so on a Kelvin
     # net they can join two branches of the star away from the shunt pad --
@@ -1361,6 +1406,7 @@ def optimize_pcb(
             copper_oz=config.drc_copper_oz,
             min_clearance_mm=config.drc_clearance_mm,
             project_path=config.drc_project_path,
+            mask_screen=mask_screen,
         )
         full_errors = full_counts["__total__"]
         baseline_errors = baseline_counts["__total__"]
@@ -1400,6 +1446,7 @@ def optimize_pcb(
                     copper_oz=config.drc_copper_oz,
                     min_clearance_mm=config.drc_clearance_mm,
                     project_path=config.drc_project_path,
+                    mask_screen=mask_screen,
                 )
 
                 # Issue #3138: a rollback is helpful if it lowers the total
@@ -1465,6 +1512,7 @@ def optimize_pcb(
                         copper_oz=config.drc_copper_oz,
                         min_clearance_mm=config.drc_clearance_mm,
                         project_path=config.drc_project_path,
+                        mask_screen=mask_screen,
                     )
                     if trial_counts["__total__"] <= baseline_errors and not _pad_violations_grew(
                         baseline_counts, trial_counts
@@ -1520,6 +1568,7 @@ def optimize_pcb(
                             copper_oz=config.drc_copper_oz,
                             min_clearance_mm=config.drc_clearance_mm,
                             project_path=config.drc_project_path,
+                            mask_screen=mask_screen,
                         )["__total__"]
                 if not any(final_segments[n] != segments_by_net[n] for n in final_segments):
                     stats.drc_failsafe_reverted = True

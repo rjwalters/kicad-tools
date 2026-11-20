@@ -332,14 +332,18 @@ class PadMaskZone:
         hh = self.half_h if copper else self.half_h + self.margin
         return abs(x - self.x) <= hw and abs(y - self.y) <= hh
 
-    def segment_intersects(self, x1: float, y1: float, x2: float, y2: float) -> bool:
-        """Does the segment cross the opening's (grown) AABB?
+    def segment_intersects(
+        self, x1: float, y1: float, x2: float, y2: float, *, grow: float = 0.0
+    ) -> bool:
+        """Does the segment cross the opening's AABB, optionally grown by *grow*?
 
         Parametric slab clip (Liang-Barsky); exact for a segment against an
-        axis-aligned box.
+        axis-aligned box.  ``grow`` widens the box by a danger-clearance band
+        (issue #9748): copper merely *near* an opening -- within the fab's
+        mask-to-copper clearance of it -- is an exposure class too.
         """
-        hw = self.half_w + self.margin
-        hh = self.half_h + self.margin
+        hw = self.half_w + self.margin + grow
+        hh = self.half_h + self.margin + grow
         dx, dy = x2 - x1, y2 - y1
         t0, t1 = 0.0, 1.0
         for p, q in (
@@ -503,11 +507,69 @@ def _terminates_on_pad(seg: Segment, zone: PadMaskZone, tolerance: float) -> boo
     return _point_segment_distance(zone.x, zone.y, seg.x1, seg.y1, seg.x2, seg.y2) <= reach
 
 
+def _clean_pad_entry(seg: Segment, zone: PadMaskZone) -> bool:
+    """Is *seg*'s entry into *zone*'s opening one clean crossing? (Issue #9748)
+
+    The mask check's one-clean-entry allowance buys ``sqrt(2) x width x
+    clearance`` of copper in the band beside the opening -- exactly one
+    crossing of the opening boundary at 45 degrees or steeper.  A re-angled
+    last leg that still ends in the pad copper but grazes the opening edge
+    at a shallow angle leaves more copper beside the opening than that
+    budget and re-measures as a ``mask_to_copper`` ``same-net own-pad entry``
+    error, so it must not claim the terminating-entry exemption.
+
+    The zone's grown AABB stands in for the true opening (it contains it),
+    so this is the guard's cheap geometric mirror of the native area rule:
+    at most one boundary crossing -- a straddle buys two -- and every
+    crossing at 45 degrees or steeper from the crossed side.
+    """
+    hw = zone.half_w + zone.margin
+    hh = zone.half_h + zone.margin
+    dx, dy = seg.x2 - seg.x1, seg.y2 - seg.y1
+    length = math.hypot(dx, dy)
+    ux, uy = (dx / length, dy / length) if length > 0.0 else (0.0, 0.0)
+    t0, t1 = 0.0, 1.0
+    crossings: list[tuple[str, float]] = []
+    for side, p, q in (
+        ("x", -dx, seg.x1 - zone.x + hw),
+        ("x", dx, zone.x + hw - seg.x1),
+        ("y", -dy, seg.y1 - zone.y + hh),
+        ("y", dy, zone.y + hh - seg.y1),
+    ):
+        if p == 0.0:
+            if q < 0.0:
+                return True  # parallel and outside this slab: no box overlap
+        else:
+            r = q / p
+            if p < 0.0:
+                if r > t1:
+                    return True
+                if r > t0:
+                    t0 = r
+                    crossings = [(side, r)]
+            else:
+                if r < t0:
+                    return True
+                if r < t1:
+                    t1 = r
+                    crossings.append((side, r))
+    if len(crossings) > 1:
+        return False  # enters and exits: a straddle is never one clean entry
+    for side, t in crossings:
+        # Steep against the crossed side: the direction component along the
+        # side's normal is at least the component along the side itself.
+        along, normal = (uy, ux) if side == "x" else (ux, uy)
+        if abs(normal) + 1e-9 < abs(along):
+            return False
+    return True
+
+
 def rewrite_keeps_pad_escapes(
     old: Sequence[Segment],
     new: Sequence[Segment],
     zones: Sequence[PadMaskZone],
     tolerance: float,
+    danger_clearance: float = 0.0,
 ) -> bool:
     """Would the chain rewrite *old* -> *new* break a pad's mask-clean escape?
 
@@ -521,10 +583,20 @@ def rewrite_keeps_pad_escapes(
     * **No new copper in an opening** -- a *new* segment (one *old* does not
       already carry) may not enter any pad's opening zone, same-net or
       foreign.  Same-net entries are exempt when they terminate on the pad
-      (see :func:`_terminates_on_pad`); foreign-net copper in an opening is a
-      ``different-net`` exposure, always.  A same-net crossing that keeps
-      every endpoint outside the opening still measures as ``same-net
-      pass-through`` once its copper enters it, so it is vetoed too.
+      with one clean, steep crossing (see :func:`_clean_pad_entry`);
+      foreign-net copper in an opening is a ``different-net`` exposure,
+      always.  A same-net crossing that keeps every endpoint outside the
+      opening still measures as ``same-net pass-through`` once its copper
+      enters it, so it is vetoed too.
+
+    Issue #9748 extends the second rule with ``danger_clearance`` -- the
+    fab's mask-to-copper clearance (the JLCPCB policy floor, 0 when no cited
+    policy exists): new copper may not enter the clearance band *beside* an
+    opening either.  A same-net track slid to 0.05 mm from a neighbouring
+    pad's opening never touches the opening itself, yet measures as a
+    ``disjoint ... same-net pass-through`` error; a *terminating* entry on
+    that pad keeps its exemption (its steep crossing stays inside the
+    one-entry allowance).
 
     A new bend inside an opening is always part of a new segment crossing it,
     so the second rule covers the "new bend in the pad zone" case.  Copper
@@ -545,6 +617,9 @@ def rewrite_keeps_pad_escapes(
         new: The chain after the pass.
         zones: All pads' :class:`PadMaskZone` records.
         tolerance: Coordinate tolerance (mm), the optimizer's own.
+        danger_clearance: Mask-to-copper clearance around an opening that
+            new copper must keep out of unless it terminates on that pad
+            (mm); ``0`` guards the openings only.
 
     Returns:
         True when the rewrite may be kept.
@@ -586,9 +661,17 @@ def rewrite_keeps_pad_escapes(
         ):
             continue  # copper the board already carries on this layer
         for zone in zones_for(layer):
-            if not zone.segment_intersects(seg.x1, seg.y1, seg.x2, seg.y2):
+            # The band is copper-to-opening: the capsule's edge leads the
+            # centre-line by half the trace width, so grow by both.
+            if not zone.segment_intersects(
+                seg.x1, seg.y1, seg.x2, seg.y2, grow=danger_clearance + seg.width / 2.0
+            ):
                 continue
-            if zone.net_name == net_name and _terminates_on_pad(seg, zone, tolerance):
+            if (
+                zone.net_name == net_name
+                and _terminates_on_pad(seg, zone, tolerance)
+                and _clean_pad_entry(seg, zone)
+            ):
                 continue
             return False
     return True
