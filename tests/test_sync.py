@@ -3100,6 +3100,47 @@ class TestPadNetMismatches:
         load.return_value.save.assert_called_once_with(str(out))
         assert changes[0].applied
 
+    def test_hidden_power_pin_joins_net_by_name(self, tmp_path):
+        """Issue #8988: a legacy power symbol (no library ``(power)`` flag)
+        names its net through a hidden ``power_in`` pin, as KiCad does, so
+        two such symbols on separate wires are one net."""
+        lib = """
+    (symbol "demo:R" (property "Reference" "R" (at 0 0 0))
+      (symbol "R_1_1"
+        (pin passive line (at 0 3.81 270) (length 1.27) (name "~") (number "1"))
+        (pin passive line (at 0 -3.81 90) (length 1.27) (name "~") (number "2"))))
+    (symbol "demo:VPP" (property "Reference" "#PWR" (at 0 0 0))
+      (symbol "VPP_0_0"
+        (pin power_in line (at 0 0 90) (length 0) (hide yes) (name "VPP") (number "1"))))"""
+        parts = []
+        for i, x in enumerate((100, 120), 1):
+            parts.append(
+                f'(symbol (lib_id "demo:R") (at {x} 100 0) (unit 1) (uuid "r{i}")'
+                f' (property "Reference" "R{i}" (at {x} 100 0)))'
+                f' (symbol (lib_id "demo:VPP") (at {x} 90 0) (unit 1) (uuid "p{i}")'
+                f' (property "Reference" "#PWR{i}" (at {x} 90 0)))'
+                f" (wire (pts (xy {x} 90) (xy {x} 96.19)) (uuid w{i}))"
+            )
+        sch = tmp_path / "a.kicad_sch"
+        sch.write_text(
+            f'(kicad_sch (version 20231120) (generator "test") (uuid "root")'
+            f" (lib_symbols {lib}) {' '.join(parts)})"
+        )
+        fps = "".join(
+            f'(footprint "R" (layer "F.Cu") (at {x} 100) (property "Reference" "R{i}")'
+            f' (pad "1" smd rect (at 0 -1) (size 1 1) (layers "F.Cu") (net 1 "VPP"))'
+            f' (pad "2" smd rect (at 0 1) (size 1 1) (layers "F.Cu")))'
+            for i, x in enumerate((100, 120), 1)
+        )
+        pcb = tmp_path / "a.kicad_pcb"
+        pcb.write_text(
+            f'(kicad_pcb (version 20240108) (generator "test") (net 0 "") (net 1 "VPP") {fps})'
+        )
+        rec = Reconciler.__new__(Reconciler)
+        rec._schematic_path = sch
+        rec._pcb_path = pcb
+        assert rec._find_pad_net_mismatches() == []
+
     def test_strict_assign_failure_is_reported(self):
         rec = self._reconciler()
         with patch("kicad_tools.operations.netlist.export_netlist", side_effect=OSError("boom")):
