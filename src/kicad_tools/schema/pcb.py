@@ -3166,6 +3166,9 @@ class PCB:
         self._texts: list[GraphicText] = []
         self._graphics: list[BoardGraphic] = []
         self._setup: Setup | None = None
+        # Issue #9746: board-level ``(general (thickness X))`` in mm, or
+        # ``None`` when the file carries no positive header thickness.
+        self._general_thickness: float | None = None
         # Issue #4875: board-declared legacy top-level ``(net_class …)``
         # design rules, keyed by class name.  A dict (not a list) so a
         # re-``_parse()`` -- which appends rather than replaces -- overwrites
@@ -3604,6 +3607,8 @@ class PCB:
                 arc = GraphicArc.from_sexp(child)
                 self._graphic_arcs.append(arc)
                 self._graphics.append(BoardGraphic.from_sexp(child, "arc"))
+            elif tag == "general":
+                self._parse_general(child)
             elif tag == "setup":
                 self._parse_setup(child)
             elif tag == "title_block":
@@ -4019,6 +4024,19 @@ class PCB:
                 pass  # Store globally if needed
 
         return layers
+
+    def _parse_general(self, sexp: SExp) -> None:
+        """Parse the board-level ``(general (thickness X) ...)`` header (#9746).
+
+        Only the thickness is kept; a missing, unparseable or non-positive
+        value leaves :attr:`general_thickness` as ``None``.
+        """
+        node = sexp.find("thickness")
+        if node is None:
+            return
+        value = node.get_float(0)
+        if value is not None and value > 0.0:
+            self._general_thickness = float(value)
 
     def _parse_title_block(self, sexp: SExp):
         """Parse title block."""
@@ -4547,6 +4565,7 @@ class PCB:
         self._texts = []
         self._graphics = []
         self._setup = None
+        self._general_thickness = None
         self._net_classes = {}
         self._title_block = {}
         self._parse()
@@ -6080,6 +6099,17 @@ class PCB:
     def setup(self) -> Setup | None:
         """Board setup/design rules."""
         return self._setup
+
+    @property
+    def general_thickness(self) -> float | None:
+        """Board thickness in mm from ``(general (thickness X))`` (#9746).
+
+        ``None`` when the file has no ``general`` header, no ``thickness``
+        in it, or a non-positive value.  Read-only: it reflects the parsed
+        file, and the stackup strata sum (when declared) takes precedence
+        for consumers that need a physical thickness.
+        """
+        return self._general_thickness
 
     @property
     def net_classes(self) -> dict[str, BoardNetClass]:
