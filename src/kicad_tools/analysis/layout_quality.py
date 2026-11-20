@@ -104,6 +104,10 @@ _CORNER_CLASSES = ("right_angle", "acute", "turn_back")
 # Vertex keys round coordinates to 2 decimals, the same granularity the
 # sharp-trace-corner rule uses to group findings at one vertex.
 _VERTEX_DECIMALS = 2
+# Endpoint-join snap for Edge.Cuts polygonization: 1e-9 mm is far above
+# float rotation noise (~1e-15) and far below KiCad's 1 nm unit, so shared
+# corners compare equal without measurably moving the area.
+_OUTLINE_SNAP_DECIMALS = 9
 
 
 def _classify_angle(angle: float | None) -> str | None:
@@ -282,6 +286,20 @@ def _outline_area_mm2(pcb: PCB) -> float | None:
         segments = _edge_cuts_segments(pcb)
     except ValueError:
         return None
+    if not segments:
+        return None
+    # Snap every endpoint to a fixed grid (see _OUTLINE_SNAP_DECIMALS) so shared
+    # corners that were computed through different float paths (a rotated
+    # footprint endpoint ``6.1e-16`` vs a board line's ``0``) compare equal;
+    # exact-coordinate polygonization would otherwise see an open contour.
+    snapped = [
+        (
+            (round(a[0], _OUTLINE_SNAP_DECIMALS) + 0.0, round(a[1], _OUTLINE_SNAP_DECIMALS) + 0.0),
+            (round(b[0], _OUTLINE_SNAP_DECIMALS) + 0.0, round(b[1], _OUTLINE_SNAP_DECIMALS) + 0.0),
+        )
+        for a, b in segments
+    ]
+    segments = [seg for seg in snapped if seg[0] != seg[1]]
     if not segments:
         return None
     try:

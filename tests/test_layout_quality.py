@@ -659,6 +659,44 @@ def test_footprint_rect_cutout_rotation_invariant(rot):
     assert analyze_layout_quality(pcb).outline_area_mm2 == pytest.approx(100 * 50 - 24.0, abs=1e-6)
 
 
+MIXED_JOIN_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+
+  (gr_line (start 40 20) (end 45 20) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start 45 20) (end 45 30) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start 45 30) (end {close_x} 30) (stroke (width 0.1)) (layer "Edge.Cuts"))
+
+  (footprint "Mech:EdgePiece"
+    (layer "F.Cu")
+    (at 40 30 {rot})
+    (property "Reference" "J9")
+    (fp_line (start 0 0) (end 10 0) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  )
+)
+"""
+
+
+def test_rotated_footprint_edge_joins_board_lines():
+    # A footprint at 90 deg maps local (10, 0) to (40 + 6e-16, 20) rather
+    # than exactly (40, 20); the shared corner must still close the
+    # contour (5 x 10 = 50 mm^2).
+    pcb = _load_pcb(MIXED_JOIN_PCB.format(rot=90, close_x=40))
+    assert analyze_layout_quality(pcb).outline_area_mm2 == pytest.approx(50.0, abs=1e-6)
+
+
+def test_open_contour_still_none_after_snapping():
+    # Control: a genuinely open contour (gap of 1 mm) stays unmeasured.
+    pcb = _load_pcb(MIXED_JOIN_PCB.format(rot=90, close_x=41))
+    assert analyze_layout_quality(pcb).outline_area_mm2 is None
+
+
 @pytest.mark.parametrize("rot", [30, 45])
 def test_footprint_square_cutout_rotated_not_degenerate(rot):
     # A square at a non-multiple of 90 deg used to collapse to a
