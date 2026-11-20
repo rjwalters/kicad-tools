@@ -948,6 +948,13 @@ Examples:
     else:
         args._pairwise_voltages = None
         args._pairwise_required = None
+        # Mirror every stash attr ``_preload_voltage_map`` resets (#9685), so
+        # a namespace that skipped the preload can never carry a stale edge
+        # requirement from an earlier call.
+        args._pairwise_intervals = None
+        args._pairwise_pair_bounds = None
+        args._pairwise_edge_voltage = None
+        args._pairwise_edge_required = None
         # Issue #8433: the gate is silently off without a map; say so on
         # stderr (stdout may carry the table or the JSON document).
         if not args.quiet and not as_json:

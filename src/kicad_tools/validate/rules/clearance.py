@@ -54,7 +54,7 @@ from ..clearance_shapes import (
 from ..copper_refs import Origin, board_origin, segment_ref, via_ref
 from ..spatial import candidate_pairs
 from ..violations import DRCResults, DRCViolation
-from .base import DRC_TOLERANCE, DRCRule
+from .base import DRC_TOLERANCE, KICAD_CLEARANCE_BAND_MM, DRCRule, drc_clear
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers import DesignRules
@@ -117,8 +117,8 @@ ARC_COPPER_SAGITTA_MM: float = 0.001
 #: a shortfall in ``[490, 500)`` nm; the midpoint, 495 nm, keeps ~5 nm of
 #: float headroom on either side.  kicad-cli reports the *true* gap
 #: (``actual 0.1995 mm`` at the 500 nm sample), which the exact
-#: measurement reproduces.  Straight-track pairs keep :data:`DRC_TOLERANCE`
-#: (their own band is #9619's, deliberately out of scope here); see
+#: measurement reproduces.  Straight-track pairs use the 500 nm band from #9619
+#: (:data:`KICAD_CLEARANCE_BAND_MM`); see
 #: :func:`pair_clearance_tolerance_mm`.
 ARC_CLEARANCE_BAND_MM: float = 0.000495
 
@@ -455,7 +455,7 @@ def pair_clearance_tolerance_mm(elem1: CopperElement, elem2: CopperElement) -> f
     kicad-cli image, so the checker agrees with native DRC's arc
     acceptance across the transition (a 490 nm-short gap passes, a 500
     nm-short one is flagged).  Every other pair keeps
-    :data:`DRC_TOLERANCE`.  Deliberately separate from the *measurement*
+    :data:`KICAD_CLEARANCE_BAND_MM`.  Deliberately separate from the *measurement*
     (``_calculate_clearance`` answers the true gap): a band change can
     never shift a reported gap, and the band this pair needs is visible at
     the comparison, not baked into the geometry.  Both comparison sites --
@@ -465,7 +465,7 @@ def pair_clearance_tolerance_mm(elem1: CopperElement, elem2: CopperElement) -> f
     """
     if elem1.element_type == "arc" or elem2.element_type == "arc":
         return ARC_CLEARANCE_BAND_MM
-    return DRC_TOLERANCE
+    return KICAD_CLEARANCE_BAND_MM
 
 
 def _via_colocated_with_track(elem1: CopperElement, elem2: CopperElement) -> bool:
@@ -932,6 +932,7 @@ def _angle_on_arc(theta: float, geom: tuple[float, ...]) -> bool:
     if _arc_sweep_is_full(sweep):
         return True
     delta = (theta - geom[3]) % math.tau
+    # The distance routines also consider both endpoints explicitly.
     return delta <= sweep if sweep >= 0.0 else delta >= math.tau + sweep
 
 
@@ -1274,7 +1275,7 @@ def _arc_other_clearance(
     half_arc = arc_elem.geometry[4] / 2.0
     shape = other.kernel_shape()
     if isinstance(shape, KVia):
-        d, q = _point_arc_distance(shape.x, shape.y, geom)
+        d, _ = _point_arc_distance(shape.x, shape.y, geom)
         gap = d - half_arc - shape.diameter / 2.0
         return gap, other.geometry[0], other.geometry[1]
     if isinstance(shape, KPad):
@@ -2447,7 +2448,9 @@ class ClearanceRule(DRCRule):
                 and elem1.source_footprint is not elem2.source_footprint
             ):
                 required = max(required, min_smd_pad_clearance or 0)
-            if clearance + pair_clearance_tolerance_mm(elem1, elem2) < required:
+            if not drc_clear(
+                clearance, required, band_mm=pair_clearance_tolerance_mm(elem1, elem2)
+            ):
                 violation = self._create_violation(
                     elem1, elem2, clearance, required, layer_name, loc_x, loc_y
                 )
@@ -3003,7 +3006,7 @@ class SegmentZoneClearanceRule(DRCRule):
             )
 
         clearance = centerline_dist - half_w
-        if clearance + DRC_TOLERANCE >= min_clearance:
+        if drc_clear(clearance, min_clearance):
             return None
 
         p_line, p_poly = nearest_points(line, poly)
@@ -3229,7 +3232,7 @@ class ViaZoneClearanceRule(DRCRule):
 
         if dist > 0:
             clearance = dist
-            if clearance + DRC_TOLERANCE >= min_clearance:
+            if drc_clear(clearance, min_clearance):
                 return None
             from shapely.ops import nearest_points
 

@@ -63,6 +63,10 @@ _INTERIOR_SHRINK = 1e-6  # shrink a slot before the "crosses interior" test
 _BRIDGE_QUAD_SEGS = 16  # arc resolution of the dimension-X opening (round joins)
 # A pair is a PASS when creepage >= min within this tolerance (mm).  Mirrors
 # the spirit of DRC_TOLERANCE -- a sub-micron shortfall is not a real defect.
+# Deliberately still 1e-4 (not the #9619 checker band): the probe measured
+# kicad-cli copper *clearance*; creepage is an IEC 60664-1 voltage-map
+# requirement the probe never covered, and HV/creepage is never looser than
+# the standard requires.
 _PASS_TOLERANCE = 1e-4
 
 # Per-net voltage model (#4371): two conductors whose mapped potentials differ

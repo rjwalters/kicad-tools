@@ -1015,7 +1015,7 @@ class TestArcAcceptanceBand:
         assert findings[0].actual_value == pytest.approx(0.1995, abs=1e-6)
 
     def test_band_is_separate_from_measurement(self):
-        from kicad_tools.validate.rules.base import DRC_TOLERANCE
+        from kicad_tools.validate.rules.base import KICAD_CLEARANCE_BAND_MM
         from kicad_tools.validate.rules.clearance import (
             ARC_CLEARANCE_BAND_MM,
             CopperElement,
@@ -1039,7 +1039,7 @@ class TestArcAcceptanceBand:
                     reference="t",
                 ),
             )
-            == DRC_TOLERANCE
+            == KICAD_CLEARANCE_BAND_MM
         )
         arc = CopperElement(
             element_type="arc",

@@ -1750,6 +1750,12 @@ class Autorouter:
         # preferences); aliasing the module-level singleton leaked those
         # writes into every later Autorouter in the same process.
         self.net_class_map = net_class_map or dict(DEFAULT_NET_CLASS_MAP)
+        # Issue #9600 (row 3 review): per-net track widths authored in the
+        # board's ``.kicad_pro`` netclasses (``{net_name: width_mm}``), set by
+        # the PCB loader for the neck census -- an authored assignment wins
+        # over the name-classification map.  Empty when no project sidecar
+        # resolves (diagnostic data; never a routing failure).
+        self.authored_net_widths: dict[str, float] = {}
 
         # Issue #6366: per-net A* heuristic-weight overrides (net id ->
         # weight).  Empty = every net searches at the default weight 1.0.
@@ -1778,6 +1784,13 @@ class Autorouter:
         # unavailable means the audit cannot vouch for pad copper at all, and
         # the gate must not treat the two alike (see ``_pairwise_pad_geometry``).
         self._pairwise_pad_geometry_cache: tuple[Any, ...] | str | None = None
+        # Issue #9685: memoised sheet-absolute Edge.Cuts linework for the
+        # #4588 post-route audit's copper-vs-board-edge column (resolved +
+        # cached by the CLI's ``_pairwise_board_edge_geometry`` helper, which
+        # applies the same board-origin shift as the pads/zones helpers).
+        # ``None`` = not yet resolved, or resolved to "no Edge.Cuts linework"
+        # (a board the census also scores no edge pairs on).
+        self._pairwise_board_edge_geometry_cache: Any = None
         # Issue #4699: the preserved routes the CLI's ``_finalize_routes``
         # actually re-emitted into the output board.  ``None`` = finalize has
         # not run yet; the #4588 post-route pairwise gate audits this copper
@@ -1993,6 +2006,12 @@ class Autorouter:
         self._lattice_net_routes: dict[int, list[Route]] | None = None
         self._lattice_served: set[int] = set()
         self._lattice_negotiation_stats: Any = None
+        # Issue #9581: keys whose search started in ANY pass of the final
+        # lattice negotiation -- the honest per-link ``attempted`` signal
+        # for the --complete report (a "deadline-exceeded" reason is
+        # per-pass and can land on a link an earlier pass declined on its
+        # own merits).
+        self._lattice_attempted_keys: frozenset[object] = frozenset()
         # Issue #4270: per-diff-pair coupled-routing outcomes for the lattice
         # engine ("coupled" or a decline reason), keyed by pair base name.
         self._lattice_pair_outcomes: dict[str, str] = {}
@@ -2063,6 +2082,9 @@ class Autorouter:
         # Issue #8396: ``--complete`` links rolled back for adding pairwise HV
         # creepage shortfalls (set by ``_rollback_complete_creepage`` in route_cmd).
         self._complete_creepage_refusals: list[dict] = []
+        # Issue #9685: what the same gate verified -- ``None`` until the
+        # rollback helper runs (read by ``_build_complete_link_report``).
+        self._complete_creepage_gate: dict | None = None
 
         # Issue #5517 (Epic #5508 Phase 1b): ordered commit journal.  A pure
         # observer on the routing grid -- see
@@ -5651,6 +5673,11 @@ class Autorouter:
                 pf, _negotiate, ran[id(coupled)], coupled, offer, (routes_by_key, stats)
             )
         self._lattice_negotiation_stats = stats
+        # Issue #9581: keep the attempted-keys signal beside the stats --
+        # ``getattr`` because duck-typed pathfinder stand-ins in tests
+        # predate the field (the report falls back to the reason-derived
+        # flag when it is absent).
+        self._lattice_attempted_keys = frozenset(getattr(stats, "attempted_keys", ()) or ())
         self._warn_lattice_pair_nets_routed_twice()
         # Issue #4477 (epic #4465, Phase 4): copy the per-connection decline
         # diagnosis onto the ROUTER (not just the pathfinder) because
