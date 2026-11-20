@@ -6,7 +6,7 @@ import { deepPcbReferenceFor } from "../data/deepPcbReference.ts";
 interface Props { run: BenchmarkRun }
 const { run } = Astro.props;
 const r = run.report;
-const root = "https://github.com/rjwalters/kicad-tools/blob/main/benchmarks/external/results/";
+const root = "https://github.com/2AMLogic/kicad-tools/blob/main/benchmarks/external/results/";
 const rawUrl = root + run.path.split("/").map(encodeURIComponent).join("/");
 const input = r.pre_route_completion;
 // Vendor figures are already presented separately in the historical reference

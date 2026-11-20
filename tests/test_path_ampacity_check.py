@@ -1131,3 +1131,44 @@ class TestButtressWireCreditThroughChecker:
         errors = checker.check_path_ampacity().errors
         assert len(errors) == 1
         assert "too narrow" in errors[0].message
+
+
+class TestButtressWireCreditFromReinforceNet:
+    """The uncovered-stretch verdict on legs the placer itself derived (#9666).
+
+    The uncovered-stretch cases above feed ``PathAmpacityRule`` hand-built
+    ``WiredLeg`` geometry; this one builds a layer-change board, lets
+    ``reinforce_net`` anchor only the F.Cu leg, and judges the credit through
+    the real leg derivation (frame, per-layer splitting, run chaining).
+    """
+
+    def test_bcu_stretch_outside_a_reinforce_net_leg_still_fails(self) -> None:
+        from kicad_tools.pcb.reinforcement_sidecar import build_wire_records
+
+        # F.Cu (20,50)->(70,50) 2.4 mm, via at (70,50), B.Cu
+        # (70,50)->(120,50) 2.4 mm, one declared 13.42 A eligible path.
+        # reinforce_net anchors the F.Cu leg only, so path_ampacity credits
+        # F.Cu and must judge the B.Cu stretch at bare copper width.
+        pcb = PCB.create(width=200, height=100, center=False)
+        pcb.add_trace((20, 50), (70, 50), width=2.4, layer="F.Cu", net=_WIRE_NET)
+        pcb.add_via(70, 50, size=0.6, drill=0.3, net=_WIRE_NET)
+        pcb.add_trace((70, 50), (120, 50), width=2.4, layer="B.Cu", net=_WIRE_NET)
+        _add_th_pad_footprint(pcb, ref="J1", x=20.0, y=50.0, net=_WIRE_NET, drill=1.0, size=2.0)
+        _add_th_pad_footprint(pcb, ref="J2", x=120.0, y=50.0, net=_WIRE_NET, drill=1.0, size=2.0)
+        spec = _force_spec(13.42)
+        outcome = reinforce_net(pcb, _WIRE_NET, current_paths=[spec], layer="F.Cu")
+        wires = build_wire_records(outcome, 0.0, 0.0)
+        legs = _wired_legs(pcb, wires, spec)
+
+        # The placer derived exactly the F.Cu leg: the B.Cu stretch of the
+        # same path is anchored on no layer and must not be credited.
+        assert [(leg.layer, leg.points, leg.width, leg.gauge) for leg in legs] == [
+            ("F.Cu", ((20.0, 50.0), (70.0, 50.0)), 2.4, 16)
+        ]
+        results = PathAmpacityRule(specs=[spec], wired_legs=legs).check(pcb, _design_rules_2oz())
+        underwidth = [v for v in results.errors if "too narrow" in v.message]
+        assert len(underwidth) == 1
+        assert "trace on B.Cu too narrow" in underwidth[0].message
+        assert "not covered by a wire leg" in underwidth[0].message
+        assert "width 2.400mm" in underwidth[0].message
+        assert not any("trace on F.Cu" in v.message for v in results.errors)

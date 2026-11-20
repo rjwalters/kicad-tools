@@ -110,18 +110,15 @@ PROBE_CHECK_CATEGORIES: tuple[str, ...] = (
 #: the board would actually carry.
 _ARC_TESSELLATION_UM = 0.001
 
-_ITEM_FIELDS = {
-    "type",
-    "net",
-    "layer",
-    "width",
-    "start",
-    "mid",
-    "end",
-    "at",
-    "size",
-    "drill",
-    "layers",
+#: Fields every item accepts regardless of its ``type`` (#9618).
+_COMMON_ITEM_FIELDS = frozenset({"type", "net"})
+
+#: Per-type allowlists: a field meaningless for the item's ``type`` is
+#: rejected at parse time instead of being silently dropped (#9618).
+_ITEM_FIELDS: dict[str, frozenset[str]] = {
+    "segment": frozenset({"layer", "width", "start", "end"}),
+    "arc": frozenset({"layer", "width", "start", "end", "mid"}),
+    "via": frozenset({"at", "size", "drill", "layers"}),
 }
 
 
@@ -189,12 +186,15 @@ def _parse_one(raw: Any, index: int) -> ProbeItem:
     item = f"{index}"
     if not isinstance(raw, dict):
         raise ItemsFileError(f"item {item}: each entry must be an object")
-    unknown = sorted(set(raw) - _ITEM_FIELDS)
-    if unknown:
-        raise ItemsFileError(f"item {item}: unknown field(s) {unknown}")
     kind = raw.get("type")
-    if kind not in ("segment", "arc", "via"):
+    if not isinstance(kind, str) or kind not in _ITEM_FIELDS:
         raise ItemsFileError(f"item {item}: 'type' must be segment, arc or via")
+    unknown = sorted(set(raw) - _COMMON_ITEM_FIELDS - _ITEM_FIELDS[kind])
+    if unknown:
+        message = f"item {item}: field(s) {unknown} not valid for type '{kind}'"
+        if kind == "segment" and "mid" in unknown:
+            message += '; use "type": "arc" to keep the midpoint'
+        raise ItemsFileError(message)
     net = raw.get("net")
     if not isinstance(net, str) or not net:
         raise ItemsFileError(f"item {item}: 'net' must be a non-empty string")
@@ -230,9 +230,7 @@ def _parse_one(raw: Any, index: int) -> ProbeItem:
     width = _as_positive(raw.get("width"), item, "width")
     start = _as_point(raw.get("start"), item, "start")
     end = _as_point(raw.get("end"), item, "end")
-    mid = _as_point(raw["mid"], item, "mid") if kind == "arc" else None
-    if kind == "arc" and mid is None:  # pragma: no cover - guarded above
-        raise ItemsFileError(f"item {item}: arcs require 'mid'")
+    mid = _as_point(raw.get("mid"), item, "mid") if kind == "arc" else None
     return ProbeItem(
         kind=kind, net=net, index=index, layer=layer, width=width, start=start, end=end, mid=mid
     )

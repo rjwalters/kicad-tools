@@ -728,6 +728,7 @@ class TestCheckMetaCheck:
             "overall",
             "schematic_missing",
             "incomplete_categories",
+            "schematic",
         }
         for name in ("drc", "erc", "lvs", "manifest"):
             assert "status" in meta[name]
@@ -737,6 +738,9 @@ class TestCheckMetaCheck:
         assert meta["schematic_missing"] is False
         # A clean run names no incomplete category (issue #9062).
         assert meta["incomplete_categories"] == []
+        # Issue #9637: the schematic used and how it was found are reported.
+        assert meta["schematic"]["path"] is not None
+        assert meta["schematic"]["source"] in {"project.kct", "sibling", "--schematic"}
 
     def test_meta_checks_omitted_under_drc_only_in_json(self, drc_clean_pcb: Path, capsys):
         """--drc-only must NOT add meta_checks to the JSON envelope."""
@@ -905,6 +909,7 @@ class TestOverallMatchesExitCode:
             "overall",
             "schematic_missing",
             "incomplete_categories",
+            "schematic",
         }
         assert meta["overall"] == "INCOMPLETE"
         assert meta["incomplete_categories"] == ["mask_to_copper"]
@@ -979,6 +984,7 @@ class TestMetaCheckResultCoverageIncomplete:
             "overall",
             "schematic_missing",
             "incomplete_categories",
+            "schematic",
         }
 
 

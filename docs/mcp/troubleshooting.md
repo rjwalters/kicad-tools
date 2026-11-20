@@ -379,7 +379,7 @@ When reporting issues, include:
 
 ### Reporting Issues
 
-File issues at: https://github.com/rjwalters/kicad-tools/issues
+File issues at: https://github.com/2AMLogic/kicad-tools/issues
 
 Include:
 - Operating system

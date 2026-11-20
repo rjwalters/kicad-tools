@@ -606,6 +606,64 @@ class TestUndecidedExemptionIsUnknownNotADefect:
         assert "UNKNOWN" in captured
         assert "tight footprint" in captured
 
+    # -------------------- #9632: ``(severity ignore)`` leaves the band reachable
+
+    @staticmethod
+    def _ignored_rule(
+        condition: str = "A.insideArea('X')", name: str = "ignore in area"
+    ) -> DruRule:
+        """The #9632 fixture: an exemption to 0 mm under ``(severity ignore)``."""
+        return DruRule(name, condition, None, ((CLEARANCE, 0.0),), "ignore")
+
+    def test_undecided_ignore_rule_keeps_the_unknown_band_reachable(self) -> None:
+        # The #9632 repro: an ignored rule whose condition cannot be decided
+        # must widen the band (lower_bound 0.0 < requirement 0.2), else the
+        # band is unreachable and such pairs masquerade as decided defects.
+        rules = BoardClearanceRules(dru_rules=[self._ignored_rule()])
+        pad = ItemProps("Pad", "GND", footprint_ref="J3", footprint_lib_id=None)
+        track = ItemProps("Track", "+3V3", footprint_ref="", footprint_lib_id="")
+
+        res = rules.explain_required(CLEARANCE, pad, track)
+
+        assert res.requirement == pytest.approx(0.2)
+        assert res.lower_bound == pytest.approx(0.0)
+        assert res.unknown_rules == ("ignore in area",)
+
+    def test_gap_an_undecided_ignore_rule_covers_is_unknown_not_a_defect(self) -> None:
+        # 0.15 mm is below the 0.2 default but legal wherever the ignored
+        # rule wins (KiCad checks nothing there), so it can only be unknown.
+        rules = BoardClearanceRules(dru_rules=[self._ignored_rule(self.AREA_RULE)])
+
+        near = kept_copper_clearance_violations(self._router_with_gap(0.15), board_rules=rules)
+
+        assert len(near) == 1
+        assert near[0].required == pytest.approx(0.2)
+        assert near[0].unknown_rules == ("ignore in area",)
+
+    def test_cli_gate_ignored_rule_is_unknown_not_an_input_defect(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        out = tmp_path / "out.kicad_pcb"
+        out.write_text("(kicad_pcb)")
+        out.with_suffix(".kicad_dru").write_text(
+            """(version 1)
+(rule "ignore in area"
+  (condition "A.insideArea('X')")
+  (constraint clearance (min 0))
+  (severity ignore))
+"""
+        )
+
+        errors = _audit_kept_copper_clearance(
+            self._router_with_gap(0.15), out, quiet=False, source_pcb=None
+        )
+        captured = capsys.readouterr().out
+
+        assert errors == []
+        assert "UNKNOWN" in captured
+        assert "ignore in area" in captured
+        assert "Kept Input Copper Clearance Check" not in captured  # no definite-defect block
+
 
 class TestConditionalNetClassRuleFloorsNewCopper:
     @staticmethod
@@ -814,6 +872,67 @@ class TestConditionalNetClassRuleFloorsNewCopper:
         assert declared.dru_conditional_mm is None
         assert declared.project_requirement() is None
         assert declared.via_requirement() is None
+
+    def test_ignored_unconditional_rule_does_not_floor(self, tmp_path: Path) -> None:
+        # #9670: the ignore guard used to bind the conditional bucket only,
+        # so a rule that enforces nothing floored every trace at 0.9 mm.
+        pcb = self._board(
+            tmp_path,
+            """(version 1)
+(rule "ignored unconditional"
+  (severity ignore)
+  (constraint clearance (min 0.9mm)))
+""",
+        )
+
+        declared = read_declared_clearance_rules(pcb)
+
+        assert declared.dru_mm is None
+        assert declared.project_requirement() is None
+        assert declared.via_requirement() is None
+
+    def test_ignored_via_scoped_rule_does_not_floor(self, tmp_path: Path) -> None:
+        # Same omission in the via bucket (#9670): KiCad checks nothing
+        # where an ignored via-scoped rule wins, so it must not floor
+        # via_requirement either.
+        pcb = self._board(
+            tmp_path,
+            """(version 1)
+(rule "ignored via clearance"
+  (condition "A.Type == 'Via' || B.Type == 'Via'")
+  (constraint clearance (min 0.9mm))
+  (severity ignore))
+""",
+        )
+
+        declared = read_declared_clearance_rules(pcb)
+
+        assert declared.dru_via_mm is None
+        assert declared.project_requirement() is None
+        assert declared.via_requirement() is None
+
+    def test_ignored_rule_leaves_an_enabled_sibling_in_force(self, tmp_path: Path) -> None:
+        # Skipping the ignored rule must not swallow the enabled one next to
+        # it (#9670).
+        pcb = self._board(
+            tmp_path,
+            """(version 1)
+(rule "ignored unconditional"
+  (severity ignore)
+  (constraint clearance (min 0.9mm)))
+(rule "unconditional clearance"
+  (constraint clearance (min 0.15mm)))
+""",
+        )
+
+        declared = read_declared_clearance_rules(pcb)
+
+        assert declared.dru_mm == pytest.approx(0.15)
+        assert declared.project_requirement() == (
+            pytest.approx(0.15),
+            RuleSource.PROJECT_DRU,
+            None,
+        )
 
     def test_via_scoped_rule_stays_out_of_the_boardwide_floor(self, tmp_path: Path) -> None:
         pcb = self._board(
