@@ -2950,12 +2950,23 @@ class CppPathfinder:
                 saved_routable_layers = list(self._routable_layers)
                 self.set_routable_layers(pending_routable)
             result = _run_fresh_search(timeout_seconds, self._effective_search_iterations)
+            # Issue #9696: Python's band-relaxed wrapper returns a deadline-hit
+            # search as-is (``last_route_deadline_hit``), so the two backends
+            # stay behaviourally identical -- a wall-clock FAILURE_TIMEOUT is
+            # a drained budget, not a gate-caused failure, and a gate-off
+            # retry would burn a second full budget to fail the same way.
+            # ``getattr`` keeps a stale .so without ``failure_reason`` retrying
+            # as before.
+            first_search_hit_deadline = router_cpp is not None and int(
+                getattr(result, "failure_reason", router_cpp.FAILURE_NONE)
+            ) == int(router_cpp.FAILURE_TIMEOUT)
             if (
                 not result.success
                 and not self._relief_mode
                 and float(getattr(self._rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0) > 0.0
                 and hasattr(self._impl, "own_net_band_rejects")
                 and self._impl.own_net_band_rejects() > 0
+                and not first_search_hit_deadline
             ):
                 # Issue #9019: a fence/band reshape must never lose a
                 # connection.  The retry fires ONLY when the gated search
