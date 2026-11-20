@@ -1387,3 +1387,149 @@ class TestAnalyticArcDistances:
                 p1, p2 = arc_pts(g1, 400), arc_pts(g2, 400)
                 want = min(math.dist(a, b) for a in p1 for b in p2)
                 assert got == pytest.approx(want, abs=5e-2), (g1, g2)
+
+
+# ---------------------------------------------------------------------------
+# Issue #9714: conservative pruning of the arc-vs-arc chord search.
+#
+# The pair verdict is minimised over the covering chords of both arcs; the
+# landed #9678 loop evaluated every chord pair.  These tests pin the
+# optimisation's contract: the pruned search returns the SAME gap and the
+# SAME witness (reported location) as an exhaustive chord-pair reference --
+# including pairs where several chords attain an equal minimum -- while
+# provably skipping exact kernel evaluations that cannot improve either.
+# ---------------------------------------------------------------------------
+
+_S2 = 2.0**0.5
+
+
+def _arc_element(
+    start: tuple[float, float],
+    mid: tuple[float, float],
+    end: tuple[float, float],
+    *,
+    width: float = 0.2,
+    net: int = 1,
+):
+    from kicad_tools.schema.pcb import Arc as SchemaArc
+    from kicad_tools.validate.rules.clearance import CopperElement
+
+    return CopperElement.from_arc(
+        SchemaArc(start=start, mid=mid, end=end, width=width, layer="B.Cu", net_number=net)
+    )
+
+
+def _segment_element(
+    start: tuple[float, float], end: tuple[float, float], *, width: float = 0.2, net: int = 2
+):
+    from kicad_tools.schema.pcb import Segment as SchemaSegment
+    from kicad_tools.validate.rules.clearance import CopperElement
+
+    return CopperElement.from_segment(
+        SchemaSegment(start=start, end=end, width=width, layer="B.Cu", net_number=net)
+    )
+
+
+def _exhaustive_reference(elem1, elem2) -> tuple[float, tuple[float, float]]:
+    """The pre-#9714 exhaustive chord loop, reimplemented as the oracle.
+
+    Same first-strict-minimum selection (the witness whose four endpoints
+    feed the track-vs-track location), so equality with the pruned search
+    asserts both the gap and the reported location.
+    """
+    from kicad_tools.validate.clearance_shapes import copper_gap
+    from kicad_tools.validate.rules.clearance import _element_chord_shapes
+
+    best: tuple[float, object, object] | None = None
+    for c1 in _element_chord_shapes(elem1):
+        for c2 in _element_chord_shapes(elem2):
+            gap = copper_gap(c1, c2)
+            if best is None or gap < best[0]:
+                best = (gap, c1, c2)
+    assert best is not None
+    gap, s1, s2 = best
+    loc = ((s1.x1 + s1.x2 + s2.x1 + s2.x2) / 4, (s1.y1 + s1.y2 + s2.y1 + s2.y2) / 4)
+    return gap, loc
+
+
+class TestArcPairChordPruning:
+    # Since Issue #9702 authored arcs take the exact path in
+    # ``_arc_pair_clearance``; the covering-chord search these tests pin
+    # (Issue #9714) is the fallback, so they call it directly.
+    def test_pruned_search_matches_exhaustive_reference(self):
+        from kicad_tools.validate.rules.clearance import _arc_chord_pair_clearance
+
+        clear = _arc_element((2, 0), (_S2, _S2), (0, 2))
+        wide = _arc_element((5, 0), (5 / _S2, 5 / _S2), (0, 5), net=2)
+        near = _arc_element((2.25, 0), (2.25 / _S2, 2.25 / _S2), (0, 2.25), net=2)
+        # Two quarter arcs sharing both endpoints and bulging toward each
+        # other: the minimum (-width) is attained at the TWO endpoint chord
+        # pairs -- different locations, first in row-major order must win.
+        lens_a = _arc_element((2, 0), (_S2, _S2), (0, 2))
+        lens_b = _arc_element((0, 2), (2 - _S2, 2 - _S2), (2, 0), net=2)
+        # One interior crossing (circle (0,0) r=2 vs circle (1,0) r=2).
+        crossing_a = _arc_element((2, 0), (_S2, _S2), (0, 2))
+        crossing_b = _arc_element((1, 2), (1 - _S2, _S2), (-1, 0), net=2)
+        # The issue's geometry: concentric 50 mm quarter arcs, 0.3 mm apart,
+        # so every corresponding chord pair attains an equal minimum.
+        big1 = _arc_element((50, 0), (50 / _S2, 50 / _S2), (0, 50))
+        big2 = _arc_element((50.3, 0), (50.3 / _S2, 50.3 / _S2), (0, 50.3), net=2)
+        # Identical geometry, foreign nets: the first chord pair saturates.
+        twin = _arc_element((2, 0), (_S2, _S2), (0, 2), net=2)
+        # Mixed kinds: many chords against one straight segment.
+        seg = _segment_element((2.3, -1.0), (2.3, 1.0))
+        cases = [
+            ("clear_concentric", clear, wide),
+            ("near_threshold_concentric", clear, near),
+            ("shared_endpoint_equal_minima", lens_a, lens_b),
+            ("interior_crossing", crossing_a, crossing_b),
+            ("large_concentric_equal_minima", big1, big2),
+            ("identical_geometry", clear, twin),
+            ("arc_vs_segment_near_threshold", clear, seg),
+        ]
+        for name, e1, e2 in cases:
+            gap, loc_x, loc_y = _arc_chord_pair_clearance(e1, e2)
+            ref_gap, ref_loc = _exhaustive_reference(e1, e2)
+            assert gap == ref_gap, f"{name}: gap {gap!r} != exhaustive {ref_gap!r}"
+            assert (loc_x, loc_y) == ref_loc, (
+                f"{name}: location {(loc_x, loc_y)!r} != exhaustive {ref_loc!r}"
+            )
+
+    def test_concentric_large_arcs_prune_exact_evaluations(self, monkeypatch):
+        # The reported superlinear case as one pair: ~124 x ~127 chords =
+        # ~15.7k exhaustive kernel calls; the pruned search must evaluate
+        # strictly fewer and still answer the exhaustive gap.
+        from kicad_tools.validate.rules import clearance as clearance_mod
+        from kicad_tools.validate.rules.clearance import (
+            _arc_chord_pair_clearance,
+            _element_chord_shapes,
+        )
+
+        e1 = _arc_element((50, 0), (50 / _S2, 50 / _S2), (0, 50))
+        e2 = _arc_element((50.3, 0), (50.3 / _S2, 50.3 / _S2), (0, 50.3), net=2)
+        n1 = len(_element_chord_shapes(e1))
+        n2 = len(_element_chord_shapes(e2))
+        assert n1 * n2 > 10_000  # the fixture is the expensive shape
+
+        real = clearance_mod._kernel_copper_gap
+        calls = [0]
+
+        def counting(a, b):
+            calls[0] += 1
+            return real(a, b)
+
+        monkeypatch.setattr(clearance_mod, "_kernel_copper_gap", counting)
+        gap, _, _ = _arc_chord_pair_clearance(e1, e2)
+        ref_gap, _ = _exhaustive_reference(e1, e2)
+        assert gap == ref_gap
+        assert calls[0] < n1 * n2  # pruning skips exact evaluations
+        assert calls[0] * 8 < n1 * n2  # ...by a solid margin, not one pair
+
+    def test_chord_shapes_memoised_per_element(self):
+        # A sweep asks the same element for its chords once per candidate
+        # pair (Issue #9714 suspects the rebuild); the list must be built
+        # once per element and handed to every caller.
+        from kicad_tools.validate.rules.clearance import _element_chord_shapes
+
+        elem = _arc_element((50, 0), (50 / _S2, 50 / _S2), (0, 50))
+        assert _element_chord_shapes(elem) is _element_chord_shapes(elem)
