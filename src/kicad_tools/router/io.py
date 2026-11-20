@@ -39,7 +39,7 @@ import math
 import re
 import warnings
 from collections import Counter
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -5396,6 +5396,53 @@ def _authored_net_clearances(
     return {name: value.clearance for name, value in resolved.items()}
 
 
+def authored_net_widths(
+    pcb_path: str | Path,
+    net_names: Iterable[str],
+    project_path: str | Path | None = None,
+) -> dict[str, float]:
+    """``{net_name: authored netclass track width}`` for the census (#9600 row 3).
+
+    Best-effort by design, unlike :func:`_authored_net_clearances`: the
+    width feeds the neck REPORT, so an unresolvable project must not fail
+    routing -- the census logs and falls back to the classification map /
+    global rule instead of silently routing below an electrical minimum
+    (which is what the raising clearance resolver is for).  Reads
+    ``project_path`` (default: ``pcb_path``'s ``.kicad_pro`` sibling) and
+    resolves each net's effective ``track_width`` through assignments and
+    patterns with native priority semantics
+    (:func:`~kicad_tools.core.project_clearance.authored_netclass_widths`);
+    ``Default``-sourced widths are excluded so a ``--trace-width`` override
+    keeps winning.
+    """
+    import json
+
+    from kicad_tools.core.project_clearance import ProjectClearanceError, authored_netclass_widths
+
+    sidecar = (
+        Path(project_path) if project_path is not None else Path(pcb_path).with_suffix(".kicad_pro")
+    )
+    if not sidecar.is_file():
+        return {}
+    try:
+        project = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "neck census: cannot read project %s (%s); using class map only", sidecar, exc
+        )
+        return {}
+    try:
+        resolved = authored_netclass_widths(project, list(net_names))
+    except ProjectClearanceError as exc:
+        logger.warning(
+            "neck census: %s: %s; using class map only (clearance enforcement is unaffected)",
+            sidecar,
+            exc,
+        )
+        return {}
+    return {name: value.width for name, value in resolved.items()}
+
+
 def load_pcb_for_routing(
     pcb_path: str,
     skip_nets: list[str] | None = None,
@@ -6124,6 +6171,11 @@ def load_pcb_for_routing(
     # Issue #8066: --complete keeps listed nets' preserved copper (obstacle + output).
     router._preserve_listed_copper = bool(preserve_listed_copper and load_existing_routes)
     remember_authored_floors(router, authored_floors)
+    # Issue #9600 (row 3 review): the authored netclass TRACK widths for the
+    # neck census, resolved from the same project the floors came from.
+    # Diagnostic data: missing/unresolvable widths simply leave the census on
+    # the classification map + global rule (see ``authored_net_widths``).
+    router.authored_net_widths = authored_net_widths(pcb_path, list(net_map), project_path)
     # Issue #5863: what this board lost to pad geometry the router cannot
     # represent, for reports and callers that need to say so out loud.
     router.unsupported_geometry_nets = frozenset(unsupported_geometry_nets)

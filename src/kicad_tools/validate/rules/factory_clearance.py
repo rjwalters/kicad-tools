@@ -78,6 +78,7 @@ def check_pth_hole_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
 
     from .clearance import (
         ClearanceRule,
+        _arc_copper_geom,
         _collect_zone_fills,
         _element_to_shapely_geom,
         _pad_on_layer,
@@ -106,6 +107,12 @@ def check_pth_hole_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
             if elem.element_type == "segment":
                 x1, y1, x2, y2, width = elem.geometry
                 geom = LineString(((x1, y1), (x2, y2))).buffer(width / 2, quad_segs=64)
+            elif elem.element_type == "arc":
+                # Issue #9673: arcs are track copper on their own layer, so
+                # they count on inner AND outer layers like the segment arm
+                # above -- the covering chord footprint the pairwise rules
+                # measure (``_arc_copper_geom``), never a pad/via shape.
+                geom = _arc_copper_geom(elem)
             elif inner_minimum is not None:
                 geom = _element_to_shapely_geom(elem)
             else:

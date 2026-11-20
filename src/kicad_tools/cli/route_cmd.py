@@ -71,6 +71,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from kicad_tools.core.kicad_lock import check_kicad_lock
+from kicad_tools.router.neck_report import (
+    class_width_lookup,
+    collect_necked_copper,
+    format_neck_report,
+)
 from kicad_tools.sexp.scan import has_unquoted
 
 from .route_deadline import record_stage, restore_stage
@@ -4334,6 +4339,22 @@ def _finalize_routes(
             f"-- have segments, not all pads connected"
         )
         flush_print(f"  Unrouted:        {unrouted_count}/{nets_to_route} -- no segments at all")
+        neck_report = format_neck_report(
+            collect_necked_copper(
+                router.routes,
+                class_width_lookup(
+                    getattr(router, "net_class_map", None),
+                    router.rules.trace_width,
+                    getattr(router, "authored_net_widths", None),
+                ),
+            ),
+            # A contiguous neck longer than the taper distance (plus one
+            # grid cell of placement slack, the same bound the row-3
+            # geometry test uses) is beyond the #1018 taper: call it long.
+            long_threshold_mm=(router.rules.neck_down_distance + router.grid.resolution),
+        )
+        if neck_report:
+            flush_print(neck_report)
 
     return route_sexp, stats, cleanup_stats
 
@@ -9494,6 +9515,8 @@ def _preload_voltage_map(args) -> int:
     args._pairwise_required = None
     args._pairwise_intervals = None
     args._pairwise_pair_bounds = None
+    args._pairwise_edge_voltage = None
+    args._pairwise_edge_required = None
     if getattr(args, "voltage_map", None) is not None:
         from kicad_tools.creepage.standards import StandardLookupError
         from kicad_tools.placement.hv_domains import build_required_by_domain_pair
@@ -9553,10 +9576,42 @@ def _preload_voltage_map(args) -> int:
         except StandardLookupError as e:
             print(f"Error: voltage-map creepage lookup failed: {e}", file=sys.stderr)
             return 1
+        # Issue #9685: the board-edge column of the same table.  `kct creepage`
+        # scores one copper-vs-Edge.Cuts pair per HV net against the map's
+        # `_edge_voltage` reference; without this the router's audit had no
+        # edge requirement to check committed copper against, and `--complete`
+        # shipped tracks closer to the board edge than the map requires with a
+        # SUCCESS exit.  Raw lookups (not floored at dru -- the DRU floor is
+        # only known once the board's rules load); consumers skip a net at or
+        # below the floor.
+        from kicad_tools.router.pairwise_clearance import (
+            edge_required_clearances,
+            load_edge_voltage,
+        )
+
+        try:
+            _edge_voltage = load_edge_voltage(vm_path)
+            _edge_required = edge_required_clearances(
+                _voltages,
+                edge_voltage=_edge_voltage,
+                standard_id=getattr(args, "creepage_standard", "iec60664"),
+                pollution_degree=getattr(args, "pollution_degree", 2),
+                material_group=getattr(args, "material_group", "IIIa"),
+                hv_threshold=getattr(args, "hv_threshold", 30.0),
+                net_intervals=_intervals,
+            )
+        except StandardLookupError as e:
+            print(f"Error: voltage-map creepage lookup failed: {e}", file=sys.stderr)
+            return 1
+        except (ValueError, TypeError, OSError) as e:
+            print(f"Error: invalid voltage-map: {e}", file=sys.stderr)
+            return 1
         args._pairwise_voltages = _voltages
         args._pairwise_required = _required
         args._pairwise_intervals = _intervals
         args._pairwise_pair_bounds = _pair_bounds or None
+        args._pairwise_edge_voltage = _edge_voltage
+        args._pairwise_edge_required = _edge_required
     return 0
 
 
@@ -9842,6 +9897,90 @@ def _pairwise_pad_geometry(router: "Autorouter") -> "tuple[PadGeometry, ...] | N
     return pads
 
 
+def _pairwise_board_edge_geometry(router: "Autorouter"):
+    """Resolve (and memoise) the board's Edge.Cuts linework for the audit (#9685).
+
+    Built by the census's own
+    :func:`~kicad_tools.creepage.engine.board_edge_geometry` from the SAME
+    recorded source-board path (:func:`_pairwise_pad_geometry`'s
+    ``_pairwise_attach_zone_pcb_path``), then shifted by ``pcb.board_origin``
+    exactly like :func:`~kicad_tools.router.pairwise_clearance.pcb_pad_geometry`
+    shifts pads -- Edge.Cuts graphics parse board-relative, and every Segment
+    this audit compares against is sheet-absolute.
+
+    Returns the shapely geometry, or ``None`` when there is nothing to check:
+    ``None`` is "verified-empty" here (a board with no Edge.Cuts linework gets
+    no edge pairs in ``kct creepage`` either -- the census skips its edge loop
+    on the same condition), never a silent degradation of a live check.  A
+    board path that cannot be read warns once on stderr; the pad audit's
+    unavailable-sentinel already covers the no-path case (pads and edge read
+    the same file), so an edge read failure after pads succeeded is not a
+    realistic degradation path.
+    """
+    cached = getattr(router, "_pairwise_board_edge_geometry_cache", None)
+    if cached is not None:
+        return cached
+    geom = None
+    pcb_path = getattr(router, "_pairwise_attach_zone_pcb_path", None)
+    if pcb_path is not None:
+        try:
+            from kicad_tools.creepage.engine import board_edge_geometry
+            from kicad_tools.schema.pcb import PCB
+
+            pcb = PCB.load(str(pcb_path))
+            geom = board_edge_geometry(pcb)
+            if geom is not None and not geom.is_empty:
+                from shapely.affinity import translate  # type: ignore[import-untyped]
+
+                geom = translate(geom, pcb.board_origin[0], pcb.board_origin[1])
+            else:
+                geom = None
+        except Exception as exc:
+            print(
+                f"Warning: could not read Edge.Cuts geometry from {pcb_path} "
+                f"({type(exc).__name__}: {exc}); the HV pairwise audit cannot "
+                f"check copper-to-board-edge clearance.",
+                file=sys.stderr,
+            )
+            geom = None
+    with contextlib.suppress(AttributeError):  # exotic router stand-ins
+        router._pairwise_board_edge_geometry_cache = geom
+    return geom
+
+
+def _pairwise_board_edge_violations(
+    router: "Autorouter", args, routes, *, id_to_name=None
+) -> "list[PairwiseViolation]":
+    """Copper-vs-board-edge shortfalls of the audited trace copper (#9685).
+
+    The edge column of the #4588 audit: every route in ``routes`` (the same
+    fresh + preserved + oracle copper list :func:`_audit_pairwise_clearance`
+    already scans) whose net carries an edge requirement above the DRU floor
+    is measured against the ``Edge.Cuts`` outline, at the requirement the
+    census computes for that net (worst-case interval endpoint differencing
+    against ``_edge_voltage``, same standard lookup -- see
+    :func:`_preload_voltage_map`).  Strict no-op without ``--voltage-map``.
+    """
+    edge_required = getattr(args, "_pairwise_edge_required", None)
+    if not edge_required:
+        return []
+    rules = getattr(router, "rules", None)
+    table = getattr(rules, "pairwise_clearance", None) if rules is not None else None
+    floor = float(table.dru) if table is not None else 0.0
+    geom = _pairwise_board_edge_geometry(router)
+    if geom is None:
+        return []
+    from kicad_tools.router.pairwise_clearance import board_edge_pairwise_violations
+
+    return board_edge_pairwise_violations(
+        routes,
+        edge_required,
+        edge_geometry=geom,
+        id_to_name=id_to_name,
+        floor=floor,
+    )
+
+
 def _audited_trace_copper(router: "Autorouter", *, id_to_name=None) -> "list[Route]":
     """Every trace route the output board carries -- fresh AND preserved (#4699).
 
@@ -10052,6 +10191,12 @@ def _audit_pairwise_clearance(
     the router never moves them -- so reading them from the input board is
     exact, in the same sheet-absolute frame the attach zones use).
 
+    Issue #9685 added the board-edge column: trace/via copper vs the
+    ``Edge.Cuts`` outline at the per-net requirement the census scores against
+    the map's ``_edge_voltage`` reference (:func:`_pairwise_board_edge_violations`
+    -- the class of the ``gate track vs board edge`` row in the #9685 report,
+    which this audit structurally could not see at all).
+
     That last widening is what closes the gap the #4507 T4 proof measured: 13
     of the 17 residual softstart rev-C census fails were routed trace or via
     copper against a foreign pad, a class this audit structurally could not see
@@ -10079,8 +10224,15 @@ def _audit_pairwise_clearance(
     table = getattr(rules, "pairwise_clearance", None) if rules is not None else None
     if table is None:
         return []
-    # No pair exceeds the scalar floor: no HV pad widening is enabled.
-    if table.max_required_clearance() <= table.dru:
+    # No pair exceeds the scalar floor: no HV pad widening is enabled.  The
+    # edge column (#9685) keeps the audit alive on its own: a single-HV-net
+    # map has no net-net pairs at all, yet its net still owes creepage to the
+    # board edge.
+    from kicad_tools.router.pairwise_clearance import _PASS_TOLERANCE
+
+    _edge_required = getattr(args, "_pairwise_edge_required", None) or {}
+    _edge_active = any(mm > table.dru + _PASS_TOLERANCE for mm in _edge_required.values())
+    if table.max_required_clearance() <= table.dru and not _edge_active:
         return []
     routes = _audited_trace_copper(router, id_to_name=id_to_name)
     if not routes:
@@ -10101,6 +10253,13 @@ def _audit_pairwise_clearance(
         dru=table.dru,
         attach_zones=_pairwise_attach_zones(router),
         foreign_pads=foreign_pads,
+    )
+    # Issue #9685: the board-edge column -- copper vs Edge.Cuts at the same
+    # per-net requirement `kct creepage` scores against `_edge_voltage`.  Both
+    # the rollback and the final exit-code gate run through this function, so
+    # they gain the check together.
+    violations = violations + _pairwise_board_edge_violations(
+        router, args, routes, id_to_name=id_to_name
     )
     # A single conflicting corridor is decomposed into many collinear segment
     # pairs that all report the SAME net pair, gap and location.  Collapse the
@@ -10166,6 +10325,7 @@ def _rollback_complete_creepage(
     """
     refusals: list[dict] = []
     router._complete_creepage_refusals = refusals
+    router._complete_creepage_gate = None
     if not getattr(args, "complete", False) or getattr(args, "_pairwise_required", None) is None:
         return refusals
     fresh = [r for r in (getattr(router, "routes", None) or []) if r.segments or r.vias]
@@ -10185,7 +10345,9 @@ def _rollback_complete_creepage(
     for _ in range(len(saved) + 1):
         violations = _audit_pairwise_clearance(router, args, id_to_name=id_to_name)
         if any(v.net_b == PAD_AUDIT_INCOMPLETE for v in violations):
-            break  # audit could not run; cannot judge, leave copper alone
+            # The audit could not run to completion; claiming a verified-link
+            # count here would be the reassuring-line failure mode again.
+            return refusals
         new = [v for v in violations if _key(v) not in baseline]
         fresh_names = {r.net_name for r in router.routes}
         target = None
@@ -10219,6 +10381,20 @@ def _rollback_complete_creepage(
                 f"  --complete: rolled back a {name} link -- {name} vs {other}: "
                 f"{v.actual_mm:.3f}mm < required {v.required_mm:.3f}mm"
             )
+    # Issue #9685: state what the gate actually verified, so a consumer can
+    # tell a fully-audited completion from one whose links were never checked.
+    verified = sum(1 for r in (getattr(router, "routes", None) or []) if r.segments or r.vias)
+    router._complete_creepage_gate = {
+        "committed_routes_verified": verified,
+        "rolled_back": len(refusals),
+        # The classes this audit covers (#9685 added the board edge).
+        "checks": ["trace/via vs trace/via", "trace/via vs pad", "copper vs board edge"],
+    }
+    if not quiet:
+        print(
+            f"  --complete: voltage-map gate verified {verified} committed route(s) "
+            f"({len(refusals)} rolled back for creepage)"
+        )
     return refusals
 
 
@@ -19636,6 +19812,10 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
         "deadline_hit": stats.deadline_hit,
         "elapsed_s": round(stats.elapsed_s, 3),
         "budget_s": round(stats.budget_s, 3) if stats.budget_s is not None else None,
+        # Issue #9685: what the voltage-map creepage gate verified, so a
+        # consumer reading the report can tell an audited completion from an
+        # unchecked one without re-deriving the audit's scope.
+        "creepage_gate": getattr(router, "_complete_creepage_gate", None),
         "unroutable_links": links,
     }
 

@@ -304,13 +304,14 @@ class Pin1MarkerRule(DRCRule):
     def check(
         self,
         pcb: PCB,
-        design_rules: DesignRules,
+        design_rules: DesignRules | None = None,
     ) -> DRCResults:
         """Check every selected footprint for a visible pin-1 marker.
 
         Args:
             pcb: The PCB to check.
-            design_rules: Unused; the rule is geometric only.
+            design_rules: Unused; the rule is geometric only.  Optional for
+                callers that have no manufacturer profile (Issue #9707).
 
         Returns:
             DRCResults with at most one violation per footprint.

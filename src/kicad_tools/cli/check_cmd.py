@@ -146,6 +146,11 @@ _NET_RELATIONSHIP_RULE_IDS: frozenset[str] = frozenset(
         "clearance_segment_segment",
         "clearance_via_via",
         "clearance_pad_via",
+        # Copper-arc pair kinds (Issue #9673) carry the same ``nets`` pair.
+        "clearance_arc_arc",
+        "clearance_arc_pad",
+        "clearance_arc_segment",
+        "clearance_arc_via",
         # Issue #8938: physical_copper_gap findings carry the structured
         # ``same_net`` flag (a same-net slit is one net, so the two-name
         # classifier below sees nothing to compare).
