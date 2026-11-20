@@ -194,22 +194,28 @@ class EdgeClearanceRule(DRCRule):
 
             if hit is not None:
                 gap = 0.0
-                region, point = hit
-                items: tuple[str, ...] = (
-                    f"Net {segment.net_number}",
-                    f"Inside filled {region.shape_type} cut-out",
-                )
-            else:
-                # Report at whichever endpoint sits closer to the outline --
-                # the same witness the old endpoints-only scan would have
-                # picked, so a finding still points near the trouble spot
-                # even though the *verdict* now comes from the full segment.
-                dist_start = self._min_distance_to_outline(segment.start, outline_segments)
-                dist_end = self._min_distance_to_outline(segment.end, outline_segments)
-                point = segment.start if dist_start <= dist_end else segment.end
-                items = (f"Net {segment.net_number}",)
 
             if gap < min_clearance - _CLEARANCE_EPSILON_MM:
+                # Build the finding's witness only now that a finding is
+                # being raised: the two O(outline-edges) distance calls
+                # below are pure waste on the vast majority of segments
+                # that clear the edge (Issue #9715).
+                if hit is not None:
+                    region, point = hit
+                    items: tuple[str, ...] = (
+                        f"Net {segment.net_number}",
+                        f"Inside filled {region.shape_type} cut-out",
+                    )
+                else:
+                    # Report at whichever endpoint sits closer to the
+                    # outline -- the same witness the old endpoints-only
+                    # scan would have picked, so a finding still points
+                    # near the trouble spot even though the *verdict* now
+                    # comes from the full segment.
+                    dist_start = self._min_distance_to_outline(segment.start, outline_segments)
+                    dist_end = self._min_distance_to_outline(segment.end, outline_segments)
+                    point = segment.start if dist_start <= dist_end else segment.end
+                    items = (f"Net {segment.net_number}",)
                 results.add(
                     DRCViolation(
                         rule_id="edge_clearance_trace",

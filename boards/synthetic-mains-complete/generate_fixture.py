@@ -36,17 +36,46 @@ PARTS = [
 ]
 
 
-def pad(num: str, net: str, dx: float, dy: float) -> str:
-    n = NETS.index(net)
+def pad(
+    num: str,
+    net: str,
+    dx: float,
+    dy: float,
+    size: float = 2.0,
+    drill: float = 0.9,
+    nets: list[str] | None = None,
+) -> str:
+    table = NETS if nets is None else nets
+    n = table.index(net)
+    s = f"{size:g}"
+    d = f"{drill:g}"
     return (
-        f'    (pad "{num}" thru_hole circle (at {dx} {dy}) (size 2 2) (drill 0.9) '
+        f'    (pad "{num}" thru_hole circle (at {dx} {dy}) (size {s} {s}) (drill {d}) '
         f'(layers "*.Cu" "*.Mask") (net {n} "{net}"))'
     )
 
 
-def footprint(i: int, ref: str, x: float, y: float, axis: str, pads: list[tuple[str, str]]) -> str:
+def footprint(
+    i: int,
+    ref: str,
+    x: float,
+    y: float,
+    axis: str,
+    pads: list[tuple[str, str]],
+    pad_size: float = 2.0,
+    pad_drill: float = 0.9,
+    nets: list[str] | None = None,
+) -> str:
     body = "\n".join(
-        pad(num, net, 5.08 * k if axis == "x" else 0.0, 5.08 * k if axis == "y" else 0.0)
+        pad(
+            num,
+            net,
+            5.08 * k if axis == "x" else 0.0,
+            5.08 * k if axis == "y" else 0.0,
+            pad_size,
+            pad_drill,
+            nets,
+        )
         for k, (num, net) in enumerate(pads)
     )
     return (
@@ -58,7 +87,45 @@ def footprint(i: int, ref: str, x: float, y: float, axis: str, pads: list[tuple[
     )
 
 
+EDGE_NETS = ["", "/LINE", "/NEUT"]
+
+# Board-edge fixture (#9685): two 2-pin THT parts one pad-row below the top
+# Edge.Cuts line (board-relative coords; ``footprint`` adds the sheet origin).
+# The /LINE pads (1.6 mm round) sit with their copper 1.65 mm from the edge --
+# clean against the 150 V / PD2 / IIIa board-edge requirement (1.6 mm) -- while
+# the 2.0 mm-wide HV class track that closes the /LINE link between them
+# reaches 1.4 mm from it.  A router with no copper-vs-board-edge model commits
+# that track and exits 0; the census fails `/LINE vs <board edge>` on the same
+# map.  This is the synthetic analogue of the issue's "gate track vs board
+# edge 1.50 < 2.0 mm" row.
+EDGE_PARTS = [
+    ("E1", 25.0, 2.45, "y", [("1", "/LINE"), ("2", "/NEUT")]),
+    ("E2", 45.0, 2.45, "y", [("1", "/LINE"), ("2", "/NEUT")]),
+]
+
+
+def edge_fixture() -> str:
+    """Render ``edge_fixture.kicad_pcb`` (deterministic, no inputs)."""
+    nets = " ".join(f'(net {i} "{n}")' for i, n in enumerate(EDGE_NETS))
+    fps = "\n".join(
+        footprint(i + 1, *p, pad_size=1.6, pad_drill=0.8, nets=EDGE_NETS)
+        for i, p in enumerate(EDGE_PARTS)
+    )
+    return f"""(kicad_pcb (version 20240108) (generator "synthetic-9685") (generator_version "8.0")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  {nets}
+  (gr_rect (start {OX} {OY}) (end {OX + W} {OY + H}) (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))
+{fps}
+)
+"""
+
+
 def main() -> None:
+    if "--edge" in sys.argv:
+        sys.stdout.write(edge_fixture())
+        return
     nets = " ".join(f'(net {i} "{n}")' for i, n in enumerate(NETS))
     fps = "\n".join(footprint(i + 1, *p) for i, p in enumerate(PARTS))
     sys.stdout.write(
