@@ -10364,14 +10364,14 @@ def _rollback_complete_creepage(
     # tell a fully-audited completion from one whose links were never checked.
     verified = sum(1 for r in (getattr(router, "routes", None) or []) if r.segments or r.vias)
     router._complete_creepage_gate = {
-        "committed_links_verified": verified,
+        "committed_routes_verified": verified,
         "rolled_back": len(refusals),
         # The classes this audit covers (#9685 added the board edge).
         "checks": ["trace/via vs trace/via", "trace/via vs pad", "copper vs board edge"],
     }
     if not quiet:
         print(
-            f"  --complete: voltage-map gate verified {verified} committed link(s) "
+            f"  --complete: voltage-map gate verified {verified} committed route(s) "
             f"({len(refusals)} rolled back for creepage)"
         )
     return refusals

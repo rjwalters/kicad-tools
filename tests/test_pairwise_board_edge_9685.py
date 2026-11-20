@@ -15,6 +15,8 @@ import json
 from pathlib import Path
 
 import pytest
+from shapely.geometry import LineString
+from shapely.ops import unary_union
 
 from kicad_tools.router.pairwise_clearance import (
     board_edge_pairwise_violations,
@@ -22,8 +24,6 @@ from kicad_tools.router.pairwise_clearance import (
     load_edge_voltage,
 )
 from kicad_tools.router.primitives import Route, Segment, Via
-
-shapely = pytest.importorskip("shapely")
 
 # IEC 60664-1, PD2, material group IIIa step-up rows the fixture relies on.
 REQ_150V = 1.6
@@ -83,9 +83,6 @@ class TestEdgeRequiredClearances:
 
 
 def _edge_rect(x1: float, y1: float, x2: float, y2: float):
-    from shapely.geometry import LineString
-    from shapely.ops import unary_union
-
     pts = [(x1, y1), (x2, y1), (x2, y2), (x1, y2), (x1, y1)]
     return unary_union([LineString([a, b]) for a, b in zip(pts, pts[1:], strict=False)])
 

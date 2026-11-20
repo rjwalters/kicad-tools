@@ -184,7 +184,7 @@ def test_complete_rolls_back_edge_creepage_and_output_stays_clean(tmp_path):
         assert r["measured_mm"] < r["required_mm"] == 1.6
     gate = data["creepage_gate"]
     assert gate["rolled_back"] == len(rolled)
-    assert gate["committed_links_verified"] >= 1
+    assert gate["committed_routes_verified"] >= 1
     assert "copper vs board edge" in gate["checks"]
     assert _failing_edge_pairs(out) == []
 
