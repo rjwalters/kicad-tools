@@ -741,6 +741,32 @@ def _restore_route_grid(router: "Autorouter", routes: list["Route"]) -> None:
         router.grid.mark_route_usage(route)
 
 
+def _fmt_secs(value: float) -> str:
+    """Format a computed seconds duration for display (:data:`g` rounding).
+
+    Issue #9581 (PR #9603 review): the budget derivation line formatted
+    every term with ``:.0f``, so a fractional ``--timeout`` was rounded
+    away before the user's eyes -- ``--timeout 120.5`` printed
+    ``--timeout 120s`` and ``0.4`` printed ``--timeout 0s``.  Computed
+    durations (setup, reserves, budget) keep this display rounding; the
+    USER-SUPPLIED value uses :func:`_fmt_secs_exact`.
+    """
+    return f"{float(value):g}"
+
+
+def _fmt_secs_exact(value: float) -> str:
+    """Format a user-supplied seconds value round-trippably.
+
+    Issue #9581 (PR #9603 review, round 2): ``:g`` keeps only six
+    significant digits, so a typed ``--timeout 120.0001`` printed
+    ``--timeout 120s``.  The shortest round-trippable repr keeps every
+    digit the user supplied (``120.0001``), with an integral value still
+    printing bare (``100``).
+    """
+    text = repr(float(value))
+    return text[:-2] if text.endswith(".0") else text
+
+
 def _set_wall_clock_deadline(args) -> None:
     """Stamp a monotonic deadline on ``args`` from ``args.timeout``.
 
@@ -762,6 +788,7 @@ def _set_wall_clock_deadline(args) -> None:
     of ``--timeout``.
     """
     timeout = getattr(args, "timeout", None)
+    typed_timeout = float(timeout) if timeout and timeout > 0 else None
     now = time.monotonic()
     from .route_deadline import remaining_deadline
 
@@ -788,6 +815,31 @@ def _set_wall_clock_deadline(args) -> None:
             float(timeout),
             reserve,
         )
+        # Issue #9581: state the derivation on stdout, at the start of a
+        # ``--complete`` run with ``--timeout`` -- the reserves are real time
+        # off the budget the user typed, and until now they were only visible
+        # in the logger.info line above, which never reaches a redirected
+        # log.  Exactly the values stamped on ``args`` below this branch.
+        if (
+            typed_timeout is not None
+            and getattr(args, "complete", False)
+            and not getattr(args, "quiet", False)
+        ):
+            # Issue #9581 (PR #9603 review): under a supervisor-set invocation
+            # deadline the clamp above shrinks the budget by the time the
+            # invocation already consumed.  Lead with the value the user
+            # typed and give the consumed time its own term, so the printed
+            # arithmetic sums to the flag instead of silently relabelling
+            # the clamped remainder as ``--timeout``.
+            setup_consumed = max(0.0, typed_timeout - float(timeout))
+            print(
+                f"--timeout {_fmt_secs_exact(typed_timeout)}s "
+                f"- setup {_fmt_secs(setup_consumed)}s "
+                f"- auto-fix reserve {_fmt_secs(float(reserve))}s "
+                f"- post-route reserve {_fmt_secs(float(post_route))}s "
+                f"= routing budget "
+                f"{_fmt_secs(float(timeout) - float(reserve) - float(post_route))}s"
+            )
     else:
         args._wall_clock_deadline = None
         args._auto_fix_reserve = 0.0
@@ -9515,6 +9567,8 @@ def _preload_voltage_map(args) -> int:
     args._pairwise_required = None
     args._pairwise_intervals = None
     args._pairwise_pair_bounds = None
+    args._pairwise_edge_voltage = None
+    args._pairwise_edge_required = None
     if getattr(args, "voltage_map", None) is not None:
         from kicad_tools.creepage.standards import StandardLookupError
         from kicad_tools.placement.hv_domains import build_required_by_domain_pair
@@ -9574,10 +9628,42 @@ def _preload_voltage_map(args) -> int:
         except StandardLookupError as e:
             print(f"Error: voltage-map creepage lookup failed: {e}", file=sys.stderr)
             return 1
+        # Issue #9685: the board-edge column of the same table.  `kct creepage`
+        # scores one copper-vs-Edge.Cuts pair per HV net against the map's
+        # `_edge_voltage` reference; without this the router's audit had no
+        # edge requirement to check committed copper against, and `--complete`
+        # shipped tracks closer to the board edge than the map requires with a
+        # SUCCESS exit.  Raw lookups (not floored at dru -- the DRU floor is
+        # only known once the board's rules load); consumers skip a net at or
+        # below the floor.
+        from kicad_tools.router.pairwise_clearance import (
+            edge_required_clearances,
+            load_edge_voltage,
+        )
+
+        try:
+            _edge_voltage = load_edge_voltage(vm_path)
+            _edge_required = edge_required_clearances(
+                _voltages,
+                edge_voltage=_edge_voltage,
+                standard_id=getattr(args, "creepage_standard", "iec60664"),
+                pollution_degree=getattr(args, "pollution_degree", 2),
+                material_group=getattr(args, "material_group", "IIIa"),
+                hv_threshold=getattr(args, "hv_threshold", 30.0),
+                net_intervals=_intervals,
+            )
+        except StandardLookupError as e:
+            print(f"Error: voltage-map creepage lookup failed: {e}", file=sys.stderr)
+            return 1
+        except (ValueError, TypeError, OSError) as e:
+            print(f"Error: invalid voltage-map: {e}", file=sys.stderr)
+            return 1
         args._pairwise_voltages = _voltages
         args._pairwise_required = _required
         args._pairwise_intervals = _intervals
         args._pairwise_pair_bounds = _pair_bounds or None
+        args._pairwise_edge_voltage = _edge_voltage
+        args._pairwise_edge_required = _edge_required
     return 0
 
 
@@ -9863,6 +9949,90 @@ def _pairwise_pad_geometry(router: "Autorouter") -> "tuple[PadGeometry, ...] | N
     return pads
 
 
+def _pairwise_board_edge_geometry(router: "Autorouter"):
+    """Resolve (and memoise) the board's Edge.Cuts linework for the audit (#9685).
+
+    Built by the census's own
+    :func:`~kicad_tools.creepage.engine.board_edge_geometry` from the SAME
+    recorded source-board path (:func:`_pairwise_pad_geometry`'s
+    ``_pairwise_attach_zone_pcb_path``), then shifted by ``pcb.board_origin``
+    exactly like :func:`~kicad_tools.router.pairwise_clearance.pcb_pad_geometry`
+    shifts pads -- Edge.Cuts graphics parse board-relative, and every Segment
+    this audit compares against is sheet-absolute.
+
+    Returns the shapely geometry, or ``None`` when there is nothing to check:
+    ``None`` is "verified-empty" here (a board with no Edge.Cuts linework gets
+    no edge pairs in ``kct creepage`` either -- the census skips its edge loop
+    on the same condition), never a silent degradation of a live check.  A
+    board path that cannot be read warns once on stderr; the pad audit's
+    unavailable-sentinel already covers the no-path case (pads and edge read
+    the same file), so an edge read failure after pads succeeded is not a
+    realistic degradation path.
+    """
+    cached = getattr(router, "_pairwise_board_edge_geometry_cache", None)
+    if cached is not None:
+        return cached
+    geom = None
+    pcb_path = getattr(router, "_pairwise_attach_zone_pcb_path", None)
+    if pcb_path is not None:
+        try:
+            from kicad_tools.creepage.engine import board_edge_geometry
+            from kicad_tools.schema.pcb import PCB
+
+            pcb = PCB.load(str(pcb_path))
+            geom = board_edge_geometry(pcb)
+            if geom is not None and not geom.is_empty:
+                from shapely.affinity import translate  # type: ignore[import-untyped]
+
+                geom = translate(geom, pcb.board_origin[0], pcb.board_origin[1])
+            else:
+                geom = None
+        except Exception as exc:
+            print(
+                f"Warning: could not read Edge.Cuts geometry from {pcb_path} "
+                f"({type(exc).__name__}: {exc}); the HV pairwise audit cannot "
+                f"check copper-to-board-edge clearance.",
+                file=sys.stderr,
+            )
+            geom = None
+    with contextlib.suppress(AttributeError):  # exotic router stand-ins
+        router._pairwise_board_edge_geometry_cache = geom
+    return geom
+
+
+def _pairwise_board_edge_violations(
+    router: "Autorouter", args, routes, *, id_to_name=None
+) -> "list[PairwiseViolation]":
+    """Copper-vs-board-edge shortfalls of the audited trace copper (#9685).
+
+    The edge column of the #4588 audit: every route in ``routes`` (the same
+    fresh + preserved + oracle copper list :func:`_audit_pairwise_clearance`
+    already scans) whose net carries an edge requirement above the DRU floor
+    is measured against the ``Edge.Cuts`` outline, at the requirement the
+    census computes for that net (worst-case interval endpoint differencing
+    against ``_edge_voltage``, same standard lookup -- see
+    :func:`_preload_voltage_map`).  Strict no-op without ``--voltage-map``.
+    """
+    edge_required = getattr(args, "_pairwise_edge_required", None)
+    if not edge_required:
+        return []
+    rules = getattr(router, "rules", None)
+    table = getattr(rules, "pairwise_clearance", None) if rules is not None else None
+    floor = float(table.dru) if table is not None else 0.0
+    geom = _pairwise_board_edge_geometry(router)
+    if geom is None:
+        return []
+    from kicad_tools.router.pairwise_clearance import board_edge_pairwise_violations
+
+    return board_edge_pairwise_violations(
+        routes,
+        edge_required,
+        edge_geometry=geom,
+        id_to_name=id_to_name,
+        floor=floor,
+    )
+
+
 def _audited_trace_copper(router: "Autorouter", *, id_to_name=None) -> "list[Route]":
     """Every trace route the output board carries -- fresh AND preserved (#4699).
 
@@ -10073,6 +10243,12 @@ def _audit_pairwise_clearance(
     the router never moves them -- so reading them from the input board is
     exact, in the same sheet-absolute frame the attach zones use).
 
+    Issue #9685 added the board-edge column: trace/via copper vs the
+    ``Edge.Cuts`` outline at the per-net requirement the census scores against
+    the map's ``_edge_voltage`` reference (:func:`_pairwise_board_edge_violations`
+    -- the class of the ``gate track vs board edge`` row in the #9685 report,
+    which this audit structurally could not see at all).
+
     That last widening is what closes the gap the #4507 T4 proof measured: 13
     of the 17 residual softstart rev-C census fails were routed trace or via
     copper against a foreign pad, a class this audit structurally could not see
@@ -10100,8 +10276,15 @@ def _audit_pairwise_clearance(
     table = getattr(rules, "pairwise_clearance", None) if rules is not None else None
     if table is None:
         return []
-    # No pair exceeds the scalar floor: no HV pad widening is enabled.
-    if table.max_required_clearance() <= table.dru:
+    # No pair exceeds the scalar floor: no HV pad widening is enabled.  The
+    # edge column (#9685) keeps the audit alive on its own: a single-HV-net
+    # map has no net-net pairs at all, yet its net still owes creepage to the
+    # board edge.
+    from kicad_tools.router.pairwise_clearance import _PASS_TOLERANCE
+
+    _edge_required = getattr(args, "_pairwise_edge_required", None) or {}
+    _edge_active = any(mm > table.dru + _PASS_TOLERANCE for mm in _edge_required.values())
+    if table.max_required_clearance() <= table.dru and not _edge_active:
         return []
     routes = _audited_trace_copper(router, id_to_name=id_to_name)
     if not routes:
@@ -10122,6 +10305,13 @@ def _audit_pairwise_clearance(
         dru=table.dru,
         attach_zones=_pairwise_attach_zones(router),
         foreign_pads=foreign_pads,
+    )
+    # Issue #9685: the board-edge column -- copper vs Edge.Cuts at the same
+    # per-net requirement `kct creepage` scores against `_edge_voltage`.  Both
+    # the rollback and the final exit-code gate run through this function, so
+    # they gain the check together.
+    violations = violations + _pairwise_board_edge_violations(
+        router, args, routes, id_to_name=id_to_name
     )
     # A single conflicting corridor is decomposed into many collinear segment
     # pairs that all report the SAME net pair, gap and location.  Collapse the
@@ -10187,6 +10377,7 @@ def _rollback_complete_creepage(
     """
     refusals: list[dict] = []
     router._complete_creepage_refusals = refusals
+    router._complete_creepage_gate = None
     if not getattr(args, "complete", False) or getattr(args, "_pairwise_required", None) is None:
         return refusals
     fresh = [r for r in (getattr(router, "routes", None) or []) if r.segments or r.vias]
@@ -10206,7 +10397,9 @@ def _rollback_complete_creepage(
     for _ in range(len(saved) + 1):
         violations = _audit_pairwise_clearance(router, args, id_to_name=id_to_name)
         if any(v.net_b == PAD_AUDIT_INCOMPLETE for v in violations):
-            break  # audit could not run; cannot judge, leave copper alone
+            # The audit could not run to completion; claiming a verified-link
+            # count here would be the reassuring-line failure mode again.
+            return refusals
         new = [v for v in violations if _key(v) not in baseline]
         fresh_names = {r.net_name for r in router.routes}
         target = None
@@ -10240,6 +10433,20 @@ def _rollback_complete_creepage(
                 f"  --complete: rolled back a {name} link -- {name} vs {other}: "
                 f"{v.actual_mm:.3f}mm < required {v.required_mm:.3f}mm"
             )
+    # Issue #9685: state what the gate actually verified, so a consumer can
+    # tell a fully-audited completion from one whose links were never checked.
+    verified = sum(1 for r in (getattr(router, "routes", None) or []) if r.segments or r.vias)
+    router._complete_creepage_gate = {
+        "committed_routes_verified": verified,
+        "rolled_back": len(refusals),
+        # The classes this audit covers (#9685 added the board edge).
+        "checks": ["trace/via vs trace/via", "trace/via vs pad", "copper vs board edge"],
+    }
+    if not quiet:
+        print(
+            f"  --complete: voltage-map gate verified {verified} committed route(s) "
+            f"({len(refusals)} rolled back for creepage)"
+        )
     return refusals
 
 
@@ -10281,6 +10488,58 @@ def _print_pairwise_addendum(violations: "Sequence[PairwiseViolation]") -> None:
     print(f"  Additionally, {len(violations)} HV pairwise clearance violation(s) detected:")
     print(_format_pairwise_violations(violations, limit=5))
     print("  (trace/via/pad copper; run 'kct creepage' for the pour-aware full census)")
+
+
+def _print_pairwise_attach_zone_policy(router: "Autorouter", args, output_path) -> None:
+    """Name the attach-zone policy the completed run audited under (issue #9717).
+
+    The post-route HV gate applies the #4506 rated-footprint attach zones
+    unconditionally (there is no ``kct route`` opt-out), while ``kct creepage``
+    grants the same exemption only on an explicit ``--waive-attach-zone``.  A
+    designer who reads a clean route verdict and then censuses the written
+    board without the flag sees new FAILs for exactly the class of copper this
+    gate exempted (#9685's H2).  This note states the policy that WAS used and
+    the flag that reproduces it, without claiming any particular pair was
+    waived -- the audit keeps no per-pair telemetry, and a pair-level claim
+    would need evidence for that pair.
+
+    Strictly a no-op unless the conditions that made the audit consult zones
+    all held: ``--voltage-map`` supplied (``args._pairwise_required`` set), the
+    pairwise table widened past the scalar DRU floor (``_audit_pairwise_clearance``'s
+    own activation test), at least one attach zone resolved on the source
+    board, and copper actually committed (never ``--dry-run``).  Zones resolve
+    from the router's memoised cache, so this adds no board loads.
+    """
+    if getattr(args, "dry_run", False):
+        return
+    if getattr(args, "_pairwise_required", None) is None:
+        return
+    rules = getattr(router, "rules", None)
+    table = getattr(rules, "pairwise_clearance", None) if rules is not None else None
+    if table is None or table.max_required_clearance() <= table.dru:
+        return
+    zones = _pairwise_attach_zones(router)
+    if not zones:
+        return
+    print()
+    print(
+        f"  Attach-zone exemption: ENABLED -- {len(zones)} rated-footprint attach "
+        "zone(s) (#4506) applied by this run's HV audit; copper inside a zone is "
+        "exempt from the pairwise requirement."
+    )
+    print(
+        "  'kct creepage' grants that exemption only with --waive-attach-zone, so "
+        "a census without the flag is stricter and can FAIL pairs this audit "
+        "exempted; copper outside the zones still fails with the flag enabled. "
+        "Match this policy on the written board with:"
+    )
+    vm = getattr(args, "voltage_map", None)
+    print(
+        f"    kct creepage {output_path} --voltage-map {vm} --standard "
+        f"{getattr(args, 'creepage_standard', 'iec60664')} --pollution-degree "
+        f"{getattr(args, 'pollution_degree', 2)} --material-group "
+        f"{getattr(args, 'material_group', 'IIIa')} --waive-attach-zone"
+    )
 
 
 def _pairwise_escalation_exit(rc: int, violations: "Sequence[PairwiseViolation]") -> int:
@@ -14482,6 +14741,9 @@ def route_with_layer_escalation(
                 # Issue #4979: inherited-only findings (any newly created
                 # ones already replaced the banner above).
                 _print_layer_intent_addendum(_layer_intent)
+        # Issue #9717: name the attach-zone policy the audit used, beside the
+        # verdict the designer acts on.
+        _print_pairwise_attach_zone_policy(final_result.router, args, output_path)
 
     # Issue #2881: Stash the final router on args so an outer
     # ``route_with_mfr_tier_escalation`` wrapper can inspect
@@ -15467,6 +15729,9 @@ def route_with_rule_relaxation(
                 # Issue #4979: inherited-only findings (any newly created
                 # ones already replaced the banner above).
                 _print_layer_intent_addendum(_layer_intent)
+        # Issue #9717: name the attach-zone policy the audit used, beside the
+        # verdict the designer acts on.
+        _print_pairwise_attach_zone_policy(final_result.router, args, output_path)
 
     # Issue #7377: pair via-parity summary + --export-failed-nets on every tail.
     _run_post_verdict_reports(
@@ -18024,6 +18289,9 @@ def route_with_combined_escalation(
                 # Issue #4979: inherited-only findings (any newly created
                 # ones already replaced the banner above).
                 _print_layer_intent_addendum(_layer_intent)
+        # Issue #9717: name the attach-zone policy the audit used, beside the
+        # verdict the designer acts on.
+        _print_pairwise_attach_zone_policy(final_result.router, args, output_path)
 
     # Issue #7377: pair via-parity summary + --export-failed-nets on every tail.
     _run_post_verdict_reports(
@@ -19518,12 +19786,26 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
     already exist independently:
 
     * **Timing** -- the lattice netset negotiation's per-connection decline
-      reason (``LatticePathfinder.failure_reasons``, issue #4278) plus the
-      per-link wall-clock budget stats (``LatticeNegotiationStats``,
-      issue #4472): elapsed time, the granted budget, and whether the
-      deadline was hit.  A connection never reached before the deadline is
-      declined with the honest reason ``"deadline-exceeded"`` (see
-      :meth:`~kicad_tools.router.lattice.pathfinder.LatticePathfinder.route_netset`).
+      reason (``LatticePathfinder.failure_reasons``, issue #4278).  The
+      per-link deadline signal IS that reason: ``"deadline-exceeded"``
+      means the deadline cut the best pass before the link reached any
+      decline -- never attempted in ANY pass, or its most recent earlier
+      outcome was a successful route.  A link an earlier pass attempted
+      and declined on its own merits keeps that real reason even when a
+      later truncated pass became the best pass -- unless a still later
+      pass routed it, which clears the record
+      (:meth:`~kicad_tools.router.lattice.pathfinder.LatticePathfinder.route_netset`);
+      any other reason means the link was attempted (and declined or
+      rolled back).  Per link, ``deadline_hit`` is true only for the
+      deadline-exceeded reason; ``attempted`` comes from the negotiation's
+      attempted-keys set (true when the search reached the link in ANY
+      pass), falling back to the reason's complement when the set is
+      absent
+      (issue #9581: they used to be OR-ed with / copied from the
+      whole-run negotiation totals, so once a run hit its deadline every
+      link was flagged as deadline-hit).  Per-link ``elapsed_s`` /
+      ``budget_s`` are ``None`` -- the wall-clock totals are whole-run
+      quantities and stay at report level only.
     * **Blocking copper** -- the SAME obstruction enumeration
       ``kct net-status --why`` prints
       (:func:`~kicad_tools.router.stuck_classifier.classify_stuck_nets`),
@@ -19551,6 +19833,10 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
     if stats is None:
         return None
     reasons: dict[object, str] = dict(getattr(router, "_lattice_failure_reasons", {}) or {})
+    # Issue #9581: keys whose search started in ANY pass of the negotiation.
+    # ``None`` when the router predates the field (duck-typed stand-ins);
+    # the attempted flag then falls back to the reason-derived form below.
+    attempted_keys: frozenset[object] | None = getattr(router, "_lattice_attempted_keys", None)
     # Issue #8396: links committed by the search but rolled back for creepage.
     creepage_refusals: list[dict] = list(getattr(router, "_complete_creepage_refusals", []) or [])
     if not reasons and not creepage_refusals:
@@ -19605,11 +19891,29 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
         net_name = _net_name_for_lattice_key(router, key)
         ep = endpoints.get(key)
         diag = diag_by_net.get(net_name)
+        # Issue #9581: per-link truth.  ``attempted`` is the honest
+        # cross-pass signal -- True when the search reached this link in
+        # ANY pass (the pathfinder's attempted-keys set).  A bare
+        # ``"deadline-exceeded"`` reason cannot carry it: the stamp is
+        # per-PASS, so a link declined on its own merits in an early
+        # pass carries it in a later truncated pass that became the
+        # best pass (the pathfinder now restores the earlier real
+        # reason for such links, as long as that decline is still the
+        # link's most recent outcome -- a pass that routes the link
+        # clears the record, so it reads as the deadline stamp instead;
+        # the set still decides ``attempted`` either way).  ``deadline_hit`` keeps meaning
+        # "this reason is the deadline stamp".  (Both flags used to be
+        # OR-ed with / copied from the whole-run negotiation totals,
+        # so once a run hit its deadline every link was flagged.)
+        deadline_reason = reason == "deadline-exceeded"
         entry: dict = {
             "net": net_name,
             "reason": reason,
             "link": {"start": ep[0], "end": ep[1]} if ep else None,
-            "deadline_hit": bool(reason == "deadline-exceeded" or stats.deadline_hit),
+            "deadline_hit": bool(deadline_reason),
+            "attempted": bool(
+                (key in attempted_keys) if attempted_keys is not None else (not deadline_reason)
+            ),
             # Issue #4979: machine-readable "this residual is layer-
             # constrained" flag.  A link the hard layer intent declined
             # (``layer-constrained-start``/``-end``, or a search the hard
@@ -19620,8 +19924,12 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
             # reason, because the remedy is different (relax/repoint the
             # net-class ``avoid_layers``, or give the net a legal corridor).
             "layer_constrained": _is_layer_constrained_reason(reason),
-            "elapsed_s": round(stats.elapsed_s, 3),
-            "budget_s": round(stats.budget_s, 3) if stats.budget_s is not None else None,
+            # Issue #9581: ``stats.elapsed_s`` / ``stats.budget_s`` are
+            # WHOLE-negotiation totals, not this link's; copying them onto
+            # every entry made a deadline run look like each link burned
+            # the full budget.  Run totals stay at report level only.
+            "elapsed_s": None,
+            "budget_s": None,
             "blocking_copper": list(diag.blocking_nets) if diag else [],
             "nearest_blocker_mm": (
                 round(diag.nearest_blocker_mm, 4)
@@ -19639,10 +19947,15 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
         links.append(
             {
                 **ref,
+                # Issue #9581: a creepage-rolled-back link WAS attempted
+                # (committed by the search, then rolled back for pairwise
+                # creepage) -- attempted, not deadline-hit, and the timing
+                # totals below are run-level quantities, not per link.
                 "deadline_hit": False,
+                "attempted": True,
                 "layer_constrained": False,
-                "elapsed_s": round(stats.elapsed_s, 3),
-                "budget_s": round(stats.budget_s, 3) if stats.budget_s is not None else None,
+                "elapsed_s": None,
+                "budget_s": None,
                 "blocking_copper": [ref["blocking_net"]],
                 "nearest_blocker_mm": ref["measured_mm"],
                 "stuck_classification": None,
@@ -19657,6 +19970,10 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
         "deadline_hit": stats.deadline_hit,
         "elapsed_s": round(stats.elapsed_s, 3),
         "budget_s": round(stats.budget_s, 3) if stats.budget_s is not None else None,
+        # Issue #9685: what the voltage-map creepage gate verified, so a
+        # consumer reading the report can tell an audited completion from an
+        # unchecked one without re-deriving the audit's scope.
+        "creepage_gate": getattr(router, "_complete_creepage_gate", None),
         "unroutable_links": links,
     }
 
@@ -19677,6 +19994,11 @@ def _print_complete_link_report(report: dict) -> None:
         link = entry["link"]
         ep = f"{link['start']} <-> {link['end']}" if link else "(pads unknown)"
         print(f"  [{entry['net']}] {ep} -- {entry['reason']}")
+        # Issue #9581: say explicitly when a link was never attempted
+        # because the run's deadline passed first -- distinct from an
+        # attempted link that the search declined on its own merits.
+        if entry.get("attempted") is False:
+            print("      not attempted: the run's deadline passed before this link was reached")
         if entry.get("required_mm") is not None:
             print(
                 f"      creepage: {entry['net']} vs {entry['blocking_net']}: "
@@ -20321,6 +20643,15 @@ def _list_unverified_sets(output_path: object, *, file=None) -> list[Path]:
 
 
 def _in_process_main(argv: list[str] | None = None) -> int:
+    # Issue #9581: the route command mixes bare print() with flush_print();
+    # with stdout redirected Python block-buffers the bare prints and a
+    # long run shows nothing until exit.  Line-buffer once here -- the
+    # single entry every path shares (CLI, supervised worker, tests) --
+    # rather than sprinkling flush=True over hundreds of call sites.
+    # Guarded: a stream without reconfigure (canned test doubles) keeps
+    # its own buffering.
+    with contextlib.suppress(AttributeError, ValueError):
+        sys.stdout.reconfigure(line_buffering=True)  # type: ignore[union-attr]
     from .route_receipt import run
 
     return run(lambda: _in_process_main_impl(argv))
@@ -20524,8 +20855,8 @@ def _route_parser() -> argparse.ArgumentParser:
         help=(
             "Issue #4477 (epic #4465, Phase 4): write the structured, "
             "machine-readable --complete unroutable-link report to PATH as "
-            "JSON (net, link pad endpoints, elapsed vs the per-link "
-            "deadline, and blocking copper reusing the 'kct net-status "
+            "JSON (run elapsed time and budget, plus each link's net, pad "
+            "endpoints, attempted and deadline_hit flags, and blocking copper from 'kct net-status "
             "--why' obstruction enumeration). Only written when --complete "
             "left one or more links unroutable; a human-readable summary is "
             "always printed regardless of this flag. Ignored without "
@@ -26574,6 +26905,9 @@ def _run_main_impl(args, parser, argv) -> int:
                     nets_to_route_ids=multi_pad_net_ids,
                     single_pad_count=len(single_pad_nets),
                 )
+        # Issue #9717: name the attach-zone policy the audit used, beside the
+        # verdict the designer acts on.
+        _print_pairwise_attach_zone_policy(router, args, output_path)
 
     # Issue #6277: the JSON summary must not depend on the text banner chain
     # (``if not quiet``) or on the outcome being PARTIAL, so every direct-route

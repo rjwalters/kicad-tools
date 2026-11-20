@@ -42,6 +42,12 @@ from dataclasses import dataclass
 #: duplicated as a literal here rather than imported to avoid a
 #: ``manufacturers`` -> ``validate`` package dependency; keep the two
 #: values in sync if either changes.
+#: #9619 review: deliberately still 1e-4, NOT the probed KiCad clearance
+#: band (``validate/rules/base.py``'s ``KICAD_CLEARANCE_BAND_MM``): this
+#: is a via-in-pad mask-dam eligibility check, not a copper-clearance
+#: verdict, and the #9619 probe never covered it (on track width and
+#: drill size pinned kicad-cli flags a 100 nm shortfall with no band, so
+#: unprobed checks keep the pre-#9619 guard).
 _ELIGIBILITY_TOLERANCE_MM = 1e-4
 
 
