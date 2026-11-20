@@ -1256,7 +1256,7 @@ def _emit_single_pad_net_warning(
     )
 
 
-def _strip_route_blocks(pcb_content: str) -> tuple[str, int, int]:
+def _strip_route_blocks(pcb_content: str, collect: list[str] | None = None) -> tuple[str, int, int]:
     """Strip top-level ``(segment ...)`` and ``(via ...)`` blocks from PCB content.
 
     Issue #2976: When ``_stage_input_for_auto_pour`` aliases ``pcb_path`` to
@@ -1280,6 +1280,10 @@ def _strip_route_blocks(pcb_content: str) -> tuple[str, int, int]:
 
     Args:
         pcb_content: Original PCB file content.
+        collect: Optional list.  When given, the verbatim text of every
+            excised block is appended to it (issue #9599 row 2: the
+            existing-copper replacement notice lists the affected nets from
+            these blocks).
 
     Returns:
         Tuple of ``(stripped_content, segments_removed, vias_removed)``.
@@ -1341,6 +1345,8 @@ def _strip_route_blocks(pcb_content: str) -> tuple[str, int, int]:
                     segments_removed += 1
                 else:
                     vias_removed += 1
+                if collect is not None:
+                    collect.append(pcb_content[token_start - 1 : k])
                 # Skip whitespace that was preceding this form (trailing
                 # newline/tab from the previous emission) to keep the
                 # resulting file tidy.
@@ -1360,6 +1366,80 @@ def _strip_route_blocks(pcb_content: str) -> tuple[str, int, int]:
         prev_char = ch
         i += 1
     return "".join(out), segments_removed, vias_removed
+
+
+# Issue #9599 row 2: the net-declaration table ``(net 3 "NAME")`` maps stripped
+# copper's numeric ``(net 3)`` references onto user-visible net names.  Name-
+# only boards (KiCad 10, #4416) carry ``(net "NAME")`` directly on the copper.
+_NET_DECL_RE = re.compile(r'\(net\s+(\d+)\s+"((?:[^"\\]|\\.)*)"\)')
+_BLOCK_NET_RE = re.compile(
+    r'\(net\s+(\d+)(?:\s+"(?:[^"\\]|\\.)*")?\s*\)|\(net\s+"((?:[^"\\]|\\.)+)"\)'
+)
+
+
+def _baseline_copper_nets(pcb_content: str) -> tuple[int, int, list[str]]:
+    """Census the input board's existing routing copper (issue #9599 row 2).
+
+    Returns ``(segments, vias, sorted net names)`` carried by top-level
+    ``(segment ...)`` / ``(via ...)`` blocks -- the copper a plain ``kct
+    route`` run replaces with its own freshly routed paths.  Net id ``0``
+    copper (orphans) is not attributed to any named net.
+    """
+    net_names: dict[int, str] = {}
+    for decl in _NET_DECL_RE.finditer(pcb_content):
+        net_names.setdefault(int(decl.group(1)), decl.group(2))
+    blocks: list[str] = []
+    _, segs, vias = _strip_route_blocks(pcb_content, collect=blocks)
+    names: set[str] = set()
+    for block in blocks:
+        m = _BLOCK_NET_RE.search(block)
+        if m is None:
+            continue
+        if m.group(1) is not None:
+            net_id = int(m.group(1))
+            if net_id != 0:
+                names.add(net_names.get(net_id, f"Net {net_id}"))
+        elif m.group(2):
+            names.add(m.group(2))
+    return segs, vias, sorted(names)
+
+
+def _warn_existing_copper_replacement(pcb_path: Path, args) -> None:
+    """List the existing copper a plain ``kct route`` run will replace (#9599 row 2).
+
+    The save path treats the in-memory router state as authoritative: every
+    ``_write_routed_pcb`` call strips ALL top-level ``(segment ...)`` /
+    ``(via ...)`` blocks and re-inserts only this run's routes (issue #2976).
+    Without ``--preserve-existing`` that silently removes hand-placed copper;
+    this notice names every affected net before routing starts, and points at
+    the flag that locks existing copper (kept verbatim as fixed obstacles and
+    re-emitted unchanged, issue #5788).  Skipped for quiet / dry runs, and
+    whenever the preserve machinery is in effect (--preserve-existing, --nets,
+    --region, --complete -- all of which stamp the preserve path).
+    """
+    if getattr(args, "quiet", False) or getattr(args, "dry_run", False):
+        return
+    if getattr(args, "preserve_existing", False):
+        return
+    try:
+        in_segs, in_vias, nets = _baseline_copper_nets(Path(pcb_path).read_text())
+    except (OSError, UnicodeDecodeError):
+        return
+    if not in_segs and not in_vias:
+        return
+    names = ", ".join(nets) if nets else "(unnamed nets)"
+    print(
+        f"  Note: input board has existing routing copper "
+        f"({in_segs} segment(s), {in_vias} via(s)) on nets: {names}."
+    )
+    print(
+        "        This run replaces existing routing copper with freshly routed "
+        "paths -- hand-placed tracks/vias are NOT carried over."
+    )
+    print(
+        "        Pass --preserve-existing to lock existing copper (kept "
+        "verbatim and routed around)."
+    )
 
 
 # Issue #4416: a KiCad-10 name-only inline net reference is ``(net "SDA")`` --
@@ -1777,7 +1857,7 @@ def _write_routed_pcb(
                 "reference dialect the parser could not resolve). The output "
                 f"file {output_path} was left UNCHANGED to prevent data "
                 "loss. Please report this at "
-                "https://github.com/rjwalters/kicad-tools/issues (ref #4413)."
+                "https://github.com/2AMLogic/kicad-tools/issues (ref #4413)."
             )
 
     # Atomic write: tmp file -> fsync -> rename.  Sibling-in-same-dir
@@ -4598,6 +4678,24 @@ def _fallback_receipt_fields(router: Any) -> dict[str, Any]:
     return fields
 
 
+def _grid_arrays_released(router: Any) -> bool:
+    """True once the routing grid's per-cell occupancy arrays are freed.
+
+    ``_release_routing_engine_state`` (issue #4292) swaps every dense plane
+    for a zero-length array before the CLI tail; anything that still indexes
+    them fails with a numpy "index 0 is out of bounds for axis 0 with size 0"
+    instead of a real answer.  The post-release partial save (#9579) must
+    serialise the already-finalized copper without touching the grid, so it
+    needs to know.  Structural on purpose: the freed-and-rebuilt cycle of an
+    escalation flow un-releases the grid, and a stale marker would not.
+    """
+    blocked = getattr(getattr(router, "grid", None), "_blocked", None)
+    shape = getattr(blocked, "shape", None)
+    if not shape:
+        return False
+    return bool(shape[0] == 0)
+
+
 def _save_partial_results() -> bool:
     """Save partial routing results if interrupted.
 
@@ -4667,6 +4765,10 @@ def _save_partial_results() -> bool:
             print("  No routes to save.")
         return False
 
+    # Issue #9579: name the step a failure happened in.  A bare ``str(e)``
+    # (e.g. a numpy "index 0 is out of bounds") said nothing about which
+    # artifact was or was not saved.
+    step = "reading the placement board"
     try:
         # The placement the copper was routed against: the source board, or
         # the moved one when a placement delta has been kept (issue #6314).
@@ -4676,17 +4778,35 @@ def _save_partial_results() -> bool:
         # dialect so the interrupted save does not flip name-based copper to
         # numeric.  Detect from the content already in hand (avoid re-reading).
         name_only = bool(_NAME_ONLY_NET_RE.search(original_content))
+        step = "serialising the routed copper"
         # Issue #8270: collapse per-grid-cell segments (on a copy) so the
         # ``_partial`` board is editable.  ``cleanup_artifacts`` is what
         # ``router.to_sexp`` runs first; keep it, then serialise merged routes.
+        # Issue #9579: on a released grid (#4292 tail) ``cleanup_artifacts``
+        # dies in the acute-foldback validation -- it indexes the freed
+        # per-cell arrays -- and the ``to_sexp`` fallback then repeats the
+        # same cleanup, so both attempts abort before anything is written.
+        # The released-grid callers run strictly after ``_finalize_routes``,
+        # whose cleanup already ran on the live grid, so the copper here is
+        # final: serialise it without querying the grid at all.  The live
+        # interrupt path (grid still allocated) keeps the full cleanup.
+        released = _grid_arrays_released(router)
         try:
-            router.cleanup_artifacts()
+            if not released:
+                router.cleanup_artifacts()
             route_sexp = "\n\t".join(
                 r.to_sexp(name_only=name_only)
                 for r in _merge_checkpoint_routes(router.routes, router)
             )
         except Exception:  # noqa: BLE001 - fall back to the raw serialisation
-            route_sexp = router.to_sexp(name_only=name_only)
+            # ``skip_cleanup`` only on the released-grid path (#9579): a
+            # live-grid call must stay what it always was, so routers (and
+            # test doubles) whose ``to_sexp`` predates the keyword keep
+            # accepting the fallback.
+            if released:
+                route_sexp = router.to_sexp(name_only=name_only, skip_cleanup=True)
+            else:
+                route_sexp = router.to_sexp(name_only=name_only)
         try:
             # Issue #8270: name the partially routed nets for the timeout report.
             info["partial_net_stubs"] = _partial_net_stubs(router)
@@ -4717,6 +4837,7 @@ def _save_partial_results() -> bool:
             else:
                 save_path = output_path.with_stem(output_path.stem + "_partial")
 
+            step = f"writing the partial board {save_path.name}"
             check_kicad_lock(cast(Path, save_path))
 
             # Insert routes before final closing parenthesis
@@ -4741,6 +4862,10 @@ def _save_partial_results() -> bool:
             from .route_receipt import record_publication
 
             record_publication(save_path)
+
+            # The partial board is on disk from here on (issue #9579): a later
+            # failure is about a sidecar or the summary, never the board.
+            step = f"recording the partial-save stage for {save_path.name}"
 
             # Issue #6330: publish the snapshot facts NOW, before the slow
             # access-witness sidecar below.  A hard kill during that write
@@ -4777,12 +4902,23 @@ def _save_partial_results() -> bool:
             # write is best-effort by construction (the helper swallows its own
             # errors) and the journal dump measures well under the 5 s
             # SIGTERM -> SIGKILL grace window the supervisor allows.
+            step = "writing the access-witness sidecar"
             _interrupt_state["access_witness_path"] = _write_access_witness_sidecar(
                 cast(Path, save_path), router, quiet=quiet, journal_first=True
             )
 
             if not quiet:
-                stats = router.get_statistics()
+                # Issue #9579: everything is saved at this point.  The
+                # statistics are a summary only, so a failure computing them
+                # must not be reported as a failed save (the board and its
+                # sidecars were already written).
+                stats_error = ""
+                try:
+                    stats: dict[str, Any] | None = router.get_statistics()
+                except Exception as stats_exc:  # noqa: BLE001 - summary only
+                    logger.debug("partial-save statistics failed", exc_info=True)
+                    stats = None
+                    stats_error = f"{type(stats_exc).__name__}: {stats_exc}"
                 # This snapshot inserts the current router copper into the
                 # source board. Interrupts can save it at any stage; clean
                 # partial exits save after optimization/tuning. It is not a
@@ -4796,13 +4932,17 @@ def _save_partial_results() -> bool:
                         f"(current routing state; NOT canonical)"
                     )
                     print(f"  Canonical output remains: {output_path}")
-                print(f"    Nets routed: {stats['nets_routed']}")
-                print(f"    Segments: {stats['segments']}")
-                print(f"    Vias: {stats['vias']}")
+                if stats is not None:
+                    print(f"    Nets routed: {stats['nets_routed']}")
+                    print(f"    Segments: {stats['segments']}")
+                    print(f"    Vias: {stats['vias']}")
+                else:
+                    print(f"    (routing statistics unavailable: {stats_error})")
             return True
     except Exception as e:
+        logger.debug("partial-save failed while %s", step, exc_info=True)
         if not quiet:
-            print(f"  Error saving partial results: {e}")
+            print(f"  Error saving partial results while {step}: {type(e).__name__}: {e}")
 
     return False
 
@@ -9365,11 +9505,16 @@ def _preload_voltage_map(args) -> int:
     Shared by ``kct route`` and ``kct optimize-traces`` so both accept the same
     inputs and fail with the same messages.  Stashes the result on
     ``args._pairwise_voltages`` / ``args._pairwise_required`` (both ``None``
-    when ``--voltage-map`` was not supplied).  Returns 0, or 1 after printing
-    the error to stderr.
+    when ``--voltage-map`` was not supplied) plus the per-net ``[lo, hi]``
+    intervals on ``args._pairwise_intervals`` (#9602) and the parsed
+    ``_pair_bounds`` caps on ``args._pairwise_pair_bounds`` (#8043, consumed by
+    the sub-threshold advisory, and #9644, for ``route-link``'s omitted-net
+    fallback).  Returns 0, or 1 after printing the error to stderr.
     """
     args._pairwise_voltages = None
     args._pairwise_required = None
+    args._pairwise_intervals = None
+    args._pairwise_pair_bounds = None
     if getattr(args, "voltage_map", None) is not None:
         from kicad_tools.creepage.standards import StandardLookupError
         from kicad_tools.placement.hv_domains import build_required_by_domain_pair
@@ -9377,6 +9522,7 @@ def _preload_voltage_map(args) -> int:
             _norm_net_key,
             load_pair_bounds,
             load_signed_voltage_map,
+            load_voltage_intervals,
         )
 
         vm_path = Path(args.voltage_map).resolve()
@@ -9396,10 +9542,18 @@ def _preload_voltage_map(args) -> int:
             _raw_voltages = load_signed_voltage_map(vm_path)
             # Issue #8043: device-bounded pair caps from the same sidecar.
             _pair_bounds = load_pair_bounds(vm_path)
+            # Issue #9602: keep the full [lo, hi] intervals too, so the table
+            # below differences range-bearing nets end-to-end exactly like the
+            # census (the scalar collapse alone can score a sign-flipping
+            # pair's opposite bank at 0 V and drop it from the matrix).
+            _raw_intervals = load_voltage_intervals(vm_path)
         except (ValueError, OSError) as e:
             print(f"Error: invalid voltage-map: {e}", file=sys.stderr)
             return 1
         _voltages = {_norm_net_key(n): float(v) for n, v in _raw_voltages.items()}
+        _intervals = {
+            _norm_net_key(n): (float(lo), float(hi)) for n, (lo, hi) in _raw_intervals.items()
+        }
         from kicad_tools.creepage.engine import pair_bounds_unmapped_nets
 
         for _n in pair_bounds_unmapped_nets(_pair_bounds, _voltages):
@@ -9415,12 +9569,15 @@ def _preload_voltage_map(args) -> int:
                 material_group=getattr(args, "material_group", "IIIa"),
                 hv_threshold=getattr(args, "hv_threshold", 30.0),
                 pair_bounds=_pair_bounds or None,
+                domain_intervals=_intervals,
             )
         except StandardLookupError as e:
             print(f"Error: voltage-map creepage lookup failed: {e}", file=sys.stderr)
             return 1
         args._pairwise_voltages = _voltages
         args._pairwise_required = _required
+        args._pairwise_intervals = _intervals
+        args._pairwise_pair_bounds = _pair_bounds or None
     return 0
 
 
@@ -9525,6 +9682,8 @@ def _warn_subthreshold_coverage_gap(args, voltages, dru: float) -> None:
         pollution_degree=getattr(args, "pollution_degree", 2),
         material_group=getattr(args, "material_group", "IIIa"),
         hv_threshold=hv_threshold,
+        pair_bounds=getattr(args, "_pairwise_pair_bounds", None),
+        net_intervals=getattr(args, "_pairwise_intervals", None),
     )
     if gap.pair_count == 0:
         return
@@ -10628,7 +10787,11 @@ def _audit_kept_copper_clearance(
     path copies beside the output -- else KiCad's defaults.  At ``error``
     severity (KiCad's default) the near-misses are printed as errors and
     returned so they fail the run; at ``warning`` they are printed and not
-    returned; at ``ignore`` nothing is reported.  Never raises.
+    returned; at ``ignore`` nothing is reported.  Issue #9578: a pair whose
+    verdict hinges on a rule the evaluator cannot decide is printed as
+    UNKNOWN -- naming the rule -- and is never returned as an input defect,
+    under every severity but ``ignore``, which returns before anything is
+    computed or printed.  Never raises.
     """
     from kicad_tools.router.board_clearance_rules import BoardClearanceRules
     from kicad_tools.router.io import kept_copper_clearance_violations, kicad_rule_severity
@@ -10659,9 +10822,38 @@ def _audit_kept_copper_clearance(
                 "input clearance was NOT checked"
             )
         return []
-    if near and not quiet:
-        _print_input_clearance_findings(near, severity)
-    return near if severity == "error" else []
+    # Issue #9578: pairs whose verdict hinges on a rule this tool cannot
+    # decide are named and counted as unknown -- never as input defects, so
+    # they neither fail the run nor imply a KiCad-exact verdict.  kicad-cli
+    # pcb drc remains the authority for them.
+    unknown = [v for v in near if v.unknown_rules]
+    definite = [v for v in near if not v.unknown_rules]
+    if unknown and not quiet:
+        _print_unknown_rule_clearance(unknown)
+    if definite and not quiet:
+        _print_input_clearance_findings(definite, severity)
+    return definite if severity == "error" else []
+
+
+def _print_unknown_rule_clearance(violations: "Sequence[ClearanceViolation]") -> None:
+    """Report kept-copper near-misses an undecided rule keeps in doubt (#9578)."""
+    from kicad_tools.router.io import describe_input_clearance
+
+    rule_names = sorted({name for v in violations for name in v.unknown_rules})
+    print("\n--- Kept Input Copper: unresolved clearance rules ---")
+    print(
+        f"  UNKNOWN: {len(violations)} kept-copper pair(s) could not be judged because "
+        f"these .kicad_dru rule(s) use conditions this tool cannot resolve: "
+        f"{', '.join(repr(name) for name in rule_names)}"
+    )
+    print(
+        "  Counted as unknown, not as input defects (Issue #9578); run "
+        "`kicad-cli pcb drc` for the authoritative verdict on these pairs."
+    )
+    for v in violations[:20]:
+        print(f"    UNKNOWN {describe_input_clearance(v)} (rule(s): {', '.join(v.unknown_rules)})")
+    if len(violations) > 20:
+        print(f"    ... and {len(violations) - 20} more")
 
 
 def _print_input_clearance_findings(
@@ -11561,6 +11753,7 @@ _CLEARANCE_SOURCE_TOKENS: dict[str, str] = {
     "project-min-clearance": "project-min-clearance",
     "project-net-class": "project-net-class",
     "project-dru": "project-dru",
+    "project-dru-conditional": "project-dru-conditional",
 }
 
 
@@ -11632,12 +11825,24 @@ def _decide_route_clearance(
             return "project board minimum clearance"
         if rule_source is RuleSource.PROJECT_NET_CLASS:
             return f'project netclass "{class_name}"' if class_name else "project netclass"
+        if rule_source is RuleSource.PROJECT_DRU_CONDITIONAL:
+            return "board .kicad_dru conditional clearance rule"
         if rule_source is RuleSource.BOARD_NET_CLASS:
             return f'board net_class "{class_name}"'
         return str(rule_source.value)
 
-    if explicit_clearance:
+    if explicit_clearance and resolved.source is RuleSource.EXPLICIT_TARGET:
         banner = f"Clearance: {value:.4g}mm (rules: explicit --clearance flag)"
+    elif explicit_clearance:
+        # The #9578 conditional floor raised the operator's explicit value
+        # (#9588 review): say so instead of crediting the flag with a value
+        # it did not choose.
+        banner = (
+            f"Clearance: {value:.4g}mm (rules: explicit --clearance "
+            f"{clearance:.4g}mm, floored by the "
+            f"{_label(resolved.source, resolved.source_label)} {value:.4g}mm)"
+        )
+        source = "board-clamped"
     elif resolved.source is RuleSource.TARGET_DEFAULT:
         # Nothing the board or the fab declared moved the target: byte-identical
         # to the pre-#4875 silent path.
@@ -11855,6 +12060,8 @@ def _resolve_route_via_clearance(
             return "project board minimum clearance"
         if rule_source is RuleSource.PROJECT_NET_CLASS:
             return f'project netclass "{class_name}"' if class_name else "project netclass"
+        if rule_source is RuleSource.PROJECT_DRU_CONDITIONAL:
+            return "board .kicad_dru conditional clearance rule"
         if rule_source is RuleSource.BOARD_NET_CLASS:
             return f'board net_class "{class_name}"'
         if rule_source is RuleSource.TRACE_BASE:
@@ -18093,6 +18300,10 @@ def _warn_escalation_flags_ignored(args) -> None:
     this warning the run silently behaves as if it was not passed.  Stderr, so
     ``--format json`` stdout is untouched; guarded by a flag on ``args`` so the
     wrappers' repeated ladder entries do not repeat it.
+
+    Issue #9621: ``--group-length-window`` rides on ``--bus-routing`` and is
+    ignored by the same branches; ``0.0`` is a set value, so the check is
+    "is not None / not False", not plain truthiness.
     """
     if getattr(args, "_escalation_flags_warned", False):
         return
@@ -18101,8 +18312,9 @@ def _warn_escalation_flags_ignored(args) -> None:
         for flag, attr in (
             ("--progressive-clearance", "progressive_clearance"),
             ("--bus-routing", "bus_routing"),
+            ("--group-length-window", "group_length_window"),
         )
-        if getattr(args, attr, False)
+        if (value := getattr(args, attr, None)) is not None and value is not False
     ]
     if not ignored:
         return
@@ -18115,6 +18327,105 @@ def _warn_escalation_flags_ignored(args) -> None:
         file=sys.stderr,
         flush=True,
     )
+
+
+def _bus_flags_ignored_reason(
+    args,
+    *,
+    use_adaptive_grid: bool,
+    use_escape_routing: bool = False,
+) -> str | None:
+    """Name the dispatch that will ignore the bus flags, or ``None`` if honoured.
+
+    PR #9633 review: only the single-attempt ``--strategy basic`` dispatch
+    honours ``--bus-routing`` (the ``route_all_with_buses`` branch); every
+    branch that pre-empts it in :func:`route_cmd`'s dispatch order is listed
+    here in the same order, so the reason names the branch that would
+    actually run.  ``use_adaptive_grid`` mirrors ``multi_res_plan is not
+    None`` (the ``--grid auto`` adaptive plan, or its dense-package escape
+    fallback) and ``use_escape_routing`` the escape pre-phase decision --
+    both pre-empt the strategy chain.  ``--two-phase`` only pre-empts under
+    ``--strategy negotiated`` (a basic two-phase run falls through to the
+    bus branch); ``--differential-pairs`` under basic routes diff pairs
+    before the bus branch and never reads ``bus_config``.
+    """
+    if not getattr(args, "bus_routing", False):
+        return None
+    if use_adaptive_grid:
+        return "the adaptive multi-resolution grid"
+    if use_escape_routing:
+        return "the escape pre-phase"
+    if getattr(args, "progressive_clearance", False):
+        return "--progressive-clearance"
+    if getattr(args, "multi_resolution", False):
+        return "--multi-resolution"
+    if getattr(args, "two_phase", False) and args.strategy == "negotiated":
+        return "--two-phase"
+    if args.strategy != "basic":
+        return f"--strategy {args.strategy}"
+    if getattr(args, "differential_pairs", False):
+        return "--differential-pairs"
+    return None
+
+
+def _warn_bus_flags_ignored(args, reason: str) -> None:
+    """Warn once per run that the resolved dispatch ignores the bus flags (#9621).
+
+    PR #9633 review: this used to be called from inside the ``negotiated``
+    dispatch branches, after the cache-hit return, the two-phase return and
+    the adaptive-grid / escape / progressive-clearance / multi-resolution
+    returns -- so those runs printed ``Bus: enabled`` and silently behaved
+    as if ``--bus-routing`` was not passed.  It is now emitted once, before
+    the cache lookup and the strategy dispatch (see
+    :func:`_warn_bus_flags_ignored_early`), with the reason naming the
+    dispatch that ignores the flags.  Stderr, so ``--format json`` stdout is
+    untouched; guarded by a flag on ``args`` so repeated dispatches (the
+    diff-pair pre-pass wrapper) do not repeat it.
+    """
+    if getattr(args, "_bus_flags_warned", False):
+        return
+    ignored = []
+    if getattr(args, "bus_routing", False):
+        ignored.append("--bus-routing")
+    if getattr(args, "group_length_window", None) is not None:
+        ignored.append("--group-length-window")
+    if not ignored:
+        return
+    with contextlib.suppress(AttributeError):  # frozen namespace
+        args._bus_flags_warned = True
+    print(
+        f"warning: {', '.join(ignored)} ignored: {reason} does not support "
+        "bus-aware routing; re-run with --strategy basic and a single-attempt "
+        "dispatch to use it",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _warn_bus_flags_ignored_early(args, router, multi_res_plan=None) -> None:
+    """Emit the bus-flags warning before the cache lookup and strategy dispatch.
+
+    PR #9633 review: resolves, from ``args`` plus the pre-dispatch state
+    that is already computed at this point (the ``--grid auto`` multi-
+    resolution plan and the escape-pre-phase decision), which dispatch this
+    run will take -- then warns when that dispatch does not honour the bus
+    flags.  Running here means the cache-hit branch, the two-phase return
+    and every other early return can no longer skip the warning.  The
+    escape decision is the silent core of :func:`_escape_routing_decision`
+    (its message is still printed exactly once, inside the dispatch, per
+    issue #6666); calling it here adds one ``detect_dense_packages`` scan
+    on ``--bus-routing`` runs only.
+    """
+    if not getattr(args, "bus_routing", False):
+        return
+    use_escape, _ = _escape_routing_decision(router, _resolve_escape_routing_flag(args))
+    reason = _bus_flags_ignored_reason(
+        args,
+        use_adaptive_grid=multi_res_plan is not None,
+        use_escape_routing=use_escape,
+    )
+    if reason is not None:
+        _warn_bus_flags_ignored(args, reason)
 
 
 def _run_post_save_stitching(args, output_path: Path, *, quiet: bool = False):
@@ -20983,6 +21294,20 @@ def _route_parser() -> argparse.ArgumentParser:
         help="Minimum signals to form a bus group (default: 2)",
     )
     parser.add_argument(
+        "--group-length-window",
+        type=float,
+        default=None,
+        metavar="PCT",
+        help=(
+            "Group non-bus nets whose MST lengths fall within PCT percent of a "
+            "cluster's reference length into synthetic bus groups, and order "
+            "each group by escape feasibility (fewest open pad directions "
+            "first) (Issue #9621).  Requires --bus-routing --strategy basic; "
+            "ignored with a warning on --strategy negotiated and the "
+            "escalation ladders"
+        ),
+    )
+    parser.add_argument(
         "--differential-pairs",
         action="store_true",
         help=(
@@ -21126,8 +21451,9 @@ def _route_parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help=(
             "Path to a JSON per-net voltage map {net_name: volts} (reuses the "
-            "#4371 format; ranges {min,max} per #4411 collapse to the worst-case "
-            "endpoint). Potentials are read SIGNED, exactly as kct creepage "
+            "#4371 format; a range {min,max} per #4411 is differenced "
+            "end-to-end at its worst-case endpoint combination, #9602). "
+            "Potentials are read SIGNED, exactly as kct creepage "
             "reads the same file (#4867): a +150 V net and a -150 V net are a "
             "300 V pair, not 0 V. Enables HV-isolation pairwise clearance (Issue #4431 "
             "Phase 1): the router derives a net-pair required-clearance matrix "
@@ -22453,6 +22779,35 @@ def _chain_complete_argv(
     ``--auto-fix`` are excluded because the outer run's result already covers them
     (see the guard test).
 
+    Issue #9621 -- the bus family is forwarded together: ``--bus-routing``,
+    ``--bus-mode``, ``--bus-spacing``, ``--bus-min-width`` and
+    ``--group-length-window``.  The length window rides on ``--bus-routing``
+    (without it the pass only draws the "requires --bus-routing" warning), so
+    forwarding the window alone would pin a flag the pass can never honour.
+    Under ``--complete`` the strategy is coerced to basic, so forwarding
+    ``--bus-routing`` flips the pass's basic-strategy dispatch from
+    ``route_all`` to ``route_all_with_buses`` with the outer run's bus
+    configuration -- and that swap is NOT copper-neutral.  The bus driver
+    routes per group member and never runs ``route_all``'s preamble/tail
+    (``_prepare_routing``, ``_filter_pour_nets``,
+    ``_detect_and_apply_matrix_preferences``, ``_interleave_match_groups``,
+    ``_apply_byte_lane_inner_priority``, ``_probe_alone_on_empty_lengths``,
+    ``_run_subgrid_prepass``, and the ``BLOCKED_BY_COMPONENT`` rescue
+    ``_attempt_blocked_component_ripup``), so completion copper measurably
+    differs: on the 6-net row fixture of
+    ``tests/router/test_group_length_window.py`` the bus dispatch measured
+    246.818 mm / 57 segments where ``route_all`` measured 235.310 mm / 53
+    (+4.9% total trace length), both closing 6/6 -- pinned by
+    ``TestCompletionDispatchCopper`` there.  A separate, true fact: on the
+    pass's lattice engine the one-shot netset negotiation
+    (:meth:`Autorouter._negotiate_lattice_netset`) is order-independent, so
+    within either dispatch the operator's bus ordering changes only
+    ``route_net`` call order and logging, not per-net copper -- but that fact
+    says nothing about equality across the two dispatches.  Forwarding is
+    still deliberate: the operator asked for bus treatment, and honouring it
+    on the pass at the disclosed copper cost above beats silently running
+    the flag at its default.
+
     Deliberately not forwarded:
 
     * ``--auto-layers``, ``--route-engine``, ``--grid`` and the grid-engine
@@ -22561,6 +22916,27 @@ def _chain_complete_argv(
     # forwarding, the pass would only auto-tune via ``checker_limit``.
     if getattr(args, "length_match_groups", False):
         chain_argv.append("--length-match-groups")
+    # Issue #9621: the bus family is forwarded together (see the docstring's
+    # Issue #9621 note).  --bus-mode and --bus-min-width carry value defaults
+    # ("parallel" / 2), so only an explicit value is passed on, like
+    # --via-drill above; --bus-spacing and --group-length-window default to
+    # None, so a set value is always the operator's.
+    if getattr(args, "bus_routing", False):
+        chain_argv.append("--bus-routing")
+    for flag, attr in (
+        ("--bus-mode", "bus_mode"),
+        ("--bus-min-width", "bus_min_width"),
+    ):
+        value = getattr(args, attr, None)
+        if value is not None and _flag_passed_explicitly(argv, (flag,)):
+            chain_argv.extend([flag, str(value)])
+    for flag, attr in (
+        ("--bus-spacing", "bus_spacing"),
+        ("--group-length-window", "group_length_window"),
+    ):
+        value = getattr(args, attr, None)
+        if value is not None:
+            chain_argv.extend([flag, str(value)])
     return chain_argv
 
 
@@ -23957,6 +24333,12 @@ def _run_main_impl(args, parser, argv) -> int:
             grid_explicit=grid_auto_result is None,
         )
 
+    # Issue #9599 row 2: name the existing copper this run is about to
+    # replace.  All preserve-flag coercions (--nets / --region / --complete)
+    # have run above, so a False ``preserve_existing`` here means the run
+    # really will strip the input board's routing copper at its first write.
+    _warn_existing_copper_replacement(pcb_path, args)
+
     # Issue #3352 (P_AS3): --auto-pcb-size wraps the layer escalation path
     # with an outer size-escalation loop.  Q5 decision: --auto-pcb-size
     # IMPLIES --auto-layers unless --no-auto-layers was explicit (the
@@ -24241,6 +24623,8 @@ def _run_main_impl(args, parser, argv) -> int:
             print(f"Skip:     {', '.join(skip_nets)}")
         if args.bus_routing:
             print(f"Bus:      enabled ({args.bus_mode} mode)")
+            if getattr(args, "group_length_window", None) is not None:
+                print(f"          length window: {args.group_length_window}% (Issue #9621)")
         if args.differential_pairs:
             print("DiffPair: enabled")
 
@@ -24741,6 +25125,7 @@ def _run_main_impl(args, parser, argv) -> int:
             mode=bus_mode_map[args.bus_mode],
             spacing=args.bus_spacing,
             min_bus_width=args.bus_min_width,
+            length_window=getattr(args, "group_length_window", None),
         )
 
         # Show detected buses
@@ -24753,6 +25138,15 @@ def _run_main_impl(args, parser, argv) -> int:
                     print(f"    - {group['name']}: {group['width']} bits ({status})")
             else:
                 print("\n  No bus signals detected")
+
+    elif getattr(args, "group_length_window", None) is not None:
+        # Issue #9621: the window rides on bus routing; without --bus-routing
+        # there is no bus_config to carry it.
+        print(
+            "warning: --group-length-window ignored: it requires --bus-routing",
+            file=sys.stderr,
+            flush=True,
+        )
 
     # Configure differential pair routing if enabled
     diffpair_config = None
@@ -24803,6 +25197,13 @@ def _run_main_impl(args, parser, argv) -> int:
 
     _rss = RSSTracer()
     _rss.mark("route-start")
+
+    # PR #9633 review: the bus-flags-ignored warning must fire BEFORE the
+    # cache lookup and the strategy dispatch -- a cache hit or an early
+    # dispatch return (two-phase, adaptive grid, escape, progressive
+    # clearance, multi-resolution) used to skip it while still printing
+    # ``Bus: enabled``.
+    _warn_bus_flags_ignored_early(args, router, multi_res_plan)
 
     # Check cache for existing routing result (unless --no-cache)
     cache_key = None
@@ -25284,6 +25685,8 @@ def _run_main_impl(args, parser, argv) -> int:
                 # The negotiated loop honors prerouted nets via the new skip
                 # logic in route_all_negotiated.  coupled_only=True so
                 # unsupported pad configurations fall through cleanly.
+                # (Bus-flags warning: emitted before the cache lookup, see
+                # _warn_bus_flags_ignored_early.)
                 def _neg_strategy():
                     return router.route_all_negotiated(
                         **_negotiated_kwargs(
@@ -25308,6 +25711,8 @@ def _run_main_impl(args, parser, argv) -> int:
                 diffpair_budget_exit_pairs.extend(router.diffpair_budget_exit_pair_names())
                 return result
             elif args.strategy == "negotiated":
+                # (Bus-flags warning: emitted before the cache lookup, see
+                # _warn_bus_flags_ignored_early.)
                 return router.route_all_negotiated(
                     **_negotiated_kwargs(
                         args, timeout=_budgeted_timeout(args), checkpoint_callback=_checkpoint_cb

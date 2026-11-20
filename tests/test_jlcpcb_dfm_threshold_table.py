@@ -168,8 +168,10 @@ def test_observed_warning_basis_recorded():
     assert e.thresholds["pad_spacing"].warning_mm == pytest.approx(0.13)
 
 
-# Bump ``version`` in jlcpcb.yaml AND this digest together when any number changes.
-_PINNED = (1, "40c90941f294a40e")
+# Bump ``version`` in jlcpcb.yaml AND this digest together when any number,
+# ``source_url`` or ``retrieved`` date changes (the digest covers provenance,
+# not just the millimetre values).
+_PINNED = (2, "845623b78c5368b3")
 
 
 def _digest(table) -> str:

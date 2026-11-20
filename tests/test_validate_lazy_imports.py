@@ -107,6 +107,7 @@ PUBLIC_EXPORTS = {
         "MatchGroupLengthSkewRule": ".match_group_length_skew",
         "MissingPlatedHoleRule": ".missing_plated_hole",
         "Pin1MarkerRule": ".pin1_marker",
+        "PlaneSplitRule": ".plane_split",
         "PourSlotRule": ".pour_slot",
         "RedundantCopperRule": ".redundant_copper",
         "check_schematic_fields": ".schematic_fields",

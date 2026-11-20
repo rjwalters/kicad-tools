@@ -20,7 +20,7 @@ violations and zero opens. It is a feasible comparison for improving the
 router's obstacle escape and multi-terminal routing. See the parent engineering
 review for thermal and procurement gates still blocking manufacture.
 
-Host-bus benchmark request: [#5072](https://github.com/rjwalters/kicad-tools/issues/5072).
+Host-bus benchmark request: [#5072](https://github.com/2AMLogic/kicad-tools/issues/5072).
 
 ## Executable benchmark
 
