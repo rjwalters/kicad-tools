@@ -888,16 +888,17 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         rc = _preload_voltage_map(args)
         if rc != 0:
             return rc
+        _audit = CreepageAudit(
+            voltage_map=args.voltage_map,
+            standard=getattr(args, "creepage_standard", "iec60664"),
+            pollution_degree=getattr(args, "pollution_degree", 2),
+            material_group=getattr(args, "material_group", "IIIa"),
+            hv_threshold=getattr(args, "hv_threshold", 30.0),
+        )
         creepage_kwargs = {
-            "creepage_audit": CreepageAudit(
-                voltage_map=args.voltage_map,
-                standard=getattr(args, "creepage_standard", "iec60664"),
-                pollution_degree=getattr(args, "pollution_degree", 2),
-                material_group=getattr(args, "material_group", "IIIa"),
-                hv_threshold=getattr(args, "hv_threshold", 30.0),
-            ),
+            "creepage_audit": _audit,
             "creepage_baseline_text": pcb_path.read_text(),
-            "creepage_required_pairs": getattr(args, "_pairwise_required", None),
+            "creepage_required_pairs": _audit.required_pairs(),
         }
 
     from dataclasses import replace as _replace

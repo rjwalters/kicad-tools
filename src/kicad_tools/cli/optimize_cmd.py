@@ -1198,38 +1198,6 @@ Shaped-on-purpose copper (Issue #9640):
     if pairwise_checker is not None:
         stats.creepage_skips = dict(pairwise_checker.skips)
 
-    # Issue #9640: name the pairs the whole-board audit scored (with margins
-    # before/after) and the voltage-map pairs it could not.  Both texts are
-    # the optimizer's output as written, before the zone refill below
-    # (#8286): the census scores stored fills, so after a refill the file
-    # on disk can score differently -- the before/after comparison stays
-    # apples-to-apples either way.
-    creepage_report: dict = {}
-    if creepage_audit is not None and creepage_input_text is not None and not args.dry_run:
-        from kicad_tools.creepage.output_audit import audit_summary
-
-        creepage_report = audit_summary(
-            creepage_audit,
-            creepage_input_text,
-            Path(args.output or pcb_path).read_text(),
-            getattr(args, "_pairwise_required", None),
-        )
-        before_n = creepage_report.get("creepage_unwaived_failures_before")
-        after_n = creepage_report.get("creepage_unwaived_failures_after")
-        if before_n is not None and after_n is not None and after_n > before_n:
-            print(
-                f"WARNING: optimizer output (before zone refill) has {after_n} unwaived "
-                f"creepage failures (input: {before_n}); re-run `kct creepage` "
-                "before tapeout",
-                file=sys.stderr,
-            )
-        elif before_n is None:
-            print(
-                "WARNING: creepage audit could not run on the written board; "
-                "creepage of the result is UNVERIFIED -- run `kct creepage`",
-                file=sys.stderr,
-            )
-
     # Issue #8286: the rewrite moved copper but the board still carries the
     # zone fills it was read with; ``kct check`` reads stored fills, so refill
     # once, after the final write, through the shared kicad-cli path.
@@ -1257,6 +1225,47 @@ Shaped-on-purpose copper (Issue #9640):
             Path(args.project) if args.project else None,
             pack=args.pour_slots_pack,
         )
+
+    # Issue #9640: gate the file the caller actually receives -- after the zone
+    # refill (#8286) and the optional pour-slot pass, both of which move
+    # zone copper the pre-refill census cannot see.  Name the pairs scored
+    # (margins before/after) and the voltage-map pairs it could not.  When the
+    # finished board leaves any pair further under its requirement than the
+    # input, the optimization is discarded and the input is kept verbatim.
+    creepage_report: dict = {}
+    creepage_reverted = False
+    if creepage_audit is not None and creepage_input_text is not None and not args.dry_run:
+        from kicad_tools.creepage.output_audit import audit_summary, worse_pairs
+
+        final_path = Path(args.output or pcb_path)
+        final_text = final_path.read_text()
+        excess = worse_pairs(creepage_audit, creepage_input_text, final_text)
+        if excess and "unverifiable" not in excess:
+            final_path.write_text(creepage_input_text)
+            creepage_reverted = True
+            stats.output_verify_rolled_back["creepage_final"] = sorted(excess)
+            final_text = creepage_input_text
+            print(
+                "WARNING: the finished board (after zone refill"
+                f"{' and pour slots' if pour_slots else ''}) left {len(excess)} creepage "
+                "pair(s) further under their requirement than the input; the "
+                "optimization was discarded and the input kept unchanged",
+                file=sys.stderr,
+            )
+        creepage_report = audit_summary(
+            creepage_audit,
+            creepage_input_text,
+            final_text,
+            creepage_audit.required_pairs(),
+        )
+        creepage_report["creepage_final_reverted_to_input"] = creepage_reverted
+        before_n = creepage_report.get("creepage_unwaived_failures_before")
+        if before_n is None:
+            print(
+                "WARNING: creepage audit could not run on the written board; "
+                "creepage of the result is UNVERIFIED -- run `kct creepage`",
+                file=sys.stderr,
+            )
 
     cli_drc: dict | None = None
     if args.drc_aware and not args.dry_run:

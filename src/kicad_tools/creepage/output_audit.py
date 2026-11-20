@@ -23,8 +23,10 @@ from typing import Any
 #: Shortfall resolution of the verifier's counts (mm).  A pair is reported as
 #: ``round(shortfall / SHORTFALL_STEP_MM)`` units (at least 1), so a rewrite is a
 #: regression when it moves a failing pair at least one step further under its
-#: requirement, or fails a pair that passed.
-SHORTFALL_STEP_MM = 0.01
+#: requirement, or fails a pair that passed.  0.1 um: exactly the census' reported
+#: margin precision (4 decimals), so a deeper shortfall -- e.g. -0.799 mm ->
+#: -0.800 mm -- is never rounded away (#9640 review).
+SHORTFALL_STEP_MM = 0.0001
 
 _CACHE_LIMIT = 16
 
@@ -59,6 +61,44 @@ class CreepageAudit:
         self.material_group = material_group
         self.hv_threshold = hv_threshold
         self._cache: dict[str, list[dict[str, Any]] | None] = {}
+
+    def required_pairs(self) -> dict[tuple[str, str], float] | None:
+        """Voltage-map pairs the census is expected to score (``{(a, b): mm}``).
+
+        Derived here from the map file with the census' own semantics --
+        interval-aware worst case ``max(|a.hi - b.lo|, |b.hi - a.lo|)``, then
+        ``_pair_bounds`` caps, then the HV threshold -- rather than from a
+        caller's scalar-collapsed routing table.  ``None`` when the map cannot
+        be read (the audit itself then reports "unverified").
+        """
+        from kicad_tools.placement.hv_domains import build_required_by_domain_pair
+        from kicad_tools.router.pairwise_clearance import (
+            _norm_net_key,
+            load_pair_bounds,
+            load_signed_voltage_map,
+            load_voltage_intervals,
+        )
+
+        try:
+            path = Path(self.voltage_map)
+            voltages = {
+                _norm_net_key(n): float(v) for n, v in load_signed_voltage_map(path).items()
+            }
+            intervals = {
+                _norm_net_key(n): (float(lo), float(hi))
+                for n, (lo, hi) in load_voltage_intervals(path).items()
+            }
+            return build_required_by_domain_pair(
+                voltages,
+                standard_id=self.standard,
+                pollution_degree=self.pollution_degree,
+                material_group=self.material_group,
+                hv_threshold=self.hv_threshold,
+                pair_bounds=load_pair_bounds(path) or None,
+                domain_intervals=intervals,
+            )
+        except Exception:
+            return None
 
     def census(self, board_text: str) -> list[dict[str, Any]] | None:
         """Every audited pair row (JSON dicts) of ``board_text``; ``None`` if it cannot run."""
@@ -119,6 +159,21 @@ def failing_units(pairs: list[dict[str, Any]]) -> dict[str, int]:
         shortfall = max(0.0, -float(p.get("margin_mm", 0.0)))
         out[pair_key(p)] = max(1, round(shortfall / SHORTFALL_STEP_MM))
     return out
+
+
+def worse_pairs(audit: CreepageAudit, before_text: str, after_text: str) -> dict[str, int]:
+    """Pairs ``after_text`` leaves further under requirement than ``before_text``.
+
+    ``{pair key: shortfall units}``: a pair failing in ``after_text`` whose
+    shortfall exceeds its shortfall in ``before_text`` (0 when it passed).  If
+    either census cannot run the result is ``{"unverifiable": 1}`` -- never a
+    pass.
+    """
+    base = audit(before_text)
+    cur = audit(after_text)
+    if base is None or cur is None:
+        return {"unverifiable": 1}
+    return {k: n for k, n in cur.items() if n > base.get(k, 0)}
 
 
 def audit_summary(

@@ -5037,7 +5037,21 @@ def _add_reason_parser(subparsers) -> None:
 
 def _add_optimize_parser(subparsers) -> None:
     """Add optimize-traces subcommand parser."""
-    optimize_parser = subparsers.add_parser("optimize-traces", help="Optimize PCB traces")
+    optimize_parser = subparsers.add_parser(
+        "optimize-traces",
+        help="Optimize PCB traces",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Shaped-on-purpose copper (Issue #9640):\n"
+            "  Lock a track (or arc) in KiCad to mark a run as shaped on purpose.\n"
+            "  optimize-traces leaves every net that owns a locked track untouched\n"
+            "  and lists it as locked_nets_skipped. With --voltage-map, the finished\n"
+            "  candidate (after zone refill and --pour-slots) is audited and the\n"
+            "  affected nets are rolled back, or the input kept, when any pair ends\n"
+            "  further under its creepage requirement. `kct pcb prune` also skips\n"
+            "  locked tracks (individually, not per net)."
+        ),
+    )
     optimize_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     optimize_parser.add_argument("-o", "--output", help="Output file (default: modify in place)")
     optimize_net_group = optimize_parser.add_mutually_exclusive_group()

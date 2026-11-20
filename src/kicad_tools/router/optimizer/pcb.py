@@ -186,6 +186,7 @@ def _is_unresolvable_numeric_ref(
 resolve_block_net = _resolve_block_net
 
 
+_RE_QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"')
 _RE_LOCKED = re.compile(r"\(locked\s+yes\s*\)|\(locked\s*\)|(?<=[\s)])locked(?=[\s)])")
 
 
@@ -200,12 +201,16 @@ def locked_segment_nets(pcb_text: str) -> set[str]:
     net_names = parse_net_names(pcb_text)
     name_to_id = {name: nid for nid, name in net_names.items()}
     locked: set[str] = set()
-    for _start, _end, block in _extract_balanced_blocks(pcb_text, "segment"):
-        if not _RE_LOCKED.search(block):
-            continue
-        resolved = _resolve_block_net(block, net_names, name_to_id)
-        if resolved and resolved[1]:
-            locked.add(resolved[1])
+    # Straight tracks and copper arcs both carry the lock field.
+    for kind in ("segment", "arc"):
+        for _start, _end, block in _extract_balanced_blocks(pcb_text, kind):
+            # Quoted strings (net names, uuids) are data, never lock tokens:
+            # a net called "sense locked rail" does not lock its track.
+            if not _RE_LOCKED.search(_RE_QUOTED.sub('""', block)):
+                continue
+            resolved = _resolve_block_net(block, net_names, name_to_id)
+            if resolved and resolved[1]:
+                locked.add(resolved[1])
     return locked
 
 
