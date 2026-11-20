@@ -53,7 +53,7 @@ from typing import TYPE_CHECKING
 
 from ..copper_refs import board_origin
 from ..violations import DRCResults, DRCViolation
-from .base import DRC_TOLERANCE, DRCRule
+from .base import DRCRule, drc_clear
 from .clearance import CopperElement, _segment_segment_clearance
 
 if TYPE_CHECKING:
@@ -271,7 +271,7 @@ class DiffPairClearanceIntraRule(DRCRule):
                 # generic ClearanceRule uses; do NOT duplicate).
                 clearance, loc_x, loc_y = _segment_segment_clearance(elem1, elem2)
 
-                if clearance + DRC_TOLERANCE < threshold:
+                if not drc_clear(clearance, threshold):
                     violations.append(
                         self._create_violation(
                             elem1, elem2, clearance, threshold, layer_name, loc_x, loc_y

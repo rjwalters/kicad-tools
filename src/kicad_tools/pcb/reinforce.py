@@ -78,8 +78,9 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
-from kicad_tools.core.geometry import rotate_pad_offset
+from kicad_tools.core.geometry import point_in_polygon, rotate_pad_offset
 from kicad_tools.core.types import CopperLayer
 from kicad_tools.manufacturers.base import DesignRules
 from kicad_tools.physics.wire_gauge import (
@@ -106,7 +107,7 @@ from kicad_tools.router.via_clearance import (
     drill_hole_to_hole_clear,
     point_clear_of_copper,
 )
-from kicad_tools.schema.pcb import PCB, Pad, Segment
+from kicad_tools.schema.pcb import PCB, GraphicArc, GraphicLine, Pad, Segment
 
 # Default spacing between mid-run anchors (mm). Matches the architect's
 # ``ReinforcementSpec.anchor_spacing_mm`` default.
@@ -452,6 +453,16 @@ class RefusedOpening:
     required_mm: float
     actual_mm: float
     obstacle_net: str = ""
+    #: Blocking feature (#9649): its copper layer, or ``"through"`` for a
+    #: plated feature on every layer (via, PTH pad).
+    obstacle_layer: str = ""
+    #: ``track`` / ``via`` / ``pad`` / ``zone`` (#9649).
+    obstacle_kind: str = ""
+    #: Board-relative point on the blocking obstacle -- same feature the
+    #: measured gap comes from, never a nearer neighbour that clears --
+    #: also where the leg would have to be split to open around it
+    #: (#9649, #9657).
+    obstacle_at: tuple[float, float] | None = None
 
 
 @dataclass
@@ -1181,6 +1192,15 @@ class _Violation:
     required_mm: float
     actual_mm: float
     obstacle_net: str = ""
+    #: Obstacle attribution (#9649, mask-opening test only): copper layer
+    #: the blocking feature sits on, or ``"through"`` for a plated feature
+    #: that spans every layer (via, PTH pad). Empty when unattributed.
+    obstacle_layer: str = ""
+    #: ``track`` / ``via`` / ``pad`` / ``zone`` (#9649). Empty when unattributed.
+    obstacle_kind: str = ""
+    #: Board-relative point on the blocking obstacle itself -- same feature
+    #: the measured gap comes from (#9649, #9657).
+    obstacle_at: tuple[float, float] | None = None
 
 
 @dataclass
@@ -1325,6 +1345,26 @@ class _OtherNetCopper:
     net_names: dict[int, str] = field(default_factory=dict)
     #: ``(x, y, drill_mm)`` of every via and PTH pad, same-net included.
     all_drills: list[tuple[float, float, float]] = field(default_factory=list)
+    #: Copper grouped by its own layer, then net (#9649): tracks, zone
+    #: fills and SMD pads. Read by the layer-aware mask-opening test; the
+    #: layer-agnostic anchor test keeps using ``by_net``.
+    by_layer: dict[str, dict[int, _NetCopper]] = field(default_factory=dict)
+    #: Plated features spanning every copper layer, by net (#9649): vias
+    #: and PTH pads. On the opening's creepage path whatever face it is on.
+    through: dict[int, _NetCopper] = field(default_factory=dict)
+    #: Non-plated openings that carry the creepage path to the far face
+    #: (#9657): circles ``(cx, cy, r)`` -- NPTH bores (any net; a same-net
+    #: mounting hole is still a hole) and ``gr_circle`` Edge.Cuts cutouts.
+    opening_circles: list[tuple[float, float, float]] = field(default_factory=list)
+    #: Straight ``Edge.Cuts`` geometry (board outline, slots, rect/poly
+    #: cutouts) as segment pairs (#9657).
+    opening_segments: list[tuple[tuple[float, float], tuple[float, float]]] = field(
+        default_factory=list
+    )
+    #: Curved ``Edge.Cuts`` geometry as ``(start, mid, end)`` arcs (#9657).
+    opening_arcs: list[tuple[tuple[float, float], tuple[float, float], tuple[float, float]]] = (
+        field(default_factory=list)
+    )
 
 
 @dataclass
@@ -1342,6 +1382,10 @@ def _collect_other_net_copper(
 ) -> _OtherNetCopper:
     """Build the obstacle set: other-net copper by net, all drills (any net).
 
+    Also collects the board's non-plated openings (#9657): NPTH bores and
+    ``Edge.Cuts`` geometry, along which the opening test re-admits far-face
+    copper.
+
     A same-net via that already has this pass's anchor geometry is a previous
     anchor, not an obstacle: skipping it keeps a re-run idempotent (the same
     candidates are chosen and ``add_via(dedupe=True)`` drops the duplicates).
@@ -1352,11 +1396,20 @@ def _collect_other_net_copper(
     def group(net_number: int) -> _NetCopper:
         return other.by_net.setdefault(net_number, _NetCopper())
 
+    def layer_group(layer: str, net_number: int) -> _NetCopper:
+        return other.by_layer.setdefault(layer, {}).setdefault(net_number, _NetCopper())
+
+    def through_group(net_number: int) -> _NetCopper:
+        return other.through.setdefault(net_number, _NetCopper())
+
     for seg in pcb.segments:
         if seg.net_number == target_net:
             continue
         (sx, sy), (ex, ey) = seg.start, seg.end
         group(seg.net_number).tracks.append(_TrackObstacle(sx, sy, ex, ey, seg.width))
+        layer_group(seg.layer, seg.net_number).tracks.append(
+            _TrackObstacle(sx, sy, ex, ey, seg.width)
+        )
 
     for via in pcb.vias:
         vx, vy = via.position
@@ -1370,6 +1423,9 @@ def _collect_other_net_copper(
         if via.net_number == target_net:
             continue
         group(via.net_number).vias.append((vx, vy, via.size, via.net_number))
+        # Every via is plated through whatever its span says (#9649): on the
+        # opening's creepage path on both faces (tenting is not tracked).
+        through_group(via.net_number).vias.append((vx, vy, via.size, via.net_number))
 
     for fp in pcb.footprints:
         for pad in fp.pads:
@@ -1379,18 +1435,82 @@ def _collect_other_net_copper(
             px, py = pos
             if pad.drill > 0:
                 other.all_drills.append((px, py, pad.drill))
+                if pad.type == "np_thru_hole":
+                    # Unplated bore (#9657): the bare hole wall is an
+                    # insulating surface to the far face.
+                    other.opening_circles.append((px, py, pad.drill / 2.0))
             if pad.net_number == target_net:
                 continue
             # Effective bounding radius of the pad (disc model).
             radius = max(pad.size) / 2.0 if pad.size else 0.0
             group(pad.net_number).pads.append((px, py, radius, pad.net_number))
+            if pad.drill > 0 or pad.type == "thru_hole" or "*.Cu" in pad.layers:
+                # Plated through (or wildcard copper): on every layer (#9649).
+                through_group(pad.net_number).pads.append((px, py, radius, pad.net_number))
+            else:
+                for pad_layer in pad.layers:
+                    if pad_layer == "F&B.Cu":
+                        # KiCad's both-outer-faces selector: the opening test
+                        # looks each face up by its own key, so a literal
+                        # ``"F&B.Cu"`` entry would be missed (#9657).
+                        layer_group("F.Cu", pad.net_number).pads.append(
+                            (px, py, radius, pad.net_number)
+                        )
+                        layer_group("B.Cu", pad.net_number).pads.append(
+                            (px, py, radius, pad.net_number)
+                        )
+                    elif pad_layer.endswith(".Cu"):
+                        layer_group(pad_layer, pad.net_number).pads.append(
+                            (px, py, radius, pad.net_number)
+                        )
 
     for zone in pcb.zones:
         if zone.net_number == target_net:
             continue
-        for poly in zone.filled_polygons:
+        for i, poly in enumerate(zone.filled_polygons):
             if len(poly) >= 3:
-                group(zone.net_number).filled_polygons.append(_FilledPolyObstacle(list(poly)))
+                obstacle = _FilledPolyObstacle(list(poly))
+                group(zone.net_number).filled_polygons.append(obstacle)
+                layer_group(zone.filled_polygon_layer(i), zone.net_number).filled_polygons.append(
+                    obstacle
+                )
+
+    # Edge.Cuts is an unplated opening too (#9657): the creepage path can
+    # run around the board edge or through a slot/cutout, so the opening
+    # test re-admits far-face copper near it.
+    # ``PCB._detect_board_origin`` shifts footprints, segments, vias and zones
+    # to board-relative but leaves graphic items sheet-absolute, so convert
+    # every outline coordinate here to match the samples (#9657).
+    ox, oy = pcb.board_origin
+
+    def _rel(pt: tuple[float, float]) -> tuple[float, float]:
+        return (float(pt[0]) - ox, float(pt[1]) - oy)
+
+    for item in pcb.graphic_items:
+        if item.layer != "Edge.Cuts":
+            continue
+        if isinstance(item, GraphicArc):
+            other.opening_arcs.append((_rel(item.start), _rel(item.mid), _rel(item.end)))
+        elif isinstance(item, GraphicLine):
+            other.opening_segments.append((_rel(item.start), _rel(item.end)))
+        elif item.graphic_type == "rect":
+            (sx, sy), (ex, ey) = _rel(item.start), _rel(item.end)
+            other.opening_segments.extend(
+                (
+                    ((sx, sy), (ex, sy)),
+                    ((ex, sy), (ex, ey)),
+                    ((ex, ey), (sx, ey)),
+                    ((sx, ey), (sx, sy)),
+                )
+            )
+        elif item.graphic_type == "circle" and item.center is not None:
+            radius = math.dist(item.center, item.start)
+            if radius > 0.0:
+                cx, cy = _rel(item.center)
+                other.opening_circles.append((cx, cy, radius))
+        elif item.graphic_type == "poly" and len(item.points) >= 2:
+            pts = [_rel(pt) for pt in item.points]
+            other.opening_segments.extend(zip(pts, pts[1:] + pts[:1], strict=False))
 
     return other
 
@@ -2313,19 +2433,179 @@ def _sub_polyline(
     return out
 
 
+#: Opening-test obstacle kinds in check order, mapped to the
+#: :class:`_NetCopper` list that holds them (#9649).
+_OPENING_OBSTACLE_KINDS: tuple[tuple[str, str], ...] = (
+    ("track", "tracks"),
+    ("via", "vias"),
+    ("pad", "pads"),
+    ("zone", "filled_polygons"),
+)
+
+
+def _nearest_point_on_segment(
+    p: tuple[float, float], a: tuple[float, float], b: tuple[float, float]
+) -> tuple[float, float]:
+    """The point of segment ``a``-``b`` nearest ``p``."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    seg2 = dx * dx + dy * dy
+    if seg2 <= 1e-18:
+        return a
+    t = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / seg2))
+    return (a[0] + t * dx, a[1] + t * dy)
+
+
+def _obstacle_point(kind: str, item: Any, x: float, y: float) -> tuple[float, float] | None:
+    """A locating point on one obstacle of ``kind`` (#9649, #9657).
+
+    Track centerline, via centre or pad centre; for a zone fill the
+    nearest boundary point, or the sample itself when it lies inside
+    the fill -- interior copper, not the edge, is what blocks (#9657).
+    """
+    p = (x, y)
+    if kind == "track":
+        return _nearest_point_on_segment(p, (item.start_x, item.start_y), (item.end_x, item.end_y))
+    if kind == "via":
+        return (item[0], item[1])
+    if kind == "pad":
+        return (item[0], item[1])
+    pts = [(float(px), float(py)) for px, py in item.points]
+    if point_in_polygon(x, y, pts, boundary_inside=True):
+        return p
+    best: tuple[float, float] | None = None
+    best_d = math.inf
+    for a, b in zip(pts, pts[1:] + pts[:1], strict=False):
+        q = _nearest_point_on_segment(p, a, b)
+        d = math.dist(p, q)
+        if d < best_d:
+            best, best_d = q, d
+    return best
+
+
+def _opening_blocker(
+    kind: str,
+    field_name: str,
+    items: list[Any],
+    x: float,
+    y: float,
+    exposed_width: float,
+    required: float,
+) -> tuple[float, tuple[float, float] | None] | None:
+    """The worst single blocking obstacle of ``kind`` at sample ``(x, y)``.
+
+    Returns that obstacle's measured gap and a point on that **same**
+    obstacle (#9657): the gap and the reported coordinates must identify
+    the same copper, never a nearer neighbour that clears the opening.
+    Among several blockers the one with the smallest gap wins.
+    """
+    worst: tuple[float, tuple[float, float] | None] | None = None
+    for item in items:
+        single = _NetCopper(**{field_name: [item]})
+        if _group_clear(x, y, exposed_width, required, single):
+            continue
+        gap = _actual_gap(x, y, exposed_width, required, single)
+        if worst is None or gap < worst[0]:
+            worst = (gap, _obstacle_point(kind, item, x, y))
+    return worst
+
+
+def _arc_centre_radius(
+    start: tuple[float, float], mid: tuple[float, float], end: tuple[float, float]
+) -> tuple[tuple[float, float], float] | None:
+    """Circumcentre and radius of the circle through three arc points, or
+    ``None`` when the points are collinear (a degenerate arc)."""
+    ax, ay = start
+    bx, by = mid
+    cx, cy = end
+    d = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs(d) < 1e-12:
+        return None
+    a2, b2, c2 = ax * ax + ay * ay, bx * bx + by * by, cx * cx + cy * cy
+    ux = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / d
+    uy = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / d
+    return (ux, uy), math.hypot(ax - ux, ay - uy)
+
+
+def _point_to_arc_distance(
+    p: tuple[float, float],
+    start: tuple[float, float],
+    mid: tuple[float, float],
+    end: tuple[float, float],
+) -> float:
+    """Planar distance from ``p`` to the arc through ``start``-``mid``-``end`` (#9657)."""
+    centre_radius = _arc_centre_radius(start, mid, end)
+    if centre_radius is None:
+        return min(
+            math.dist(p, _nearest_point_on_segment(p, start, mid)),
+            math.dist(p, _nearest_point_on_segment(p, mid, end)),
+        )
+    (cx, cy), r = centre_radius
+    a_start = math.atan2(start[1] - cy, start[0] - cx)
+    a_mid = math.atan2(mid[1] - cy, mid[0] - cx)
+    a_end = math.atan2(end[1] - cy, end[0] - cx)
+    a_p = math.atan2(p[1] - cy, p[0] - cx)
+
+    def ccw(angle: float) -> float:
+        return angle % (2.0 * math.pi)
+
+    if ccw(a_mid - a_start) <= ccw(a_end - a_start):
+        on_arc = ccw(a_p - a_start) <= ccw(a_end - a_start)
+    else:
+        on_arc = ccw(a_start - a_p) <= ccw(a_start - a_end)
+    if on_arc:
+        return abs(math.hypot(p[0] - cx, p[1] - cy) - r)
+    return min(math.dist(p, start), math.dist(p, end))
+
+
+def _near_unplated_opening(
+    x: float, y: float, exposed_width: float, required: float, other: _OtherNetCopper
+) -> bool:
+    """True when a non-plated opening is near enough to matter (#9657).
+
+    The through-opening surface path is ``d(strip, opening) + board
+    thickness + d(opening, far-face copper)``, every term of which only
+    lengthens it beyond the planar distance used here -- so gating on the
+    strip being within ``required`` of the opening never misses a path
+    that would come up short.
+    """
+    p = (x, y)
+    reach = required + exposed_width / 2.0
+    for cx, cy, r in other.opening_circles:
+        if math.hypot(x - cx, y - cy) - r < reach:
+            return True
+    for a, b in other.opening_segments:
+        if math.dist(p, _nearest_point_on_segment(p, a, b)) < reach:
+            return True
+    for start, mid, end in other.opening_arcs:
+        if _point_to_arc_distance(p, start, mid, end) < reach:
+            return True
+    return False
+
+
 def _opening_violation(
     run: list[tuple[float, float]],
     exposed_width: float,
     other: _OtherNetCopper,
     policy: _ClearancePolicy,
+    layer: str,
 ) -> _Violation | None:
     """Creepage test of an exposed run, modelled as a chain of discs.
 
     The exposed copper has half-width ``exposed_width / 2``; each obstacle
     net must keep ``policy.required(net)`` (``max(class floor, creepage @
-    |dV|)`` with a voltage map) from it. Layer-agnostic like the anchor test:
-    other-net copper on the far side is treated as an obstacle too
-    (conservative).
+    |dV|)`` with a voltage map) from it. Layer-aware (#9649): only copper
+    on the opening's own face (``layer``) and through-plated features
+    (vias, PTH pads) are on the strip's creepage path -- far-side copper
+    sits under laminate, not on it. The anchor-hole test stays
+    layer-agnostic: a barrel and its fillet are on both faces.
+
+    Far-face exception (#9657): creepage is measured along every
+    insulating surface, and a non-plated opening -- an NPTH bore, an
+    ``Edge.Cuts`` slot/cutout or the board outline -- is one of them (the
+    path runs down the bare bore or around the board edge). For samples
+    within ``required`` of such an opening the far face's copper is kept
+    in the test, measured by its planar distance: a lower bound on the
+    through-opening surface path, so it never misses a short one.
     """
     step = max(0.05, min(_MASK_SAMPLE_STEP_MM, exposed_width / 2.0))
     samples: list[tuple[float, float]] = []
@@ -2333,18 +2613,46 @@ def _opening_violation(
         n = max(1, math.ceil(math.hypot(x1 - x0, y1 - y0) / step))
         samples.extend((x0 + (x1 - x0) * k / n, y0 + (y1 - y0) * k / n) for k in range(n))
     samples.append(run[-1])
-    for net_number, group in other.by_net.items():
+    same_face = other.by_layer.get(layer, {})
+    far_face = "B.Cu" if layer == "F.Cu" else "F.Cu"
+    has_openings = bool(other.opening_circles or other.opening_segments or other.opening_arcs)
+    for net_number in other.by_net:
         net = other.net_names.get(net_number, "")
         required, rule = policy.required(net)
-        for x, y in samples:
-            if not _group_clear(x, y, exposed_width, required, group):
-                tag = (
-                    RULE_MASK_OPENING_PAIRWISE
-                    if rule == RULE_VOLTAGE_MAP_PAIRWISE
-                    else RULE_MASK_OPENING_CLEARANCE
-                )
-                gap = _actual_gap(x, y, exposed_width, required, group)
-                return _Violation(tag, required, gap, net)
+        sources: list[tuple[str, _NetCopper | None, list[tuple[float, float]]]] = [
+            (layer, same_face.get(net_number), samples),
+            ("through", other.through.get(net_number), samples),
+        ]
+        if has_openings:
+            far_group = other.by_layer.get(far_face, {}).get(net_number)
+            if far_group is not None:
+                # Only samples a non-plated opening shortens the path for
+                # (#9657); elsewhere the far face stays under laminate.
+                far_samples = [
+                    (x, y)
+                    for x, y in samples
+                    if _near_unplated_opening(x, y, exposed_width, required, other)
+                ]
+                if far_samples:
+                    sources.append((far_face, far_group, far_samples))
+        for source, group, source_samples in sources:
+            if group is None:
+                continue
+            for kind, field_name in _OPENING_OBSTACLE_KINDS:
+                items = getattr(group, field_name)
+                if not items:
+                    continue
+                for x, y in source_samples:
+                    blocker = _opening_blocker(
+                        kind, field_name, items, x, y, exposed_width, required
+                    )
+                    if blocker is not None:
+                        tag = (
+                            RULE_MASK_OPENING_PAIRWISE
+                            if rule == RULE_VOLTAGE_MAP_PAIRWISE
+                            else RULE_MASK_OPENING_CLEARANCE
+                        )
+                        return _Violation(tag, required, blocker[0], net, source, kind, blocker[1])
     return None
 
 
@@ -2371,12 +2679,24 @@ def _plan_mask_opening(
     # half-width max(opening, wire diameter) / 2.
     if policy.pairwise is not None:
         exposed = max(width, bare_copper_diameter_mm(result.wire_gauge_awg))
-        v = _opening_violation(run, exposed, other, policy)
+        v = _opening_violation(run, exposed, other, policy, leg.layer)
         if v is not None:
+            obstacle = ""
+            if v.obstacle_kind:
+                obstacle = f"{v.obstacle_kind} on {v.obstacle_layer}"
+                if v.obstacle_at is not None:
+                    # Sheet coordinates: both user-facing reports (CLI text
+                    # line and JSON) quote this prose verbatim, while the
+                    # structured fields are origin-shifted by the reporter
+                    # -- all four must agree (#9657).
+                    ox, oy = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+                    obstacle += (
+                        f" at ({v.obstacle_at[0] + ox:.3f}, {v.obstacle_at[1] + oy:.3f}) mm -- "
+                    )
             leg.mask_status = MASK_REFUSED
             leg.mask_reason = (
                 f"exposed run would be {v.actual_mm:.3f} mm from net {v.obstacle_net!r} "
-                f"(need {v.required_mm:.3f} mm, {v.rule}); no opening written"
+                f"({obstacle}need {v.required_mm:.3f} mm, {v.rule}); no opening written"
             )
             result.refused_openings.append(
                 RefusedOpening(
@@ -2387,6 +2707,9 @@ def _plan_mask_opening(
                     required_mm=v.required_mm,
                     actual_mm=v.actual_mm,
                     obstacle_net=v.obstacle_net,
+                    obstacle_layer=v.obstacle_layer,
+                    obstacle_kind=v.obstacle_kind,
+                    obstacle_at=v.obstacle_at,
                 )
             )
             return
