@@ -41,7 +41,7 @@ def _write_sidecar(directory: Path, **entry) -> Path:
         "manufacturer": JLC_TIER1_MFR,
         "source": "https://jlcpcb.com/capabilities/pcb-capabilities/",
         "reason": "Published pad-hole minimum; matches reviewed geometry",
-        "tracking_issue": "https://github.com/rjwalters/kicad-tools/issues/5006",
+        "tracking_issue": "https://github.com/2AMLogic/kicad-tools/issues/5006",
     }
     defaults.update(entry)
     sidecar = directory / "fabrication_overrides.json"
@@ -64,7 +64,7 @@ def _valid_override(**kwargs) -> FabricationOverride:
         "manufacturer_id": JLC_TIER1_MFR,
         "source": "https://jlcpcb.com/capabilities/pcb-capabilities/",
         "reason": "Published pad-hole minimum; matches reviewed geometry",
-        "tracking_issue": "https://github.com/rjwalters/kicad-tools/issues/5006",
+        "tracking_issue": "https://github.com/2AMLogic/kicad-tools/issues/5006",
     }
     defaults.update(kwargs)
     return FabricationOverride(**defaults)
@@ -189,7 +189,7 @@ def test_load_fabrication_overrides_round_trips(tmp_path: Path):
                         "manufacturer": JLC_TIER1_MFR,
                         "source": "https://jlcpcb.com/capabilities/pcb-capabilities/",
                         "reason": "Published pad-hole minimum",
-                        "tracking_issue": "https://github.com/rjwalters/kicad-tools/issues/5006",
+                        "tracking_issue": "https://github.com/2AMLogic/kicad-tools/issues/5006",
                     }
                 }
             }
@@ -202,7 +202,7 @@ def test_load_fabrication_overrides_round_trips(tmp_path: Path):
     assert overrides[0].field == "min_hole_to_hole_mm"
     assert overrides[0].value == 0.45
     assert overrides[0].manufacturer_id == JLC_TIER1_MFR
-    assert overrides[0].tracking_issue == "https://github.com/rjwalters/kicad-tools/issues/5006"
+    assert overrides[0].tracking_issue == "https://github.com/2AMLogic/kicad-tools/issues/5006"
 
     # And it survives the full validate + apply pipeline.
     rules = _rules()

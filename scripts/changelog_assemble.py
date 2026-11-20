@@ -74,7 +74,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_FRAGMENTS_DIR = REPO_ROOT / "changelog.d"
 DEFAULT_CHANGELOG = REPO_ROOT / "CHANGELOG.md"
-DEFAULT_REPO_SLUG = "rjwalters/kicad-tools"
+DEFAULT_REPO_SLUG = "2AMLogic/kicad-tools"
 
 #: Fragment kinds, in the order their sections appear in a release.
 KINDS: tuple[str, ...] = ("upgrade", "fixed", "added", "changed", "performance")

@@ -132,7 +132,7 @@ describe("known issues (#7261)", () => {
   });
 
   it("links each issue to the tracker", () => {
-    expect(knownIssueHref(7250)).toBe("https://github.com/rjwalters/kicad-tools/issues/7250");
+    expect(knownIssueHref(7250)).toBe("https://github.com/2AMLogic/kicad-tools/issues/7250");
   });
 });
 

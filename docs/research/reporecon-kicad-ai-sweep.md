@@ -40,7 +40,7 @@ has 2 stars and is AGPL-3.0, below the threshold, so it is not recorded.
 | nevenfo/kicad-agentic-mcp | 5 | AGPL-3.0 | copyleft-ideas-only | watch | Rust, days old; README not studied |
 | devbisme/ai-circuit-design-tests | 6 | none | unlicensed | watch | Third-party bench, see below |
 | 2262727886-stack/mspm0g-contest-skill | 320 | none | - | ignore | TI MSPM0G3507 / K230 car dev kit; KiCad files are incidental, no KiCad tooling |
-| rjwalters/kicad-tools | 69 | MIT | - | ignore | This repo |
+| 2AMLogic/kicad-tools | 69 | MIT | - | ignore | This repo |
 | FareedKhan-dev/ai-pc | 10 | proprietary | - | ignore | Windows desktop-automation agent, not KiCad-specific; all rights reserved |
 | Finerestaurant/kicad-mcp-python | 41 | none | - | ignore | Last push 2025-07-15, unlicensed, IPC server superseded by kipilot-mcp / KiCad AI Assistant |
 | 10-X-eng/KiChad | 22 | GPL-3.0 (KiCad fork) | - | ignore | A KiCad fork with a build environment; forking KiCad is a kct non-goal |

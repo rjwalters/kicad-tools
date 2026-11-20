@@ -16,6 +16,23 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-19
 
+- **Issue #9637** (closed): kct check: LVS compares the board against project.kct's schematic even when the board being checked is a different artifact
+- **PR #9641**: fix(check): use project.kct schematic only for the board it names
+- **Issue #9686** (closed): Release daemon Judge steps promptly when PR checks are pending
+- **PR #9317**: fix: point hard-coded repository URLs at the 2AMLogic organization
+- **Issue #9621** (closed): Router: group mode for similar-length nets without a shared naming convention (length window, escape order)
+- **PR #9633**: feat: add --group-length-window synthetic bus groups for similar-length nets
+- **PR #9688**: docs: hand pending-CI PRs back from daemon Judge steps
+- **Issue #9670** (closed): DRU clearance reading: stale case-insensitivity docstring for memberOfFootprint, and (severity ignore) honoured in only one of three buckets
+- **PR #9672**: fix: skip (severity ignore) DRU rules in all clearance buckets; correct memberOfFootprint docstring
+- **Issue #9663** (closed): route-auto stale-write guard: take the file signature before the load, not after the parse
+- **PR #9664**: fix: take route-auto stale-write signature before the board load
+- **Issue #9648** (closed): path_ampacity does not credit a buttress wire: a fully wired leg is still 'too narrow' at the bare trace width
+- **PR #9650**: fix: credit fully wired buttress wires in path_ampacity
+- **Issue #9667** (closed): changelog.d/9637 needs an .upgrade.md: kct check can newly exit non-zero (INCOMPLETE) on a board the spec does not name
+- **PR #9668**: docs: add 9637 upgrade note for newly-reachable INCOMPLETE exit in kct check
+- **Issue #9602** (closed): Teach kct route / kct pcb to difference voltage-map intervals (signed-collapse consumers, #4411 follow-up)
+- **PR #9613**: fix: difference voltage-map intervals end-to-end in route-time pairwise tables
 - **PR #9587**: feat: add kct voltage-map-merge to merge per-scenario voltage maps into one envelope
 - **Issue #9590** (closed): Add kct probe and kct apply --checked: check a batch of proposed copper, then write atomically
 - **PR #9617**: feat: add kct probe and kct apply --checked for batch copper check-then-write

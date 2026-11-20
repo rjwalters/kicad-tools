@@ -134,5 +134,5 @@ Claude: [calls apply_move]
 ## Support
 
 For issues with the MCP server:
-- [GitHub Issues](https://github.com/rjwalters/kicad-tools/issues)
+- [GitHub Issues](https://github.com/2AMLogic/kicad-tools/issues)
 - [MCP Protocol Documentation](https://modelcontextprotocol.io/)

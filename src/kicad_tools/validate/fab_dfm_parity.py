@@ -67,7 +67,7 @@ from .violations import DRCViolation
 Status = Literal["covered", "partial", "not_covered"]
 
 #: Where the observed categories/thresholds came from (counts are hand-recorded).
-SOURCE = "https://github.com/rjwalters/kicad-tools/issues/8838"
+SOURCE = "https://github.com/2AMLogic/kicad-tools/issues/8838"
 RETRIEVED = "2026-11-12"
 
 #: Manufacturer ids the table applies to (``jlcpcb`` and its ``jlcpcb-tier*`` profiles).

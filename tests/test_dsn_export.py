@@ -796,14 +796,54 @@ class TestBoardOutline:
         assert "(boundary" not in dsn
         assert any("closed outline" in o for o in exporter.omissions)
 
-    def test_footprint_edge_cuts_listed(self, tmp_path):
+    def test_footprint_edge_cuts_exported_not_listed(self, tmp_path):
+        # Issue #9593: footprint-local Edge.Cuts is board outline per KiCad,
+        # so it is exported (polygonized together with the board-level rect),
+        # not omitted with a "footprint-embedded Edge.Cuts" note.
         fp = (
             '(footprint "X" (layer "F.Cu") (at 5 5)\n'
             '  (fp_line (start 0 0) (end 1 0) (layer "Edge.Cuts")))'
         )
         edges = '(gr_rect (start 0 0) (end 100 60) (layer "Edge.Cuts"))'
         exporter, _ = self._export(tmp_path, edges, fp)
-        assert any("footprint-embedded Edge.Cuts" in o for o in exporter.omissions)
+        assert not any("footprint-embedded Edge.Cuts" in o for o in exporter.omissions)
+        assert len(exporter._board_outline) == 4  # the board-level rect
+
+    def test_footprint_only_outline_exported(self, tmp_path):
+        # A board whose ONLY outline is footprint-level Edge.Cuts now exports.
+        fp = (
+            '(footprint "X" (layer "F.Cu") (at 50 30)\n'
+            '  (fp_line (start -40 -25) (end 40 -25) (layer "Edge.Cuts"))\n'
+            '  (fp_line (start 40 -25) (end 40 25) (layer "Edge.Cuts"))\n'
+            '  (fp_line (start 40 25) (end -40 25) (layer "Edge.Cuts"))\n'
+            '  (fp_line (start -40 25) (end -40 -25) (layer "Edge.Cuts")))'
+        )
+        exporter, dsn = self._export(tmp_path, "", fp)
+        assert not any("Edge.Cuts" in o or "board outline" in o.lower() for o in exporter.omissions)
+        poly = self._boundary(dsn)
+        assert poly.area == pytest.approx(80 * 50, abs=0.1)
+
+    def test_legacy_module_edge_cuts_cutout_exported(self, tmp_path):
+        # KiCad 5 ``(module ...)`` blocks carry the same footprint-local
+        # Edge.Cuts graphics; the shared reader used to filter on the modern
+        # ``footprint`` tag alone, so a legacy module's cut-out silently
+        # disappeared from DSN export (pinned kicad-cli's DXF export shows
+        # all eight lines). Both spellings must be accepted (#9593).
+        p = [(0, 0), (100, 0), (100, 60), (0, 60)]
+        edges = "\n".join(self._line(p[i], p[(i + 1) % 4]) for i in range(4))
+        mod = (
+            '(module "CUT" (layer "F.Cu") (at 40 30)\n'
+            '  (fp_line (start -10 -5) (end 10 -5) (layer "Edge.Cuts"))\n'
+            '  (fp_line (start 10 -5) (end 10 5) (layer "Edge.Cuts"))\n'
+            '  (fp_line (start 10 5) (end -10 5) (layer "Edge.Cuts"))\n'
+            '  (fp_line (start -10 5) (end -10 -5) (layer "Edge.Cuts")))'
+        )
+        exporter, dsn = self._export(tmp_path, edges, mod)
+        assert self._boundary(dsn).area == pytest.approx(6000)
+        keepouts = self._keepouts(dsn)
+        assert sorted(layer for layer, _ in keepouts) == ["B.Cu", "F.Cu"]
+        assert all(hole.area == pytest.approx(200.0) for _, hole in keepouts)
+        assert not any("Edge.Cuts" in o for o in exporter.omissions)
 
     def test_micron_gap_is_snapped(self, tmp_path):
         edges = "\n".join(

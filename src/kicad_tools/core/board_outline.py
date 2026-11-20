@@ -286,11 +286,237 @@ def circle_tessellation_points(
 
 
 def outline_graphics(root: SExp) -> Iterator[SExp]:
-    """Yield only direct, explicitly layer-qualified board outline graphics."""
+    """Yield every board outline graphic in sheet-absolute board coordinates.
+
+    Top-level ``gr_*`` graphics on Edge.Cuts pass through unchanged. Graphics
+    stored inside a footprint (``fp_line``/``fp_arc``/``fp_circle``/``fp_poly``/
+    ``fp_rect``/``fp_curve`` carrying a ``(layer "Edge.Cuts")`` child) are
+    re-emitted as equivalent ``gr_*`` nodes transformed into board coordinates,
+    because KiCad treats footprint-local Edge.Cuts as board outline (real
+    boards ship this way -- SparkFun's IoT RedBoard ESP32-P4 keeps its whole
+    outline in a locked footprint). The transform is each footprint's
+    placement frame: ``board = anchor + R(rotation) . local`` (Y-down
+    rotate). A back-side footprint needs no extra mirror: KiCad stores its
+    children's local geometry already mirrored across the x axis
+    (:func:`kicad_tools.schema.pcb.flip_footprint_children_to_back`,
+    Issue #8581), and applying the zone formula's ``M(is_back)`` here
+    double-mirrored every back-side outline (native-parity pinned by
+    ``tests/test_footprint_edge_cuts_outline.py``). Both the modern
+    ``(footprint ...)`` and legacy KiCad 5 ``(module ...)`` block tags are
+    accepted.
+
+    A footprint ``fp_rect`` is emitted as four ``gr_line`` nodes: a rotated
+    rectangle is not axis-aligned, and every outline consumer already handles
+    straight segments. Malformed footprint graphics raise ``ValueError`` like
+    their top-level counterparts.
+    """
     for node in root.iter_children():
         layer = node.find_child("layer")
         if node.tag and node.tag.startswith("gr_") and layer and layer.get_string(0) == "Edge.Cuts":
             yield node
+    yield from footprint_outline_graphics(root)
+
+
+_FP_OUTLINE_TAGS = frozenset({"fp_line", "fp_arc", "fp_circle", "fp_poly", "fp_rect", "fp_curve"})
+
+# Both spellings of a footprint block: modern ``(footprint ...)`` and the
+# KiCad 5 legacy ``(module ...)`` (the schema accepts both everywhere a
+# footprint block is walked; Edge.Cuts graphics inside a legacy module are
+# board outline exactly like modern ones).
+_FOOTPRINT_BLOCK_TAGS = frozenset({"footprint", "module"})
+
+
+def _footprint_frame(fp: SExp) -> tuple[Point, float]:
+    """``(sheet-absolute anchor, rotation deg)`` of a footprint/module node."""
+    at = fp.find_child("at")
+    if at is None or len(at.children) < 2:
+        raise ValueError("Malformed footprint Edge.Cuts: missing (at x y [angle]) anchor")
+    ax, ay = at.get_float(0), at.get_float(1)
+    if ax is None or ay is None or not math.isfinite(ax) or not math.isfinite(ay):
+        raise ValueError("Malformed footprint Edge.Cuts: invalid (at ...) anchor")
+    angle = at.get_float(2) if len(at.children) > 2 else 0.0
+    if angle is None or not math.isfinite(angle):
+        raise ValueError("Malformed footprint Edge.Cuts: invalid (at ...) rotation")
+    return (ax, ay), angle
+
+
+def _to_board_frame(local: Point, anchor: Point, angle_deg: float) -> Point:
+    """Push a footprint-local point through the placement frame.
+
+    KiCad stores a flipped footprint's local geometry already mirrored in
+    the file: flipping to the back rewrites the children's local ``y``
+    (verified black-box against pcbnew 10.0.6 ``Flip`` output in
+    :func:`kicad_tools.schema.pcb.flip_footprint_children_to_back`,
+    Issue #8581), so reading applies rotation and translation only -- an
+    extra mirror here would double-mirror every back-side footprint and
+    put its outline on the wrong side of the anchor (native-parity pinned
+    by ``tests/test_footprint_edge_cuts_outline.py``).
+    """
+    x, y = local
+    a = math.radians(angle_deg)
+    cos_a, sin_a = math.cos(a), math.sin(a)
+    return (anchor[0] + x * cos_a + y * sin_a, anchor[1] - x * sin_a + y * cos_a)
+
+
+def _xy_node(point: Point) -> SExp:
+    return SExp.list("xy", point[0], point[1])
+
+
+def _pts_node(points: list[Point]) -> SExp:
+    node = SExp.list("pts")
+    for point in points:
+        node.add(_xy_node(point))
+    return node
+
+
+def _layer_node() -> SExp:
+    return SExp.list("layer", "Edge.Cuts")
+
+
+def _footprint_outline_nodes(node: SExp, anchor: Point, angle_deg: float) -> list[SExp]:
+    """Re-emit one footprint Edge.Cuts graphic as board-frame ``gr_*`` node(s)."""
+    tag = node.tag or ""
+
+    def board(local: Point) -> Point:
+        return _to_board_frame(local, anchor, angle_deg)
+
+    if tag == "fp_line":
+        return [
+            SExp.list(
+                "gr_line",
+                SExp.list("start", *board(_point(node, "start"))),
+                SExp.list("end", *board(_point(node, "end"))),
+                _layer_node(),
+            )
+        ]
+
+    if tag == "fp_arc":
+        start, end = _point(node, "start"), _point(node, "end")
+        mid_child = node.find_child("mid")
+        if mid_child is not None:
+            mid = _coordinate(mid_child, "fp_arc mid")
+        else:
+            angle_child = node.find_child("angle")
+            sweep = (
+                angle_child.get_float(0)
+                if angle_child is not None and len(angle_child.children) == 1
+                else None
+            )
+            if sweep is None or not math.isfinite(sweep):
+                raise ValueError("Malformed Edge.Cuts fp_arc: missing mid or invalid legacy angle")
+            # Legacy fp_arc stores (start) = centre, (end) = first on-arc point.
+            start, mid, end = legacy_arc_points(end, start, sweep)
+        return [
+            SExp.list(
+                "gr_arc",
+                SExp.list("start", *board(start)),
+                SExp.list("mid", *board(mid)),
+                SExp.list("end", *board(end)),
+                _layer_node(),
+            )
+        ]
+
+    if tag == "fp_circle":
+        center, end = _point(node, "center"), _point(node, "end")
+        return [
+            SExp.list(
+                "gr_circle",
+                SExp.list("center", *board(center)),
+                SExp.list("end", *board(end)),
+                _layer_node(),
+            )
+        ]
+
+    if tag in ("fp_poly", "fp_curve"):
+        pts = node.find_child("pts")
+        chain = [_coordinate(xy, f"{tag} xy") for xy in pts.find_children("xy")] if pts else []
+        if tag == "fp_poly" and len(chain) < 3:
+            raise ValueError(f"Malformed Edge.Cuts {tag}: missing points")
+        if tag == "fp_curve" and len(chain) != 4:
+            raise ValueError(f"Malformed Edge.Cuts {tag}: expected four cubic control points")
+        return [
+            SExp.list(
+                "gr_poly" if tag == "fp_poly" else "gr_curve",
+                _pts_node([board(point) for point in chain]),
+                _layer_node(),
+            )
+        ]
+
+    if tag == "fp_rect":
+        # Four straight edges; rotation/mirror make an axis-aligned (start, end)
+        # pair meaningless, and every outline consumer already handles plain
+        # segments. Left open (KiCad's own gr_poly convention): consumers close.
+        (x1, y1), (x2, y2) = _point(node, "start"), _point(node, "end")
+        corners = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+        board_corners = [board(corner) for corner in corners]
+        return [
+            SExp.list(
+                "gr_line",
+                SExp.list("start", *board_corners[i]),
+                SExp.list("end", *board_corners[(i + 1) % 4]),
+                _layer_node(),
+            )
+            for i in range(4)
+        ]
+
+    raise ValueError(f"Unsupported footprint Edge.Cuts geometry: {tag}")
+
+
+def footprint_outline_graphics(root: SExp) -> Iterator[SExp]:
+    """Yield only the footprint-local Edge.Cuts graphics, in board coordinates.
+
+    The footprint-half of :func:`outline_graphics`; consumers that already
+    read top-level ``gr_*`` graphics through another path iterate this to add
+    the footprint contribution without double-counting the board-level ones.
+    """
+    for fp in root.iter_children():
+        if (fp.tag or "") not in _FOOTPRINT_BLOCK_TAGS:
+            continue
+        if not any(
+            (child.tag or "") in _FP_OUTLINE_TAGS
+            and (layer := child.find_child("layer")) is not None
+            and layer.get_string(0) == "Edge.Cuts"
+            for child in fp.iter_children()
+        ):
+            continue
+        anchor, angle = _footprint_frame(fp)
+        for node in fp.iter_children():
+            if (node.tag or "") in _FP_OUTLINE_TAGS:
+                layer = node.find_child("layer")
+                if layer is not None and layer.get_string(0) == "Edge.Cuts":
+                    yield from _footprint_outline_nodes(node, anchor, angle)
+
+
+def outline_node_points(node: SExp) -> list[Point]:
+    """Authored geometry points of one outline graphic node, in node coordinates.
+
+    ``gr_line``/``gr_rect`` yield ``[start, end]``; ``gr_arc`` yields
+    ``[start, mid, end]`` (legacy centre/angle encodings normalized);
+    ``gr_circle`` yields ``[center, end]``; ``gr_poly``/``gr_curve`` yield the
+    ``(pts (xy ...))`` vertex chain. Raises ``ValueError`` on malformed
+    geometry, matching the module's fail-loud contract.
+    """
+    tag = node.tag or ""
+    if tag in ("gr_line", "gr_rect"):
+        return [_point(node, "start"), _point(node, "end")]
+    if tag == "gr_arc":
+        start, end = _point(node, "start"), _point(node, "end")
+        if node.find_child("mid") is not None:
+            return [start, _point(node, "mid"), end]
+        angle = node.find_child("angle")
+        sweep = angle.get_float(0) if angle is not None and len(angle.children) == 1 else None
+        if sweep is None or not math.isfinite(sweep):
+            raise ValueError("Malformed Edge.Cuts gr_arc: missing mid or invalid legacy angle")
+        return list(legacy_arc_points(end, start, sweep))
+    if tag == "gr_circle":
+        return [_point(node, "center"), _point(node, "end")]
+    if tag in ("gr_poly", "gr_curve"):
+        pts = node.find_child("pts")
+        chain = [_coordinate(xy, f"{tag} xy") for xy in pts.find_children("xy")] if pts else []
+        if len(chain) < 3:
+            raise ValueError(f"Malformed Edge.Cuts {tag}: missing points")
+        return chain
+    raise ValueError(f"Unsupported Edge.Cuts geometry: {tag}")
 
 
 class OutlineSegments(list[tuple[Point, Point]]):
