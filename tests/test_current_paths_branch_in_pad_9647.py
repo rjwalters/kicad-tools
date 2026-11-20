@@ -224,3 +224,67 @@ def test_off_centre_tap_sharing_trunk_entry_is_excluded(branch_layer):
         ),
     )
     assert sense.ok, sense.reason
+
+
+def _off_centre_board(tap_layer: str, *, external: bool = True):
+    """A trunk stopping at (118,50) inside the J2 pad, with a 0.3 mm tap.
+
+    Nothing reaches the J2 pad centre (120,50), so no centre-reaching chain
+    exists and the empty-goal fallback governs (#9677). With ``external`` the
+    tap continues out of the pad to R1; without it the buried copper ends
+    inside the pad.
+    """
+    pcb = PCB.create(width=200, height=120, center=False)
+    _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+    _add_pad_footprint(pcb, ref="J2", x=120, y=50, net="NET1")
+    _add_pad_footprint(pcb, ref="R1", x=130, y=70, net="NET1")
+    for ref in ("J1", "J2"):
+        pcb.get_footprint(ref).pads[0].size = (5.0, 5.0)
+    pcb.add_trace(("J1", "1"), (118, 50), width=4.0, layer="F.Cu", net="NET1", dedupe=False)
+    pcb.add_trace((118, 50), (118, 51), width=0.3, layer=tap_layer, net="NET1", dedupe=False)
+    if external:
+        pcb.add_trace((118, 51), (130, 70), width=0.3, layer=tap_layer, net="NET1", dedupe=False)
+    return pcb
+
+
+@pytest.mark.parametrize("tap_layer", ["F.Cu", "B.Cu"])
+def test_exiting_off_centre_tap_is_not_path_evidence(tap_layer):
+    # #9677: when no copper reaches the pad centre, a buried seed feeding an
+    # external branch that leaves the pad where the trunk does not land is
+    # that branch's head, not the trunk's continuation -- the trunk must
+    # resolve to exactly its own 4.0 mm segment (98 mm).
+    pcb = _off_centre_board(tap_layer)
+    result = resolve_current_path(pcb, _branch_spec())
+    assert result.ok, result.reason
+    assert {id(s) for s in result.segments} == _trunk_ids(pcb)
+    assert result.length_mm == pytest.approx(98.0)
+    assert result.min_width is not None and result.min_width.width_mm == pytest.approx(4.0)
+
+
+@pytest.mark.parametrize("tap_layer", ["F.Cu", "B.Cu"])
+def test_exiting_off_centre_tap_stays_uncovered_audit_evidence(tap_layer):
+    # The same board through the independent post-write audit: both tap
+    # segments belong to no declared path, so a trunk-only declaration
+    # leaves them uncovered.
+    pcb = _off_centre_board(tap_layer)
+    audit = audit_current_paths(pcb, [_branch_spec()])
+    assert audit.all_resolved
+    assert not audit.fully_covered
+    assert {id(s) for s in audit.uncovered["NET1"]} == _branch_ids(pcb)
+
+
+@pytest.mark.parametrize("tap_layer", ["F.Cu", "B.Cu"])
+def test_ending_off_centre_seed_keeps_documented_fallback(tap_layer):
+    # Control for the documented #9651 fallback: with the external segment
+    # removed, the buried copper ends inside the pad and stays the best
+    # on-route evidence (2 segments, 99 mm, 0.3 mm minimum). This catches a
+    # blanket deletion of seed evidence.
+    pcb = _off_centre_board(tap_layer, external=False)
+    result = resolve_current_path(pcb, _branch_spec())
+    assert result.ok, result.reason
+    assert {id(s) for s in result.segments} == {id(s) for s in pcb.segments}
+    assert result.length_mm == pytest.approx(99.0)
+    assert result.min_width is not None and result.min_width.width_mm == pytest.approx(0.3)
+    audit = audit_current_paths(pcb, [_branch_spec()])
+    assert audit.all_resolved
+    assert audit.fully_covered

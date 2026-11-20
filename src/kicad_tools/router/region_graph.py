@@ -807,6 +807,7 @@ class RegionGraph:
         self,
         source_id: int,
         target_id: int,
+        entry_penalties: dict[int, float] | None = None,
     ) -> list[int] | None:
         """Find a path between two regions using A* search.
 
@@ -816,6 +817,14 @@ class RegionGraph:
         Args:
             source_id: Source region ID
             target_id: Target region ID
+            entry_penalties: Optional per-region soft entry penalties
+                (region ID -> cost in the same units as ``edge.distance``,
+                mm).  Added once when the path ENTERS the region, so a
+                finite penalty only diverts the corridor around a priced
+                area when a detour exists and never blocks the path
+                (Issue #9622, review of #9635: the coarse corridor search
+                otherwise accepts a straight line through a fine-pitch
+                body at zero cost).  ``None`` keeps the search unchanged.
 
         Returns:
             List of region IDs forming the path (inclusive of source and
@@ -858,8 +867,10 @@ class RegionGraph:
                 if neighbor_id in closed_set:
                     continue
 
-                # Cost = distance * congestion factor
+                # Cost = distance * congestion factor (+ soft entry penalty)
                 edge_cost = edge.distance * edge.congestion_cost
+                if entry_penalties:
+                    edge_cost += entry_penalties.get(neighbor_id, 0.0)
                 new_g = current.g_score + edge_cost
 
                 if neighbor_id not in g_scores or new_g < g_scores[neighbor_id]:
