@@ -8902,6 +8902,26 @@ class LatticePathfinder:
                     # from ``reasons`` (which would make an unroutable link
                     # undiagnosable in the completion report).
                     for _length2, kind2, item2 in items[_idx:]:
+                        if kind2 == 1 and any(
+                            (item2.key, _pol2) in attempted_keys for _pol2 in ("P", "N")
+                        ):
+                            # Issue #9581 (PR #9603 review): a pair whose
+                            # fallback ever flushed reports per LEG -- the
+                            # flush records each decline under its leg key,
+                            # so stamping the parent pair key here hides the
+                            # legs' latest real outcome behind one
+                            # pair-shaped deadline row.  Stamp each leg: one
+                            # whose most recent outcome is still a decline
+                            # keeps that reason; one last routed successfully
+                            # (the fold below cleared it) takes the deadline
+                            # stamp, exactly like a single net.
+                            for _pol2 in ("P", "N"):
+                                _leg_key2 = (item2.key, _pol2)
+                                reasons[_leg_key2] = prior_decline_reasons.get(
+                                    _leg_key2, "deadline-exceeded"
+                                )
+                            pair_outcomes[item2.key] = SegmentOutcome("deadline-exceeded")
+                            continue
                         key2 = item2.key if kind2 == 1 else item2[0]
                         # Issue #9581: a key the search already reached in
                         # an earlier pass WAS attempted -- keep its most
@@ -9063,6 +9083,15 @@ class LatticePathfinder:
             for _vk in pass_attempted:
                 if _vk not in reasons:
                     prior_decline_reasons.pop(_vk, None)
+            # Issue #9581 (PR #9603 review): a key with a route this pass
+            # succeeded -- a single net, a flushed fallback leg, or a coupled
+            # pair's leg (``commit_pair``; the items loop records only the
+            # PARENT pair key in ``pass_attempted``).  Popping those keeps
+            # the record at "most recent outcome": a pair that couples after
+            # its legs declined must not leave the legs' decline restorable
+            # by a later truncated pass that skips the pair.
+            for _rk in routes:
+                prior_decline_reasons.pop(_rk, None)
 
             score = (
                 (routed_items, coupled_count, hybrid_count, fallback_legs)

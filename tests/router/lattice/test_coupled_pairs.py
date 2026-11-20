@@ -712,6 +712,131 @@ def test_uncoupled_fallback_reports_unroutable_leg_without_emitting_it(tmp_path,
     assert "not attempted: the run's deadline passed" not in out
 
 
+def test_uncoupled_fallback_legs_keep_declines_when_a_later_pass_is_cut(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    # PR #9603 review (round 2): a truncated WINNING pass must not overwrite
+    # a fallback pair's earlier per-leg diagnoses.  Pass 1 declines the
+    # shorter near-side pair (patched, so it falls back to uncoupled legs
+    # that route) and geometrically declines both legs of the walled pair;
+    # pass 2 couples the shorter pair -- winning the best-pass tie-break --
+    # and the deadline then expires before the walled pair is revisited.
+    # The final report must retain two attempted, geometrically declined
+    # links, not one pair-shaped "deadline-exceeded" row.
+    wall_f = _pad(15.0, 6.0, 9, "WALL", ref="WF", width=0.6, height=13.0)
+    wall_b = Pad(
+        x=15.0,
+        y=6.0,
+        width=0.6,
+        height=13.0,
+        net=9,
+        net_name="WALL",
+        layer=Layer.B_CU,
+        ref="WB",
+        pin="1",
+    )
+    s_p_a = _pad(4.0, 9.0, 3, "E+", ref="J2")
+    s_n_a = _pad(4.0, 10.0, 4, "E-", ref="J2")
+    s_p_b = _pad(11.0, 9.0, 3, "E+", ref="U2")
+    s_n_b = _pad(11.0, 10.0, 4, "E-", ref="U2")
+    pf, walled = _pair_board([wall_f, wall_b, s_p_a, s_n_a, s_p_b, s_n_b])
+    shorter = CoupledConnection(
+        key=("pair", 3, 4),
+        pair_name="E",
+        pad_p_a=s_p_a,
+        pad_n_a=s_n_a,
+        pad_p_b=s_p_b,
+        pad_n_b=s_n_b,
+        net_class=_HS,
+        pitch=_PITCH,
+    )
+    # Deterministic fake clock: everything runs at t=1000 under a deadline
+    # of 1100 until the shorter pair couples in pass 2, at which point the
+    # budget expires and the pass-2 cut lands on the walled pair (the items
+    # sort shortest-first: 7mm shorter pair before the 24mm walled pair).
+    deadline = 1100.0
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(
+        "kicad_tools.router.lattice.pathfinder.time.monotonic", lambda: clock["now"]
+    )
+    real_pair_impl = pf._route_pair_impl
+    shorter_declines = {"n": 0}
+    shorter_couples = {"n": 0}
+
+    def shorter_falls_back_then_expires_budget(item, *args, **kwargs):
+        if item is shorter and not shorter_declines["n"]:
+            shorter_declines["n"] += 1
+            return None, "pair-blocked-congestion"
+        res, reason = real_pair_impl(item, *args, **kwargs)
+        if item is shorter and res is not None:
+            # The FIRST success is the between-passes congested-fallback
+            # probe (an empty-board run, not part of any pass); the SECOND
+            # is the pass-2 items-loop couple that wins the tie-break --
+            # expire the budget right after it so the walled pair's item
+            # hits the mid-pass cut.
+            shorter_couples["n"] += 1
+            if shorter_couples["n"] >= 2:
+                clock["now"] = deadline + 1.0
+        return res, reason
+
+    monkeypatch.setattr(pf, "_route_pair_impl", shorter_falls_back_then_expires_budget)
+    routes, stats = pf.route_netset(
+        [],
+        coupled=[shorter, walled],
+        uncoupled_fallback=True,
+        max_iterations=2,
+        deadline=deadline,
+    )
+
+    assert stats.deadline_hit is True
+    assert stats.iterations == 2, stats
+    assert stats.converged is False
+    assert set(routes) == {(shorter.key, "P"), (shorter.key, "N")}
+    assert pf.pair_outcomes[shorter.key] == "coupled", pf.pair_outcomes
+    assert pf.pair_outcomes[walled.key] == "deadline-exceeded", pf.pair_outcomes
+    leg_keys = {(walled.key, "P"), (walled.key, "N")}
+    # Both leg diagnoses survived the truncated winning pass: no parent-key
+    # deadline row, no lost geometric decline.
+    assert set(pf.failure_reasons) == leg_keys, pf.failure_reasons
+    for key in leg_keys:
+        assert pf.failure_reasons[key] != "deadline-exceeded", pf.failure_reasons
+    assert leg_keys <= set(stats.attempted_keys)
+
+    # The public report says the same thing: two attempted links with
+    # geometric reasons -- never "not attempted" -- even though the run
+    # itself hit its deadline.
+    from types import SimpleNamespace
+
+    from kicad_tools.cli.route_cmd import (
+        _build_complete_link_report,
+        _print_complete_link_report,
+    )
+
+    router = SimpleNamespace(
+        _lattice_negotiation_stats=stats,
+        _lattice_failure_reasons=dict(pf.failure_reasons),
+        _lattice_attempted_keys=stats.attempted_keys,
+        _lattice_connection_endpoints={
+            (walled.key, "P"): ("J1.1", "U1.1"),
+            (walled.key, "N"): ("J1.1", "U1.1"),
+        },
+        _complete_creepage_refusals=[],
+        net_names={1: "D+", 2: "D-", 3: "E+", 4: "E-"},
+    )
+    report = _build_complete_link_report(router, tmp_path / "absent.kicad_pcb")
+    assert report is not None
+    assert report["deadline_hit"] is True
+    by_net = {entry["net"]: entry for entry in report["unroutable_links"]}
+    assert set(by_net) == {"D+", "D-"}, by_net
+    for name in ("D+", "D-"):
+        assert by_net[name]["attempted"] is True, by_net[name]
+        assert by_net[name]["deadline_hit"] is False, by_net[name]
+        assert by_net[name]["reason"] != "deadline-exceeded", by_net[name]
+    _print_complete_link_report(report)
+    out = capsys.readouterr().out
+    assert "not attempted: the run's deadline passed" not in out
+
+
 def test_uncoupled_fallback_coupled_pair_unchanged() -> None:
     # A pair that couples must be byte-for-byte the same with the flag on.
     pf, pc = _pair_board()

@@ -726,6 +726,15 @@ class TestBudgetDerivationLine:
         assert "--timeout 0.4s" in text
         assert "--timeout 0s" not in text
 
+        # PR #9603 review round 2: ``:g`` keeps only six significant digits,
+        # so a typed value beyond that still lost its fraction (``120.0001``
+        # printed ``120s``).  The typed value prints round-trippably.
+        args = SimpleNamespace(timeout=120.0001, auto_fix=False, complete=True)
+        route_cmd._set_wall_clock_deadline(args)
+        text = capsys.readouterr().out
+        assert "--timeout 120.0001s" in text
+        assert "--timeout 120s" not in text
+
     def test_clamped_timeout_leads_with_typed_value(self, monkeypatch, capsys):
         """PR #9603 review: under a supervisor-set invocation deadline the
         clamp shrinks the budget before the print.  The line must still lead

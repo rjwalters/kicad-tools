@@ -737,15 +737,29 @@ def _restore_route_grid(router: "Autorouter", routes: list["Route"]) -> None:
 
 
 def _fmt_secs(value: float) -> str:
-    """Format seconds without rounding away fractional precision.
+    """Format a computed seconds duration for display (:data:`g` rounding).
 
     Issue #9581 (PR #9603 review): the budget derivation line formatted
     every term with ``:.0f``, so a fractional ``--timeout`` was rounded
     away before the user's eyes -- ``--timeout 120.5`` printed
-    ``--timeout 120s`` and ``0.4`` printed ``--timeout 0s``.  Each term
-    now keeps the precision it was given (trailing zeros stripped).
+    ``--timeout 120s`` and ``0.4`` printed ``--timeout 0s``.  Computed
+    durations (setup, reserves, budget) keep this display rounding; the
+    USER-SUPPLIED value uses :func:`_fmt_secs_exact`.
     """
     return f"{float(value):g}"
+
+
+def _fmt_secs_exact(value: float) -> str:
+    """Format a user-supplied seconds value round-trippably.
+
+    Issue #9581 (PR #9603 review, round 2): ``:g`` keeps only six
+    significant digits, so a typed ``--timeout 120.0001`` printed
+    ``--timeout 120s``.  The shortest round-trippable repr keeps every
+    digit the user supplied (``120.0001``), with an integral value still
+    printing bare (``100``).
+    """
+    text = repr(float(value))
+    return text[:-2] if text.endswith(".0") else text
 
 
 def _set_wall_clock_deadline(args) -> None:
@@ -814,7 +828,7 @@ def _set_wall_clock_deadline(args) -> None:
             # the clamped remainder as ``--timeout``.
             setup_consumed = max(0.0, typed_timeout - float(timeout))
             print(
-                f"--timeout {_fmt_secs(typed_timeout)}s "
+                f"--timeout {_fmt_secs_exact(typed_timeout)}s "
                 f"- setup {_fmt_secs(setup_consumed)}s "
                 f"- auto-fix reserve {_fmt_secs(float(reserve))}s "
                 f"- post-route reserve {_fmt_secs(float(post_route))}s "
