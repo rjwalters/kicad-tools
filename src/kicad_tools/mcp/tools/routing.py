@@ -521,8 +521,11 @@ def _resolve_route_auto_grid(
             value = float(grid)
         except (TypeError, ValueError):
             raise ValueError(f"--grid must be 'auto' or a number in mm, got {grid!r}") from None
-        if value <= 0:
-            raise ValueError(f"--grid must be a positive pitch in mm, got {value}")
+        # Issue #9620 review: NaN compares false against everything and
+        # infinity against zero, so a plain ``<= 0`` accepted both -- require
+        # a finite positive pitch.
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"--grid must be a finite positive pitch in mm, got {value}")
         return value, warnings
     try:
         from kicad_tools.router.clearance_resolver import resolve_routing_clearances

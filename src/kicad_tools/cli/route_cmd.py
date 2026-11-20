@@ -67,6 +67,7 @@ import signal
 import sys
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict, cast
@@ -22690,7 +22691,7 @@ _CHAIN_COMPLETE_MIN_BUDGET_S = 90.0
 # Issue #9620: the budget-only coarser retry runs on the partial-routing exit
 # -- a batch that routed something but ended below --min-completion -- and on
 # the zero-routed exit (1) when THIS invocation saved the board (see the
-# freshness gate in _chain_budget_coarser_pass) and every open net's last
+# publication gate in _chain_budget_coarser_pass) and every open net's last
 # recorded search failure is budget-labelled.  3/4 (dirty copper --
 # coarsening does not fix shorts), 5 (interrupted), 9 (pre-route gate) and 10
 # (unverified success) all keep their own verdicts; a batch that met its
@@ -22705,9 +22706,6 @@ _BUDGET_RETRY_ACCEPT_EXITS = frozenset({0, 2, EXIT_UNVERIFIED})
 # Like the chained completion pass: under ``--timeout`` the retry is skipped
 # below this much remaining budget so it cannot turn into a deadline timeout.
 _BUDGET_RETRY_MIN_BUDGET_S = 90.0
-# The exit-1 (zero routed nets) freshness gate tolerates this much timestamp
-# skew between the invocation start and the output board's mtime.
-_BUDGET_RETRY_FRESH_EPSILON_S = 1.0
 
 # Issue #9620 review: when the coarser-grid retry runs under ``--format json``,
 # the INNER _main_impl holds its JSON document back into this list instead of
@@ -22744,18 +22742,16 @@ def _fresh_staging_dir(output: Path, kind: str) -> Path:
     """Private per-invocation staging dir for a chained pass (Issue #9620 review).
 
     ``kind`` ("chain" / "coarser") selects the dot-prefixed prefix beside
-    ``output``.  Staging in a unique private directory -- instead of globbing
-    ``<stem>.<kind>*`` siblings -- guarantees the pass can only ever touch
-    files it created: an input named ``board.coarser.kicad_pcb`` or an
-    unrelated ``board.coarser-notes.txt`` next to ``-o board.kicad_pcb`` is
-    never deleted, overwritten or promoted by mistake.
+    ``output``.  Staging in a unique private directory -- ``mkdtemp`` alone --
+    guarantees the pass can only ever touch files it created: an input named
+    ``board.coarser.kicad_pcb`` or an unrelated ``board.coarser-notes.txt``
+    next to ``-o board.kicad_pcb`` is never deleted, overwritten or promoted
+    by mistake.  Cleanup (:func:`_discard_staging_dir`) owns exactly the
+    directory this call allocated; a sibling directory matching the prefix --
+    including another invocation's still-live staging dir -- is never removed
+    (Issue #9620 review: the previous glob-and-rmtree deleted both).
     """
-    import shutil as _shutil
-
     prefix = f".{output.stem}.{kind}-"
-    for stale in output.parent.glob(glob.escape(prefix) + "*"):
-        if stale.is_dir():
-            _shutil.rmtree(stale, ignore_errors=True)
     return Path(tempfile.mkdtemp(prefix=prefix, dir=str(output.parent)))
 
 
@@ -22782,6 +22778,45 @@ def _discard_staging_dir(stage_dir: Path) -> None:
     import shutil as _shutil
 
     _shutil.rmtree(stage_dir, ignore_errors=True)
+
+
+def _relocate_promoted_json_paths(document: str, stage_dir: Path, output: Path) -> str:
+    """Rewrite a promoted run's JSON document to its published paths (#9620).
+
+    The inner (retry) run derived every artifact path from its staged output
+    inside *stage_dir*; promotion moved those artifacts next to *output* and
+    removed the staging directory, so the document's staged paths are stale.
+    Path strings under the staging prefix are rewritten to the published
+    location when that artifact exists there, and the key is OMITTED when the
+    selected run produced no corresponding artifact (e.g. a fully-routed retry
+    wrote no search-failure sidecar) -- a path to nothing is worse than none.
+    Unparseable input is returned unchanged (the document still publishes).
+    """
+    import json as _json
+
+    prefix = str(stage_dir) + os.sep
+
+    def _walk(node):
+        if isinstance(node, dict):
+            relocated = {}
+            for key, value in node.items():
+                if isinstance(value, str) and value.startswith(prefix):
+                    published = output.with_name(Path(value).name)
+                    if published.is_file():
+                        relocated[key] = str(published)
+                    # else: omit -- no corresponding artifact was published.
+                else:
+                    relocated[key] = _walk(value)
+            return relocated
+        if isinstance(node, list):
+            return [_walk(item) for item in node]
+        return node
+
+    try:
+        data = _json.loads(document)
+    except (ValueError, TypeError):
+        return document
+    return _json.dumps(_walk(data), indent=2)
 
 
 def _restore_supervisor_control(control: str, snapshot: str) -> None:
@@ -23308,6 +23343,21 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
     return chain_rc if not after and chain_rc == 0 else result
 
 
+def _staged_export_report_path(original: str) -> Path:
+    """Stage the effective failed-nets report in its destination filesystem.
+
+    Issue #9620 review: the staged report must land in the SAME filesystem as
+    the caller's ``--export-failed-nets`` target, so publishing it later is an
+    atomic same-directory ``os.replace`` -- never a cross-device link -- and a
+    publication failure is handled before anything else moves.  The name is
+    unique (dot-prefixed, uuid-suffixed) and the file is created only by the
+    inner run, so an absent staged report still means "the retry produced no
+    report".
+    """
+    target = Path(original)
+    return target.parent / f".{target.name}.coarser-retry-{uuid.uuid4().hex[:8]}{target.suffix}"
+
+
 def _budget_retry_argv(
     argv: list[str] | None,
     grid_mm: float,
@@ -23330,13 +23380,18 @@ def _budget_retry_argv(
     * ``--lint-gate`` / ``--lint-gate-waivers`` / ``--lint-gate-strict`` are
       dropped: the OUTER run's gate (which finishes after this pass) judges
       whatever board ends up at ``--output``, promoted or not.
-    * ``--export-failed-nets PATH`` is redirected into the staging directory
-      (Issue #9620 review): the inner run must not overwrite the caller's
-      report while the first result is still the selected one.  When
-      *report_map* is given, the original argv value is recorded in it, mapped
-      to the staged path, so promotion can move the winner's report into place
-      (and reconcile its absence) -- a discarded retry leaves the caller's
-      report describing the board that is still at ``-o``.
+    * ``--export-failed-nets PATH`` is redirected to a unique staged path in
+      the target's own filesystem (Issue #9620 review): the inner run must not
+      overwrite the caller's report while the first result is still the
+      selected one, and publishing the winner's report must be a same-device
+      rename.  Only the EFFECTIVE occurrence -- the last one, argparse
+      last-wins -- is redirected; earlier occurrences are inert and dropped
+      (Issue #9620 review: staging every occurrence collided two targets onto
+      one file and let promotion clobber a path this run was never asked to
+      touch).  When *report_map* is given, the original argv value is recorded
+      in it, mapped to the staged path, so promotion can move the winner's
+      report into place (and reconcile its absence) -- a discarded retry
+      leaves the caller's report describing the board that is still at ``-o``.
     """
     base = list(sys.argv[1:]) if argv is None else list(argv)
     out: list[str] = []
@@ -23344,11 +23399,12 @@ def _budget_retry_argv(
     output_set = False
     i = 0
 
-    def _staged_report(original: str) -> Path:
-        staged_path = staged.parent / f"export-failed-nets{Path(original).suffix or '.txt'}"
-        if report_map is not None:
-            report_map[original] = staged_path
-        return staged_path
+    # The effective --export-failed-nets occurrence: the LAST one (argparse
+    # last-wins for a plain path argument).
+    effective_report_idx: int | None = None
+    for j, tok in enumerate(base):
+        if tok == "--export-failed-nets" or tok.startswith("--export-failed-nets="):
+            effective_report_idx = j
 
     while i < len(base):
         tok = base[i]
@@ -23368,14 +23424,24 @@ def _budget_retry_argv(
             out.append(f"--output={staged}")
             output_set = True
             i += 1
-        elif tok == "--export-failed-nets":
-            original = base[i + 1] if i + 1 < len(base) else ""
-            out.extend(["--export-failed-nets", str(_staged_report(original))])
-            i += 2
-        elif tok.startswith("--export-failed-nets="):
-            original = tok.split("=", 1)[1]
-            out.append(f"--export-failed-nets={_staged_report(original)}")
-            i += 1
+        elif tok == "--export-failed-nets" or tok.startswith("--export-failed-nets="):
+            tok_idx = i
+            if tok == "--export-failed-nets":
+                original = base[i + 1] if i + 1 < len(base) else ""
+                i += 2
+            else:
+                original = tok.split("=", 1)[1]
+                i += 1
+            if tok_idx != effective_report_idx:
+                # An earlier, inert occurrence: argparse never reads it, so it
+                # is dropped -- not staged, not recorded, never touched.
+                continue
+            if not original:
+                continue
+            staged_report = _staged_export_report_path(original)
+            if report_map is not None:
+                report_map[original] = staged_report
+            out.extend(["--export-failed-nets", str(staged_report)])
         elif tok in ("--lint-gate", "--lint-gate-strict"):
             i += 1
         elif tok == "--lint-gate-waivers":
@@ -23417,16 +23483,19 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
     ``--format json`` is not an exclusion (Issue #9620 review): the same
     routing decision runs, and ``_main_impl`` publishes one JSON document
     describing the selected result.  The retry also fires on the zero-routed
-    exit (1) when this invocation saved ``-o`` (mtime freshness) -- every
-    attempted net burning its whole budget is the issue's failure mode even
-    when nothing routed, while a setup failure or a stale ``-o`` left by an
-    earlier run must not be re-run.  The staged board is promoted over ``-o``
+    exit (1) -- every attempted net burning its whole budget is the issue's
+    failure mode even when nothing routed.  Both trigger exits are gated on
+    THIS invocation actually having published ``-o`` (the route receipt's
+    publication record, Issue #9620 review): a stale board left by an earlier
+    run -- however fresh its mtime looks -- describes routing this invocation
+    never did and must not be re-run.  The staged board is promoted over ``-o``
     only when the retry routes strictly more nets; a retry that routes fewer
     (or equal), or whose own connectivity report is unreadable, keeps the
-    first result, per the issue's acceptance criteria.  Promotion promotes
-    the retry's diagnostics with its board (sidecars and ``--export-failed-nets``
-    reports are staged per run and reconciled), and returns the retry's own
-    exit code -- the promoted board's threshold verdict.
+    first result, per the issue's acceptance criteria.  Promotion publishes
+    the retry's diagnostics with its board (sidecars and the effective
+    ``--export-failed-nets`` report are staged per run and reconciled), and
+    returns the retry's own exit code -- the promoted board's threshold
+    verdict.
     """
     if (
         result not in _BUDGET_RETRY_TRIGGER_EXITS
@@ -23438,29 +23507,18 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
     output = (
         Path(args.output) if getattr(args, "output", None) else pcb.with_stem(pcb.stem + "_routed")
     )
-    if not output.is_file():
+    # Issue #9620 review: both trigger exits must be gated on actual
+    # publication by the first pass of THIS invocation -- the route receipt
+    # records exactly that (its ``record_publication`` is called by every
+    # atomic board writer, and a setup/argument failure never records one).
+    # An mtime comparison accepted a pre-existing board and, with timestamp
+    # skew, even one written before the run started.
+    from . import route_receipt as _route_receipt_gate
+
+    _invocation = _route_receipt_gate._current.get()
+    if _invocation is None or output.absolute() not in _invocation.published:
         return result
     quiet = bool(getattr(args, "quiet", False))
-    if result == 1:
-        # Zero routed nets is only retryable when THIS invocation saved the
-        # board: a setup failure that never wrote anything leaves a stale -o
-        # (or an old output from an earlier run) whose labels describe a board
-        # this run never produced.  Fail closed without a timestamp.
-        started = getattr(args, "_route_wall_started", None)
-        try:
-            fresh = (
-                started is not None
-                and output.stat().st_mtime >= started - _BUDGET_RETRY_FRESH_EPSILON_S
-            )
-        except OSError:
-            fresh = False
-        if not fresh:
-            if not quiet:
-                print(
-                    "\n--- Coarser-grid retry skipped: exit 1 with an output "
-                    "board not written by this run ---"
-                )
-            return result
     try:
         first_grid = float(args.grid)
         clearance = float(args.clearance)
@@ -23557,9 +23615,15 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
     staged = stage_dir / output.name
     staged_reports: dict[str, Path] = {}
     retry_argv = _budget_retry_argv(argv, retry_grid, staged, staged_reports)
+    # The effective report stages in its DESTINATION filesystem (Issue #9620
+    # review), so the staging directory's removal does not own it.
+    staged_report_paths = list(staged_reports.values())
 
     def _discard() -> None:
         _discard_staging_dir(stage_dir)
+        for report in staged_report_paths:
+            with contextlib.suppress(OSError):
+                report.unlink(missing_ok=True)
 
     # Same supervisor / receipt restoration contract as the chained completion
     # pass: the inner run republishes the output identity and receipt context;
@@ -23628,18 +23692,36 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
                     f"(exit {retry_rc}, {why}); first result kept"
                 )
             return result
-        # Promotion: the retry's diagnostics travel with its board.  Sidecars
-        # first, the board last (same exclusions as the chained completion
-        # pass: the receipt and constraint sidecars are re-derived by the
-        # outer run); the mapped --export-failed-nets reports move separately
-        # to the caller's own paths.
+        # Promotion: the retry's diagnostics travel with its board.  The
+        # effective --export-failed-nets report publishes FIRST (Issue #9620
+        # review): it stages in its destination filesystem, and a publication
+        # failure here keeps the first result whole -- board, report and exit
+        # agree, instead of a promoted board beside a report that cannot move.
+        # Sidecars follow, the board last (same exclusions as the chained
+        # completion pass: the receipt and constraint sidecars are re-derived
+        # by the outer run).
         # Reconcile presence: a first-pass sidecar whose staged twin the retry
         # did not write describes a board no longer at -o (an empty failure map
         # removes the sidecar by contract) -- remove it.
+        for original, staged_report in staged_reports.items():
+            target = Path(original)
+            try:
+                if staged_report.is_file():
+                    os.replace(staged_report, target)
+                else:
+                    # The retry produced no report (e.g. it routed everything);
+                    # the first pass's report would describe the discarded board.
+                    target.unlink(missing_ok=True)
+            except OSError as exc:
+                if not quiet:
+                    print(
+                        "  Coarser-grid retry could not publish the failed-nets "
+                        f"report at {target} ({exc}); first result kept"
+                    )
+                return result
         had_staged_sidecar = _search_failures_sidecar_path(staged).is_file()
-        report_paths = set(staged_reports.values())
         for f in sorted(stage_dir.iterdir()):
-            if f == staged or f in report_paths:
+            if f == staged:
                 continue
             if f.suffix in {".kicad_pro", ".kicad_dru", ".kicad_prl"} or f.name.endswith(
                 ".route.json"
@@ -23649,18 +23731,13 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
         if not had_staged_sidecar:
             _search_failures_sidecar_path(output).unlink(missing_ok=True)
         os.replace(staged, output)
-        for original, staged_report in staged_reports.items():
-            target = Path(original)
-            if staged_report.is_file():
-                os.replace(staged_report, target)
-            else:
-                # The retry produced no report (e.g. it routed everything); the
-                # first pass's report would describe the discarded board.
-                target.unlink(missing_ok=True)
-        if json_capture is not None and json_capture:
+        if json_capture:
             # _main_impl publishes exactly one JSON document describing the
-            # selected result -- here, the promoted retry's own document.
-            args._budget_retry_json_document = json_capture[0]
+            # selected result -- here, the promoted retry's own document, with
+            # its artifact paths translated to the published locations.
+            args._budget_retry_json_document = _relocate_promoted_json_paths(
+                json_capture[0], stage_dir, output
+            )
     finally:
         # Also runs on RouteDeadlineExpired / KeyboardInterrupt: -o was never
         # touched before promotion, so only staging needs removing.
@@ -23734,6 +23811,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 )
                 else contextlib.nullcontext(None)
             )
+            handed_off = False
             with capture as held:
                 try:
                     try:
@@ -23747,10 +23825,6 @@ def _main_impl(argv: list[str] | None = None) -> int:
                             if staged is not None:
                                 args._lint_gate_output = str(gate.output)
                                 args.output = str(staged)
-                        # Issue #9620 review: the coarser retry's zero-routed
-                        # (exit 1) trigger must distinguish a board this run
-                        # wrote from a stale -o left by an earlier run.
-                        args._route_wall_started = time.time()
                         result = _run_main_impl(args, parser, argv)
                         # Issue #9620: the budget-only coarser retry re-routes the
                         # whole batch before the chained completion pass, so its
@@ -23781,11 +23855,15 @@ def _main_impl(argv: list[str] | None = None) -> int:
                         _emit_route_json_fallback(args, exit_code)
                 finally:
                     if _route_json_capture is not None and held is not None:
-                        # Issue #9620 review: an inner (retry) run held its
-                        # JSON document back for the outer run to select.
+                        # Issue #9620 review: an inner (retry) run hands its
+                        # JSON document to the requesting outer run -- consumed
+                        # exactly once there; the inner never also writes it
+                        # locally (its nested json guard would land the
+                        # document on stderr).
                         _route_json_capture.append(held.getvalue())
+                        handed_off = True
             retry_json = getattr(args, "_budget_retry_json_document", None)
-            if held is not None and json_stream is not None:
+            if held is not None and json_stream is not None and not handed_off:
                 if gate is not None and outcome is not None:
                     from .route_lint_gate import merge_into_json_document
 

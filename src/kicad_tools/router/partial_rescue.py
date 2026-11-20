@@ -234,7 +234,8 @@ def partially_connected_signal_nets(
     pass never reached (chorus's budget-starved tail).
 
     With ``strict=True`` an unreadable report (``kct check`` emitted no
-    parseable JSON) raises :class:`ConnectivityReportError` instead of
+    parseable JSON, failed, or produced a document without a usable
+    findings list) raises :class:`ConnectivityReportError` instead of
     returning ``[]`` -- the count is unknown, not zero (Issue #9620).
     """
     result = subprocess.run(
@@ -261,8 +262,22 @@ def partially_connected_signal_nets(
                 f"{pcb_path} (exit {result.returncode})"
             ) from None
         return []
+    # Issue #9620 review: a check that FAILED (non-zero exit, error-shaped
+    # body like ``{"error": ...}``) or a document without a findings list is
+    # an unknown count, never zero -- defaulting a missing list to ``[]`` let
+    # an unassessed board pass the promotion gates.  A well-formed report
+    # (``violations``/``errors`` present, even empty) is accepted regardless
+    # of the exit code: connectivity findings make ``kct check`` exit 1.
+    findings = data.get("violations", data.get("errors")) if isinstance(data, dict) else None
+    if not isinstance(findings, list):
+        if strict:
+            raise ConnectivityReportError(
+                f"kct check produced no usable connectivity findings for "
+                f"{pcb_path} (exit {result.returncode})"
+            )
+        return []
     partial: list[str] = []
-    for v in data.get("violations", data.get("errors", [])):
+    for v in findings:
         rule = v.get("rule_id") or v.get("rule") or v.get("type")
         if rule != "connectivity":
             continue

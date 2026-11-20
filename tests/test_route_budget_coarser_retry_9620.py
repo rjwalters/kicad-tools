@@ -15,6 +15,7 @@ Two halves of the PCBJam failure-mode fix:
 from __future__ import annotations
 
 import argparse
+import contextvars
 import json
 import os
 import time
@@ -25,7 +26,13 @@ import pytest
 
 from kicad_tools.cli import route_cmd
 from kicad_tools.cli.parser import create_parser
-from kicad_tools.cli.route_cmd import _budget_retry_argv, _chain_budget_coarser_pass
+from kicad_tools.cli.route_cmd import (
+    _budget_retry_argv,
+    _chain_budget_coarser_pass,
+    _discard_staging_dir,
+    _fresh_staging_dir,
+    _relocate_promoted_json_paths,
+)
 from kicad_tools.cli.route_deadline import RouteDeadlineExpired
 from kicad_tools.mcp.tools.routing import _resolve_route_auto_grid
 from kicad_tools.router.stuck_classifier import write_search_failures_sidecar
@@ -63,6 +70,29 @@ def _stub_open(monkeypatch, states: list[list[str]]):
     )
 
 
+def _published(monkeypatch, *boards: Path) -> None:
+    """Record *boards* as published by THIS invocation in the route receipt.
+
+    Issue #9620 review: the coarser retry gates both trigger exits on the
+    route receipt's publication record, so unit tests that expect the retry
+    to run must install one.
+    """
+    from kicad_tools.cli import route_receipt
+
+    invocation = route_receipt._Invocation(
+        source=Path(boards[0]).with_name("in.kicad_pcb").absolute(),
+        outputs={},
+        authored={},
+    )
+    for board in boards:
+        invocation.published.add(Path(board).absolute())
+    # A real ContextVar (the pass both reads it and restores it via .set), not a
+    # get-only stub.
+    current = contextvars.ContextVar("test_route_receipt", default=None)
+    current.set(invocation)
+    monkeypatch.setattr(route_receipt, "_current", current)
+
+
 # --- kct route: retry fires on a budget-only failed batch ------------------
 
 
@@ -76,6 +106,7 @@ def test_retry_on_budget_only_failure(board, monkeypatch):
         return 0
 
     monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    _published(monkeypatch, board)
     assert _chain_budget_coarser_pass(_args(board), None, 2) == 0
     assert board.read_text() == "coarser"
     # The retry names the coarser grid (0.1 x2, under the 0.2 ceiling) and
@@ -102,6 +133,7 @@ def test_retry_grid_capped_at_clearance(board, monkeypatch):
         return 0
 
     monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    _published(monkeypatch, board)
     assert _chain_budget_coarser_pass(_args(board, grid=0.15, clearance=0.2), None, 2) == 0
     assert seen["argv"][seen["argv"].index("--grid") + 1] == "0.2"
 
@@ -115,6 +147,7 @@ def test_retry_routed_fewer_nets_keeps_first_result(board, monkeypatch):
         return 2
 
     monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    _published(monkeypatch, board)
     assert _chain_budget_coarser_pass(_args(board), None, 2) == 2
     assert board.read_text() == "negotiated"
     assert not list(board.parent.glob(f".{board.stem}.coarser-*"))
@@ -129,6 +162,7 @@ def test_retry_partial_improvement_promotes_board_keeps_exit(board, monkeypatch)
         return 2
 
     monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    _published(monkeypatch, board)
     assert _chain_budget_coarser_pass(_args(board), None, 2) == 2
     assert board.read_text() == "better"
 
@@ -141,6 +175,7 @@ def test_failed_retry_restores_output(board, monkeypatch):
         return 1
 
     monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    _published(monkeypatch, board)
     assert _chain_budget_coarser_pass(_args(board), None, 2) == 2
     assert board.read_text() == "negotiated"
 
@@ -152,6 +187,7 @@ def test_exception_in_retry_restores_output(board, monkeypatch):
         raise RuntimeError("x")
 
     monkeypatch.setattr(route_cmd, "_main_impl", boom)
+    _published(monkeypatch, board)
     assert _chain_budget_coarser_pass(_args(board), None, 2) == 2
     assert board.read_text() == "negotiated"
 
@@ -175,6 +211,7 @@ def test_retry_propagates_deadline_and_interrupt(board, monkeypatch, signal):
 
     _stub_open(monkeypatch, [["VCP"]])
     monkeypatch.setattr(route_cmd, "_main_impl", boom)
+    _published(monkeypatch, board)
     with pytest.raises(signal):
         _chain_budget_coarser_pass(_args(board), None, 2)
     # -o was never touched and staging was discarded by the outer finally.
@@ -196,6 +233,7 @@ def test_no_retry_on_geometric_failure(board, monkeypatch, labels):
     write_search_failures_sidecar(board, labels)
     _stub_open(monkeypatch, [sorted(labels)] if len(labels) > 1 else [["VCP"]])
     monkeypatch.setattr(route_cmd, "_main_impl", lambda a: pytest.fail("must not run"))
+    _published(monkeypatch, board)
     assert _chain_budget_coarser_pass(_args(board), None, 2) == 2
     assert board.read_text() == "negotiated"
 
@@ -205,6 +243,7 @@ def test_no_retry_on_unlabelled_open_net(board, monkeypatch):
     write_search_failures_sidecar(board, {"OTHER": "timeout"})
     _stub_open(monkeypatch, [["VCP"]])
     monkeypatch.setattr(route_cmd, "_main_impl", lambda a: pytest.fail("must not run"))
+    _published(monkeypatch, board)
     assert _chain_budget_coarser_pass(_args(board), None, 2) == 2
 
 
@@ -213,6 +252,7 @@ def test_no_retry_without_sidecar(board, monkeypatch):
     sidecar.unlink()
     _stub_open(monkeypatch, [["VCP"]])
     monkeypatch.setattr(route_cmd, "_main_impl", lambda a: pytest.fail("must not run"))
+    _published(monkeypatch, board)
     assert _chain_budget_coarser_pass(_args(board), None, 2) == 2
 
 
@@ -245,7 +285,8 @@ def test_only_failure_exits_trigger_retry(board, monkeypatch, result):
 
 @pytest.mark.parametrize("result", [1, 2])
 def test_failure_exits_trigger_retry_when_eligible(board, monkeypatch, result):
-    """Exit 2 always qualifies; exit 1 (zero routed nets) only with a fresh -o."""
+    """Exit 2 always qualifies; exit 1 (zero routed nets) with a board this
+    invocation published (the route receipt's record, Issue #9620 review)."""
     _stub_open(monkeypatch, [["VCP"], []])
 
     def fake_main(argv):
@@ -253,44 +294,85 @@ def test_failure_exits_trigger_retry_when_eligible(board, monkeypatch, result):
         return 0
 
     monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
-    args = _args(board, _route_wall_started=time.time() - 5)
-    assert _chain_budget_coarser_pass(args, None, result) == 0
+    _published(monkeypatch, board)
+    assert _chain_budget_coarser_pass(_args(board), None, result) == 0
     assert board.read_text() == "coarser"
 
 
-def test_exit1_stale_output_not_retried(board, monkeypatch):
-    """Exit 1 with an -o from an earlier run (mtime old) is a setup failure
-    or stale artifact, not this invocation's all-budget zero-routed board."""
+@pytest.mark.parametrize("result", [1, 2])
+def test_stale_output_not_published_by_this_run_not_retried(board, monkeypatch, result):
+    """A pre-existing -o this invocation never published -- however budget-
+    labelled or fresh its mtime looks -- is a stale artifact, not this run's
+    all-budget board.  The route receipt records no publication for it, so
+    neither trigger exit retries (Issue #9620 review: this is the old
+    budget-labelled board + argument-error probe, and the board whose mtime
+    fell half a second before the run)."""
     stale = time.time() - 3600
     os.utime(board, (stale, stale))
     _stub_open(monkeypatch, [["VCP"]])
     monkeypatch.setattr(route_cmd, "_main_impl", lambda a: pytest.fail("must not run"))
-    args = _args(board, _route_wall_started=time.time())
-    assert _chain_budget_coarser_pass(args, None, 1) == 1
+    # No _published(): the receipt invocation never recorded this board.
+    assert _chain_budget_coarser_pass(_args(board), None, result) == result
     assert board.read_text() == "negotiated"
 
 
-def test_exit1_without_start_timestamp_not_retried(board, monkeypatch):
-    """No recorded invocation start (direct unit call) -- fail closed."""
+@pytest.mark.parametrize("mtime", [time.time() + 5, time.time() - 0.5, 0])
+def test_exit1_fresh_mtime_alone_is_not_a_publication(board, monkeypatch, mtime):
+    """A board timestamped around the run's start is still not retried
+    without a receipt publication record -- mtime alone proved forgeable."""
+    os.utime(board, (mtime, mtime))
     _stub_open(monkeypatch, [["VCP"]])
     monkeypatch.setattr(route_cmd, "_main_impl", lambda a: pytest.fail("must not run"))
     assert _chain_budget_coarser_pass(_args(board), None, 1) == 1
+    assert board.read_text() == "negotiated"
 
 
 def test_no_retry_when_already_at_clearance_ceiling(board, monkeypatch):
     """An auto grid already at the ceiling has no coarser legal pitch."""
     _stub_open(monkeypatch, [["VCP"]])
     monkeypatch.setattr(route_cmd, "_main_impl", lambda a: pytest.fail("must not run"))
+    _published(monkeypatch, board)
     assert _chain_budget_coarser_pass(_args(board, grid=0.2, clearance=0.2), None, 2) == 2
 
 
 def test_no_retry_without_output_board(tmp_path, monkeypatch):
     out = tmp_path / "never-written.kicad_pcb"
+    _stub_open(monkeypatch, [["VCP"]])
     monkeypatch.setattr(route_cmd, "_main_impl", lambda a: pytest.fail("must not run"))
+    _published(monkeypatch, out)
     assert _chain_budget_coarser_pass(_args(out), None, 2) == 2
 
 
 # --- staging owns only its private directory (Issue #9620 review) -----------
+
+
+@pytest.mark.parametrize("kind", ["chain", "coarser"])
+def test_fresh_staging_dir_never_removes_sibling_directories(tmp_path, kind):
+    """Issue #9620 review: allocating a staging directory must not delete
+    anything beside it.  Two overlapping allocations (a second invocation
+    starting while the first still runs) and an unrelated hidden directory
+    that merely matches the prefix all survive; cleanup owns exactly the
+    directory its own call allocated."""
+    output = tmp_path / "board.kicad_pcb"
+    output.write_text("x")
+    notes = tmp_path / f".board.{kind}-notes"
+    notes.mkdir()
+    (notes / "keep").write_text("keep")
+
+    first = _fresh_staging_dir(output, kind)
+    second = _fresh_staging_dir(output, kind)
+    assert first.is_dir() and second.is_dir() and first != second
+    # The second allocation left the first invocation's staging dir alive.
+    assert first.is_dir()
+    # An unrelated hidden directory matching the prefix was never touched.
+    assert (notes / "keep").read_text() == "keep"
+
+    _discard_staging_dir(first)
+    assert not first.exists()
+    assert second.is_dir() and notes.is_dir()
+    _discard_staging_dir(second)
+    assert not second.exists()
+    assert notes.is_dir()
 
 
 def test_retry_staging_never_touches_same_stem_siblings(tmp_path, monkeypatch):
@@ -311,6 +393,7 @@ def test_retry_staging_never_touches_same_stem_siblings(tmp_path, monkeypatch):
         return 0
 
     monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    _published(monkeypatch, out)
     args = _args(out, pcb=str(sibling_input))
     assert _chain_budget_coarser_pass(args, None, 2) == 0
     assert sibling_input.read_text() == "input board"
@@ -331,6 +414,7 @@ def test_promotion_returns_retry_exit_code(board, monkeypatch, retry_rc):
         return retry_rc
 
     monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    _published(monkeypatch, board)
     assert _chain_budget_coarser_pass(_args(board), None, 2) == retry_rc
     assert board.read_text() == "better"
 
@@ -362,6 +446,7 @@ def test_discarded_retry_leaves_caller_report_describing_first_board(board, monk
         return 2
 
     monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    _published(monkeypatch, board)
     assert _chain_budget_coarser_pass(_args(board), _report_argv(board, report), 2) == 2
     assert board.read_text() == "negotiated"
     assert json.loads(report.read_text()) == {"first": True}
@@ -378,6 +463,7 @@ def test_promoted_retry_replaces_caller_report(board, monkeypatch, tmp_path):
         return 0
 
     monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    _published(monkeypatch, board)
     assert _chain_budget_coarser_pass(_args(board), _report_argv(board, report), 2) == 0
     assert json.loads(report.read_text()) == {"retry": True}
 
@@ -397,6 +483,7 @@ def test_promoted_retry_without_report_removes_first_pass_report(board, monkeypa
         return 0
 
     monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    _published(monkeypatch, board)
     assert _chain_budget_coarser_pass(_args(board), _report_argv(board, report), 2) == 0
     assert not report.exists()
 
@@ -414,6 +501,7 @@ def test_promoted_retry_clears_stale_search_failure_sidecar(board, monkeypatch):
         return 0
 
     monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    _published(monkeypatch, board)
     assert _chain_budget_coarser_pass(_args(board), None, 2) == 0
     assert board.read_text() == "coarser"
     assert not sidecar.exists()
@@ -431,6 +519,7 @@ def test_promoted_retry_sidecar_lands_beside_output(board, monkeypatch):
         return 2
 
     monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    _published(monkeypatch, board)
     assert _chain_budget_coarser_pass(_args(board), None, 2) == 2
     assert json.loads(sidecar.read_text()) == {"search_failures": {"UART_TX": "timeout"}}
 
@@ -457,6 +546,7 @@ def test_unreadable_retry_report_keeps_first_board(board, monkeypatch):
         return 0
 
     monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    _published(monkeypatch, board)
     assert _chain_budget_coarser_pass(_args(board), None, 2) == 2
     assert board.read_text() == "negotiated"
 
@@ -500,21 +590,154 @@ def test_retry_argv_replaces_short_output_flag():
 
 
 def test_retry_argv_stages_export_failed_nets():
-    """The retry writes the failed-nets report into its staging directory, not
-    over the caller's path (Issue #9620 review)."""
+    """The retry writes the effective failed-nets report into a unique staged
+    path in the TARGET's own filesystem (same-device publish), never over the
+    caller's path (Issue #9620 review)."""
     reports: dict[str, Path] = {}
     out = _budget_retry_argv(
         ["in.kicad_pcb", "--export-failed-nets", "failed.json"], 0.2, Path("d/s.kicad_pcb"), reports
     )
-    assert out[out.index("--export-failed-nets") + 1] == str(Path("d/export-failed-nets.json"))
-    assert reports == {"failed.json": Path("d/export-failed-nets.json")}
+    staged = Path(out[out.index("--export-failed-nets") + 1])
+    assert staged != Path("failed.json")
+    assert staged.parent == Path("failed.json").parent
+    assert staged.name.startswith(".failed.json.coarser-retry-")
+    assert staged.name.endswith(".json")
+    assert list(reports) == ["failed.json"]
+    assert reports["failed.json"] == staged
 
     reports_eq: dict[str, Path] = {}
     out = _budget_retry_argv(
         ["in.kicad_pcb", "--export-failed-nets=r.txt"], 0.2, Path("d/s.kicad_pcb"), reports_eq
     )
-    assert "--export-failed-nets=" + str(Path("d/export-failed-nets.txt")) in out
-    assert reports_eq == {"r.txt": Path("d/export-failed-nets.txt")}
+    staged_eq = Path(out[out.index("--export-failed-nets") + 1])
+    assert staged_eq.name.startswith(".r.txt.coarser-retry-")
+    assert staged_eq.name.endswith(".txt")
+    assert reports_eq == {"r.txt": staged_eq}
+
+
+def test_retry_argv_honours_only_the_effective_export_failed_nets():
+    """argparse is last-wins: with two --export-failed-nets occurrences only
+    the LAST is effective.  The retry stages exactly that one and drops the
+    inert earlier occurrence -- staging both collided two targets onto one
+    file and let promotion clobber a path this run was never asked to touch
+    (Issue #9620 review)."""
+    reports: dict[str, Path] = {}
+    out = _budget_retry_argv(
+        [
+            "in.kicad_pcb",
+            "--export-failed-nets",
+            "ignored.json",
+            "--export-failed-nets=report.json",
+        ],
+        0.2,
+        Path("d/s.kicad_pcb"),
+        reports,
+    )
+    occurrences = [i for i, tok in enumerate(out) if tok == "--export-failed-nets"]
+    assert len(occurrences) == 1
+    staged = Path(out[occurrences[0] + 1])
+    assert staged.parent == Path("report.json").parent
+    assert staged.name.startswith(".report.json.coarser-retry-")
+    assert "ignored.json" not in out
+    assert reports == {"report.json": staged}
+
+
+def test_promotion_leaves_inert_report_path_untouched(board, monkeypatch, tmp_path):
+    """The judge's two-occurrence probe: --export-failed-nets ignored.json
+    --export-failed-nets report.json must overwrite nothing but report.json."""
+    ignored = tmp_path / "ignored.json"
+    ignored.write_text('{"keep": true}')
+    report = tmp_path / "report.json"
+    report.write_text('{"first": true}')
+    _stub_open(monkeypatch, [["VCP"], []])
+
+    argv = [
+        str(board.with_name("in.kicad_pcb")),
+        "-o",
+        str(board),
+        "--export-failed-nets",
+        str(ignored),
+        "--export-failed-nets",
+        str(report),
+    ]
+
+    def fake_main(inner_argv):
+        staged_board = Path(inner_argv[inner_argv.index("-o") + 1])
+        staged_board.write_text("coarser")
+        staged_report = Path(inner_argv[inner_argv.index("--export-failed-nets") + 1])
+        staged_report.write_text('{"retry": true}')
+        assert staged_report != ignored and staged_report != report
+        return 0
+
+    monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    _published(monkeypatch, board)
+    assert _chain_budget_coarser_pass(_args(board), argv, 2) == 0
+    assert board.read_text() == "coarser"
+    assert json.loads(ignored.read_text()) == {"keep": True}
+    assert json.loads(report.read_text()) == {"retry": True}
+    # No staged-report litter beside the caller's paths.
+    assert not list(tmp_path.glob(".report.json.coarser-retry-*"))
+    assert not list(tmp_path.glob(".ignored.json.coarser-retry-*"))
+
+
+def test_report_publication_failure_keeps_first_result(board, monkeypatch, tmp_path):
+    """The effective report stages in its destination filesystem, so the
+    publish is a same-directory rename; if publication still fails (here a
+    simulated cross-device/permission error), the board, the report and the
+    command outcome must agree -- the first result is kept whole and no
+    staged litter remains (Issue #9620 review)."""
+    report = tmp_path / "failed.json"
+    report.write_text('{"first": true}')
+    _stub_open(monkeypatch, [["VCP"], []])
+    seen = {}
+
+    def fake_main(inner_argv):
+        staged_board = Path(inner_argv[inner_argv.index("-o") + 1])
+        staged_board.write_text("coarser")
+        staged_report = Path(inner_argv[inner_argv.index("--export-failed-nets") + 1])
+        staged_report.write_text('{"retry": true}')
+        seen["staged_report"] = staged_report
+        return 0
+
+    real_replace = os.replace
+
+    def failing_replace(src, dst, *a, **k):
+        if Path(dst) == report:
+            raise OSError(18, "Invalid cross-device link")
+        return real_replace(src, dst, *a, **k)
+
+    monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    monkeypatch.setattr("os.replace", failing_replace)
+    _published(monkeypatch, board)
+    assert _chain_budget_coarser_pass(_args(board), _report_argv(board, report), 2) == 2
+    assert board.read_text() == "negotiated"
+    assert json.loads(report.read_text()) == {"first": True}
+    # The staged report (which lives next to the target, outside the staging
+    # directory) was cleaned up, not left behind.
+    assert not seen["staged_report"].exists()
+    assert not list(tmp_path.glob(".failed.json.coarser-retry-*"))
+
+
+def test_discarded_retry_leaves_no_staged_report_litter(board, monkeypatch, tmp_path):
+    """A discarded retry's staged report (beside the caller's target, in the
+    target's filesystem) is removed with the staging directory."""
+    report = tmp_path / "failed.json"
+    report.write_text('{"first": true}')
+    _stub_open(monkeypatch, [["VCP"], ["VCP"]])
+
+    def fake_main(inner_argv):
+        staged_board = Path(inner_argv[inner_argv.index("-o") + 1])
+        staged_board.write_text("worse")
+        staged_report = Path(inner_argv[inner_argv.index("--export-failed-nets") + 1])
+        staged_report.write_text('{"retry": true}')
+        return 2
+
+    monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    _published(monkeypatch, board)
+    assert _chain_budget_coarser_pass(_args(board), _report_argv(board, report), 2) == 2
+    assert board.read_text() == "negotiated"
+    assert json.loads(report.read_text()) == {"first": True}
+    assert not list(tmp_path.glob(".failed.json.coarser-retry-*"))
 
 
 # --- route-auto: --grid flag and selection ---------------------------------
@@ -535,7 +758,7 @@ def test_resolve_grid_explicit_value_honoured(tmp_path):
     assert _resolve_route_auto_grid(tmp_path / "b.kicad_pcb", pcb, rules, "0.25") == (0.25, [])
 
 
-@pytest.mark.parametrize("bad", ["abc", -0.1, 0])
+@pytest.mark.parametrize("bad", ["abc", -0.1, 0, "nan", "inf", "-inf", float("nan"), float("inf")])
 def test_resolve_grid_rejects_invalid_explicit_value(tmp_path, bad):
     pcb = SimpleNamespace(get_board_outline=lambda: [(0, 0), (10, 8)])
     rules = SimpleNamespace(min_clearance=0.2)
@@ -670,6 +893,12 @@ def test_main_impl_hooks_retry_before_chain_complete(board, monkeypatch):
             args.grid = 0.1
             args.clearance = 0.2
             Path(args.output).write_text("negotiated")
+            # Issue #9620 review: the retry gates on the route receipt's
+            # publication record, so the first pass must publish -o.
+            from kicad_tools.cli import route_receipt
+
+            route_receipt.configure(args)
+            route_receipt.record_publication(Path(args.output))
             return 2
         # The retry pass: explicit coarser grid, everything routed.
         Path(args.output).write_text("coarser")
@@ -715,6 +944,12 @@ def test_format_json_promoted_retry_emits_one_document_describing_it(board, monk
         args.grid = 0.1
         args.clearance = 0.2
         Path(args.output).write_text("negotiated")
+        # The retry gates on the route receipt's publication record; the real
+        # first pass publishes via the atomic board writer.
+        from kicad_tools.cli import route_receipt
+
+        route_receipt.configure(args)
+        route_receipt.record_publication(Path(args.output))
         return 2
 
     def fake_inner_main(argv):
@@ -759,6 +994,10 @@ def test_format_json_kept_first_result_emits_one_document(board, monkeypatch, ca
         args.grid = 0.1
         args.clearance = 0.2
         Path(args.output).write_text("negotiated")
+        from kicad_tools.cli import route_receipt
+
+        route_receipt.configure(args)
+        route_receipt.record_publication(Path(args.output))
         return 2
 
     def fake_inner_main(argv):
@@ -783,3 +1022,99 @@ def test_format_json_kept_first_result_emits_one_document(board, monkeypatch, ca
     assert board.read_text() == "negotiated"
     doc = json.loads(capsys.readouterr().out)
     assert doc["exit_code"] == 2
+
+
+def test_relocate_promoted_json_paths(tmp_path):
+    """A promoted run's staged artifact paths translate to their published
+    locations; a staged path with no published artifact is omitted (a path
+    to nothing is worse than none); non-staged paths and unparseable input
+    pass through (Issue #9620 review)."""
+    stage = tmp_path / ".out.coarser-abcd"
+    stage.mkdir()
+    output = tmp_path / "out.kicad_pcb"
+    output.write_text("board")
+    published_sidecar = output.with_name("out.search_failures.json")
+    published_sidecar.write_text("{}")
+    document = json.dumps(
+        {
+            "routing_plan": {"sidecar": str(stage / "out.search_failures.json")},
+            "export": {"failed_nets": str(stage / "out.failed-nets.json")},
+            "board": str(output),
+            "nested": [str(stage / "out.search_failures.json"), 3],
+        }
+    )
+    relocated = json.loads(_relocate_promoted_json_paths(document, stage, output))
+    assert relocated["routing_plan"] == {"sidecar": str(published_sidecar)}
+    assert relocated["export"] == {}  # no published artifact: key omitted
+    assert relocated["board"] == str(output)  # unstaged paths untouched
+    # List members pass through: an element with no published artifact cannot
+    # be omitted without shifting the list, so only dict values relocate.
+    assert relocated["nested"] == [str(stage / "out.search_failures.json"), 3]
+    assert _relocate_promoted_json_paths("not json", stage, output) == "not json"
+
+
+def test_format_json_promoted_document_points_at_published_artifacts(board, monkeypatch, capsys):
+    """Issue #9620 review: the promoted retry's stdout document describes the
+    PUBLISHED board -- staged artifact paths are translated next to -o, a path
+    whose artifact never published is omitted, and the inner document is
+    consumed once (nothing leaks to stderr)."""
+    write_search_failures_sidecar(board, {"VCP": "timeout"})
+    states = iter([["VCP"], []])
+    monkeypatch.setattr(
+        "kicad_tools.router.partial_rescue.partially_connected_signal_nets",
+        lambda *a, **k: next(states),
+    )
+    published_sidecar = board.with_name(f"{board.stem}.search_failures.json")
+
+    def fake_run_main_impl(args, parser, argv):
+        args._grid_selection = "auto"
+        args.grid = 0.1
+        args.clearance = 0.2
+        Path(args.output).write_text("negotiated")
+        from kicad_tools.cli import route_receipt
+
+        route_receipt.configure(args)
+        route_receipt.record_publication(Path(args.output))
+        return 2
+
+    def fake_inner_main(argv):
+        staged = Path(argv[argv.index("-o") + 1])
+        staged.write_text("coarser-retry")
+        staged_sidecar = staged.with_name(f"{staged.stem}.search_failures.json")
+        staged_sidecar.write_text('{"search_failures": {"VCP": "timeout"}}')
+        if route_cmd._route_json_capture is not None:
+            route_cmd._route_json_capture.append(
+                json.dumps(
+                    {
+                        "routing_plan": {"sidecar": str(staged_sidecar)},
+                        "export": {"failed_nets": str(staged.with_name("failed-nets.json"))},
+                    }
+                )
+            )
+        return 0
+
+    monkeypatch.setattr(route_cmd, "_run_main_impl", fake_run_main_impl)
+    real_main_impl = route_cmd._main_impl
+    monkeypatch.setattr(route_cmd, "_main_impl", fake_inner_main)
+    rc = real_main_impl(
+        [
+            str(board.with_name("in.kicad_pcb")),
+            "-o",
+            str(board),
+            "--grid",
+            "auto",
+            "--format",
+            "json",
+        ]
+    )
+    assert rc == 0
+    assert board.read_text() == "coarser-retry"
+    captured = capsys.readouterr()
+    doc = json.loads(captured.out)
+    # One stdout document, whose sidecar is the PUBLISHED sidecar...
+    assert doc["routing_plan"] == {"sidecar": str(published_sidecar)}
+    assert published_sidecar.is_file()
+    # ...whose unpublished artifact has no dangling staged path...
+    assert doc["export"] == {}
+    # ...and whose inner document never also landed on stderr.
+    assert "routing_plan" not in captured.err
