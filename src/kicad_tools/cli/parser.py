@@ -3043,9 +3043,11 @@ def _add_pcb_parser(subparsers) -> None:
         "--no-current-paths",
         dest="no_current_paths",
         action="store_true",
-        help="Suppress current-paths sidecar auto-discovery for 'pcb prune', "
-        "restoring the pre-#9747 behaviour of ignoring a sidecar unless "
-        "--current-paths names one. Cannot be combined with --current-paths.",
+        help="Suppress current-paths sidecar auto-discovery for 'pcb prune': "
+        "no sidecar is loaded (only an explicit --current-paths names one), "
+        "so declared nets get no declared-current width test in planning "
+        "and the post-plan current-path audit gate (Issue #8687) is "
+        "disabled. Cannot be combined with --current-paths.",
     )
     pcb_prune.add_argument(
         "--wide",
