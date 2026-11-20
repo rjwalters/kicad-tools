@@ -1,4 +1,4 @@
-name: External Benchmark Re-run
+name: Board 06 seed-42 measurement
 
 # Issue #7669: reproducible re-run of the four published external benchmark
 # cases (pocketbeagle, beagleconnect_freedom, strf zero-touch; strf tuned) on
@@ -36,10 +36,10 @@ jobs:
         run: echo "image=${KICAD_IMAGE}" >> "$GITHUB_OUTPUT"
 
   bench:
-    name: Run external benchmark cases
+    name: Compare board 06 seed-42 backends
     needs: kicad_pin
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 350
     container:
       image: ${{ needs.kicad_pin.outputs.image }}
       options: --user 0:0 --memory 12g
@@ -79,64 +79,52 @@ jobs:
       - name: Build C++ router backend
         run: uv run kct build-native
 
-      - name: Record native backend check
-        # Timing is only valid with the C++ backend; this step fails the run
-        # rather than publishing Python-fallback timings.
+      - name: Regenerate and measure each backend
+        env:
+          PYTHONUNBUFFERED: "1"
         run: |
           set -euo pipefail
-          mkdir -p bench-out
-          uv run kct build-native --check | tee bench-out/native-check.txt
-          grep -q "C++ backend: available" bench-out/native-check.txt
+          board=boards/06-diffpair-test
+          for backend in cpp python; do
+            dir="measurement/$backend"
+            mkdir -p "$dir"
+            for input in "$board"/regression-fixture/*; do
+              case "$input" in *_routed.kicad_pcb|*.md) continue ;; esac
+              cp "$input" "$dir/"
+            done
+            if [[ $backend == python ]]; then
+              mv src/kicad_tools/router/router_cpp.*.so "$RUNNER_TEMP/"
+            fi
+            uv run python -c 'import sys; from kicad_tools.router.cpp_backend import get_backend_info; info = get_backend_info(); print(info); assert info["backend"] == sys.argv[1]' "$backend"
+            uv run python "$board/generate_design.py" "$dir" --step route --seed 42 2>&1 | tee "$dir/route.log"
+            pcb="$dir/diffpair_test_routed.kicad_pcb"
+            test -s "$pcb"
+            rc=0
+            uv run kct check "$pcb" --mfr jlcpcb --format json > "$dir/check.json" || rc=$?
+            echo "$backend kct check exit $rc"
+            jq -e '.violations | type == "array"' "$dir/check.json"
+            jq '[.violations[] | select(.rule_id == "physical_copper_gap" and (.severity == "error" or .severity == "warning")) | {nets,items,actual_value,layer}]' "$dir/check.json" | tee "$dir/slits.json"
+            sha256sum "$pcb"
+          done
+          uv run python - <<'PYTHON'
+          from collections import Counter
+          from pathlib import Path
+          from kicad_tools.schema.pcb import PCB
+          def route(path):
+              board = PCB.load(path)
+              def name(obj):
+                  return board.nets[obj.net_number].name
+              return (Counter((name(s), s.layer, s.width, tuple(sorted((s.start, s.end)))) for s in board.segments),
+                      Counter((name(v), v.position, v.size, v.drill, tuple(v.layers)) for v in board.vias))
+          cpp, py = [Path("measurement") / backend / "diffpair_test_routed.kicad_pcb" for backend in ("cpp", "python")]
+          print("PCB bytes identical:", cpp.read_bytes() == py.read_bytes())
+          for kind, left, right in zip(("segments", "vias"), route(cpp), route(py)):
+              print(kind, "C++ only:", (left-right).total(), "Python only:", (right-left).total())
+          PYTHON
 
-      - name: Zero-touch protocol (pocketbeagle, beagleconnect_freedom, strf)
-        # A routing failure is a measurement, not a workflow failure: the
-        # report is still written and uploaded.
-        continue-on-error: true
-        run: |
-          uv run kct bench external \
-            --board pocketbeagle --board beagleconnect_freedom --board strf \
-            --seed "$SEED" -v --output-dir bench-out/zero-touch
-
-      - name: Tuned protocol (strf)
-        continue-on-error: true
-        run: |
-          uv run kct bench external --board strf --tuned \
-            --seed "$SEED" -v --output-dir bench-out/tuned
-
-      - name: Write run provenance
+      - uses: actions/upload-artifact@v4
         if: always()
-        run: |
-          set -euo pipefail
-          mkdir -p bench-out
-          jq -n \
-            --arg date "$(date -u +%F)" \
-            --arg recorded "$(date -u +%FT%TZ)" \
-            --arg commit "$GITHUB_SHA" \
-            --arg ref "$GITHUB_REF" \
-            --arg run "$GITHUB_RUN_ID" \
-            --arg image "$KICAD_IMAGE" \
-            --arg kicad "$(kicad-cli --version)" \
-            --arg python "$(uv run python -c 'import platform; print(platform.python_version())')" \
-            --arg native "$(cat bench-out/native-check.txt 2>/dev/null || true)" \
-            --argjson seed "$SEED" \
-            '{record_type: "external_benchmark_run_provenance", record_version: 1,
-              run_date_utc: $date, recorded_at: $recorded, tool_commit: $commit,
-              ref: $ref, workflow_run_id: $run, kicad_image: $image,
-              kicad_cli: $kicad, python: $python, native_check: $native,
-              seed: $seed}' > bench-out/run-provenance.json
-          git status --porcelain --untracked-files=no > bench-out/tracked-source-status.txt
-
-      - name: Upload reports and provenance
-        if: always()
-        uses: actions/upload-artifact@v7
         with:
-          name: external-bench-${{ github.run_id }}
-          # Reports + provenance only; normalized/ and routed/ hold full
-          # copies of third-party board files and are never published.
-          path: |
-            bench-out/run-provenance.json
-            bench-out/tracked-source-status.txt
-            bench-out/native-check.txt
-            bench-out/*/*.json
-            bench-out/*/*.md
-          if-no-files-found: warn
+          name: board06-seed42-measurement
+          path: measurement/
+          retention-days: 14
