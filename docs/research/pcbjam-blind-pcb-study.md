@@ -40,8 +40,11 @@ study ([pcbjam.com/blog/fable-blind-pcb-layout](https://www.pcbjam.com/blog/fabl
 read 2026-11-19) for the study's own "finished" definition, its per-board
 commentary and its account of the tooling batches. No board file was opened
 and nothing was run — that was #9595's job (since done for the first board;
-see `pcbjam-blind-pcb-results.md`). Quotations below are from the
-MIT-licensed repo and are attributed to their run. `bt` itself is **not
+see `pcbjam-blind-pcb-results.md`). Quotations below come from two
+sources: those attributed to a run are from the MIT-licensed repo; those marked
+"(write-up)" — including the CM4 passages — are from PCBJam's separate article,
+which the repo's MIT licence does not cover (see Licence hygiene), so they are
+short quotations with the link retained. `bt` itself is **not
 published**; what we know of
 it comes only from its public command description (`sandbox/briefs/tools-bt.md`)
 and the agents' reviews in each run's `work/BT-REVIEW.md` — ideas only.
@@ -149,10 +152,15 @@ a board tool*, drawn only from the published briefs and the agents'
 them:
 
 - **Check-then-apply as one atomic step, and probe must check proposed items
-  against each other**, not only against the board: two hand-made stubs passed
+  against each other**, not only against the board: in the 2026-11-12
+  OrangeCrab run (`orangecrab-bt-20261112-1613`), two hand-made stubs passed
   probe while violating each other and were caught only by KiCad DRC
-  (orangecrab review, item 7). `bt apply --checked` and `bt probe` were the
-  most-trusted commands in the study. → #9590
+  (orangecrab review, item 7). That was an earlier tool state: the later
+  RedBoard placement run (2026-11-16, `redboard-place-bt-20261116-1017`)
+  confirmed in its review that probe checked new items against each other, and
+  its brief specified that a checked apply writes nothing when the probe fails.
+  `bt apply --checked` and `bt probe` were the most-trusted commands in the
+  study. → #9590
 - **Plane protection as a routing cost, not an afterthought**: a zone-cost or
   keep-planes option, a warning when a route crosses another net's zone, and
   the route-refill-group-count loop built in (esp32-route review, late
@@ -185,7 +193,7 @@ them:
 
 | Study finding | kct issue | What we would build |
 |---|---|---|
-| Probe checks items only against the board; apply is not atomic | #9590 | `kct probe` batches and `kct apply --checked` |
+| Early `bt` (OrangeCrab, 2026-11-12) probed only against the board; the later tool (RedBoard placement, 2026-11-16) checked proposed items against each other and a checked apply wrote nothing on a failed probe. How the unpublished tool handles a crash *during* a write is not established | #9590 | Propose the same check-before-write behaviour for `kct probe` batches and `kct apply --checked` |
 | Bulk routing cuts planes; no zone-crossing cost or warning | #9591 | Router zone-split cost + `kct check` plane-integrity finding |
 | Shove ignores layers; batch JSON traps; greedy ordering; grid scaling | #9592 | Audit `kct route` against ten reported failure modes |
 | Net-less copper graphics, custom pads, footprint-local outlines ignored | #9593 | Footprint-level Edge.Cuts handled everywhere the outline is used |
@@ -195,7 +203,10 @@ them:
 ## Licence hygiene
 
 `blind-pcb-runs` is MIT (`LICENSE`, Copyright 2026 Gergő Törcsvári): quoting
-and paraphrasing with attribution, as above, is fine, and its scoring method
+and paraphrasing its run material with attribution, as above, is fine. The
+PCBJam article (pcbjam.com/blog/fable-blind-pcb-layout) is a separate work whose
+licence scope the repository README does not extend to it: quote it sparingly,
+mark each quotation "(write-up)", and prefer paraphrase. The repo's scoring method
 and sandbox design are reusable with attribution. The **boards** keep their own
 licences (CERN-OHL-P-2.0, CERN-OHL 1.2, 0BSD, WTFPL, MIT, Apache-2.0, and one
 SparkFun board with no LICENSE file at the pinned commit) — fetch by their
