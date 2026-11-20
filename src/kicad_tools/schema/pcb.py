@@ -564,7 +564,36 @@ def _insert_layer_child_after(layer_node: SExp, child: SExp, tags: tuple[str, ..
     layer_node.children.insert(index, child)
 
 
-def _exchange_front_back_primitives(pad_node: SExp) -> None:
+def _exchange_pad_field(front: SExp, back: SExp, tag: str) -> None:
+    front_field, back_field = front.find_child(tag), back.find_child(tag)
+    if front_field is not None and back_field is not None:
+        front_field.children, back_field.children = back_field.children, front_field.children
+        return
+    if front_field is not None:
+        front.remove(front_field)
+    if back_field is not None:
+        back.remove(back_field)
+        _insert_pad_child_before(front, back_field, ("options", "primitives", "uuid", "padstack"))
+    if front_field is not None:
+        _insert_pad_child_before(back, front_field, ("options", "primitives", "zone_connect"))
+
+
+def _mirror_pad_shape_fields(holder: SExp) -> None:
+    for tag in ("offset", "rect_delta"):
+        point = holder.find_child(tag)
+        if point is not None:
+            _negate_node_y(point)
+    chamfer = holder.find_child("chamfer")
+    if chamfer is not None:
+        chamfer.children = [
+            SExp.atom(_CHAMFER_CORNER_SWAP[c.value])
+            if c.is_atom and c.value in _CHAMFER_CORNER_SWAP
+            else c
+            for c in chamfer.children
+        ]
+
+
+def _exchange_front_back_primitives(pad_node: SExp, custom_clearance: SExp | None) -> None:
     """Swap the pad's front and back padstack shape definitions.
 
     A ``front_inner_back`` padstack serializes the front layer's definition at
@@ -580,12 +609,16 @@ def _exchange_front_back_primitives(pad_node: SExp) -> None:
     ``outline`` when the pad's front was plain before the flip.
     """
     padstack = pad_node.find_child("padstack")
+    _mirror_pad_shape_fields(pad_node)
+    drill = pad_node.find_child("drill")
+    if drill is not None:
+        _mirror_local_y(drill)
     back = None
     if padstack is not None:
         for layer in padstack.find_children("layer"):
+            _mirror_pad_shape_fields(layer)
             if layer.get_string(0) == "B.Cu":
                 back = layer
-                break
     if back is None:
         return
     back_shape_node = back.find_child("shape")
@@ -601,17 +634,15 @@ def _exchange_front_back_primitives(pad_node: SExp) -> None:
     pad_node.children[2] = SExp.atom(back_shape)
     back_shape_node.set_atom(0, front_shape)
 
-    # -- size -----------------------------------------------------------------
-    top_size = pad_node.find_child("size")
-    back_size = back.find_child("size")
-    if top_size is not None and back_size is not None:
-        top_size.children, back_size.children = back_size.children, top_size.children
-    elif top_size is not None:
-        pad_node.remove(top_size)
-        _insert_layer_child_after(back, top_size, ("shape",))
-    elif back_size is not None:
-        back.remove(back_size)
-        _insert_pad_child_before(pad_node, back_size, ("drill", "layers", "options", "primitives"))
+    for tag in ("size", "rect_delta", "roundrect_rratio", "chamfer_ratio", "chamfer"):
+        _exchange_pad_field(pad_node, back, tag)
+    # KiCad stores the front copper offset under drill, and the back offset
+    # directly under its layer. The hole dimensions stay with the pad.
+    if drill is None and back.find_child("offset") is not None:
+        drill = SExp.list("drill", 0)
+        _insert_pad_child_before(pad_node, drill, ("layers",))
+    if drill is not None:
+        _exchange_pad_field(drill, back, "offset")
 
     # -- options: the anchor moves with the shape; clearance is pad-level ------
     top_options = pad_node.find_child("options")
@@ -620,7 +651,7 @@ def _exchange_front_back_primitives(pad_node: SExp) -> None:
     back_anchor = _pad_options_anchor(back_options)
     clearance = top_options.find_child("clearance") if top_options is not None else None
     if back_shape == "custom":
-        entries = [clearance if clearance is not None else SExp.list("clearance", "outline")]
+        entries = [clearance or custom_clearance or SExp.list("clearance", "outline")]
         if back_anchor is not None:
             entries.append(back_anchor)
         if top_options is None:
@@ -654,7 +685,7 @@ def _exchange_front_back_primitives(pad_node: SExp) -> None:
         _insert_layer_child_after(back, block, ("shape", "size", "options"))
 
 
-def mirror_pad_primitives(pad_node: SExp) -> None:
+def mirror_pad_primitives(pad_node: SExp, custom_clearance: SExp | None = None) -> None:
     """Mirror a custom pad's primitives the way KiCad's ``Flip`` does.
 
     Every ``(primitives ...)`` block under the pad -- the top-level block and
@@ -664,7 +695,7 @@ def mirror_pad_primitives(pad_node: SExp) -> None:
     exchanges between the pad's top level and the padstack's ``B.Cu`` layer.
     Measured black-box against ``pcbnew`` 10.0.6 ``Flip`` on layer-asymmetric
     padstacks (the golden fixture's pads 7-11, Issues #9752/#9773).
-    No-ops for pads without primitives.
+    Standalone pad shapes also mirror their offset, trapezoid delta and corners.
     """
     for primitives in iter_pad_primitives(pad_node):
         _mirror_local_y(primitives)
@@ -674,7 +705,7 @@ def mirror_pad_primitives(pad_node: SExp) -> None:
             start, end = arc.find_child("start"), arc.find_child("end")
             if start is not None and end is not None and arc.find_child("mid") is not None:
                 start.children, end.children = end.children, start.children
-    _exchange_front_back_primitives(pad_node)
+    _exchange_front_back_primitives(pad_node, custom_clearance)
 
 
 def flip_footprint_children_to_back(footprint_node: SExp, rotation: float = 0.0) -> None:
@@ -698,17 +729,6 @@ def flip_footprint_children_to_back(footprint_node: SExp, rotation: float = 0.0)
                 angle = at_node.get_float(2)
                 if angle:
                     at_node.children[2] = _mm_atom(-angle)
-            drill = child.find_child("drill")
-            if drill is not None:
-                _mirror_local_y(drill)
-            chamfer = child.find_child("chamfer")
-            if chamfer is not None:
-                chamfer.children = [
-                    SExp.atom(_CHAMFER_CORNER_SWAP[c.value])
-                    if c.is_atom and c.value in _CHAMFER_CORNER_SWAP
-                    else c
-                    for c in chamfer.children
-                ]
             # Walks nested padstack blocks and exchanges front/back (Issue #9752).
             mirror_pad_primitives(child)
         elif tag in _FP_TEXT_TAGS:
@@ -1150,6 +1170,24 @@ class Pad:
     # ``power_out`` switch-node pin from a regulator output (issue #5998).
     pinfunction: str = ""
 
+    # A plain front shape cannot serialize the pad-wide custom zone mode.
+    _custom_clearance: SExp | None = field(default=None, init=False, repr=False, compare=False)
+
+    def mirror_shape_geometry(self) -> None:
+        node = self._sexp_node
+        if node is None:
+            return
+        if options := node.find_child("options"):
+            if clearance := options.find_child("clearance"):
+                self._custom_clearance = clearance
+        mirror_pad_primitives(node, self._custom_clearance)
+        # The tree already holds the mirrored geometry. Refresh the public
+        # fields without invoking setters that serialize absent defaults.
+        parsed = Pad.from_sexp(node)
+        if parsed is not None:
+            for name in ("shape", "size", "roundrect_rratio", "drill_offset"):
+                object.__setattr__(self, name, getattr(parsed, name))
+
     def __setattr__(self, name: str, value: object) -> None:
         # An oval hole has no single diameter: refuse *before* storing so the
         # Python value and the tree cannot diverge (issue #7479).
@@ -1260,13 +1298,13 @@ class Pad:
             pad.rotation = at.get_float(2) or 0.0
 
         # Size
-        if size := sexp.find("size"):
+        if size := sexp.find_child("size"):
             w = size.get_float(0) or 0.0
             h = size.get_float(1) or w
             pad.size = (w, h)
 
         # Corner radius ratio for roundrect pads (default 0.25 when absent)
-        if rratio := sexp.find("roundrect_rratio"):
+        if rratio := sexp.find_child("roundrect_rratio"):
             value = rratio.get_float(0)
             if value is not None:
                 pad.roundrect_rratio = value

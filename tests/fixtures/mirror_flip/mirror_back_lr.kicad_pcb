@@ -536,6 +536,148 @@
 			)
 		)
 		(embedded_fonts no)
+		(pad "12" thru_hole roundrect
+			(at -3 -7 150)
+			(size 1 0.9)
+			(drill 0.3
+				(offset 0.1 -0.05)
+			)
+			(layers "*.Cu" "*.Mask")
+			(remove_unused_layers no)
+			(roundrect_rratio 0.4)
+			(uuid "7f2630f7-dc47-44eb-999d-559b68375f8f")
+			(padstack
+				(mode front_inner_back)
+				(layer "Inner"
+					(shape custom)
+					(size 0.6 0.6)
+					(options
+						(anchor circle)
+					)
+					(primitives
+						(gr_poly
+							(pts
+								(xy -0.9 0.1) (xy -0.1 0.1) (xy -0.3 -0.8)
+							)
+							(width 0)
+							(fill yes)
+						)
+					)
+				)
+				(layer "B.Cu"
+					(shape custom)
+					(size 0.6 0.6)
+					(options
+						(anchor circle)
+					)
+					(primitives
+						(gr_poly
+							(pts
+								(xy -0.2 0.2) (xy 0.8 -0.1) (xy 0.1 -0.7)
+							)
+							(width 0)
+							(fill yes)
+						)
+					)
+					(zone_connect -1)
+				)
+			)
+		)
+		(pad "13" thru_hole roundrect
+			(at 0 -7 150)
+			(size 0.55 0.55)
+			(drill 0.3)
+			(layers "*.Cu" "*.Mask")
+			(remove_unused_layers no)
+			(roundrect_rratio 0)
+			(chamfer_ratio 0.2)
+			(chamfer bottom_left)
+			(uuid "9f6a452c-459f-4155-9ad2-39a49d35ecc1")
+			(padstack
+				(mode front_inner_back)
+				(layer "Inner"
+					(shape custom)
+					(size 0.6 0.6)
+					(options
+						(anchor circle)
+					)
+					(primitives
+						(gr_poly
+							(pts
+								(xy -0.9 0.1) (xy -0.1 0.1) (xy -0.3 -0.8)
+							)
+							(width 0)
+							(fill yes)
+						)
+					)
+				)
+				(layer "B.Cu"
+					(shape custom)
+					(size 0.6 0.6)
+					(options
+						(anchor circle)
+					)
+					(primitives
+						(gr_poly
+							(pts
+								(xy -0.2 0.2) (xy 0.8 -0.1) (xy 0.1 -0.7)
+							)
+							(width 0)
+							(fill yes)
+						)
+					)
+					(zone_connect -1)
+				)
+			)
+		)
+		(pad "14" thru_hole custom
+			(at 3 -7 150)
+			(size 0.6 0.6)
+			(drill 0.3)
+			(layers "*.Cu" "*.Mask")
+			(remove_unused_layers no)
+			(options
+				(clearance outline)
+				(anchor circle)
+			)
+			(primitives
+				(gr_poly
+					(pts
+						(xy -0.4 0.3) (xy 0.7 -0.1) (xy 0 -0.9)
+					)
+					(width 0)
+					(fill yes)
+				)
+			)
+			(uuid "2810998f-7f93-47ec-a52e-1b7ec9445ef3")
+			(padstack
+				(mode front_inner_back)
+				(layer "Inner"
+					(shape custom)
+					(size 0.6 0.6)
+					(options
+						(anchor circle)
+					)
+					(primitives
+						(gr_poly
+							(pts
+								(xy -0.9 0.1) (xy -0.1 0.1) (xy -0.3 -0.8)
+							)
+							(width 0)
+							(fill yes)
+						)
+					)
+				)
+				(layer "B.Cu"
+					(shape trapezoid)
+					(size 0.9 0.8)
+					(rect_delta 0.08 -0.03)
+					(thermal_bridge_angle 45)
+					(zone_connect -1)
+				)
+			)
+		)
+		(embedded_fonts no)
 	)
 	(gr_rect
 		(start 90 90)

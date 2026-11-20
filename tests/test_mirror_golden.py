@@ -546,8 +546,17 @@ def _side_definitions(pad) -> dict[str, dict]:
         prims = None
         if block is not None:
             prims = list(block.iter_children())
+        offset_holder = holder.find_child("drill") if holder is node else holder
+        offset = offset_holder.find_child("offset") if offset_holder is not None else None
+        fields = {
+            tag: field.values
+            for tag in ("rect_delta", "roundrect_rratio", "chamfer_ratio", "chamfer")
+            if (field := holder.find_child(tag)) is not None
+        }
         return {
             "shape": shape,
+            "fields": fields,
+            "offset": offset.values if offset is not None else [0, 0],
             "size": (size.get_float(0), size.get_float(1)) if size is not None else None,
             "options": None if options is None else {"clearance": clearance, "anchor": anchor},
             "primitives": prims,
@@ -591,6 +600,8 @@ def _assert_defs_equal(mine: dict[str, dict], theirs: dict[str, dict]) -> None:
     assert list(mine) == list(theirs), f"owners differ: {list(mine)} vs {list(theirs)}"
     for owner in mine:
         m, t = mine[owner], theirs[owner]
+        assert m["fields"] == t["fields"], owner
+        assert m["offset"] == pytest.approx(t["offset"]), owner
         assert m["shape"] == t["shape"], f"{owner}: shape {m['shape']} != {t['shape']}"
         assert (m["size"] is None) == (t["size"] is None), f"{owner}: size presence"
         if m["size"] is not None:
@@ -619,39 +630,36 @@ class TestMirrorOneSidedPadstackExchange:
         return _side_definitions(_custom_pad(_u1(board), number))
 
     def test_fixture_pins_the_four_one_sided_cases(self):
-        front = self._defs(PCB.load(str(_FRONT)), "8")
-        assert list(front) == ["F.Cu", "Inner", "B.Cu"]
+        board = PCB.load(str(_FRONT))
         cases = {
-            "8": (
-                "custom",
-                "custom",
-                True,
-                True,
-            ),  # (front shape, back shape, front block, back block)
-            "9": ("custom", "custom", True, True),
-            "10": ("custom", "circle", True, False),
-            "11": ("circle", "custom", False, True),
+            "8": ("custom", "custom", 1, 0),
+            "9": ("custom", "custom", 0, 1),
+            "10": ("custom", "circle", 1, None),
+            "11": ("circle", "custom", None, 1),
         }
-        for number, (fshape, bshape, fblock, bblock) in cases.items():
-            defs = self._defs(PCB.load(str(_FRONT)), number)
-            assert defs["F.Cu"]["shape"] == fshape, number
-            assert defs["B.Cu"]["shape"] == bshape, number
-            assert (defs["F.Cu"]["primitives"] is not None) == fblock, number
-            assert (defs["B.Cu"]["primitives"] is not None) == bblock, number
-            # The empty side of pads 8/9 serializes a literal empty block.
-            if fshape == "custom" and not fblock:
-                assert defs["F.Cu"]["primitives"] == [], number
-            if bshape == "custom" and not bblock:
-                assert defs["B.Cu"]["primitives"] == [], number
+        for number, (fshape, bshape, fcount, bcount) in cases.items():
+            defs = self._defs(board, number)
+            assert list(defs) == ["F.Cu", "Inner", "B.Cu"]
+            for owner, shape, count in (("F.Cu", fshape, fcount), ("B.Cu", bshape, bcount)):
+                assert defs[owner]["shape"] == shape, number
+                primitives = defs[owner]["primitives"]
+                assert (None if primitives is None else len(primitives)) == count, number
             # Every case carries the distinct Inner triangle.
             assert len(_primitive_coords(defs["Inner"]["primitives"])[0][1]) == 6, number
 
     def test_onesided_definitions_equal_kicad_flip(self):
-        for number in ("8", "9", "10", "11"):
+        for number in ("8", "9", "10", "11", "12", "13", "14"):
             _assert_defs_equal(
                 self._defs(_flip_front(), number),
                 self._defs(PCB.load(str(_BACK)), number),
             )
+
+    def test_live_geometry_matches_native_flip(self):
+        mine = _u1(_flip_front())
+        for expected in _u1(PCB.load(str(_BACK))).pads:
+            pad = _custom_pad(mine, expected.number)
+            for name in ("shape", "size", "roundrect_rratio", "drill_offset"):
+                assert getattr(pad, name) == getattr(expected, name), (pad.number, name)
 
     def test_circle_outer_loses_custom_metadata(self):
         """The measured core of #9773: flipping pad 10 must move the custom
@@ -675,20 +683,40 @@ class TestMirrorOneSidedPadstackExchange:
     def test_onesided_exchange_survives_save_and_reparse(self, tmp_path: Path):
         out = tmp_path / "flipped.kicad_pcb"
         _flip_front().save(str(out))
-        for number in ("8", "9", "10", "11"):
+        for number in ("8", "9", "10", "11", "12", "13", "14"):
             _assert_defs_equal(
                 self._defs(PCB.load(str(out)), number),
                 self._defs(PCB.load(str(_BACK)), number),
             )
 
     def test_double_mirror_restores_onesided_definitions(self):
-        for number in ("8", "9", "10", "11"):
+        for number in ("8", "9", "10", "11", "12", "13", "14"):
             original = self._defs(PCB.load(str(_FRONT)), number)
             pcb = PCB.load(str(_FRONT))
             applicator = StrategyApplicator()
             applicator.apply_strategy(pcb, _mirror_strategy())
             applicator.apply_strategy(pcb, _mirror_strategy())
             _assert_defs_equal(self._defs(pcb, number), original)
+
+    @pytest.mark.skipif(find_kicad_cli() is None, reason="requires native KiCad reload")
+    def test_shape_geometry_after_native_reload(self, tmp_path: Path):
+        board = _flip_front()
+        for name, golden in (("single", _BACK), ("double", _FRONT)):
+            out = tmp_path / f"{name}.kicad_pcb"
+            board.save(str(out))
+            subprocess.run(
+                [str(find_kicad_cli()), "pcb", "upgrade", "--force", str(out)],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=60,
+            )
+            reloaded = PCB.load(str(out))
+            expected = PCB.load(str(golden))
+            for number in ("12", "13", "14"):
+                _assert_defs_equal(self._defs(reloaded, number), self._defs(expected, number))
+            if name == "single":
+                StrategyApplicator().apply_strategy(board, _mirror_strategy())
 
     def test_back_placement_entry_point_matches_kicad_flip(self):
         """``flip_footprint_children_to_back`` (#8581) shares the transform:
@@ -698,7 +726,7 @@ class TestMirrorOneSidedPadstackExchange:
         pcb = PCB.load(str(_FRONT))
         fp = _u1(pcb)
         flip_footprint_children_to_back(fp._sexp_node, fp.rotation)
-        for number in ("8", "9", "10", "11"):
+        for number in ("8", "9", "10", "11", "12", "13", "14"):
             _assert_defs_equal(
                 self._defs(pcb, number),
                 self._defs(PCB.load(str(_BACK)), number),

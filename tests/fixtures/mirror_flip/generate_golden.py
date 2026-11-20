@@ -260,7 +260,7 @@ def add_one_sided_padstack_custom_pad(
     y_mm: float,
     front: str,
     back: str,
-) -> None:
+) -> pcbnew.PAD:
     """Add a through-hole ``front_inner_back`` custom pad with a ONE-SIDED outer.
 
     ``front``/``back`` pick each outer layer's definition: ``"poly"`` (custom
@@ -304,6 +304,7 @@ def add_one_sided_padstack_custom_pad(
                 pad.AddPrimitivePoly(layer, _poly_set(tris[layer]), 0, True)
     pad.SetFPRelativePosition(VECTOR2I(mm(x_mm), mm(y_mm)))
     fp.Add(pad)
+    return pad
 
 
 def add_silk_line(fp: pcbnew.FOOTPRINT, x1: float, y1: float, x2: float, y2: float) -> None:
@@ -373,6 +374,21 @@ def main() -> int:
     add_one_sided_padstack_custom_pad(fp, "9", -0.5, 4.6, "empty", "poly")
     add_one_sided_padstack_custom_pad(fp, "10", 1.0, 4.6, "poly", "circle")
     add_one_sided_padstack_custom_pad(fp, "11", 2.5, 4.6, "circle", "poly")
+
+    rounded = add_one_sided_padstack_custom_pad(fp, "12", -3, 7, "poly", "circle")
+    rounded.SetShape(pcbnew.B_Cu, PAD_SHAPE_ROUNDRECT)
+    rounded.SetSize(pcbnew.B_Cu, VECTOR2I(mm(1.0), mm(0.9)))
+    rounded.SetRoundRectRadiusRatio(pcbnew.B_Cu, 0.4)
+    rounded.SetOffset(pcbnew.B_Cu, VECTOR2I(mm(0.10), mm(0.05)))
+    rounded.SetCustomShapeInZoneOpt(pcbnew.CUSTOM_SHAPE_ZONE_MODE_CONVEXHULL)
+    chamfered = add_one_sided_padstack_custom_pad(fp, "13", 0, 7, "poly", "circle")
+    chamfered.SetShape(pcbnew.B_Cu, pcbnew.PAD_SHAPE_CHAMFERED_RECT)
+    chamfered.SetChamferRectRatio(pcbnew.B_Cu, 0.2)
+    chamfered.SetChamferPositions(pcbnew.B_Cu, 1)  # top left
+    trapezoid = add_one_sided_padstack_custom_pad(fp, "14", 3, 7, "circle", "poly")
+    trapezoid.SetShape(pcbnew.F_Cu, pcbnew.PAD_SHAPE_TRAPEZOID)
+    trapezoid.SetSize(pcbnew.F_Cu, VECTOR2I(mm(0.9), mm(0.8)))
+    trapezoid.SetDelta(pcbnew.F_Cu, VECTOR2I(mm(0.08), mm(0.03)))
 
     # An asymmetric silk mark (pin-1 tick) so the cosmetic side-flip is
     # observable in the golden too.
