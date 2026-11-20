@@ -541,24 +541,117 @@ def iter_pad_primitives(node: SExp) -> Iterator[SExp]:
             yield from iter_pad_primitives(child)
 
 
-def _exchange_front_back_primitives(pad_node: SExp) -> None:
-    """Swap the pad's top-level primitives with its padstack ``B.Cu`` block's.
+def _pad_options_anchor(options: SExp | None) -> SExp | None:
+    """The ``(anchor ...)`` child of a pad ``(options ...)`` node, if any."""
+    return options.find_child("anchor") if options is not None else None
 
-    A ``front_inner_back`` padstack serializes the front layer's primitives at
-    the pad's top level and the back layer's inside ``(padstack (layer
-    "B.Cu" ...))``; KiCad's ``Flip`` exchanges the two blocks' contents
-    (measured black-box on ``pcbnew`` 10.0.6, Issue #9752).
+
+def _insert_pad_child_before(pad_node: SExp, child: SExp, tags: tuple[str, ...]) -> None:
+    """Insert *child* before the pad's first child named in *tags* (append)."""
+    for i, existing in enumerate(pad_node.children):
+        if existing.name in tags:
+            pad_node.children.insert(i, child)
+            return
+    pad_node.children.append(child)
+
+
+def _insert_layer_child_after(layer_node: SExp, child: SExp, tags: tuple[str, ...]) -> None:
+    """Insert *child* after the layer node's last child named in *tags*."""
+    index = 1  # after the layer-name atom
+    for i, existing in enumerate(layer_node.children):
+        if existing.name in tags:
+            index = max(index, i + 1)
+    layer_node.children.insert(index, child)
+
+
+def _exchange_front_back_primitives(pad_node: SExp) -> None:
+    """Swap the pad's front and back padstack shape definitions.
+
+    A ``front_inner_back`` padstack serializes the front layer's definition at
+    the pad's top level (the shape atom, ``(size ...)``, ``(options ...)`` and
+    ``(primitives ...)``) and the back layer's inside ``(padstack (layer
+    "B.Cu" ...))``.  KiCad's ``Flip`` exchanges the two definitions, not only
+    two existing primitives blocks: when one outer side is not a custom shape
+    (and so has no primitives block at all), the shape, size, options and
+    primitives move together and the unused side ends up with the other
+    side's plain shape (measured black-box on the CI-pinned ``pcbnew`` 10.0.6
+    image, Issues #9752 and #9773).  The pad-level ``(clearance ...)`` option
+    serializes only beside a custom top-level shape -- its default
+    ``outline`` when the pad's front was plain before the flip.
     """
-    top = pad_node.find_child("primitives")
-    back = None
     padstack = pad_node.find_child("padstack")
+    back = None
     if padstack is not None:
         for layer in padstack.find_children("layer"):
             if layer.get_string(0) == "B.Cu":
-                back = layer.find_child("primitives")
+                back = layer
                 break
-    if top is not None and back is not None:
-        top.children, back.children = back.children, top.children
+    if back is None:
+        return
+    back_shape_node = back.find_child("shape")
+    if back_shape_node is None or len(pad_node.children) < 3 or pad_node.children[2].is_list:
+        return
+
+    front_shape = str(pad_node.children[2].value)
+    back_shape = back_shape_node.get_string(0)
+    if back_shape is None:
+        return
+
+    # -- shape atom ----------------------------------------------------------
+    pad_node.children[2] = SExp.atom(back_shape)
+    back_shape_node.set_atom(0, front_shape)
+
+    # -- size -----------------------------------------------------------------
+    top_size = pad_node.find_child("size")
+    back_size = back.find_child("size")
+    if top_size is not None and back_size is not None:
+        top_size.children, back_size.children = back_size.children, top_size.children
+    elif top_size is not None:
+        pad_node.remove(top_size)
+        _insert_layer_child_after(back, top_size, ("shape",))
+    elif back_size is not None:
+        back.remove(back_size)
+        _insert_pad_child_before(pad_node, back_size, ("drill", "layers", "options", "primitives"))
+
+    # -- options: the anchor moves with the shape; clearance is pad-level ------
+    top_options = pad_node.find_child("options")
+    back_options = back.find_child("options")
+    front_anchor = _pad_options_anchor(top_options)
+    back_anchor = _pad_options_anchor(back_options)
+    clearance = top_options.find_child("clearance") if top_options is not None else None
+    if back_shape == "custom":
+        entries = [clearance if clearance is not None else SExp.list("clearance", "outline")]
+        if back_anchor is not None:
+            entries.append(back_anchor)
+        if top_options is None:
+            top_options = SExp.list("options")
+            _insert_pad_child_before(pad_node, top_options, ("primitives", "uuid", "padstack"))
+        top_options.children = entries
+    elif top_options is not None:
+        pad_node.remove(top_options)
+    if front_shape == "custom":
+        entries = [front_anchor] if front_anchor is not None else []
+        if back_options is None:
+            back_options = SExp.list("options")
+            _insert_layer_child_after(back, back_options, ("shape", "size"))
+        back_options.children = entries
+    elif back_options is not None:
+        back.remove(back_options)
+
+    # -- primitives: the block follows its side's (new) shape -----------------
+    top_prims = pad_node.find_child("primitives")
+    back_prims = back.find_child("primitives")
+    if top_prims is not None:
+        pad_node.remove(top_prims)
+    if back_prims is not None:
+        back.remove(back_prims)
+    if back_shape == "custom":
+        # The top level takes the old back block's contents.
+        block = back_prims if back_prims is not None else SExp.list("primitives")
+        _insert_pad_child_before(pad_node, block, ("uuid", "padstack"))
+    if front_shape == "custom":
+        block = top_prims if top_prims is not None else SExp.list("primitives")
+        _insert_layer_child_after(back, block, ("shape", "size", "options"))
 
 
 def mirror_pad_primitives(pad_node: SExp) -> None:
@@ -567,9 +660,10 @@ def mirror_pad_primitives(pad_node: SExp) -> None:
     Every ``(primitives ...)`` block under the pad -- the top-level block and
     each nested ``(padstack (layer ...) ...)`` block of a per-layer padstack --
     is y-mirrored with three-point ``gr_arc`` endpoints swapping, and the
-    top-level (front) block exchanges contents with the padstack's ``B.Cu``
-    block.  Measured black-box against ``pcbnew`` 10.0.6 ``Flip`` on a
-    layer-asymmetric padstack (the golden fixture's pad 7, Issue #9752).
+    whole front/back shape definition (shape, size, options, primitives)
+    exchanges between the pad's top level and the padstack's ``B.Cu`` layer.
+    Measured black-box against ``pcbnew`` 10.0.6 ``Flip`` on layer-asymmetric
+    padstacks (the golden fixture's pads 7-11, Issues #9752/#9773).
     No-ops for pads without primitives.
     """
     for primitives in iter_pad_primitives(pad_node):
