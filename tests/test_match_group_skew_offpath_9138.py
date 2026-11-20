@@ -24,6 +24,7 @@ from kicad_tools.router.kicad_length import measure_pcb_net
 from kicad_tools.router.rules import NetClassRouting
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.validate.match_group_skew import derive_group_skew_data
+from tests.test_trace_length import PATH_BASE_PCB
 
 pytestmark = pytest.mark.skipif(not has_shapely(), reason="path measurement needs shapely")
 
@@ -109,6 +110,20 @@ def test_loop_is_reported_and_summed_figure_kept(tmp_path: Path, caplog):
     assert len(messages) == 1
     assert "DQ0" in messages[0]
     assert "20.0" in messages[0]
+
+
+def test_connected_third_pad_reports_difference_from_selected_path(tmp_path: Path, caplog):
+    path = tmp_path / "three-pad.kicad_pcb"
+    path.write_text(PATH_BASE_PCB)
+    pcb = PCB.load(str(path))
+    net_classes = dict.fromkeys(("BRANCH", "VIAS", "DUP"), NET_CLASS)
+
+    derive_group_skew_data(pcb, net_classes)
+
+    assert (
+        "[match-group-skew] DDR_DATA: net BRANCH total track length exceeds the selected "
+        "pad-to-pad path length by 5.000 mm (off-path copper included in summed length)"
+    ) in caplog.messages
 
 
 def test_clean_nets_match_summed_length_and_stay_silent(tmp_path: Path, caplog):

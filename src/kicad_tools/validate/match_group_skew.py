@@ -22,13 +22,9 @@ This module provides the producer side -- a thin shim that:
    declared member of each detected group -- the same summed
    kicad-cli-semantics figure the router's match-group tuner
    length-matches against, so producer and tuner share one ruler.
-   Off-path copper the signal never travels (a dead-end loop,
-   duplicate or stub) is *reported* -- a warning naming the group,
-   the net and the amount -- whenever it exceeds
-   :data:`OFF_PATH_REPORT_EPSILON_MM` (Issue #9138), but it is not
-   excluded from the figure: see the constant's rationale for why
-   any path-aware shedding measures a group with the router's own
-   tuning copper asymmetrically and manufactures skew.
+   When total track length exceeds the selected pad-to-pad path length by
+   more than :data:`OFF_PATH_REPORT_EPSILON_MM` (Issue #9138), a warning
+   names the group, net and difference. The skew uses the summed length.
 3. Builds the ``group_skew_data`` (``max(L) - min(L)`` across the
    group), the detected ``tracker_match_groups`` list, and the per-group
    ``threshold_map`` from each group's net class
@@ -194,11 +190,10 @@ def derive_group_skew_data(
         :meth:`MatchGroupTracker.get_all_skews` for routes recorded
         via :meth:`MatchGroupTracker.record_routes`.  This is the
         property tested in ``tests/test_validate_match_group_skew.py``.
-        Off-path copper the signal never travels (a dead-end loop,
-        duplicate or stub) is reported -- not excluded -- when it
-        exceeds :data:`OFF_PATH_REPORT_EPSILON_MM` (Issue #9138), so the
-        guarantee holds unconditionally: every member is measured with
-        the same summed kicad-cli ruler the router's tuner matches.
+        A warning reports the difference between total track length and
+        the selected pad-to-pad path length when the difference exceeds
+        :data:`OFF_PATH_REPORT_EPSILON_MM` (Issue #9138). Every member
+        contributes its summed kicad-cli length to the skew figure.
 
         Suffix inference is OFF here (``enable_suffix_inference=False``,
         the detector's default).  Standalone ``kct check`` follows the
@@ -413,20 +408,11 @@ def _warn_off_path_copper(
 ) -> None:
     """Report a member net's off-path copper when it exceeds the epsilon.
 
-    Off-path copper is same-net copper on no pad-to-pad path, as
-    measured by :meth:`TraceLengthAnalyzer.measure_net_path` (Issue
-    #9138).  On this repo's boards it is usually benign residual --
-    tuner cycle copper (rejoined length-matching bumps) or barrel
-    overlap under pads/vias -- though it also captures genuine
-    dead-end branches and stubs; the warning therefore states what
-    was measured, not a cause.  Above
-    :data:`OFF_PATH_REPORT_EPSILON_MM` it inflates this member's summed
-    length and can mask real group skew, so it is reported; it is NOT
-    excluded from the figure (see the constant's rationale for the
-    measured evidence that shedding it manufactures skew).  Nets with
-    no path-based figure -- unnamed net, a PCB stand-in without
-    ``get_net_by_name``, no shapely, an open net, fewer than two pads
-    -- report nothing and simply keep their summed length.
+    Compare total track length with the longest of the shortest paths
+    between pad pairs, as selected by TraceLengthAnalyzer.measure_net_path.
+    The difference can include a branch serving a third pad or an alternate
+    route between two pads. Members with no path measurement stay silent.
+    All members retain their summed length for skew calculation.
     """
     if not net_name or not callable(getattr(pcb, "get_net_by_name", None)):
         return
@@ -437,8 +423,8 @@ def _warn_off_path_copper(
     off_path_mm = measurement.off_path_length_mm
     if off_path_mm is not None and off_path_mm > OFF_PATH_REPORT_EPSILON_MM:
         logger.warning(
-            "[match-group-skew] %s: net %s carries %.3f mm of off-path copper "
-            "(same-net copper on no pad-to-pad path) included in its length",
+            "[match-group-skew] %s: net %s total track length exceeds the selected "
+            "pad-to-pad path length by %.3f mm (off-path copper included in summed length)",
             group_name,
             net_name,
             off_path_mm,
