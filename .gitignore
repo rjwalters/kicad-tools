@@ -70,6 +70,12 @@ boards/*/*/design_output.log
 boards/*/output/*.kct.json
 boards/*/*/output/*.kct.json
 
+# kct route run locks (issue #9720): advisory lock, flock guard and staging
+# temps written beside a routed --output (`.<name>.kct-route.lock*`); runtime
+# state, never committed. The guard is never removed by design -- see
+# src/kicad_tools/core/route_run_lock.py.
+.*.kct-route.lock*
+
 # Local credentials (BYO API keys -- issue #4118). NEVER commit real keys.
 .env
 .env.*
