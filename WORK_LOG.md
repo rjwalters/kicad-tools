@@ -16,6 +16,15 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-19
 
+- **Issue #9642** (closed): kct check silk_pad_clearance: board-level gr_line / gr_arc are compared in the wrong frame on origin-offset boards (false errors, and real overlaps missed)
+- **PR #9653**: fix: shift board-level silk into the pads' frame in silk_pad_clearance
+- **Issue #9608** (closed): route_understated_pairs misses _pair_bounds on slash-prefixed net names (false understatement reports)
+- **PR #9682**: fix: normalise net keys in route_understated_pairs bounds lookup
+- **Issue #9666** (closed): path_ampacity wire credit: no real-geometry test for an uncovered stretch
+- **PR #9679**: test: judge the uncovered stretch through reinforce_net-derived wire legs
+- **Issue #9647** (closed): path_ampacity / current-paths-audit: a thin branch that leaves the sink pad is counted as part of the resolved path (false 'would fuse')
+- **PR #9651**: fix(current-paths): exclude a branch buried in an endpoint pad from the resolved path
+- **Issue #9655** (closed): current-paths: a second chained pad-internal segment on the route is dropped from the resolved path
 - **Issue #9637** (closed): kct check: LVS compares the board against project.kct's schematic even when the board being checked is a different artifact
 - **PR #9641**: fix(check): use project.kct schematic only for the board it names
 - **Issue #9686** (closed): Release daemon Judge steps promptly when PR checks are pending

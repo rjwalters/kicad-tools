@@ -606,6 +606,64 @@ class TestUndecidedExemptionIsUnknownNotADefect:
         assert "UNKNOWN" in captured
         assert "tight footprint" in captured
 
+    # -------------------- #9632: ``(severity ignore)`` leaves the band reachable
+
+    @staticmethod
+    def _ignored_rule(
+        condition: str = "A.insideArea('X')", name: str = "ignore in area"
+    ) -> DruRule:
+        """The #9632 fixture: an exemption to 0 mm under ``(severity ignore)``."""
+        return DruRule(name, condition, None, ((CLEARANCE, 0.0),), "ignore")
+
+    def test_undecided_ignore_rule_keeps_the_unknown_band_reachable(self) -> None:
+        # The #9632 repro: an ignored rule whose condition cannot be decided
+        # must widen the band (lower_bound 0.0 < requirement 0.2), else the
+        # band is unreachable and such pairs masquerade as decided defects.
+        rules = BoardClearanceRules(dru_rules=[self._ignored_rule()])
+        pad = ItemProps("Pad", "GND", footprint_ref="J3", footprint_lib_id=None)
+        track = ItemProps("Track", "+3V3", footprint_ref="", footprint_lib_id="")
+
+        res = rules.explain_required(CLEARANCE, pad, track)
+
+        assert res.requirement == pytest.approx(0.2)
+        assert res.lower_bound == pytest.approx(0.0)
+        assert res.unknown_rules == ("ignore in area",)
+
+    def test_gap_an_undecided_ignore_rule_covers_is_unknown_not_a_defect(self) -> None:
+        # 0.15 mm is below the 0.2 default but legal wherever the ignored
+        # rule wins (KiCad checks nothing there), so it can only be unknown.
+        rules = BoardClearanceRules(dru_rules=[self._ignored_rule(self.AREA_RULE)])
+
+        near = kept_copper_clearance_violations(self._router_with_gap(0.15), board_rules=rules)
+
+        assert len(near) == 1
+        assert near[0].required == pytest.approx(0.2)
+        assert near[0].unknown_rules == ("ignore in area",)
+
+    def test_cli_gate_ignored_rule_is_unknown_not_an_input_defect(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        out = tmp_path / "out.kicad_pcb"
+        out.write_text("(kicad_pcb)")
+        out.with_suffix(".kicad_dru").write_text(
+            """(version 1)
+(rule "ignore in area"
+  (condition "A.insideArea('X')")
+  (constraint clearance (min 0))
+  (severity ignore))
+"""
+        )
+
+        errors = _audit_kept_copper_clearance(
+            self._router_with_gap(0.15), out, quiet=False, source_pcb=None
+        )
+        captured = capsys.readouterr().out
+
+        assert errors == []
+        assert "UNKNOWN" in captured
+        assert "ignore in area" in captured
+        assert "Kept Input Copper Clearance Check" not in captured  # no definite-defect block
+
 
 class TestConditionalNetClassRuleFloorsNewCopper:
     @staticmethod

@@ -1757,6 +1757,7 @@ def _pad_continuation_chains(
     internal: Sequence[Segment],
     centres: Iterable[tuple[float, float]],
     entries: Iterable[tuple[float, float]],
+    branch_exits: Iterable[tuple[float, float]] = (),
 ) -> list[Segment]:
     """The wholly pad-internal copper a resolved route rides to its terminal.
 
@@ -1770,10 +1771,17 @@ def _pad_continuation_chains(
     sharing the trunk's own attachment point -- stays out. When no
     centre-reaching chain exists from an entry (buried copper that stops
     short of the terminal), the segments under it are kept as the best
-    on-route evidence rather than silently dropped.
+    on-route evidence rather than silently dropped -- unless ``branch_exits``
+    proves them a branch's buried head (#9677): the pad's external edges
+    leaving at points the declared route itself does not land on. Copper
+    chaining from an entry to such an exit feeds that branch, while copper
+    spanning two of the route's own entries is through-copper the route
+    rides across the pad and stays.
     """
     internal = list(internal)
     centres = list(centres)
+    entries = list(entries)
+    branch_exits = list(branch_exits)
     if not internal or not centres:
         return []
 
@@ -1781,6 +1789,29 @@ def _pad_continuation_chains(
         return point_to_segment_distance(*point, *seg.start, *seg.end) <= _PAD_EPS
 
     goal = {i for i, seg in enumerate(internal) if any(_touches_point(seg, c) for c in centres)}
+
+    def _proven_branch(seed: int) -> bool:
+        # Connectivity the geometric chain above cannot see: a buried
+        # component feeding an external edge that leaves the pad where the
+        # declared route does not land is that branch's head, not the
+        # route's continuation (#9677).
+        if not branch_exits:
+            return False
+        component = {seed}
+        pending = [seed]
+        while pending:
+            i = pending.pop()
+            for j in range(len(internal)):
+                if j not in component and _pad_segments_touch(internal[i], internal[j]):
+                    component.add(j)
+                    pending.append(j)
+        entries_hit = {
+            entry for entry in entries if any(_touches_point(internal[i], entry) for i in component)
+        }
+        if len(entries_hit) >= 2:
+            return False
+        return any(_touches_point(internal[i], point) for i in component for point in branch_exits)
+
     kept: dict[int, Segment] = {}
     for entry in entries:
         if any(math.dist(entry, centre) <= _PAD_EPS for centre in centres):
@@ -1814,7 +1845,7 @@ def _pad_continuation_chains(
                 ):
                     dist[j] = dist[i] + _seg_length(internal[j])
                     prev[j] = i
-        for i in chain if chain is not None else seeds:
+        for i in chain if chain is not None else [i for i in seeds if not _proven_branch(i)]:
             kept.setdefault(i, internal[i])
     return [internal[i] for i in sorted(kept)]
 
@@ -1826,19 +1857,36 @@ def _hub_continuation_segments(
 
     Entry points are the edges' pad attachments that sit beyond the pad
     centre: copper hanging off the terminal itself carries a branch, not the
-    route (#9647).
+    route (#9647). The declared edges' own landing points are likewise not
+    exits -- a parallel member of the same declared path can share the
+    route's off-centre landing inside a thru-hole pad -- so only an external
+    edge leaving the pad where the declared copper does not land marks the
+    buried copper under it as that branch's (#9677).
     """
     internal = graph.internal.get(hub)
     if not internal:
         return []
     centres = graph.pad_centres.get(hub, ())
+    route_edges = set(edges)
+    landings = {
+        point
+        for edge in route_edges
+        for attach_hub, point in graph.attachments.get(edge, [])
+        if attach_hub == hub
+    }
     entries = [
         point
-        for edge in edges
-        for attach_hub, point in graph.attachments.get(edge, [])
-        if attach_hub == hub and not any(math.dist(point, centre) <= _PAD_EPS for centre in centres)
+        for point in landings
+        if not any(math.dist(point, centre) <= _PAD_EPS for centre in centres)
     ]
-    return _pad_continuation_chains(internal, centres, entries)
+    branch_exits = {
+        point
+        for edge, attachments in graph.attachments.items()
+        if edge not in route_edges
+        for attach_hub, point in attachments
+        if attach_hub == hub and point not in landings
+    }
+    return _pad_continuation_chains(internal, centres, entries, branch_exits)
 
 
 def _bfs_path(graph: _CopperGraph, start: _Node, goal: _Node) -> list[Segment] | None:

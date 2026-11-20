@@ -110,6 +110,9 @@ class _StubPCB:
             if seg.layer == layer:
                 yield seg
 
+    def arcs_on_layer(self, layer: str):
+        return iter([])
+
 
 def _design_rules(min_clearance_mm: float = 0.127) -> DesignRules:
     """Build a real DesignRules with a configurable inter-pair clearance.
