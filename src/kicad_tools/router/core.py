@@ -1784,6 +1784,13 @@ class Autorouter:
         # unavailable means the audit cannot vouch for pad copper at all, and
         # the gate must not treat the two alike (see ``_pairwise_pad_geometry``).
         self._pairwise_pad_geometry_cache: tuple[Any, ...] | str | None = None
+        # Issue #9685: memoised sheet-absolute Edge.Cuts linework for the
+        # #4588 post-route audit's copper-vs-board-edge column (resolved +
+        # cached by the CLI's ``_pairwise_board_edge_geometry`` helper, which
+        # applies the same board-origin shift as the pads/zones helpers).
+        # ``None`` = not yet resolved, or resolved to "no Edge.Cuts linework"
+        # (a board the census also scores no edge pairs on).
+        self._pairwise_board_edge_geometry_cache: Any = None
         # Issue #4699: the preserved routes the CLI's ``_finalize_routes``
         # actually re-emitted into the output board.  ``None`` = finalize has
         # not run yet; the #4588 post-route pairwise gate audits this copper
@@ -2069,6 +2076,9 @@ class Autorouter:
         # Issue #8396: ``--complete`` links rolled back for adding pairwise HV
         # creepage shortfalls (set by ``_rollback_complete_creepage`` in route_cmd).
         self._complete_creepage_refusals: list[dict] = []
+        # Issue #9685: what the same gate verified -- ``None`` until the
+        # rollback helper runs (read by ``_build_complete_link_report``).
+        self._complete_creepage_gate: dict | None = None
 
         # Issue #5517 (Epic #5508 Phase 1b): ordered commit journal.  A pure
         # observer on the routing grid -- see
