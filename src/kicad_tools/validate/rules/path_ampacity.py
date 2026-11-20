@@ -557,75 +557,109 @@ class PathAmpacityRule(DRCRule):
     ) -> list[_CreditSpan]:
         """The judgement stretches of ``segment`` against the wired legs.
 
-        A segment is covered by a leg when its centreline midpoint lies
-        within the leg's polyline at the anchor-on-leg tolerance
+        A segment is covered by a leg when its whole centreline -- start,
+        midpoint and end alike -- lies within the leg's corridor
         (:data:`~kicad_tools.validate.rules.reinforcement_incomplete
         .ANCHOR_ON_LEG_SLACK_MM` beyond the leg's half-width) on the same
         layer and net **and** it follows that leg's polyline -- both of its
-        endpoints project onto distinct arc positions of it. A segment that
-        only meets a leg side-on (a perpendicular branch stub inside the
-        trunk's corridor, whose endpoints project to one trunk point) does
-        not follow the trunk and is never credited by the trunk's wire:
-        the leg it does follow judges it, and bare copper does when no leg
-        does. But the wire is only soldered between the leg's two anchors,
-        so only the sub-span of the segment projected inside the leg's
-        :attr:`WiredLeg.anchor_arc` range is credited; the hole-to-pad
-        stubs outside it are judged at bare copper width (Issue #9654).
-        Each credited stretch gets the wire's copper cross-section
-        expressed as extra trace width at the layer's foil thickness, so
-        adding it to the copper width sums the two sections -- exactly how
-        ``width_for_current`` derives width from required area. A single
-        bare span when no wired leg covers the segment.
+        endpoints project onto distinct arc positions of it. A segment
+        that merely crosses the corridor (a perpendicular or angled branch
+        stub whose midpoint is inside the trunk's corridor while its far
+        endpoint leaves it) does not follow the trunk and is never
+        credited by the trunk's wire: of the legs that match, the one the
+        segment runs along -- the smallest off-corridor deviation,
+        whatever the order of ``wired_legs`` -- judges it, and bare copper
+        does when no leg does. But the wire is only soldered between the
+        leg's two anchors, so only the sub-span of the segment projected
+        inside the leg's :attr:`WiredLeg.anchor_arc` range is credited;
+        the hole-to-pad stubs outside it are judged at bare copper width
+        (Issue #9654). Each credited stretch gets the wire's copper
+        cross-section expressed as extra trace width at the layer's foil
+        thickness, so adding it to the copper width sums the two
+        sections -- exactly how ``width_for_current`` derives width from
+        required area. A single bare span when no wired leg covers the
+        segment.
         """
         seg_len = _segment_length(segment)
         bare = _CreditSpan(0.0, seg_len, None, 0.0)
+        start, end = _segment_end(segment, 0), _segment_end(segment, 1)
         midpoint = self._segment_midpoint(segment)
+        # Every leg whose corridor holds the segment's whole centreline
+        # and whose polyline it follows; the winner is picked below,
+        # never by the order of ``wired_legs``.
+        candidates: list[tuple[float, WiredLeg, float]] = []
         for leg, area_mm2 in wire_areas:
             if leg.net != spec.net_name or leg.layer != layer:
                 continue
-            if _dist_to_polyline(leg.points, midpoint) > (leg.width / 2.0 + ANCHOR_ON_LEG_SLACK_MM):
+            deviation_mm = max(_dist_to_polyline(leg.points, p) for p in (start, midpoint, end))
+            if deviation_mm > (leg.width / 2.0 + ANCHOR_ON_LEG_SLACK_MM):
                 continue
-            thickness_mm = copper_thickness_from_oz(
-                self._copper_weight_oz(design_rules, external=external)
-            )
-            if thickness_mm <= 0:
-                return [bare]
-            credit_mm = area_mm2 / thickness_mm
-            full = _CreditSpan(0.0, seg_len, leg, credit_mm)
-            if leg.anchor_arc is None or seg_len <= 1e-9:
-                # No anchor range recorded: credit the whole segment, the
-                # pre-#9654 reading.
-                return [full]
-            a0, a1 = sorted(leg.anchor_arc)
-            cum = _cumulative_arc(leg.points)
-            t_start = _arc_on_polyline(leg.points, cum, _segment_end(segment, 0))
-            t_end = _arc_on_polyline(leg.points, cum, _segment_end(segment, 1))
-            if abs(t_end - t_start) <= 1e-6:
-                # Degenerate projection: the segment meets this polyline
-                # side-on (both endpoints project to one polyline point),
-                # so it does not follow this leg -- a perpendicular branch
-                # stub inside the trunk's corridor must be judged by the
-                # leg it follows, never credited by the trunk's wire.
-                continue
-            lo, hi = (t_start, t_end) if t_start < t_end else (t_end, t_start)
-            c0, c1 = max(lo, a0), min(hi, a1)
-            if c1 - c0 <= 1e-6:  # no overlap with the wired span: bare copper
-                return [bare]
-            if lo >= a0 - 1e-6 and hi <= a1 + 1e-6:  # fully between the anchors
-                return [full]
+            if leg.anchor_arc is not None and seg_len > 1e-9:
+                cum = _cumulative_arc(leg.points)
+                if (
+                    abs(
+                        _arc_on_polyline(leg.points, cum, end)
+                        - _arc_on_polyline(leg.points, cum, start)
+                    )
+                    <= 1e-6
+                ):
+                    # Degenerate projection: the segment meets this
+                    # polyline side-on (both endpoints project to one
+                    # polyline point), so it does not follow this leg --
+                    # a branch stub inside the trunk's corridor must be
+                    # judged by the leg it follows, never credited by the
+                    # trunk's wire.
+                    continue
+            candidates.append((deviation_mm, leg, area_mm2))
+        if not candidates:
+            return [bare]
+        # The leg the segment actually runs along has the smallest
+        # off-corridor deviation (about 0 when it follows the polyline);
+        # ties break on the leg's own geometry, so the pick -- and the
+        # verdict -- never depends on the order of ``wired_legs``.
+        _, leg, area_mm2 = min(
+            candidates,
+            key=lambda c: (
+                c[0],
+                c[1].points,
+                c[1].anchor_arc or (),
+                c[1].width,
+                c[1].gauge,
+            ),
+        )
+        thickness_mm = copper_thickness_from_oz(
+            self._copper_weight_oz(design_rules, external=external)
+        )
+        if thickness_mm <= 0:
+            return [bare]
+        credit_mm = area_mm2 / thickness_mm
+        full = _CreditSpan(0.0, seg_len, leg, credit_mm)
+        if leg.anchor_arc is None or seg_len <= 1e-9:
+            # No anchor range recorded: credit the whole segment, the
+            # pre-#9654 reading.
+            return [full]
+        a0, a1 = sorted(leg.anchor_arc)
+        cum = _cumulative_arc(leg.points)
+        t_start = _arc_on_polyline(leg.points, cum, start)
+        t_end = _arc_on_polyline(leg.points, cum, end)
+        lo, hi = (t_start, t_end) if t_start < t_end else (t_end, t_start)
+        c0, c1 = max(lo, a0), min(hi, a1)
+        if c1 - c0 <= 1e-6:  # no overlap with the wired span: bare copper
+            return [bare]
+        if lo >= a0 - 1e-6 and hi <= a1 + 1e-6:  # fully between the anchors
+            return [full]
 
-            def frac(u: float) -> float:
-                return min(1.0, max(0.0, (u - t_start) / (t_end - t_start)))
+        def frac(u: float) -> float:
+            return min(1.0, max(0.0, (u - t_start) / (t_end - t_start)))
 
-            spans: list[_CreditSpan] = []
-            for u_from, u_to in ((lo, c0), (c1, hi)):
-                f0, f1 = sorted((frac(u_from), frac(u_to)))
-                if f1 - f0 > 1e-6:
-                    spans.append(_CreditSpan(f0 * seg_len, f1 * seg_len, None, 0.0))
-            spans.append(_CreditSpan(frac(c0) * seg_len, frac(c1) * seg_len, leg, credit_mm))
-            spans.sort()
-            return spans
-        return [bare]
+        spans: list[_CreditSpan] = []
+        for u_from, u_to in ((lo, c0), (c1, hi)):
+            f0, f1 = sorted((frac(u_from), frac(u_to)))
+            if f1 - f0 > 1e-6:
+                spans.append(_CreditSpan(f0 * seg_len, f1 * seg_len, None, 0.0))
+        spans.append(_CreditSpan(frac(c0) * seg_len, frac(c1) * seg_len, leg, credit_mm))
+        spans.sort()
+        return spans
 
     @staticmethod
     def _copper_weight_oz(design_rules: DesignRules, *, external: bool) -> float:
