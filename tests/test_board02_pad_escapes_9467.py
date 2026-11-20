@@ -148,3 +148,66 @@ def test_via_of_another_net_is_not_moved():
     pcb = _board(via)
     assert slide_ring_vias(pcb) == 0
     assert pcb.vias[0].position == pytest.approx((20.6, 20.0))
+
+
+# --- 45-degree copper only (fleet angle census, issue #3532) ----------------
+
+minimal_candidate_routes = RECIPE["_minimal_candidate_routes"]
+slid_corridor_legs = RECIPE["_slid_corridor_legs"]
+save_exact = RECIPE["_save_exact"]
+legs_45 = RECIPE["_legs_45"]
+
+
+def test_minimal_candidates_are_all_45_aligned():
+    """No straight or slanted-L candidate at an arbitrary angle survives."""
+    routes = minimal_candidate_routes((20.0, 20.0), (22.3, 27.1))
+    assert routes
+    assert all(legs_45(route) for route in routes)
+    # The straight pad-to-target line (about 18 degrees off vertical) is gone.
+    assert [(20.0, 20.0), (22.3, 27.1)] not in routes
+
+
+def test_minimal_candidates_keep_an_aligned_straight_route():
+    assert [(20.0, 20.0), (22.0, 22.0)] in minimal_candidate_routes((20.0, 20.0), (22.0, 22.0))
+
+
+class _Seg:
+    def __init__(self, start, end):
+        self.start, self.end = start, end
+
+
+def test_corridor_slide_moves_junction_along_its_diagonal_neighbour():
+    """Board 02's LINE_B case: a vertical corridor beside R2.1 ending in a
+    45-degree run into U1.3 slides sideways; the junction moves along the
+    diagonal, so no leg is skewed off 45 degrees."""
+    a, b = (18.5, 37.1), (18.5, 46.58)
+    top = _Seg((19.0875, 37.1), a)  # horizontal neighbour
+    bottom = _Seg(b, (20.0, 48.08))  # 45-degree neighbour
+    corridor = _Seg(a, b)
+    legs = slid_corridor_legs(corridor, a, b, (top, bottom), True, 18.2)
+    assert legs is not None
+    points = {id(seg): (p, q) for seg, p, q in legs}
+    assert points[id(corridor)] == ((18.2, 37.1), (18.2, 46.28))
+    assert points[id(bottom)] == ((18.2, 46.28), (20.0, 48.08))
+    assert all(legs_45([p, q]) for _seg, p, q in legs)
+
+
+def test_corridor_slide_refuses_to_reverse_a_neighbour():
+    a, b = (18.5, 37.1), (18.5, 46.58)
+    top = _Seg((18.6, 37.1), a)  # a 0.1 mm horizontal stub
+    bottom = _Seg(b, (20.0, 48.08))
+    # Sliding to x=18.7 would flip the stub past its far end.
+    assert slid_corridor_legs(_Seg(a, b), a, b, (top, bottom), True, 18.7) is None
+
+
+def test_save_exact_keeps_sub_10um_coordinates_past_100mm():
+    """New copper keeps 4 decimals; the 6-significant-digit writer would turn
+    the exact 45-degree leg (147.5625, 92.3375)->(147.4, 92.5) into a 0.09
+    degree off-angle one by writing 147.562."""
+    pcb = _board()
+    path = Path(tempfile.mkdtemp()) / "exact.kicad_pcb"
+    pcb.add_trace((147.5625, 92.3375), (147.4, 92.5), width=0.2, layer="F.Cu", net=1, dedupe=False)
+    save_exact(pcb, path)
+    text = path.read_text()
+    assert "(start 147.5625 92.3375)" in text
+    assert "147.562 " not in text

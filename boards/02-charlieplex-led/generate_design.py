@@ -209,9 +209,7 @@ def _canonicalize_copper(routed_path: Path) -> None:
     ordered = sorted(pcb.segments, key=key)
     pcb.segments[:] = ordered
     for index, seg in enumerate(ordered):
-        seg.uuid = str(
-            uuidlib.uuid5(uuidlib.NAMESPACE_OID, f"board02-copper:{index}:{key(seg)}")
-        )
+        seg.uuid = str(uuidlib.uuid5(uuidlib.NAMESPACE_OID, f"board02-copper:{index}:{key(seg)}"))
     pcb.save(str(routed_path))
 
 
@@ -232,9 +230,7 @@ def _restamp_uuids(routed_path: Path) -> None:
     doc = parse_file(routed_path)
 
     def strip_uuids(node):
-        return "".join(
-            line for line in serialize_sexp(node).splitlines() if "(uuid " not in line
-        )
+        return "".join(line for line in serialize_sexp(node).splitlines() if "(uuid " not in line)
 
     seen: dict[str, int] = {}
 
@@ -317,8 +313,7 @@ def stabilize_release_copper(routed_path: Path) -> None:
             )
             if result.returncode != 0:
                 raise RuntimeError(
-                    f"optimize-traces failed ({result.returncode}): "
-                    f"{result.stdout}{result.stderr}"
+                    f"optimize-traces failed ({result.returncode}): {result.stdout}{result.stderr}"
                 )
             _graft_copper(routed_path, donor)
         _canonicalize_copper(routed_path)
@@ -360,6 +355,29 @@ def stabilize_release_copper(routed_path: Path) -> None:
         raise RuntimeError(f"zone refill failed: {refill.stderr}")
 
 
+#: What ``kct route`` leaves beside the routed board (#8156 stem-keyed
+#: sidecars, the #5639 access witness, the routing plan and decisions log).
+#: Board 02 commits the authored ``net_class_map.json``/``fab_profile.json``
+#: only: a stem-keyed net-class map would shadow the authored one for every
+#: reader (``resolve_committed_net_class_map``), dropping its
+#: ``preferred_layers`` and ampacity declarations, and the routing plan
+#: records an absolute host path (#6532).
+ROUTER_SIDECAR_SUFFIXES = (
+    ".net_class_map.json",
+    ".fab_profile.json",
+    ".routing_plan.json",
+    ".decisions.json",
+    ".access_witness.json",
+    ".route.json",
+)
+
+
+def drop_router_sidecars(routed_path: Path) -> None:
+    """Remove ``kct route``'s byproduct sidecars next to ``routed_path`` (#9467)."""
+    for suffix in ROUTER_SIDECAR_SUFFIXES:
+        routed_path.with_name(routed_path.stem + suffix).unlink(missing_ok=True)
+
+
 def declare_ampacity_targets(output_dir: Path) -> None:
     """Declare the spec's supply currents as ``target_ampacity`` (Issue #7206).
 
@@ -374,29 +392,13 @@ def declare_ampacity_targets(output_dir: Path) -> None:
     # writes the routed PCB), so create it rather than masking the
     # route_success fast-fail gate's message with an ENOENT.
     output_dir.mkdir(parents=True, exist_ok=True)
-    # ``kct route`` also writes the stem-keyed sidecar (#8156) and the
-    # readiness/check auto-probe prefers it, so the declaration must land on
-    # both names or ``kct check`` reports ``ampacity: unknown`` (#9467).
-    sidecars = [
-        output_dir / "net_class_map.json",
-        output_dir / "charlieplex_3x3_routed.net_class_map.json",
-    ]
-    for sidecar in sidecars:
-        if not sidecar.exists():
-            continue
-        data = json.loads(sidecar.read_text())
-        for net, amps in AMPACITY_TARGETS_A.items():
-            entry = data.setdefault(net, {"name": "Power", "priority": 1, "trace_width": 0.25})
-            entry["target_ampacity"] = amps
-        sidecar.write_text(json.dumps(data, indent=2))
-    if not any(p.exists() for p in sidecars):
-        sidecar = sidecars[0]
-        data = {}
-        for net, amps in AMPACITY_TARGETS_A.items():
-            entry = data.setdefault(net, {"name": "Power", "priority": 1, "trace_width": 0.25})
-            entry["target_ampacity"] = amps
-        sidecar.write_text(json.dumps(data, indent=2))
-    print(f"   Declared target_ampacity on {', '.join(AMPACITY_TARGETS_A)}: {sidecars[0]}")
+    sidecar = output_dir / "net_class_map.json"
+    data = json.loads(sidecar.read_text()) if sidecar.exists() else {}
+    for net, amps in AMPACITY_TARGETS_A.items():
+        entry = data.setdefault(net, {"name": "Power", "priority": 1, "trace_width": 0.25})
+        entry["target_ampacity"] = amps
+    sidecar.write_text(json.dumps(data, indent=2))
+    print(f"   Declared target_ampacity on {', '.join(AMPACITY_TARGETS_A)}: {sidecar}")
 
 
 def route_pcb(input_path: Path, output_path: Path) -> bool:
@@ -662,6 +664,7 @@ def main() -> int:
         # Step 5: Route PCB
         routed_path = output_dir / "charlieplex_3x3_routed.kicad_pcb"
         route_success = route_pcb(pcb_path, routed_path)
+        drop_router_sidecars(routed_path)
         declare_ampacity_targets(output_dir)
 
         # Finalization can reject physical DRC failures as well as incomplete

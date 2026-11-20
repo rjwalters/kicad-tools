@@ -52,6 +52,7 @@ manufacturers:
 # pinned toolchain (KCT_KICAD_DOCKER=1, kicad-cli 10.0.6), keyed with
 # identity_allowance.violation_identity:
 #   01: 2 errors / 1 signature   02: 29 / 8    03: 78 / 23
+#   (02's entry was removed when #9467 cleared its copper to 0 errors.)
 #   05: 83 / 21                  06: 48 / 14   07: 67 / 16
 # Board 00 measures 0 mask_to_copper errors and board 04's native path
 # dispatches to the reviewed paid-drill validator whose rule selection does
@@ -65,16 +66,6 @@ identity_allowances:
   boards/01-voltage-divider/output/voltage_divider_routed.kicad_pcb:
     mask_to_copper:
       VOUT: 8858
-  boards/02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb:
-    mask_to_copper:
-      GND: 8858
-      LINE_A: 8858
-      NODE_A: 8858
-      NODE_B: 8858
-      NODE_C: 8858
-      NODE_D: 8858
-      RESET: 8858
-      VCC: 8858
   boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb:
     mask_to_copper:
       AREF: 8858

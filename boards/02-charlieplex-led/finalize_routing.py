@@ -14,7 +14,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from kicad_tools.router.quantize import quantize_pcb_file
+from kicad_tools.router.quantize import is_45_aligned, quantize_pcb_file, segment_angle_census
 from kicad_tools.sexp import parse_file, serialize_sexp
 
 
@@ -110,7 +110,7 @@ def _relocate_pad_edge(path):
     if result.skipped or result.unresolvable:
         raise ValueError(f"Board02 pad-edge vias left in the dam zone: {result}")
     if result.changed:
-        pcb.save(path)
+        _save_exact(pcb, path)
 
 
 #: Centre-line distance a pad escape may bend from the pad it serves.  Closer,
@@ -204,7 +204,12 @@ class _EscapeContext:
             for pad in fp.pads:
                 x0, y0, x1, y1 = pad_absolute_bbox(pad, fp)
                 self.pads.append(
-                    (fp.reference, pad, (x0, y0, x1, y1), ((x0 + x1) / 2, (y0 + y1) / 2))
+                    (
+                        fp.reference,
+                        pad,
+                        (x0, y0, x1, y1),
+                        _ser_point(((x0 + x1) / 2, (y0 + y1) / 2)),
+                    )
                 )
         self.point = Point
 
@@ -387,8 +392,8 @@ def _reroute_spoke(pcb, ctx, pad, bbox, centre, layer, spoke, line_string):
         for i in range(1, int(span / 0.05)):
             f = i * 0.05 / span
             probe = (
-                round(last_from[0] + (vertex[0] - last_from[0]) * f, 4),
-                round(last_from[1] + (vertex[1] - last_from[1]) * f, 4),
+                _ser(last_from[0] + (vertex[0] - last_from[0]) * f),
+                _ser(last_from[1] + (vertex[1] - last_from[1]) * f),
             )
             if _bbox_distance(probe, bbox) >= _ESCAPE_BEND_MM - 1e-6:
                 options.append((probe, (probe, vertex)))
@@ -426,7 +431,7 @@ def _reroute_spoke(pcb, ctx, pad, bbox, centre, layer, spoke, line_string):
         width=width,
         layer=layer,
         net=net,
-        waypoints=[tuple(round(c, 4) for c in v) for v in route[1:-1]] or None,
+        waypoints=[_ser_point(v) for v in route[1:-1]] or None,
         dedupe=False,
     )
     if remainder is not None:
@@ -447,9 +452,58 @@ def _line_distance(point, a, b):
     return abs((point[0] - a[0]) * dy - (point[1] - a[1]) * dx) / length
 
 
+def _ser(value):
+    """``value`` at the 0.1 um quantum :func:`_save_exact` writes copper at."""
+    return round(value, 4)
+
+
+def _fmt_quantum(value):
+    text = f"{round(value, 4):.4f}".rstrip("0").rstrip(".")
+    return "0" if text in ("-0", "") else text
+
+
+def _save_exact(pcb, path):
+    """Save ``pcb`` with every copper coordinate written at the 0.1 um quantum.
+
+    The S-expression writer formats a *new* float with 6 significant digits,
+    so a coordinate past 100 mm keeps only 3 decimals: a pass that re-adds an
+    existing segment turns its untouched 147.5625 end into 147.562 and an
+    exact 45-degree leg into an off-angle one (#9467; the fleet angle census,
+    issue #3532).  Pinning each new coordinate atom's text to 4 decimals
+    writes exactly the geometry the passes verified.  Atoms parsed from the
+    file keep their original text.
+    """
+    for node in pcb._sexp.children:
+        if getattr(node, "name", None) not in ("segment", "via", "arc"):
+            continue
+        for key in ("start", "mid", "end", "at"):
+            sub = node.find(key)
+            if sub is None:
+                continue
+            for atom in sub.children:
+                if isinstance(atom.value, float) and atom._original_str is None:
+                    atom._original_str = _fmt_quantum(atom.value)
+    pcb.save(path)
+
+
+def _ser_point(point):
+    return (_ser(point[0]), _ser(point[1]))
+
+
+def _legs_45(points):
+    """True if every leg of ``points`` (as serialized) is on 0/45/90/135.
+
+    Every pass below that writes new copper checks this before it commits a
+    route, so the recipe never emits arbitrary-angle copper for the fleet
+    angle census to catch (issue #3532, #9467).
+    """
+    pts = [_ser_point(v) for v in points]
+    return all(is_45_aligned(b[0] - a[0], b[1] - a[1]) for a, b in zip(pts, pts[1:], strict=False))
+
+
 def _bend_count(points):
     count = 0
-    for a, b, c in zip(points, points[1:], points[2:]):
+    for a, b, c in zip(points, points[1:], points[2:], strict=False):
         cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])
         if abs(cross) > 1e-9:
             count += 1
@@ -538,7 +592,9 @@ def _minimal_candidate_routes(pad_xy, target):
             out.append([(px, py), (tx + s, py), (tx, ty)])
     out.append([(px, py), (px, ty), (tx, ty)])
     out.append([(px, py), (tx, py), (tx, ty)])
-    return out
+    # Only 0/45/90/135-degree copper: the straight route and the slanted Ls
+    # are kept only where they happen to be 45-aligned.
+    return [route for route in out if _legs_45(route)]
 
 
 def _walk_escape_chain(pcb, ctx, pad, centre, layer, spoke):
@@ -604,9 +660,7 @@ def _minimal_escapes(pcb):
                 clearance = _escape_obstacle_clearance(width)
                 best = None
                 for route in _minimal_candidate_routes(centre, target):
-                    if any(
-                        _bbox_distance(v, bbox) < _ESCAPE_BEND_MM - 1e-6 for v in route[1:-1]
-                    ):
+                    if any(_bbox_distance(v, bbox) < _ESCAPE_BEND_MM - 1e-6 for v in route[1:-1]):
                         continue
                     shape = LineString(route).buffer(width / 2 + clearance)
                     if any(shape.intersects(o) for o in obstacles):
@@ -624,7 +678,7 @@ def _minimal_escapes(pcb):
                     width=width,
                     layer=layer,
                     net=pad.net_number,
-                    waypoints=[tuple(round(c, 4) for c in v) for v in route[1:-1]] or None,
+                    waypoints=[_ser_point(v) for v in route[1:-1]] or None,
                     dedupe=False,
                 )
                 rerouted += 1
@@ -666,8 +720,8 @@ def _trim_pass_throughs(pcb):
             half_w = (bbox[2] - bbox[0]) / 4.0
             half_h = (bbox[3] - bbox[1]) / 4.0
             t = min(half_w / max(abs(ux), 1e-9), half_h / max(abs(uy), 1e-9))
-            new_end = (round(centre[0] + ux * t, 3), round(centre[1] + uy * t, 3))
-            if math.dist(new_end, centre) >= length:
+            new_end = _ser_point((centre[0] + ux * t, centre[1] + uy * t))
+            if math.dist(new_end, centre) >= length or not _legs_45([far, new_end]):
                 continue
             pcb.remove_segments([long_])
             pcb.add_trace(
@@ -681,6 +735,52 @@ def _trim_pass_throughs(pcb):
             trimmed += 1
             ctx = _EscapeContext(pcb)
     return trimmed
+
+
+def _slid_corridor_legs(seg, a, b, neighbours, vertical, cand):
+    """The corridor leg ``a``-``b`` slid onto column/row ``cand``, with its neighbours.
+
+    Each junction moves along its neighbour's own direction -- straight
+    across for a perpendicular neighbour, along the diagonal for a 45-degree
+    one -- so every rewritten leg keeps the 0/45/90/135 angle set (issue
+    #3532) instead of being skewed toward the neighbour's far end.  Returns
+    ``[(segment, start, end), ...]`` or ``None`` when the slide would reverse
+    or collapse a leg, or a neighbour is collinear with the corridor.
+    """
+    legs = []
+    junctions = []
+    for point in (a, b):
+        nb = next((n for n in neighbours if _touches(n, point)), None)
+        if nb is None:
+            return None
+        far = tuple(nb.end) if _near(nb.start, point) else tuple(nb.start)
+        dx, dy = far[0] - point[0], far[1] - point[1]
+        along, across = (dy, dx) if vertical else (dx, dy)
+        if abs(across) < 1e-6:
+            return None  # collinear neighbour: nothing to slide against
+        if abs(along) < 1e-6:
+            new = (cand, point[1]) if vertical else (point[0], cand)
+        elif abs(abs(along) - abs(across)) < 1e-6:
+            slope = along / across
+            new = (
+                (cand, far[1] + slope * (cand - far[0]))
+                if vertical
+                else (far[0] + slope * (cand - far[1]), cand)
+            )
+        else:
+            return None
+        new = _ser_point(new)
+        before = (far[0] - point[0]) * (far[0] - new[0]) + (far[1] - point[1]) * (far[1] - new[1])
+        if before <= 1e-9:
+            return None  # the neighbour would reverse or vanish
+        junctions.append(new)
+        legs.append((nb, new, far))
+    new_a, new_b = junctions
+    old_dir = (b[0] - a[0], b[1] - a[1])
+    new_dir = (new_b[0] - new_a[0], new_b[1] - new_a[1])
+    if old_dir[0] * new_dir[0] + old_dir[1] * new_dir[1] <= 1e-9:
+        return None  # the corridor itself would reverse or vanish
+    return [(seg, new_a, new_b), *legs]
 
 
 def _nudge_corridors(pcb):
@@ -752,25 +852,14 @@ def _nudge_corridors(pcb):
                     clearance = _escape_obstacle_clearance(seg.width)
                     applied = False
                     for cand in cands:
-                        if vertical:
-                            new_a, new_b = (cand, a[1]), (cand, b[1])
-                        else:
-                            new_a, new_b = (a[0], cand), (b[0], cand)
-                        legs = [(seg, new_a, new_b)]
-                        for nb in (used[idx - 1], used[idx + 1]):
-                            na, nb2 = tuple(nb.start), tuple(nb.end)
-                            if _near(na, a):
-                                na = new_a
-                            if _near(na, b):
-                                na = new_b
-                            if _near(nb2, a):
-                                nb2 = new_a
-                            if _near(nb2, b):
-                                nb2 = new_b
-                            legs.append((nb, na, nb2))
+                        legs = _slid_corridor_legs(
+                            seg, a, b, (used[idx - 1], used[idx + 1]), vertical, cand
+                        )
+                        if legs is None:
+                            continue
                         ok = True
                         for s2, p1, p2 in legs:
-                            if math.dist(p1, p2) < 1e-6:
+                            if math.dist(p1, p2) < 1e-6 or not _legs_45([p1, p2]):
                                 ok = False
                                 break
                             shape = LineString([p1, p2]).buffer(s2.width / 2 + clearance)
@@ -828,7 +917,7 @@ def _square_escapes_file(path):
     squared = _square_pad_escapes(pcb)
     stabilized = _stabilize_escapes(pcb)
     if slid or squared or stabilized:
-        pcb.save(path)
+        _save_exact(pcb, path)
     return slid, squared
 
 
@@ -956,6 +1045,9 @@ def _finalize_candidate(path, schematic):
     quantize_pcb_file(path)
     _relocate_pad_edge(path)
     _square_escapes_file(path)
+    _total, off_angle = segment_angle_census(path)
+    if off_angle:
+        raise ValueError(f"Board02 escape passes emitted off-angle copper: {off_angle[:5]}")
     subprocess.run(
         [
             sys.executable,
@@ -975,11 +1067,11 @@ def _finalize_candidate(path, schematic):
     if data["violations"]:
         pcb = PCB.load(path)
         if repair_report_vias(path, pcb, data):
-            pcb.save(path)
+            _save_exact(pcb, path)
             data = _native_report(path)
             pcb = PCB.load(path)
             if remove_reported_leaves(pcb, data):
-                pcb.save(path)
+                _save_exact(pcb, path)
                 data = _native_report(path)
     if data["violations"] or data["unconnected_items"] or data["schematic_parity"]:
         print(json.dumps(data, indent=2), file=sys.stderr)
