@@ -80,9 +80,10 @@ def _window_edges(router, window: str):
 def _assert_window_clearance(routes: list[Route], edges, required_centreline) -> None:
     """Every trace centreline keeps ``required_centreline(seg)`` from the window.
 
-    The tolerance is the kernel's shared clearance slack (#9619: KiCad's
-    probed ~500 nm acceptance band), not a private 1e-4: the commit gates
-    legitimately accept a route that spends that band against the floor,
+    The tolerance is the kernel's shared clearance slack -- the router's
+    own writer margin (100 nm, deliberately narrower than the checker's
+    #9619 clearance band), not a private 1e-4 literal: the commit gates
+    legitimately accept a route that spends that margin against the floor,
     so the assertion must not be tighter than the system it checks.
     """
     from kicad_tools.router.clearance_kernel import CLEARANCE_EPSILON_MM

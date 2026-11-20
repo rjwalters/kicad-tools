@@ -332,9 +332,10 @@ class TestMarginalClearanceEpsilon:
     band that silently PASSED any clearance shortfall within 5 um of the
     floor.  The entire marginal class this masked is ~1.6 um wide (an
     actual clearance of 0.0999 mm against the 4-layer JLCPCB floor of
-    0.1016 mm).  The band has been sub-marginal ever since: 1e-4 mm
-    (0.1 um) after #3913, and 5e-4 mm (0.5 um) since #9619 (KiCad's
-    probed acceptance band) -- still half the ~1.6 um class, so it fails
+    0.1016 mm).  The clearance band has been sub-marginal ever since:
+    1e-4 mm (0.1 um) after #3913, and 5e-4 mm (0.5 um) since #9619
+    (KiCad's probed acceptance band, ``KICAD_CLEARANCE_BAND_MM`` applied
+    by ``drc_clear``) -- still half the ~1.6 um class, so it fails
     while genuine float rounding (~1e-9 mm) stays suppressed.
 
     Geometry: net-1 through-via (radius 0.3) at (100, 100) vs a net-2
@@ -361,22 +362,22 @@ class TestMarginalClearanceEpsilon:
     def test_dead_band_would_have_masked_this(self, tmp_path: Path):
         """Document that the OLD 0.005 mm band would have passed this case.
 
-        Guards against a future regression that widens DRC_TOLERANCE back
-        toward the manufacturing-scale value: the fixture's 0.0999 mm
+        Guards against a future regression that widens the clearance band
+        back toward the manufacturing-scale value: the fixture's 0.0999 mm
         clearance is inside the retired 5 um dead band (0.0999 + 0.005 =
-        0.1049 >= 0.1016) but outside the current 0.5 um band (0.0999 +
-        0.0005 = 0.1004 < 0.1016), so the assertion below only holds
-        while the tolerance stays well under the ~1.6 um marginal class.
+        0.1049 >= 0.1016) but outside the current 0.5 um clearance band
+        (0.0999 + 0.0005 = 0.1004 < 0.1016), so the assertion below only
+        holds while the band stays well under the ~1.6 um marginal class.
         """
-        from kicad_tools.validate.rules.base import DRC_TOLERANCE
+        from kicad_tools.validate.rules.base import KICAD_CLEARANCE_BAND_MM
 
         actual = 0.0999
         floor = 0.1016
         # New band flags it; the retired 5 um band would not have.
-        assert actual + DRC_TOLERANCE < floor, (
-            f"DRC_TOLERANCE={DRC_TOLERANCE} mm no longer catches the "
-            f"0.0999-vs-0.1016 marginal class; it must stay well below the "
-            f"~1.6 um marginal-violation width (issue #3913)."
+        assert actual + KICAD_CLEARANCE_BAND_MM < floor, (
+            f"KICAD_CLEARANCE_BAND_MM={KICAD_CLEARANCE_BAND_MM} mm no longer "
+            f"catches the 0.0999-vs-0.1016 marginal class; it must stay well "
+            f"below the ~1.6 um marginal-violation width (issue #3913)."
         )
         assert actual + 0.005 >= floor  # the old dead band's masking behavior
 

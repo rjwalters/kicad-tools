@@ -52,11 +52,13 @@ namespace clearance {
 // Tolerance for "is this gap at least the requirement" comparisons.
 //
 // Issue #9619 ruling: the router keeps this 100 nm margin on purpose.  The
-// checker side (validate/rules/base.py's DRC_TOLERANCE) is wider -- 500 nm,
-// the largest shortfall pinned KiCad 10.0.6 accepts -- so kct check matches
-// kicad-cli verdict-for-verdict.  Copper the router writes must not sit at
-// the edge of KiCad's tolerance, where rounding on save could tip it into a
-// kicad-cli violation.  A deliberate split, not a parity bug.
+// checker's copper-clearance verdicts (validate/rules/base.py's
+// KICAD_CLEARANCE_BAND_MM, applied by drc_clear) are wider -- 500 nm, the
+// largest shortfall pinned KiCad 10.0.6 accepts -- so kct check matches
+// kicad-cli verdict-for-verdict on clearances.  Copper the router writes
+// must not sit at the edge of KiCad's tolerance, where rounding on save
+// could tip it into a kicad-cli violation.  A deliberate split, not a
+// parity bug.
 //
 // Deliberately a private copy of ``grid.cpp``'s file-local
 // ``CLEARANCE_EPSILON_MM`` (and of ``router/io.py``'s

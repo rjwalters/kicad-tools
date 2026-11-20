@@ -1,15 +1,20 @@
 """The #9619 pinned KiCad clearance-band probe, black-box on both engines.
 
 The operator ruling on Issue #9619 splits the clearance slack in two: the
-*checker* (``validate/rules/base.py``'s ``DRC_TOLERANCE`` and its
-checker-side twin in ``manufacturers/fabrication_process.py``) takes the
-largest shortfall pinned KiCad 10.0.6 accepts, so a verdict at kct's
-boundary is one ``kicad-cli pcb drc`` agrees on; everything that *writes*
-copper -- the router (see the note next to
-``router/clearance_kernel.py``'s constant), the via-moving commands and the
-placement optimiser's incremental DRC (``WRITER_CLEARANCE_MARGIN_MM``) --
-keeps its own 100 nm margin inside that band.  This file pins the checker's
-half of the split to the real KiCad behaviour.
+*checker* (``validate/rules/base.py``'s
+``KICAD_CLEARANCE_BAND_MM``, applied by ``drc_clear`` at the
+copper-clearance verdict sites) takes the largest shortfall pinned KiCad
+10.0.6 accepts, so a verdict at kct's boundary is one ``kicad-cli pcb
+drc`` agrees on; everything that *writes* copper -- the router (see the
+note next to ``router/clearance_kernel.py``'s constant), the via-moving
+commands and the placement optimiser's incremental DRC
+(``WRITER_CLEARANCE_MARGIN_MM``) -- keeps its own 100 nm margin inside
+that band.  Unprobed *non-clearance* checks (track width, drill,
+annular, floors, silk, via-in-pad) deliberately keep the 1e-4
+``DRC_TOLERANCE``: the #9619 review probed kicad-cli flagging a 100 nm
+track-width or drill shortfall outright, so the 500 nm band is
+clearance-only evidence.  This file pins the checker's clearance half of
+the split to the real KiCad behaviour.
 
 Probe method (2026-11-19, ``kicad/kicad:10.0`` image at the CI-pinned
 digest, kicad-cli 10.0.6, ``KCT_KICAD_DOCKER=1``): two nets under a
@@ -49,7 +54,10 @@ import pytest
 
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.sexp import parse_string
-from kicad_tools.validate.rules.base import DRC_FLOAT_GUARD_MM, DRC_TOLERANCE
+from kicad_tools.validate.rules.base import (
+    DRC_FLOAT_GUARD_MM,
+    KICAD_CLEARANCE_BAND_MM,
+)
 from kicad_tools.validate.rules.clearance import ClearanceRule
 
 MIN_CLEARANCE = 0.127
@@ -190,7 +198,7 @@ def test_checker_band_is_the_probed_500nm() -> None:
     5e-4 mm.  Not 499 nm (that would flag a 500 nm gap kicad-cli accepts),
     and never beyond KiCad's figure (#9619 ruling).
     """
-    assert DRC_TOLERANCE == 5e-4
+    assert KICAD_CLEARANCE_BAND_MM == 5e-4
 
 
 def test_band_guard_is_negligible_against_iu() -> None:
@@ -199,7 +207,7 @@ def test_band_guard_is_negligible_against_iu() -> None:
     nanometre-resolution check could see."""
     assert DRC_FLOAT_GUARD_MM < 1e-6  # well under KiCad's 1 nm IU
     assert DRC_FLOAT_GUARD_MM > 1e-12  # well above board-coordinate dust
-    assert DRC_TOLERANCE + DRC_FLOAT_GUARD_MM < 1.6e-3  # band stays sub-marginal
+    assert KICAD_CLEARANCE_BAND_MM + DRC_FLOAT_GUARD_MM < 1.6e-3  # band stays sub-marginal
 
 
 def test_diagonal_case_construction_is_at_the_band_edge() -> None:

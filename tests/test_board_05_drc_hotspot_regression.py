@@ -158,14 +158,15 @@ MAX_SHORTFALL_UM = 130
 # grazes on the committed artifact (0.100 mm actual vs the 0.102 mm floor --
 # ~1.6 um short, exactly the class the old 5 um dead band swallowed).  These
 # are TRUE POSITIVES that were always on the board; the checker simply
-# refused to report them.  The band has since widened to 5e-4 mm (0.5 um,
-# #9619, KiCad's probed acceptance band) -- still half the ~1.6 um class,
+# refused to report them.  Clearance verdicts have since moved to KiCad's
+# probed acceptance band (KICAD_CLEARANCE_BAND_MM = 5e-4 mm / 0.5 um,
+# #9619, applied by ``drc_clear``) -- still half the ~1.6 um class,
 # so both grazes remain reported.  The families this frozenset primarily
 # guards -- ``clearance_segment_segment`` (the #3444 hard cross-net trace
 # overlap) and the micro-via in-pad-fallback signatures ``clearance_pad_via``
 # / ``clearance_via_via`` (#3425) -- remain absent and pinned.  Exit clause:
 # re-route board 05 so the two marginal grazes clear the floor by more than
-# the current guard band (0.5 um as of #9619),
+# the current clearance band (0.5 um as of #9619),
 # then restore ``clearance_segment_via`` to the absent-set.
 ABSENT_RULES_ON_COMMITTED_PCB: frozenset[str] = frozenset(
     {

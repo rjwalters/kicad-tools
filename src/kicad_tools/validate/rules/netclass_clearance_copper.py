@@ -181,9 +181,10 @@ def check_netclass_clearance_copper(
     }
     fab_floor = design_rules.min_clearance_mm
     # Only classes stricter than the fab floor add a requirement to ``clearance``.
-    # Compare the two rule *floors* directly (#9619 review): ``DRC_TOLERANCE``
-    # is an acceptance band for a *measured gap* (applied once, to
-    # ``clearance`` against ``required_class`` below).  Spending it here too
+    # Compare the two rule *floors* directly (#9619 review): the checker band
+    # (``KICAD_CLEARANCE_BAND_MM`` via ``drc_clear``) is an acceptance band for
+    # a *measured gap* (applied once, to ``clearance`` against
+    # ``required_class`` below).  Spending it here too
     # suppressed any authored class within 500 nm of the fab floor -- with a
     # 0.1270 fab floor and an authored 0.1273 class, copper 600 nm below the
     # class requirement sailed through unflagged.  Both floors are parsed

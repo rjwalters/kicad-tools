@@ -104,9 +104,9 @@ _PAID_DRILL_RULE_FLOORS = {
 # The same slack board 04's reviewed validator applies to these three floors
 # (``manufacturing_process.validate_process``), so a finding may sit a hair under
 # the reviewed floor without being a regression.  Deliberately far tighter than
-# ``kct check``'s own guard band (validate.rules.dimensions.DRC_TOLERANCE =
-# 5e-4 mm since #9619): this assertion fails closed, so do not loosen it to
-# match that constant.
+# ``kct check``'s own guard bands (validate.rules.base.KICAD_CLEARANCE_BAND_MM =
+# 5e-4 mm for clearance verdicts, DRC_TOLERANCE = 1e-4 mm elsewhere, #9619):
+# this assertion fails closed, so do not loosen it to match either constant.
 _FLOOR_TOLERANCE_MM = 1e-6
 
 

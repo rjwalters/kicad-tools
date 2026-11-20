@@ -43,12 +43,12 @@ class TestEpsilonConstant:
         ``validate/rules/base.py``'s ``WRITER_CLEARANCE_MARGIN_MM``
         (duplicated as a literal, like the pre-#9619 copies were)."""
         from kicad_tools.validate.rules.base import (
-            DRC_TOLERANCE,
+            KICAD_CLEARANCE_BAND_MM,
             WRITER_CLEARANCE_MARGIN_MM,
         )
 
         assert _CLEARANCE_EPSILON_MM == WRITER_CLEARANCE_MARGIN_MM == 1e-4
-        assert _CLEARANCE_EPSILON_MM < DRC_TOLERANCE
+        assert _CLEARANCE_EPSILON_MM < KICAD_CLEARANCE_BAND_MM
 
     def test_edge_clearance_epsilon_keeps_the_pre_9619_value(self):
         """``validate/rules/edge.py`` keeps its own narrower 1e-4 epsilon.

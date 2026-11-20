@@ -42,7 +42,8 @@ def test_board_without_kicad_pro_is_noop(tmp_path: Path) -> None:
 
 def test_micron_shortfall_counted_and_tolerance_respected(tmp_path: Path) -> None:
     # STRAIGHT leaves a 0.45 mm gap.  Raise the HV floor to 1 um above it
-    # (flagged), then to 0.05 um above it (inside DRC_TOLERANCE, kept).
+    # (flagged), then to 0.05 um above it (inside the #9619 checker band,
+    # KICAD_CLEARANCE_BAND_MM, kept).
     # The flagged floor sits 2x the #9619 KiCad-parity band (5e-4 mm)
     # above the gap; a half-micron shortfall is exactly AT the band and
     # is accepted, matching kicad-cli DRC.

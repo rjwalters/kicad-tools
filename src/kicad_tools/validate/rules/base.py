@@ -16,59 +16,72 @@ if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
 
 
-# Numerical guard band for DRC clearance comparisons (in mm).
+# Numerical guard band for DRC comparisons (in mm).
 #
-# Issue #9619: set to the largest shortfall pinned KiCad 10.0.6 accepts --
-# 500 nm on the black-box probe (tests/test_clearance_slack_kicad_band_9619.py
-# re-runs it against the pinned image), so a finding at kct's verdict
-# boundary is one kicad-cli DRC agrees on.  Probe detail: parallel 0.2 mm
-# tracks under a 0.127 mm rule -- a 500 nm shortfall is accepted, 501 nm is
-# flagged; a 45-degree pair and a pad-to-track pair flip at the same edge
-# within the 1 nm constructibility of diagonal coordinates.
+# This exists ONLY to suppress IEEE-754 float64 rounding artifacts in the
+# geometric distance computation -- NOT to model manufacturing precision.
+# Board coordinates live in the ~0-300 mm range; the relative epsilon of
+# float64 there is ~1e-14 mm, and a few chained subtract/hypot operations
+# accumulate to at most ~1e-9 mm. A guard band of 1e-4 mm (0.1 um) is
+# ~5 orders of magnitude above that noise floor while still being far
+# below any real manufacturing feature, and it matches
+# ``_COLOCATION_EPSILON_MM`` used for the co-location check in
+# ``clearance.py``.
+#
+# The pre-#3913 value of 0.005 mm (5 um) created a dead band that silently
+# passed genuine marginal violations: the entire marginal class this guard
+# was masking is on the order of 1.6 um (e.g. actual 0.1000 mm vs a
+# 0.1016 mm / 4 mil floor). KiCad's own DRC works at IU granularity
+# (1 nm), so a 5 um dead band was ~10^8x wider than float noise requires
+# and hid real, fabricable-clearance-violating copper. See issue #3913.
+#
+# Issue #9619 review: KiCad's probed 500 nm acceptance band applies to
+# *copper clearance verdicts only* -- it lives in
+# :data:`KICAD_CLEARANCE_BAND_MM` below, applied via :func:`drc_clear` at
+# the probed sites.  It must NOT be folded into this shared constant:
+# every other consumer (track width, via drill/diameter, annular ring,
+# netclass floors, hole, silk, via-in-pad, via-under-body) is a check the
+# clearance probe never covered, and on track width and drill size pinned
+# kicad-cli flags a 100 nm shortfall with no band at all -- sharing the
+# 500 nm band there would make kct pass boards kicad-cli rejects.
+DRC_TOLERANCE: float = 1e-4
+
+# KiCad's probed copper-clearance acceptance band (mm) -- the largest
+# shortfall pinned KiCad 10.0.6 accepts on copper-clearance verdicts.
+# Black-box probe (tests/test_clearance_slack_kicad_band_9619.py re-runs
+# it against the pinned image): parallel 0.2 mm tracks under a 0.127 mm
+# rule -- a 500 nm shortfall is accepted, 501 nm is flagged; a 45-degree
+# pair and a pad-to-track pair flip at the same edge within the 1 nm
+# constructibility of diagonal coordinates.
+#
+# Scope (#9619 review): this band is *clearance-only* evidence.  Applied
+# solely by :func:`drc_clear`, whose call sites are the probed
+# copper-clearance verdicts (``clearance.py``,
+# ``diffpair_clearance_intra.py``, ``netclass_clearance_copper.py``).
+# Every other rule keeps :data:`DRC_TOLERANCE`: pinned kicad-cli flags a
+# 100 nm track-width or drill shortfall outright (no band), so widening
+# those checks to 500 nm would let ``kct check`` pass boards kicad-cli
+# rejects.  A rule may join this band only with its own probe evidence
+# (copper-to-edge is a known candidate: the #9619 review's probe showed
+# kicad-cli applies the same 500 nm band there).
 #
 # Deliberately wider than the router's slack (the router package's own
 # ``CLEARANCE_EPSILON_MM``, still 1e-4): the checker matches KiCad
-# verdict-for-verdict, while copper the router *writes* keeps a margin
-# inside KiCad's tolerance so rounding on save cannot tip it into a
-# kicad-cli violation (#9619 ruling: a deliberate split, not a parity bug
-# -- the generator stays 100 nm inside the band).
-#
-# The band still sits far above the IEEE-754 noise floor it was originally
-# introduced for (#3913): float64 coordinates in the ~0-300 mm board range
-# accumulate at most ~1e-9 mm of rounding through a few chained
-# subtract/hypot operations, five orders of magnitude below 5e-4.
-#
-# History: the pre-#3913 value of 0.005 mm (5 um) created a dead band that
-# silently passed genuine marginal violations: the entire marginal class
-# this guard was masking is on the order of 1.6 um (e.g. actual 0.1000 mm
-# vs a 0.1016 mm / 4 mil floor).  #3913 tightened it to 1e-4 mm (0.1 um);
-# #9619 widened it to 5e-4 mm to match KiCad's probed acceptance band.  It
-# remains below the ~1.6 um marginal class, so those still fail.  Note the
-# band is wider than a purely-rounding guard needs to be: a shortfall
-# between 100 nm and 500 nm now passes where #3913 reported it -- that is
-# the KiCad-parity trade-off this issue accepts.
-#
-# Duplicated as a literal (like ``manufacturers/fabrication_process.py``'s
-# twin) rather than imported because the router's copy deliberately stays
-# at 1e-4 (see above), and importing anything under
-# ``kicad_tools.router`` from the validate package would break the
-# lazy-import contract (``tests/test_validate_lazy_imports.py`` forbids
-# ``kicad_tools.validate.*`` from loading the router).  Keep the
-# checker-side copies (this and ``manufacturers/fabrication_process.py``)
-# in sync.  NOT twins: ``drc/incremental.py`` and ``creepage/engine.py``
-# deliberately stay at 1e-4 -- their consumers write copper (see
-# :data:`WRITER_CLEARANCE_MARGIN_MM` below) or sit outside the probe's
-# scope.
-DRC_TOLERANCE: float = 5e-4
+# verdict-for-verdict on clearances, while copper the router *writes*
+# keeps a margin inside KiCad's tolerance so rounding on save cannot tip
+# it into a kicad-cli violation (#9619 ruling: a deliberate split, not a
+# parity bug -- the generator stays 100 nm inside the band).
+KICAD_CLEARANCE_BAND_MM: float = 5e-4
 
 # Clearance slack for tools that *write* copper (mm) -- the margin the
 # generator side keeps inside KiCad's acceptance band.  #9619 widened the
-# *checker* (:data:`DRC_TOLERANCE`) to KiCad's probed 500 nm so verdicts
-# match ``kicad-cli`` verdict-for-verdict, but copper a kct command *moves*
-# or *places* and then saves must not rely on that band: rounding on save
-# can tip an exactly-at-the-band gap into a real kicad-cli violation.  Per
-# the #9619 ruling ("split, don't change") the writers keep the pre-#9619
-# 1e-4 margin: ``cli/pcb_move_via.py`` and ``cli/relocate_in_pad_vias.py``
+# *checker's* clearance verdicts (:data:`KICAD_CLEARANCE_BAND_MM` above)
+# to KiCad's probed 500 nm so they match ``kicad-cli``
+# verdict-for-verdict, but copper a kct command *moves* or *places* and
+# then saves must not rely on that band: rounding on save can tip an
+# exactly-at-the-band gap into a real kicad-cli violation.  Per the #9619
+# ruling ("split, don't change") the writers keep the pre-#9619 1e-4
+# margin: ``cli/pcb_move_via.py`` and ``cli/relocate_in_pad_vias.py``
 # (via moves / relocations that rewrite the board) compare against this
 # constant, and ``drc/incremental.py``'s ``_CLEARANCE_EPSILON_MM`` keeps
 # the same 1e-4 as a literal (it feeds ``optim/session.py``'s placement
@@ -92,11 +105,13 @@ DRC_FLOAT_GUARD_MM: float = 1e-9
 
 def drc_clear(measured_mm: float, required_mm: float) -> bool:
     """True unless the measured gap falls short of ``required_mm`` by more
-    than :data:`DRC_TOLERANCE` (KiCad's probed band, widened by the
-    :data:`DRC_FLOAT_GUARD_MM` float-safety term so a gap KiCad's
-    integer-nm math accepts at exactly the band edge is not flagged here
-    on float dust alone)."""
-    return measured_mm + DRC_TOLERANCE >= required_mm - DRC_FLOAT_GUARD_MM
+    than :data:`KICAD_CLEARANCE_BAND_MM` (KiCad's probed copper-clearance
+    band, widened by the :data:`DRC_FLOAT_GUARD_MM` float-safety term so a
+    gap KiCad's integer-nm math accepts at exactly the band edge is not
+    flagged here on float dust alone).  Clearance verdict sites only --
+    dimension, annular, floor, hole and silk checks keep
+    :data:`DRC_TOLERANCE`."""
+    return measured_mm + KICAD_CLEARANCE_BAND_MM >= required_mm - DRC_FLOAT_GUARD_MM
 
 
 class DRCRule(ABC):

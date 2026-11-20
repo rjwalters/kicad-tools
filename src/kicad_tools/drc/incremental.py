@@ -63,10 +63,11 @@ except ImportError:
 
 # Floating-point tolerance for pad-pad clearance comparisons.
 # Deliberately 1e-4, NOT the #9619 checker band (``validate/rules/base.py``'s
-# ``DRC_TOLERANCE``, 5e-4): this engine feeds ``optim/session.py``'s
-# placement feedback loop, which *writes* copper -- a placement accepted
-# because of the 500 nm parity band could round over into a real kicad-cli
-# violation on save, so the writer side keeps the pre-#9619 margin
+# ``KICAD_CLEARANCE_BAND_MM``, 5e-4, clearance verdicts only): this engine
+# feeds ``optim/session.py``'s placement feedback loop, which *writes*
+# copper -- a placement accepted because of the 500 nm parity band could
+# round over into a real kicad-cli violation on save, so the writer side
+# keeps the pre-#9619 margin
 # (:data:`kicad_tools.validate.rules.base.WRITER_CLEARANCE_MARGIN_MM`;
 # #9619 ruling: split, don't change).  Before #3913-era cleanups this was
 # introduced for IEEE-754 rounding in radius and trig math (e.g.
