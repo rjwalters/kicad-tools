@@ -16,6 +16,42 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-20
 
+- **Issue #9754** (closed): Silk text box: unmeasured glyphs fall back to the widest *measured* advance, not a proven bound
+- **PR #9756**: fix: measure silk text advances for remaining ASCII punctuation glyphs
+- **Issue #9751** (closed): EdgeClearanceRule outline scan is O(copper x outline) and tessellated arcs make the outline 100-400x denser
+- **PR #9758**: perf: prune the outline scan in min_gap_to_outline with a bbox lower bound (#9751)
+- **Issue #9596** (closed): Add PCBJam to the ecosystem registry with its licence split, and a research note on its blind PCB study
+- **PR #9610**: feat: add PCBJam ecosystem entries with the GPL/MIT licence split and a blind-PCB study note
+- **Issue #9620** (closed): Router: automatic coarser-grid retry (kct route) and a non-fixed grid for route-auto
+- **PR #9643**: feat: retry budget-only route failures on a coarser grid; add route-auto --grid
+- **Issue #9536** (closed): board04: regenerate output from the #9455 recipe, fix pinned-geometry tests, re-pin readiness
+- **PR #9550**: fix(board04): regenerate output from the #9455 recipe, re-pin evidence
+- **Issue #9582** (closed): voltage map: no way to give several scenarios to route/optimize-placement; _pair_bounds.max_dv rejects 0
+- **Issue #9710** (closed): placement: load_voltage_map still collapses signed intervals to max(|lo|,|hi|) — optimize-placement understates bipolar/swinging pairs
+- **PR #9745**: fix(placement): difference signed/swinging HV pairs end-to-end in optimize-placement
+- **Issue #9689** (closed): Edge clearance measures Edge.Cuts arcs against two chords, so kct check misses copper near an arc's bulge
+- **PR #9737**: fix: measure edge clearance against tessellated Edge.Cuts arcs
+- **Issue #9731** (closed): pcb reinforce: mask-opening refusal reports the first failing sample's gap, not the minimum over the run
+- **PR #9732**: fix: report minimum mask-opening gap over the run in reinforce refusals
+- **Issue #9705** (closed): Make C++ router backend test cases fail, not skip, when the backend is missing
+- **PR #9735**: test: fail, not skip, C++ router backend cases when the extension is missing
+- **Issue #9712** (closed): creepage export-rules: cross-gate the new same-netclass rule shape on kicad-cli DRC (and fix a now-stale docstring)
+- **PR #9744**: test: pin the swinging-domain self-rule on pinned kicad-cli DRC (#9712)
+- **Issue #9399** (closed): test(fix-drc): cover rotated obround pads in copper-gap repair
+- **PR #9738**: test: cover rotated obround pads in copper-gap repair
+- **Issue #9515** (closed): Silk text width model under-covers a justified label's far end (_TEXT_CHAR_WIDTH_FACTOR)
+- **PR #9522**: fix: model silk text boxes with measured stroke-font advances
+- **Issue #9713** (closed): Fab DFM parity table does not count the new clearance_arc_* rule ids
+- **PR #9742**: fix: attribute clearance_arc_* findings to fab DFM spacing rows (#9713)
+- **Issue #9530** (closed): In-memory mirror (recovery applicator) does not mirror custom-pad primitives; KiCad's flip does
+- **PR #9533**: fix: y-mirror custom-pad primitives in the recovery mirror strategy
+- **Issue #9702** (closed): Arc clearance overstates arc copper by 1-2 um: kct flags arc-to-track gaps kicad-cli accepts
+- **PR #9730**: fix: measure authored arc copper exactly in pairwise clearance (Issue #9702)
+- **Issue #9594** (closed): Report layout-quality metrics: track vs ground vias, corner and turn-back counts, pair skew
+- **PR #9614**: feat: report layout-quality metrics (via split, corners, skew) in board.json and the router benchmark
+- **Issue #9704** (closed): creepage census ignores cross-face surface paths through NPTH bores, slots and the board edge
+- **PR #9722**: fix: creepage census measures cross-face bore, slot and board-edge paths
+- **PR #9733**: ci: give board 05 unattended routes the recipe's fiducials + board-ID prep
 - **Issue #9031** (closed): tests: nested pytest.approx() at test_expand_route_experiment.py:166 blocks any pytest >= 9.2 bump
 - **Issue #9740** (closed): board 07 output/ artifact still carries the pre-repair DQ7/LDQM/UDQM/DQ13 loops; SDRAM gates fire under the #9304 defect-copper ruler
 - **Issue #9720** (closed): kct route leaves a permanent .kct-route.lock.guard file beside the output
