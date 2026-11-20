@@ -59,6 +59,19 @@ DIRTY_BOARD = BOARD.replace(
 """,
 )
 
+# The same board plus one FOE via (0.6 mm size / 0.3 mm drill) at (120, 110):
+# a via's dedupe key is net, position and layers only, so proposing a
+# different size or drill at that exact position is a position collision,
+# not a duplicate -- the requested copper is NOT on the board (Issue #9674
+# review).
+VIA_BOARD = BOARD.replace(
+    """  (segment (start 115 100.6) (end 115 119.4) (width 0.2) (layer "F.Cu") (net 2) (uuid "00000000-0000-0000-0000-000000000010"))
+""",
+    """  (segment (start 115 100.6) (end 115 119.4) (width 0.2) (layer "F.Cu") (net 2) (uuid "00000000-0000-0000-0000-000000000010"))
+  (via (at 120 110) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "00000000-0000-0000-0000-000000000020"))
+""",
+)
+
 COMMITTED = (
     Path(__file__).resolve().parent.parent
     / "boards"
@@ -71,6 +84,11 @@ COMMITTED = (
 @pytest.fixture
 def board(tmp_path: Path) -> Path:
     return _write_board(tmp_path, BOARD)
+
+
+@pytest.fixture
+def via_board(tmp_path: Path) -> Path:
+    return _write_board(tmp_path, VIA_BOARD)
 
 
 def _write_board(tmp_path: Path, text: str) -> Path:
@@ -467,9 +485,188 @@ class TestApplyChecked:
         assert rc == 0 and doc["ok"] is True
         assert doc["written"] == str(board)
         assert doc["backup"] == str(board) + ".bak"
+        assert doc["items_written"] == 1 and doc["items_skipped_as_duplicate"] == 0
         reloaded = PCB.load(str(board))
         assert any(s.net_name == "SIG" and s.layer == "F.Cu" for s in reloaded.segments)
         assert (board.parent / "b.kicad_pcb.bak").read_bytes() == original
+
+    def test_apply_all_duplicate_reports_zero_written(self, board, capsys):
+        # Issue #9674: proposing the board's own FOE track verbatim is clean
+        # (the copper is there) and add_trace dedupe skips the write; the
+        # report must not claim an item was written.
+        original = board.read_bytes()
+        duplicate = _seg("FOE", 115, 100.6, 115, 119.4, width=0.2)
+        rc, doc = _run(
+            capsys,
+            "apply",
+            str(board),
+            str(_items_file(board.parent, duplicate)),
+            "--checked",
+            "--format",
+            "json",
+        )
+        assert rc == 0 and doc["ok"] is True, doc["problems"]
+        assert doc["items_written"] == 0
+        assert doc["items_skipped_as_duplicate"] == 1
+        # No node was added: still exactly the one segment the fixture has.
+        reloaded = PCB.load(str(board))
+        assert len(reloaded.segments) == 1
+        assert (board.parent / "b.kicad_pcb.bak").read_bytes() == original
+
+    def test_apply_mixed_batch_splits_written_and_skipped(self, board, capsys):
+        rc, doc = _run(
+            capsys,
+            "apply",
+            str(board),
+            str(
+                _items_file(
+                    board.parent,
+                    _seg("FOE", 115, 100.6, 115, 119.4, width=0.2),  # exact duplicate
+                    _seg("SIG", 105, 105, 112, 105),  # new copper
+                )
+            ),
+            "--checked",
+            "--format",
+            "json",
+        )
+        assert rc == 0 and doc["ok"] is True, doc["problems"]
+        assert doc["items_written"] == 1
+        assert doc["items_skipped_as_duplicate"] == 1
+        reloaded = PCB.load(str(board))
+        assert len(reloaded.segments) == 2
+
+    def test_apply_text_output_distinguishes_skipped_duplicates(self, board, capsys):
+        rc = main(
+            [
+                "apply",
+                str(board),
+                str(_items_file(board.parent, _seg("FOE", 115, 100.6, 115, 119.4, width=0.2))),
+                "--checked",
+            ]
+        )
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "wrote 0 item(s)" in captured.out
+        assert "skipped 1 item(s) already on the board" in captured.out
+
+    @pytest.mark.parametrize(("size", "drill"), [(1.2, 0.6), (0.6004, 0.3), (0.6, 0.3004)])
+    def test_apply_via_size_mismatch_is_conflicting_not_duplicate(
+        self, via_board, capsys, size, drill
+    ):
+        # Issue #9674 review: a via's dedupe key is net, position and layers
+        # only -- size and drill are outside it -- so a 1.2/0.6 request at a
+        # 0.6/0.3 via's position is a position collision, not a duplicate.
+        # The report must not tell the agent the requested copper is there.
+        rc, doc = _run(
+            capsys,
+            "apply",
+            str(via_board),
+            str(
+                _items_file(
+                    via_board.parent,
+                    {"type": "via", "net": "FOE", "at": [120, 110], "size": size, "drill": drill},
+                )
+            ),
+            "--checked",
+            "--format",
+            "json",
+        )
+        assert rc == 0 and doc["ok"] is True, doc["problems"]
+        assert doc["items_written"] == 0
+        assert doc["items_skipped_as_duplicate"] == 0
+        assert doc["items_skipped_conflicting"] == 1
+        (detail,) = doc["conflicting_via_details"]
+        assert f"batch asked size {size} / drill {drill}" in detail
+        # The board keeps the original via: nothing was up-sized.
+        reloaded = PCB.load(str(via_board))
+        (via,) = reloaded.vias
+        assert via.size == pytest.approx(0.6) and via.drill == pytest.approx(0.3)
+
+    def test_apply_exact_duplicate_via_is_skipped_as_duplicate(self, via_board, capsys):
+        # The matching half of the split: an exact 0.6/0.3 re-proposal is a
+        # true duplicate and stays in items_skipped_as_duplicate.
+        rc, doc = _run(
+            capsys,
+            "apply",
+            str(via_board),
+            str(
+                _items_file(
+                    via_board.parent,
+                    {"type": "via", "net": "FOE", "at": [120, 110], "size": 0.6, "drill": 0.3},
+                )
+            ),
+            "--checked",
+            "--format",
+            "json",
+        )
+        assert rc == 0 and doc["ok"] is True, doc["problems"]
+        assert doc["items_written"] == 0
+        assert doc["items_skipped_as_duplicate"] == 1
+        assert doc["items_skipped_conflicting"] == 0
+        assert doc["conflicting_via_details"] == []
+
+    @pytest.mark.parametrize("match_first", [False, True])
+    def test_apply_duplicate_among_colocated_vias(self, tmp_path, capsys, match_first):
+        small = next(line for line in VIA_BOARD.splitlines() if line.startswith("  (via "))
+        large = small.replace("(size 0.6) (drill 0.3)", "(size 1.2) (drill 0.6)").replace(
+            '020"))', '021"))'
+        )
+        vias = [large, small] if match_first else [small, large]
+        board = _write_board(tmp_path, VIA_BOARD.replace(small, "\n".join(vias)))
+        item = {"type": "via", "net": "FOE", "at": [120, 110], "size": 1.2, "drill": 0.6}
+        rc, doc = _run(
+            capsys,
+            "apply",
+            str(board),
+            str(_items_file(tmp_path, item)),
+            "--checked",
+            "--format",
+            "json",
+        )
+        assert rc == 0
+        assert doc["items_written"] == 0
+        assert doc["items_skipped_as_duplicate"] == 1
+        assert doc["items_skipped_conflicting"] == 0
+        assert len(PCB.load(str(board)).vias) == 2
+
+    def test_append_new_vias_computes_one_key_per_via(self, board, monkeypatch):
+        from unittest.mock import Mock
+
+        from kicad_tools.schema import pcb
+
+        loaded = PCB.load(str(board))
+        key = Mock(wraps=pcb._via_dedup_key)
+        monkeypatch.setattr(pcb, "_via_dedup_key", key)
+        items = parse_items(
+            {
+                "items": [
+                    {"type": "via", "net": "FOE", "at": [120, y], "size": 0.6, "drill": 0.3}
+                    for y in range(100, 200)
+                ]
+            }
+        )
+        assert _append_for_write(loaded, items) == (len(items), 0, [])
+        assert key.call_count == len(items)
+
+    def test_apply_text_output_names_existing_via_size(self, via_board, capsys):
+        rc = main(
+            [
+                "apply",
+                str(via_board),
+                str(
+                    _items_file(
+                        via_board.parent,
+                        {"type": "via", "net": "FOE", "at": [120, 110], "size": 1.2, "drill": 0.6},
+                    )
+                ),
+                "--checked",
+            ]
+        )
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "held by a different via (not written)" in captured.out
+        assert "board has size 0.6 / drill 0.3" in captured.out
+        assert "batch asked size 1.2 / drill 0.6" in captured.out
 
     def test_apply_arc_writes_arc_node_and_round_trips(self, board, capsys):
         # AC #9618: pin the deliberate check/write divergence -- the arc is

@@ -211,6 +211,13 @@ class WiredLeg:
     rejecting it. ``points`` (board-relative, the frame of routed segments)
     is the leg's centreline polyline and ``width`` its widest copper -- the
     basis of the anchor-on-leg tolerance, reused for segment matching.
+
+    ``anchor_arc`` is the ``(first, last)`` cumulative-arc range of the two
+    anchor holes on ``points`` -- the stretch the wire is actually soldered
+    over. The remainder of the polyline outside it (the hole-to-pad stub at
+    each end) is bare copper a consumer must judge at copper width
+    (Issue #9654). ``None`` when no anchor range is known; consumers then
+    treat the whole polyline as wired.
     """
 
     net: str
@@ -218,6 +225,7 @@ class WiredLeg:
     points: tuple[_Point, ...]
     width: float
     gauge: int
+    anchor_arc: tuple[float, float] | None = None
 
 
 class ReinforcementIncompleteRule(DRCRule):
@@ -795,6 +803,7 @@ class ReinforcementIncompleteRule(DRCRule):
                             points=tuple(leg.points),
                             width=leg.width,
                             gauge=leg.gauge,
+                            anchor_arc=outcome,
                         )
                     )
 
@@ -868,14 +877,18 @@ class ReinforcementIncompleteRule(DRCRule):
         claimed: set[int],
         results: DRCResults,
         via_is_tented: Any,
-    ) -> bool | None:
+    ) -> tuple[float, float] | None:
         """Check one leg's (a)-(c); ``None`` when it is not a wire leg.
 
         Returns ``None`` for a leg no wire layout applies to (degenerate
         geometry, a pad covering the whole leg, or an inner layer with no
-        solder mask), else ``True``. Callers judging completeness (Issue
-        #9648) additionally require that no finding was emitted into
-        ``results``.
+        solder mask), else the ``(first, last)`` cumulative-arc range of the
+        leg's anchors -- the stretch the wire is soldered over, which
+        consumers use to keep the unwired hole-to-pad stubs at bare copper
+        (Issue #9654). A leg with fewer than two anchors always carries an
+        (a) finding, so its whole-leg placeholder span is never credited.
+        Callers judging completeness (Issue #9648) additionally require that
+        no finding was emitted into ``results``.
         """
         pts, cum, total = leg.points, leg.cum, leg.total
         if len(pts) < 2 or total <= 1e-9:
@@ -1042,7 +1055,7 @@ class ReinforcementIncompleteRule(DRCRule):
                     + " and ".join("front" if s == "F" else "back" for s in tented)
                     + " side; both sides must be mask-open",
                 )
-        return True
+        return (anchors[0].arc, anchors[-1].arc) if len(anchors) >= 2 else (0.0, total)
 
     # ------------------------------------------------------------ geometry
 

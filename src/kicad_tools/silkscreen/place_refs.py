@@ -173,20 +173,12 @@ def references_over_holes(pcb: PCB) -> set[str]:
     leaving every reviewed position that is already clear where it is.  Read
     from the rule's own findings, so it can never name a different set.
     """
-    from kicad_tools.manufacturers.base import DesignRules
     from kicad_tools.validate.rules.silkscreen import check_silk_hole_overlap
 
-    rules = DesignRules(
-        min_trace_width_mm=0.0,
-        min_clearance_mm=0.0,
-        min_via_drill_mm=0.0,
-        min_via_diameter_mm=0.0,
-        min_annular_ring_mm=0.0,
-    )
     suffix = " (reference)"
     return {
         violation.items[0][: -len(suffix)]
-        for violation in check_silk_hole_overlap(pcb, rules).violations
+        for violation in check_silk_hole_overlap(pcb).violations
         if violation.items and violation.items[0].endswith(suffix)
     }
 
