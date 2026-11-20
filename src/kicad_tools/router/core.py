@@ -2196,6 +2196,9 @@ class Autorouter:
         # report and the --protect-plane-zones hard refusal below.
         self.plane_zones: tuple[PlaneZoneOutline, ...] = ()
         self._plane_zone_source_pcb: str | None = None
+        # Set by load_pcb_for_routing when plane-zone parsing raised; the hard
+        # --protect-plane-zones veto refuses instead of running unprotected.
+        self._plane_zone_load_error: str | None = None
         self.protect_plane_zones: bool = False
         self.plane_zone_refusals: list[str] = []
         # Issue #5863: nets the loader dropped from routing because a pad on
@@ -3210,6 +3213,13 @@ class Autorouter:
         Purely pad-local copper (intra-IC ties, kelvin bridges, escape
         stubs) never reaches this gate through its own commit paths.
         """
+        # Fail closed (#9597): a hard option never silently turns itself off.
+        if self._plane_zone_load_error is not None:
+            return (
+                "plane-zone protection unavailable: could not parse the board's "
+                f"zones ({self._plane_zone_load_error}); refusing the commit "
+                "(--protect-plane-zones)"
+            )
         outlines = self.plane_zones
         if not outlines or not route.segments:
             return None
@@ -3226,7 +3236,10 @@ class Autorouter:
                 Polygon,
             )
         except ImportError:
-            return None
+            return (
+                "plane-zone protection unavailable: shapely is not installed; "
+                "refusing the commit (--protect-plane-zones)"
+            )
 
         ox, oy = (
             float(getattr(self.grid, "origin_x", 0.0)),
@@ -3251,7 +3264,10 @@ class Autorouter:
 
         zone_meta = self._plane_zone_board_state()
         if zone_meta is None:
-            return None
+            return (
+                "plane-zone protection unavailable: the source board could not be "
+                "loaded for the split check; refusing the commit (--protect-plane-zones)"
+            )
         pcb, pcb_items, resolve = zone_meta
 
         from shapely.validation import make_valid  # type: ignore[import-untyped]
@@ -3265,46 +3281,59 @@ class Autorouter:
         keepouts = [z for z in pcb.zones if getattr(z, "keepout", None) is not None]
         net_name = route.net_name or f"net {route.net}"
         for outline in candidates:
-            board_poly = translate(Polygon(outline.polygon), -ox, -oy)
-            if not board_poly.is_valid:
-                board_poly = make_valid(board_poly)
-            if board_poly.is_empty or board_poly.geom_type != "Polygon":
+            full_poly = translate(Polygon(outline.polygon), -ox, -oy)
+            if not full_poly.is_valid:
+                full_poly = make_valid(full_poly)
+            if full_poly.is_empty:
                 continue
-            # Cheap pre-filter: only zones the candidate actually touches.
-            if not any(it.geom.intersects(board_poly) for it in candidate_items):
-                continue
-            layer_items = self._plane_zone_route_items(
-                pcb_items.get(outline.layer_name, []),
-                outline,
-                board_poly,
-                ox,
-                oy,
-                exclude=route if exclude_self else None,
-            )
-            obstacles = [
-                g
-                for g in (
-                    keepout_geometry(k) for k in keepouts if _keepout_covers(k, outline.layer_name)
+            # A zone whose outline repairs to a MultiPolygon / collection is
+            # still protected: every polygonal part is checked.
+            if full_poly.geom_type == "Polygon":
+                parts = [full_poly]
+            else:
+                parts = [
+                    g
+                    for g in getattr(full_poly, "geoms", [])
+                    if g.geom_type == "Polygon" and not g.is_empty
+                ]
+            for board_poly in parts:
+                # Cheap pre-filter: only zones the candidate actually touches.
+                if not any(it.geom.intersects(board_poly) for it in candidate_items):
+                    continue
+                layer_items = self._plane_zone_route_items(
+                    pcb_items.get(outline.layer_name, []),
+                    outline,
+                    board_poly,
+                    ox,
+                    oy,
+                    exclude=route if exclude_self else None,
                 )
-                if g is not None
-            ]
-            before = zone_pieces(
-                board_poly, outline.net_number, layer_items, obstacles, outline.clearance
-            )
-            after = zone_pieces(
-                board_poly,
-                outline.net_number,
-                [*layer_items, *candidate_items],
-                obstacles,
-                outline.clearance,
-            )
-            if len(after) > len(before):
-                return (
-                    f"net {net_name}: committing this route would split zone "
-                    f"[{outline.net_name}] on {outline.layer_name} into "
-                    f"{len(after)} pad-bearing pieces (was {len(before)}); "
-                    "refusing the commit (--protect-plane-zones)"
+                obstacles = [
+                    g
+                    for g in (
+                        keepout_geometry(k)
+                        for k in keepouts
+                        if _keepout_covers(k, outline.layer_name)
+                    )
+                    if g is not None
+                ]
+                before = zone_pieces(
+                    board_poly, outline.net_number, layer_items, obstacles, outline.clearance
                 )
+                after = zone_pieces(
+                    board_poly,
+                    outline.net_number,
+                    [*layer_items, *candidate_items],
+                    obstacles,
+                    outline.clearance,
+                )
+                if len(after) > len(before):
+                    return (
+                        f"net {net_name}: committing this route would split zone "
+                        f"[{outline.net_name}] on {outline.layer_name} into "
+                        f"{len(after)} pad-bearing pieces (was {len(before)}); "
+                        "refusing the commit (--protect-plane-zones)"
+                    )
         return None
 
     def _plane_zone_board_state(self) -> tuple[Any, dict[str, list[Any]], Any] | None:

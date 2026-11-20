@@ -208,8 +208,8 @@ class TestDefaultCostAndReport:
         for crossing in plane_zone_crossings(router.routes, router.plane_zones):
             assert crossing.net_name != "+3V3"
 
+    @pytest.mark.requires_router_cpp
     def test_python_and_cpp_backends_agree(self, board: Path) -> None:
-        pytest.importorskip("kicad_tools.router.router_cpp")
         results = {}
         for backend, force_python in (("cpp", False), ("py", True)):
             router = _load(board, force_python=force_python)
@@ -255,6 +255,93 @@ class TestHardRefusal:
         seg = Segment(x1=5.0, y1=1.0, x2=10.0, y2=1.0, width=0.2, layer=Layer.F_CU, net=2)
         assert router._mark_route(Route(net=2, net_name="SIG", segments=[seg])) is True
         assert router.plane_zone_refusals == []
+
+
+class TestHardRefusalFailsClosed:
+    """--protect-plane-zones must refuse, never silently turn itself off."""
+
+    def _crossing(self):
+        from kicad_tools.router.primitives import Route, Segment
+
+        seg = Segment(x1=6.0, y1=10.0, x2=34.0, y2=10.0, width=0.2, layer=Layer.IN2_CU, net=2)
+        return Route(net=2, net_name="SIG", segments=[seg])
+
+    def test_parse_failure_refuses_under_hard_option(self, board: Path, monkeypatch) -> None:
+        from kicad_tools.schema.pcb import PCB
+
+        def boom(*a, **k):
+            raise RuntimeError("zone parse exploded")
+
+        monkeypatch.setattr(PCB, "load", boom)
+        router = _load(board)
+        assert router._plane_zone_load_error and "zone parse exploded" in (
+            router._plane_zone_load_error
+        )
+        monkeypatch.undo()
+        router.protect_plane_zones = True
+        assert router._mark_route(self._crossing()) is False
+        assert "unavailable" in router.plane_zone_refusals[0]
+        assert "zone parse exploded" in router.plane_zone_refusals[0]
+
+    def test_parse_failure_is_advisory_without_the_option(self, board: Path, monkeypatch) -> None:
+        from kicad_tools.schema.pcb import PCB
+
+        monkeypatch.setattr(PCB, "load", lambda *a, **k: (_ for _ in ()).throw(ValueError("x")))
+        router = _load(board)
+        monkeypatch.undo()
+        assert router.protect_plane_zones is False
+        assert router._mark_route(self._crossing()) is True
+
+    def test_unloadable_source_board_refuses(self, board: Path) -> None:
+        router = _load(board)
+        router.protect_plane_zones = True
+        router._plane_zone_source_pcb = None
+        assert router._mark_route(self._crossing()) is False
+        assert "could not be loaded" in router.plane_zone_refusals[0]
+
+    def test_multipolygon_zone_is_still_protected(self, board: Path, monkeypatch) -> None:
+        import shapely.affinity as affinity
+        from shapely.geometry import MultiPolygon, Polygon
+
+        real_translate = affinity.translate
+        router = _load(board)
+        router.protect_plane_zones = True
+
+        # The zone outline comes back as a MultiPolygon (the real box plus a
+        # far-away sliver); the old code skipped such zones entirely.
+        def as_multi(geom, *a, **k):
+            return MultiPolygon(
+                [real_translate(geom, *a, **k), Polygon([(100, 100), (101, 100), (101, 101)])]
+            )
+
+        monkeypatch.setattr(affinity, "translate", as_multi)
+        assert router._mark_route(self._crossing()) is False
+        assert "2 pad-bearing pieces" in router.plane_zone_refusals[0]
+
+
+class TestChainForwarding:
+    def test_completion_pass_gets_protect_flag(self) -> None:
+        from kicad_tools.cli import route_cmd
+
+        parser = route_cmd._route_parser()
+        outer = ["b.kicad_pcb", "--protect-plane-zones"]
+        args = parser.parse_args(outer)
+        argv = route_cmd._chain_complete_argv(
+            args, outer, Path("o.kicad_pcb"), Path("s.kicad_pcb")
+        )
+        assert "--protect-plane-zones" in argv
+        # The inner argv parses back to the hard option being on.
+        assert parser.parse_args([*argv]).protect_plane_zones is True
+
+    def test_default_off_is_not_forwarded(self) -> None:
+        from kicad_tools.cli import route_cmd
+
+        parser = route_cmd._route_parser()
+        args = parser.parse_args(["b.kicad_pcb"])
+        argv = route_cmd._chain_complete_argv(
+            args, ["b.kicad_pcb"], Path("o.kicad_pcb"), Path("s.kicad_pcb")
+        )
+        assert "--protect-plane-zones" not in argv
 
 
 class TestSharedPieceHelper:

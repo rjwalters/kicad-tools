@@ -6451,30 +6451,38 @@ def load_pcb_for_routing(
     # crossing report and the --protect-plane-zones hard refusal.  A strict
     # no-op (no outlines, no marks) on a stack with no PLANE layers or a
     # board with no plane-layer zones.
-    try:
-        from kicad_tools.schema.pcb import PCB as _ZoneSchemaPCB
+    # The second parse is only paid when the stack declares a PLANE layer.
+    from .layers import LayerType as _ZoneLayerType
 
-        from .layer_advisories import mark_plane_zones_on_grid, plane_zone_outlines
+    _has_plane_layers = router.layer_stack is not None and any(
+        layer.layer_type == _ZoneLayerType.PLANE for layer in router.layer_stack.layers
+    )
+    if _has_plane_layers:
+        try:
+            from kicad_tools.schema.pcb import PCB as _ZoneSchemaPCB
 
-        _zone_pcb = _ZoneSchemaPCB.load(pcb_path)
-        router.plane_zones = (
-            plane_zone_outlines(_zone_pcb, router.layer_stack, (origin_x, origin_y))
-            if router.layer_stack is not None
-            else ()
-        )
-        router._plane_zone_source_pcb = str(pcb_path)
-        if router.plane_zones:
-            _marked = mark_plane_zones_on_grid(router.grid, router.plane_zones)
-            if _marked:
-                logger.info(
-                    "Plane-layer zone cost: %d outline(s), %d grid cells marked "
-                    "(foreign zones costed, not blocked)",
-                    len(router.plane_zones),
-                    _marked,
-                )
-    except Exception:
-        # Advisory-only metadata; never refuse a board over it.
-        logger.debug("plane-zone outline parsing skipped", exc_info=True)
+            from .layer_advisories import mark_plane_zones_on_grid, plane_zone_outlines
+
+            _zone_pcb = _ZoneSchemaPCB.load(pcb_path)
+            router.plane_zones = plane_zone_outlines(
+                _zone_pcb, router.layer_stack, (origin_x, origin_y)
+            )
+            router._plane_zone_source_pcb = str(pcb_path)
+            if router.plane_zones:
+                _marked = mark_plane_zones_on_grid(router.grid, router.plane_zones)
+                if _marked:
+                    logger.info(
+                        "Plane-layer zone cost: %d outline(s), %d grid cells marked "
+                        "(foreign zones costed, not blocked)",
+                        len(router.plane_zones),
+                        _marked,
+                    )
+        except Exception as exc:
+            # The advisory cost/report stays best-effort, but the failure is
+            # recorded: --protect-plane-zones (hard) must refuse rather than
+            # run with protection silently off.
+            router._plane_zone_load_error = f"{type(exc).__name__}: {exc}"
+            logger.warning("plane-zone outline parsing failed: %s", exc)
 
     # Region-bounded routing (Issue #4148, Phase 2a): confine all new routing
     # to an axis-aligned box by marking every cell OUTSIDE it as a fixed

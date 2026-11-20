@@ -23646,6 +23646,12 @@ def _chain_complete_argv(
         chain_argv.append("--no-reserve-plane-layers")
     if getattr(args, "auto_pour", True) is False:
         chain_argv.append("--no-auto-pour")
+    # Issue #9597: a hard copper constraint -- without it the completion pass
+    # would route with the plane-zone split refusal off and could cut the very
+    # zone the operator asked to protect.  ``--no-protect-plane-zones`` is the
+    # default, so only the opt-in is forwarded.
+    if getattr(args, "protect_plane_zones", False):
+        chain_argv.append("--protect-plane-zones")
     # Issue #8694: the pass runs on the lattice engine and reaches the same
     # _run_match_group_tuning_phase as the outer run, which reads
     # ``args.length_match_groups`` (the ``length_critical`` engage mode).  Without

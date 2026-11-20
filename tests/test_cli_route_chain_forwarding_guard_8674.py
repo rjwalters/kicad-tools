@@ -208,6 +208,7 @@ NOT_FORWARDED_UNREVIEWED = {
     "--native-zone-clearance",
     "--reserve-skipped-plane-vias",
     "--reserve-pour-only-passives",  # the default; its negation IS forwarded
+    "--no-protect-plane-zones",  # the default; --protect-plane-zones IS forwarded (#9597)
     # Coupled routing.
     "--auto-analog",
     "--diffpair-max-delta",
@@ -294,6 +295,7 @@ MUST_FORWARD = {
     "--no-reserve-plane-layers",
     "--no-auto-pour",
     "--no-optimize",
+    "--protect-plane-zones",  # Issue #9597: hard constraint on zone splits
     "--raw",  # implies --no-optimize, which is what reaches the pass
     # Issue #9621: the bus family rides together -- the length window is a
     # no-op without --bus-routing (the pass would only print the
