@@ -1769,7 +1769,8 @@ class TestSilkscreenRules:
         # Should have one violation
         assert len(results) == 1
         assert results.violations[0].rule_id == "silkscreen_text_height"
-        assert results.violations[0].severity == "warning"
+        # #9798: an error under the jlcpcb profiles (operator ruling on #9795).
+        assert results.violations[0].severity == "error"
         assert results.violations[0].actual_value == pytest.approx(0.5)
         assert results.violations[0].required_value == pytest.approx(1.0)  # JLCPCB spec
 
@@ -2042,7 +2043,8 @@ class TestSilkscreenRules:
         # by #5811 -- this fixture's line is a modeled primitive, so it reports
         # no gap, but the rule still ran), silk_hole_overlap (added by #8844), and
         # silk_over_mask_opening (#8861).
-        assert results.rules_checked == 12
+        # 14 since #9798 added silk_in_keepout and silk_under_body.
+        assert results.rules_checked == 14
 
         # Check that all rule types are represented
         rule_ids = {v.rule_id for v in results.violations}

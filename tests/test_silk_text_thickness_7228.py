@@ -42,8 +42,9 @@ def test_thin_reference_is_flagged(rules):
     pcb = PCB.load(BOARD02)
     _ref(pcb, "C2").font_thickness = 0.08
     found = check_silkscreen_text_thickness(pcb, rules).violations
+    # #9798: an error under the jlcpcb profiles (operator ruling on #9795).
     assert [(v.rule_id, v.severity, v.items) for v in found] == [
-        ("silkscreen_text_thickness", "warning", ("C2 (reference)",))
+        ("silkscreen_text_thickness", "error", ("C2 (reference)",))
     ]
     assert found[0].actual_value == pytest.approx(0.08)
     assert found[0].required_value == pytest.approx(rules.min_silkscreen_width_mm)

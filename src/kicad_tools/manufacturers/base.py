@@ -316,6 +316,23 @@ class DesignRules:
     # behaviour driven by ``min_silk_to_pad_clearance_mm``.
     silk_to_pad_danger_mm: float | None = None
     silk_to_pad_warning_mm: float | None = None
+    # Operator ruling 2026-11-20 (#9795, Issue #9798): under the jlcpcb
+    # profiles these silk categories grade as errors instead of warnings.
+    # Each flag is independent and defaults to off, so every other profile
+    # keeps the legacy warning grading.
+    #
+    # ``silk_exposed_copper_is_error`` drives ``silk_over_copper`` /
+    # ``silkscreen_over_pad`` (silk on exposed copper: pads and mask
+    # openings).  Silk over a *via* is never an error (``info`` at most
+    # under this flag), per the same ruling.
+    silk_exposed_copper_is_error: bool = False
+    # ``silk_minimums_are_error`` drives ``silkscreen_line_width`` /
+    # ``silkscreen_text_height`` / ``silkscreen_text_thickness`` (silk line
+    # or text stroke below the fab minimum).
+    silk_minimums_are_error: bool = False
+    # ``silk_under_body_is_error`` drives ``silk_ref_obscured`` and
+    # ``silk_under_body`` (silk hidden under a component body).
+    silk_under_body_is_error: bool = False
     min_smd_pad_clearance_mm: float | None = None
     min_pth_hole_to_track_mm: float | None = None
     min_inner_pth_hole_to_copper_mm: float | None = None
@@ -459,6 +476,9 @@ class DesignRules:
             "min_silk_to_pad_clearance_mm": self.min_silk_to_pad_clearance_mm,
             "silk_to_pad_danger_mm": self.silk_to_pad_danger_mm,
             "silk_to_pad_warning_mm": self.silk_to_pad_warning_mm,
+            "silk_exposed_copper_is_error": self.silk_exposed_copper_is_error,
+            "silk_minimums_are_error": self.silk_minimums_are_error,
+            "silk_under_body_is_error": self.silk_under_body_is_error,
             "min_smd_pad_clearance_mm": self.min_smd_pad_clearance_mm,
             "min_pth_hole_to_track_mm": self.min_pth_hole_to_track_mm,
             "min_inner_pth_hole_to_copper_mm": self.min_inner_pth_hole_to_copper_mm,

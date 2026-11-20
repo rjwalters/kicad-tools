@@ -29,8 +29,13 @@ convention difference to explain away.  See #4612 for the measured parity table.
 
 from __future__ import annotations
 
+import fnmatch
 import math
+import re
+import sys
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -48,6 +53,7 @@ if TYPE_CHECKING:
         Pad,
         Setup,
         Via,
+        Zone,
     )
 
     from ...manufacturers import DesignRules
@@ -367,6 +373,11 @@ def check_silkscreen_line_width(
     """
     results = DRCResults(rules_checked=1)
     min_width = design_rules.min_silkscreen_width_mm
+    # Operator ruling 2026-11-20 (#9795, Issue #9798): below-minimum silk
+    # line width is an error under the jlcpcb profiles.
+    severity = (
+        "error" if bool(getattr(design_rules, "silk_minimums_are_error", False)) else "warning"
+    )
 
     # Check board-level graphics (never suppressed -- no footprint context)
     to_board = _board_frame_shift(pcb)
@@ -377,7 +388,7 @@ def check_silkscreen_line_width(
             results.add(
                 DRCViolation(
                     rule_id="silkscreen_line_width",
-                    severity="warning",
+                    severity=severity,
                     message=(
                         f"Silkscreen line width {graphic.stroke_width:.2f}mm "
                         f"< minimum {min_width:.2f}mm"
@@ -408,7 +419,7 @@ def check_silkscreen_line_width(
                 results.add(
                     DRCViolation(
                         rule_id="silkscreen_line_width",
-                        severity="warning",
+                        severity=severity,
                         message=(
                             f"Silkscreen line width {graphic.stroke_width:.2f}mm "
                             f"< minimum {min_width:.2f}mm on {footprint.reference}"
@@ -453,6 +464,11 @@ def check_silkscreen_text_height(
     results = DRCResults(rules_checked=1)
     min_height = design_rules.min_silkscreen_height_mm
     min_reference_height = design_rules.min_silkscreen_reference_height_mm
+    # Operator ruling 2026-11-20 (#9795, Issue #9798): below-minimum silk
+    # text height is an error under the jlcpcb profiles.
+    severity = (
+        "error" if bool(getattr(design_rules, "silk_minimums_are_error", False)) else "warning"
+    )
 
     # Check board-level text (never suppressed -- no footprint context)
     for text in pcb.texts:
@@ -464,7 +480,7 @@ def check_silkscreen_text_height(
             results.add(
                 DRCViolation(
                     rule_id="silkscreen_text_height",
-                    severity="warning",
+                    severity=severity,
                     message=(
                         f"Silkscreen text height {text.font_height:.2f}mm "
                         f"< minimum {min_height:.2f}mm"
@@ -509,7 +525,7 @@ def check_silkscreen_text_height(
                 results.add(
                     DRCViolation(
                         rule_id="silkscreen_text_height",
-                        severity="warning",
+                        severity=severity,
                         message=(
                             f"Silkscreen text height {fp_text.font_height:.2f}mm "
                             f"< minimum {floor:.2f}mm on {footprint.reference}"
@@ -549,6 +565,11 @@ def check_silkscreen_text_thickness(
     """
     results = DRCResults(rules_checked=1)
     min_thickness = design_rules.min_silkscreen_width_mm
+    # Operator ruling 2026-11-20 (#9795, Issue #9798): below-minimum silk
+    # text stroke is an error under the jlcpcb profiles.
+    severity = (
+        "error" if bool(getattr(design_rules, "silk_minimums_are_error", False)) else "warning"
+    )
 
     def too_thin(thickness: float) -> bool:
         return thickness < min_thickness - _CLEARANCE_EPSILON_MM
@@ -560,7 +581,7 @@ def check_silkscreen_text_thickness(
             results.add(
                 DRCViolation(
                     rule_id="silkscreen_text_thickness",
-                    severity="warning",
+                    severity=severity,
                     message=(
                         f"Silkscreen text thickness {text.font_thickness:.2f}mm "
                         f"< minimum {min_thickness:.2f}mm"
@@ -586,7 +607,7 @@ def check_silkscreen_text_thickness(
             results.add(
                 DRCViolation(
                     rule_id="silkscreen_text_thickness",
-                    severity="warning",
+                    severity=severity,
                     message=(
                         f"Silkscreen text thickness {fp_text.font_thickness:.2f}mm "
                         f"< minimum {min_thickness:.2f}mm on {footprint.reference}"
@@ -623,6 +644,11 @@ def check_silkscreen_over_pads(
         DRCResults containing any warnings
     """
     results = DRCResults(rules_checked=1)
+    # Operator ruling 2026-11-20 (#9795, Issue #9798): silk on exposed pads
+    # is an error under the jlcpcb profiles.
+    severity = (
+        "error" if bool(getattr(design_rules, "silk_exposed_copper_is_error", False)) else "warning"
+    )
 
     for footprint in pcb.footprints:
         # Get exposed pads (SMD pads are always exposed)
@@ -660,7 +686,7 @@ def check_silkscreen_over_pads(
                     results.add(
                         DRCViolation(
                             rule_id="silkscreen_over_pad",
-                            severity="warning",
+                            severity=severity,
                             message=(
                                 f"Silkscreen text may overlap exposed pad on {footprint.reference}"
                             ),
@@ -1469,8 +1495,10 @@ def check_silk_over_copper(
     Builds a shapely geometry per silk element (text bbox or buffered graphic
     stroke) and tests it against the solder-mask apertures of all pads and
     untented vias on the matching silk side.  Emits a ``silk_over_copper``
-    **warning** (matching kicad-cli severity) for any silk/aperture
-    intersection.
+    finding (``warning`` by default, matching kicad-cli severity; ``error``
+    for pad apertures under a profile with ``silk_exposed_copper_is_error``
+    -- the jlcpcb profiles -- and ``info`` for via apertures there, per the
+    operator ruling of 2026-11-20, #9795) for any silk/aperture intersection.
 
     **Counting model: one violation per (silk item, mask aperture) pair,
     matching ``kicad-cli pcb drc``.**  A refdes straddling four pads yields four
@@ -1547,19 +1575,26 @@ def check_silk_over_copper(
             )
 
     min_mask = design_rules.min_solder_mask_clearance_mm
+    # Operator ruling 2026-11-20 (#9795, Issue #9798): under the jlcpcb
+    # profiles silk on exposed copper is an error -- but silk over a *via*
+    # is not (``info`` at most), so a via-only board cannot fail through
+    # this rule either.  Untented via apertures stay in the index (the
+    # native count parity of #4612/#4624 is unchanged); only the severity
+    # they grade at moves.
+    error_grade = bool(getattr(design_rules, "silk_exposed_copper_is_error", False))
 
     # Group apertures by side and index with an STRtree for fast lookup.
     # Pads and untented vias contribute to the same index (#4624).
-    apertures: dict[str, list[tuple[_Geometry, str]]] = {"F": [], "B": []}
+    apertures: dict[str, list[tuple[_Geometry, str, bool]]] = {"F": [], "B": []}
     for side, geom, label in _iter_pad_apertures(pcb, min_mask):
-        apertures[side].append((geom, label))
+        apertures[side].append((geom, label, False))
     for side, geom, label in _iter_via_apertures(pcb, min_mask):
-        apertures[side].append((geom, label))
+        apertures[side].append((geom, label, True))
 
     trees: dict[str, Any] = {}
     for side, entries in apertures.items():
         if entries:
-            trees[side] = STRtree([g for g, _ in entries])
+            trees[side] = STRtree([g for g, _label, _via in entries])
 
     found: list[DRCViolation] = []
     for side, geom, silk_label, location, layer, _uuid in _iter_silk_geometries(pcb):
@@ -1569,7 +1604,7 @@ def check_silk_over_copper(
         tree = trees[side]
         # STRtree.query returns candidate indices whose envelopes overlap.
         for idx in tree.query(geom):
-            ap_geom, aperture_label = side_entries[int(idx)]
+            ap_geom, aperture_label, aperture_is_via = side_entries[int(idx)]
             if not geom.intersects(ap_geom):
                 continue
             # Require a non-trivial overlap area to reject hairline corner
@@ -1577,13 +1612,17 @@ def check_silk_over_copper(
             # per (silk, aperture) pair -- see the counting model above.
             if geom.intersection(ap_geom).area < _MIN_OVERLAP_AREA_MM2:
                 continue
+            if error_grade:
+                severity = "info" if aperture_is_via else "error"
+            else:
+                severity = "warning"
             # One violation per (silk item, mask aperture) PAIR, matching
             # kicad-cli.  Do NOT re-introduce a break here: it collapses a
             # multi-pad collision to a single arbitrary representative (#4612).
             found.append(
                 DRCViolation(
                     rule_id="silk_over_copper",
-                    severity="warning",
+                    severity=severity,
                     message=(
                         f"Silkscreen {silk_label} overlaps exposed copper of {aperture_label}"
                     ),
@@ -2379,7 +2418,6 @@ def check_silk_ref_obscured(
     the footprint.  A hidden reference with no such text, and a visible
     reference inside its own courtyard, are still flagged.
     """
-    del design_rules  # no manufacturer threshold
     require_shapely("silk-ref-obscured geometry")
     from shapely.geometry import Polygon
 
@@ -2395,6 +2433,11 @@ def check_silk_ref_obscured(
     )
 
     results = DRCResults(rules_checked=1)
+    # Operator ruling 2026-11-20 (#9795, Issue #9798): a reference hidden
+    # under a component body is an error under the jlcpcb profiles.
+    severity = (
+        "error" if bool(getattr(design_rules, "silk_under_body_is_error", False)) else "warning"
+    )
 
     for footprint in pcb.footprints:
         ref_text = next((t for t in footprint.texts if t.text_type == "reference"), None)
@@ -2409,7 +2452,7 @@ def check_silk_ref_obscured(
             results.add(
                 DRCViolation(
                     rule_id="silk_ref_obscured",
-                    severity="warning",
+                    severity=severity,
                     message=f"Reference designator {footprint.reference} is hidden",
                     location=footprint.position,
                     layer=ref_text.layer,
@@ -2443,7 +2486,7 @@ def check_silk_ref_obscured(
             results.add(
                 DRCViolation(
                     rule_id="silk_ref_obscured",
-                    severity="warning",
+                    severity=severity,
                     message=(
                         f"Reference designator {footprint.reference} lies entirely "
                         f"inside its own component body"
@@ -2454,6 +2497,476 @@ def check_silk_ref_obscured(
                 )
             )
 
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Silk keepouts (Issue #9798): rule areas whose sibling ``.kicad_dru`` forbids
+# silk there, plus the error check and the under-body check the operator
+# ruling of 2026-11-20 (#9795) asks for.
+# ---------------------------------------------------------------------------
+
+# Silk layer names, mapped to the side they print on.  Mirrors
+# :data:`FRONT_SILK_LAYERS` / :data:`BACK_SILK_LAYERS` but keyed for lookup.
+_SILK_LAYER_SIDES: dict[str, str] = {
+    "F.SilkS": "F",
+    "F.Silkscreen": "F",
+    "B.SilkS": "B",
+    "B.Silkscreen": "B",
+}
+
+# ``A.intersectsArea('...')`` references inside a ``.kicad_dru`` condition.
+# The capture keeps KiCad's one escape (``\'``) and the string is unescaped
+# by :func:`_dru_unquote_ref`.
+_DRU_INTERSECTS_AREA_RE = re.compile(r"\.intersectsArea\(\s*'((?:\\.|[^'\\])*)'\s*\)")
+
+
+@dataclass(frozen=True)
+class SilkKeepoutArea:
+    """One rule area where silk is forbidden by the board's ``.kicad_dru``.
+
+    KiCad's five built-in rule-area flags cover tracks, vias, pads, pours and
+    footprints -- none of them is silk.  A keepout forbids printed objects
+    only through an area-specific custom rule such as::
+
+        (rule "printed legend keepout"
+          (layer "F.SilkS")
+          (condition "A.intersectsArea('no_ink')")
+          (constraint disallow text graphic))
+
+    :func:`resolve_silk_keepouts` resolves those rules against the board's
+    own rule areas.  ``polygon`` is board-relative (the frame every
+    :func:`_iter_silk_elements` geometry lives in), so the checker and the
+    clipper in ``repair_silkscreen`` share one definition of the area.
+    """
+
+    polygon: Any
+    sides: frozenset[str]
+    disallow_text: bool
+    disallow_graphic: bool
+    label: str
+
+
+def _dru_unquote_ref(ref: str) -> str:
+    r"""Undo KiCad's single DRC-expression escape (``\'`` -> ``'``).
+
+    Measured behaviour from :mod:`kicad_tools.manufacturers.keepout_dru`:
+    the expression lexer decodes only ``\'``; every other backslash is
+    literal.  A trailing backslash was written as the ``?`` wildcard.
+    """
+    return ref.replace("\\'", "'")
+
+
+def _zone_silk_sides(zone: Zone) -> frozenset[str]:
+    """Silk sides a rule area's own layer spec names (empty when none)."""
+    names = list(zone.layers or []) + ([zone.layer] if zone.layer else [])
+    sides: set[str] = set()
+    for name in names:
+        side = _SILK_LAYER_SIDES.get(name)
+        if side is None and "*" in name:
+            # Wildcard spec (e.g. ``*.Silkscreen``): match against the four
+            # canonical silk names, as ``intersectsArea`` would.
+            for silk_name, silk_side in _SILK_LAYER_SIDES.items():
+                if fnmatch.fnmatchcase(silk_name, name):
+                    side = silk_side
+                    break
+        if side is not None:
+            sides.add(side)
+    return frozenset(sides)
+
+
+def _silk_keepout_dru_rules(
+    dru_path: Path,
+) -> list[tuple[frozenset[str] | None, frozenset[str], list[str]]]:
+    """Parse silk-forbidding rules from a ``.kicad_dru`` file.
+
+    Yields ``(silk_sides, kinds, area_references)`` per ``(rule ...)`` whose
+    constraint is a ``disallow`` naming ``text`` and/or ``graphic``.
+    ``silk_sides`` is ``None`` when the rule carries no ``(layer ...)``
+    clause of its own -- the caller then resolves sides from the referenced
+    area -- and an empty frozenset when the clause names no silk layer (a
+    rule scoped to copper cannot forbid printable ink, wherever the area
+    sits).  Rules with no ``intersectsArea`` reference are not area-specific
+    and are skipped.  A malformed file warns on stderr and yields nothing,
+    mirroring :func:`keepout_rules_for_board`'s tolerance.
+    """
+    try:
+        from kicad_tools.sexp.parser import parse_string
+
+        # A ``.kicad_dru`` file is a *sequence* of top-level expressions
+        # (``(version 1)``, then one ``(rule ...)`` each); this repo's
+        # parser expects a single root, so wrap the document in one.
+        doc = parse_string(f"(dru\n{dru_path.read_text(encoding='utf-8')}\n)")
+    except Exception as exc:  # defensive: a bad sidecar must not fail a check
+        print(
+            f"Warning: could not parse {dru_path} ({type(exc).__name__}: {exc}); "
+            "silk keepout rules were not read.",
+            file=sys.stderr,
+        )
+        return []
+    rules: list[tuple[frozenset[str] | None, frozenset[str], list[str]]] = []
+    for node in doc.children:
+        if node.is_atom or node.name != "rule":
+            continue
+        constraint = node.find("constraint")
+        if constraint is None or constraint.get_string(0) != "disallow":
+            continue
+        kinds = frozenset(str(c.value) for c in constraint.children[1:] if c.is_atom) & {
+            "text",
+            "graphic",
+        }
+        if not kinds:
+            continue
+        condition = node.find("condition")
+        condition_text = condition.get_string(0) if condition is not None else ""
+        refs = [_dru_unquote_ref(m) for m in _DRU_INTERSECTS_AREA_RE.findall(condition_text or "")]
+        if not refs:
+            continue
+        layer_node = node.find("layer") or node.find("layers")
+        if layer_node is None:
+            sides: frozenset[str] | None = None
+        else:
+            layer_names = [str(c.value) for c in layer_node.children if isinstance(c.value, str)]
+            sides = frozenset(
+                side for side in (_SILK_LAYER_SIDES.get(n) for n in layer_names) if side
+            )
+        rules.append((sides, kinds, refs))
+    return rules
+
+
+def resolve_silk_keepouts(
+    pcb: PCB,
+    dru_path: str | Path | None = None,
+) -> list[SilkKeepoutArea]:
+    """Resolve every rule area where the board forbids silk (Issue #9798).
+
+    Reads the ``.kicad_dru`` sibling of the board file (``dru_path``
+    overrides), finds the rules whose ``disallow`` names ``text`` and/or
+    ``graphic``, and resolves their ``intersectsArea`` references (UUID or
+    name, wildcards as KiCad resolves them) against ``PCB.rule_areas`` and
+    ``PCB.footprint_rule_areas`` -- both carry board-relative polygons.
+    Several rules may address one area; their sides and kinds accumulate.
+
+    The sides an area forbids silk on come from the rule's own layer clause
+    when it carries one -- a clause naming no silk layer (copper, say)
+    scopes that rule off silk entirely -- and otherwise from the area's own
+    layer spec.  An area that neither the rule nor its own layers place on
+    a silk layer cannot forbid printable ink and is skipped -- a copper
+    keepout, however strict, leaves the silk legal.  Unresolvable
+    references are skipped silently: the native DRC reports them on the
+    pinned image, not kct.
+
+    Returns ``[]`` when the board was not loaded from a file and no
+    ``dru_path`` was given.
+    """
+    require_shapely("silk keepout geometry")
+    from shapely.geometry import Polygon as _Polygon
+
+    if dru_path is None:
+        board_path = getattr(pcb, "_path", None)
+        if board_path is None:
+            return []
+        dru_path = Path(board_path).with_suffix(".kicad_dru")
+    dru_path = Path(dru_path)
+    if not dru_path.exists():
+        return []
+
+    zones = pcb.rule_areas + pcb.footprint_rule_areas
+    # Per zone index: accumulated sides and disallowed kinds.
+    sides_by_zone: dict[int, set[str]] = {}
+    kinds_by_zone: dict[int, set[str]] = {}
+    for rule_sides, kinds, refs in _silk_keepout_dru_rules(dru_path):
+        for ref in refs:
+            for index, zone in enumerate(zones):
+                if not _zone_matches_reference(zone, ref):
+                    continue
+                if rule_sides is None:
+                    # No layer clause of its own: wherever the area sits.
+                    resolved = _zone_silk_sides(zone)
+                else:
+                    # A clause naming no silk layer scopes the rule off silk.
+                    resolved = rule_sides
+                if not resolved:
+                    continue
+                sides_by_zone.setdefault(index, set()).update(resolved)
+                kinds_by_zone.setdefault(index, set()).update(kinds)
+    areas: list[SilkKeepoutArea] = []
+    for index in sorted(sides_by_zone):
+        zone = zones[index]
+        polygon = _Polygon(zone.polygon)
+        if not polygon.is_valid:
+            polygon = polygon.buffer(0)
+        if polygon.is_empty or polygon.area <= 0:
+            continue
+        uuid = (zone.uuid or "").strip()
+        name = (zone.name or "").strip()
+        label = f"{name} [{uuid}]" if name and uuid else (name or uuid)
+        parent = (getattr(zone, "parent_reference", "") or "").strip()
+        if parent:
+            label = f"{label} in {parent}"
+        zone_kinds = kinds_by_zone[index]
+        areas.append(
+            SilkKeepoutArea(
+                polygon=polygon,
+                sides=frozenset(sides_by_zone[index]),
+                disallow_text="text" in zone_kinds,
+                disallow_graphic="graphic" in zone_kinds,
+                label=label,
+            )
+        )
+    return areas
+
+
+def _zone_matches_reference(zone: Zone, ref: str) -> bool:
+    """Whether an ``intersectsArea`` reference addresses ``zone``.
+
+    Matches the zone's UUID or its name; references containing wildcards
+    (``*`` / ``?``) match either, as they do in KiCad's DRC expressions.
+    """
+    uuid = (zone.uuid or "").strip()
+    name = (zone.name or "").strip()
+    if not ref:
+        return False
+    if "*" in ref or "?" in ref:
+        return any(fnmatch.fnmatchcase(candidate, ref) for candidate in (uuid, name) if candidate)
+    return ref in (uuid, name)
+
+
+def _iter_silk_typed(
+    pcb: PCB,
+) -> Iterator[tuple[str, str, Any, str, str, str, str, tuple[float, float]]]:
+    """Yield ``(side, kind, geom, label, owner, layer, uuid, location)``.
+
+    The keepout and under-body checks need what :func:`_iter_silk_elements`
+    yields plus two things it drops: whether the element is ``text`` or
+    ``graphic`` (a keepout can forbid only one of the two) and the owning
+    footprint's reference (``""`` for board-level silk) so a footprint's own
+    silk can be exempt from its neighbours' bodies.  Geometries are in the
+    same board-relative frame as :func:`_iter_silk_elements`.
+    """
+    for footprint in pcb.footprints:
+        transform = _fp_transform(footprint)
+        for fp_text in footprint.texts:
+            side = _silk_side(fp_text.layer)
+            if side is None or fp_text.hidden:
+                continue
+            center = transform(fp_text.position)
+            geom = _text_bbox_geometry(
+                fp_text.text,
+                fp_text.font_size,
+                fp_text.font_thickness,
+                center,
+                _footprint_text_drawn_angle(fp_text.rotation, fp_text.keep_upright),
+                fp_text.justify,
+            )
+            if geom is None:
+                continue
+            yield (
+                side,
+                "text",
+                geom,
+                f"{footprint.reference} ({fp_text.text_type})",
+                footprint.reference,
+                fp_text.layer,
+                fp_text.uuid,
+                center,
+            )
+        for graphic in footprint.graphics:
+            side = _silk_side(graphic.layer)
+            if side is None:
+                continue
+            geom = _stroke_geometry(graphic, transform)
+            if geom is None:
+                continue
+            yield (
+                side,
+                "graphic",
+                geom,
+                f"{footprint.reference} (fp_{graphic.graphic_type})",
+                footprint.reference,
+                graphic.layer,
+                graphic.uuid,
+                footprint.position,
+            )
+    ox, oy = getattr(pcb, "_board_origin", (0.0, 0.0))
+
+    def to_board(p: tuple[float, float]) -> tuple[float, float]:
+        return (p[0] - ox, p[1] - oy)
+
+    board_xf = to_board if (ox or oy) else None
+    for text in pcb.texts:
+        side = _silk_side(text.layer)
+        if side is None or text.hidden:
+            continue
+        center = to_board(text.position)
+        geom = _text_bbox_geometry(
+            text.text,
+            text.font_size,
+            text.font_thickness,
+            center,
+            text.rotation,
+            text.justify,
+        )
+        if geom is None:
+            continue
+        yield (
+            side,
+            "text",
+            geom,
+            text.text[:20] if text.text else "gr_text",
+            "",
+            text.layer,
+            text.uuid,
+            center,
+        )
+    for board_graphic in pcb.graphics:
+        side = _silk_side(board_graphic.layer)
+        if side is None:
+            continue
+        geom = _stroke_geometry(board_graphic, board_xf)
+        if geom is None:
+            continue
+        yield (
+            side,
+            "graphic",
+            geom,
+            f"gr_{board_graphic.graphic_type}",
+            "",
+            board_graphic.layer,
+            board_graphic.uuid,
+            to_board(_graphic_anchor(board_graphic)),
+        )
+
+
+def check_silk_in_keepout(
+    pcb: PCB,
+    design_rules: DesignRules | None = None,
+    *,
+    dru_path: str | Path | None = None,
+) -> DRCResults:
+    """Silk inside a keepout that forbids silk (Issue #9798) -- an error.
+
+    The areas are :func:`resolve_silk_keepouts`'s: rule areas the board's
+    sibling ``.kicad_dru`` forbids ``text`` and/or ``graphic`` in, on the
+    silk side(s) the rule or the area names.  Every silk element of a
+    forbidden kind whose printed geometry intersects such an area is one
+    ``silk_in_keepout`` **error** per (silk item, area) pair -- the board
+    author wrote the disallow, so printing there is a defect, whatever the
+    fab profile says.  Where kicad-cli evaluates the same rule it reports
+    ``items_not_allowed`` on the same items; kct keeps its own rule id and
+    severity so the native finding and the manufacturer verdict stay
+    separable.
+
+    ``design_rules`` is unused (no manufacturer threshold) and may be
+    omitted by callers that have no profile.  ``dru_path`` overrides the
+    ``.kicad_dru`` sibling location (the repair pass re-checks an edited
+    tree that has no file path of its own).
+    """
+    del design_rules
+    require_shapely("silk keepout geometry")
+    from shapely import STRtree
+
+    results = DRCResults(rules_checked=1)
+    areas = resolve_silk_keepouts(pcb, dru_path=dru_path)
+    if not areas:
+        return results
+
+    tree = STRtree([area.polygon for area in areas])
+    found: list[DRCViolation] = []
+    for side, kind, geom, label, _owner, layer, silk_uuid, location in _iter_silk_typed(pcb):
+        for idx in tree.query(geom):
+            area = areas[int(idx)]
+            if side not in area.sides:
+                continue
+            if kind == "text" and not area.disallow_text:
+                continue
+            if kind == "graphic" and not area.disallow_graphic:
+                continue
+            if not geom.intersects(area.polygon):
+                continue
+            silk_item = f"{label} {{{silk_uuid}}}" if silk_uuid else label
+            found.append(
+                DRCViolation(
+                    rule_id="silk_in_keepout",
+                    severity="error",
+                    message=f"Silkscreen {label} lies in silk keepout {area.label}",
+                    location=location,
+                    layer=layer,
+                    items=(silk_item, area.label),
+                )
+            )
+    for violation in sorted(found, key=lambda v: (v.items[0], v.items[1])):
+        results.add(violation)
+    return results
+
+
+def check_silk_under_body(
+    pcb: PCB,
+    design_rules: DesignRules,
+) -> DRCResults:
+    """Silk hidden under another component's body (Issue #9798).
+
+    The operator ruling of 2026-11-20 (#9795) reads "silk under footprints"
+    as silk that ends up under a component body once assembled, and asks
+    that a rule covering only references extend to all silk on the layer.
+    :func:`check_silk_ref_obscured` keeps the reference-vs-own-footprint
+    half; this check covers every other silk element -- graphics and text,
+    footprint-owned or board-level -- that lies entirely inside **another**
+    footprint's courtyard on the same side, the same body proxy
+    :func:`check_silk_ref_obscured` uses.  A silk item merely crossing a
+    courtyard is not reported: only the wholly-hidden case is.
+
+    Severity is ``error`` under a profile with ``silk_under_body_is_error``
+    (the jlcpcb profiles, per the ruling) and ``warning`` elsewhere.
+    """
+    severity = (
+        "error" if bool(getattr(design_rules, "silk_under_body_is_error", False)) else "warning"
+    )
+    require_shapely("silk-under-body geometry")
+    from shapely.geometry import Polygon
+
+    from kicad_tools.geometry.courtyard import _courtyard_polygon, _side_has_geometry
+
+    results = DRCResults(rules_checked=1)
+
+    bodies: list[tuple[str, Any, str]] = []
+    for footprint in pcb.footprints:
+        for side in ("F", "B"):
+            if not _side_has_geometry(footprint, side):
+                continue
+            courtyard = _courtyard_polygon(footprint, side, Polygon)
+            if courtyard is None or courtyard.is_empty:
+                continue
+            bodies.append((side, courtyard, footprint.reference))
+    if not bodies:
+        return results
+
+    from shapely import STRtree
+
+    tree = STRtree([courtyard for _side, courtyard, _ref in bodies])
+    found: list[DRCViolation] = []
+    for side, _kind, geom, label, owner, layer, silk_uuid, location in _iter_silk_typed(pcb):
+        for idx in tree.query(geom):
+            body_side, courtyard, body_ref = bodies[int(idx)]
+            if body_side != side or body_ref == owner:
+                continue
+            if not courtyard.buffer(_CLEARANCE_EPSILON_MM).contains(geom):
+                continue
+            silk_item = f"{label} {{{silk_uuid}}}" if silk_uuid else label
+            found.append(
+                DRCViolation(
+                    rule_id="silk_under_body",
+                    severity=severity,
+                    message=(
+                        f"Silkscreen {label} lies entirely under component body of {body_ref}"
+                    ),
+                    location=location,
+                    layer=layer,
+                    items=(silk_item, f"{body_ref} (courtyard)"),
+                )
+            )
+    for violation in sorted(found, key=lambda v: (v.items[0], v.items[1])):
+        results.add(violation)
     return results
 
 
@@ -2476,6 +2989,8 @@ def check_all_silkscreen(
     """
     results = DRCResults()
 
+    results.merge(check_silk_in_keepout(pcb, design_rules))
+    results.merge(check_silk_under_body(pcb, design_rules))
     results.merge(check_silkscreen_line_width(pcb, design_rules, suppress_library=suppress_library))
     results.merge(
         check_silkscreen_text_height(pcb, design_rules, suppress_library=suppress_library)

@@ -171,7 +171,9 @@ class TestSilkOverCopper:
         assert len(results) == 1
         v = results.violations[0]
         assert v.rule_id == "silk_over_copper"
-        assert v.severity == "warning"
+        # Error under the jlcpcb profiles (operator ruling on #9795, #9798);
+        # a profile without the knob keeps the warning.
+        assert v.severity == "error"
         assert v.items[0].startswith("U1")
         assert "pad 1" in v.items[1]
 
@@ -1304,8 +1306,8 @@ class TestSilkEdgeClearance:
 
 
 class TestSilkSeverity:
-    def test_all_violations_are_warnings(self):
-        """Every emitted silk violation is warning severity (non-blocking)."""
+    def test_pad_overlap_errors_edge_stays_warning(self):
+        """Silk on exposed copper errors under jlcpcb (#9798); edge stays warning."""
         pcb = _empty_pcb()
         _square_outline(pcb)
         fp = _make_footprint(
@@ -1317,9 +1319,8 @@ class TestSilkSeverity:
 
         over = check_silk_over_copper(pcb, _rules())
         edge = check_silk_edge_clearance(pcb, _rules())
-        for v in (*over.violations, *edge.violations):
-            assert v.severity == "warning"
-        assert over.violations or edge.violations  # at least one fired
+        assert over.violations and all(v.severity == "error" for v in over.violations)
+        assert all(v.severity == "warning" for v in edge.violations)
 
 
 # Historical defect witnesses are frozen under regression-fixture/.
@@ -1358,7 +1359,11 @@ def test_real_board_regression(rel_path, rule_id):
         "silk_edge_clearance": edge.violations,
     }
     assert len(by_rule[rule_id]) >= 1
-    for v in (*over.violations, *edge.violations):
+    # #9798: silk on exposed copper grades as an error under jlcpcb (silk
+    # over a via aperture as info); edge clearance keeps its warning.
+    for v in over.violations:
+        assert v.severity in ("error", "info")
+    for v in edge.violations:
         assert v.severity == "warning"
 
 
@@ -1869,11 +1874,13 @@ def _silk_arc(*, uuid: str = "", layer: str = "F.SilkS") -> FootprintGraphic:
     return graphic
 
 
-def _silk_unknown(*, uuid: str = "", layer: str = "F.SilkS") -> FootprintGraphic:
+def _silk_unknown(
+    *, uuid: str = "", layer: str = "F.SilkS", stroke_width: float = 0.12
+) -> FootprintGraphic:
     return FootprintGraphic(
         graphic_type="curve",
         layer=layer,
-        stroke_width=0.12,
+        stroke_width=stroke_width,
         start=(0.0, 0.0),
         end=(1.0, 0.0),
         uuid=uuid,
@@ -2092,7 +2099,12 @@ class TestSilkGeometryCoverage:
     def test_coverage_reachable_through_check_all_silkscreen(self):
         """``kct check --only silkscreen`` surfaces the coverage advisory."""
         pcb = _empty_pcb()
-        pcb._footprints.append(_make_footprint(graphics=[_silk_unknown(uuid="u")]))
+        # A compliant stroke width (>= the 0.15 floor) so the only finding
+        # is the coverage advisory itself (#9798 regraded sub-minimum widths
+        # to errors under jlcpcb).
+        pcb._footprints.append(
+            _make_footprint(graphics=[_silk_unknown(uuid="u", stroke_width=0.2)])
+        )
 
         results = check_all_silkscreen(pcb, _rules())
         unmodeled = [v for v in results.violations if v.rule_id == SILK_GEOMETRY_UNMODELED_RULE_ID]
