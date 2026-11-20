@@ -44,7 +44,7 @@ from .grid import RoutingGrid, SetupDeadlineExpired
 from .heuristics import DEFAULT_HEURISTIC, Heuristic, HeuristicContext
 from .layers import Layer, LayerType
 from .pad_landing import landing_cost, pad_landing_geometry
-from .primitives import Pad, Route, Segment, Via
+from .primitives import Pad, Route, Segment, Via, pad_half_extents
 from .quantize import dogleg_points, is_45_aligned
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting, layer_permitted
 from .search_radius import search_radius_cells
@@ -2180,14 +2180,11 @@ class Router:
                     continue
                 if self.grid.layer_to_index(pad.layer.value) != layer:
                     continue
-                hit.append(
-                    (
-                        pad.x - pad.width / 2.0,
-                        pad.y - pad.height / 2.0,
-                        pad.x + pad.width / 2.0,
-                        pad.y + pad.height / 2.0,
-                    )
-                )
+                # Issue #9461: the board-space AABB, so a non-cardinally
+                # rotated pad is not under-sized (an under-sized box
+                # overstates the gap and silently ACCEPTS a leg in the band).
+                hw, hh = pad_half_extents(pad)
+                hit.append((pad.x - hw, pad.y - hh, pad.x + hw, pad.y + hh))
             cache[1][key] = hit
         return hit
 
