@@ -41,13 +41,12 @@ import numpy as np
 import pytest
 
 from kicad_tools.router.clearance_kernel import CLEARANCE_EPSILON_MM, KVia, copper_gap
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.grid import RoutingGrid, halo_mask, halo_offsets
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
 
-requires_cpp = pytest.mark.skipif(not is_cpp_available(), reason="C++ router backend not built")
+requires_cpp = pytest.mark.requires_router_cpp
 
 # #5410's verbatim geometry: a 0.6/0.3 DQS_N via, a DQ3 candidate 0.213 mm of
 # copper away, on the 0.127 mm grid that produced the six-cell square halo.

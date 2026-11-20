@@ -35,6 +35,7 @@ from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.sexp.builders import via_node
+from tests.conftest import require_router_cpp
 
 OUTER = {"F.Cu", "B.Cu"}
 
@@ -186,10 +187,9 @@ def test_python_and_cpp_gates_agree_on_a_partial_pair_via(layer, is_micro):
     to two gates and a 0.6 mm deficit to the third.  All three now judge the
     barrel that is fabricated; a micro via keeps its span in all three.
     """
-    from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+    from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
 
-    if not is_cpp_available():
-        pytest.skip("native backend unavailable; run kct build-native")
+    require_router_cpp()
 
     rules, grid, pads = _parity_grid()
     grid.mark_route(Route(net=1, net_name="TRACE", segments=[_parity_trace(layer)]))
@@ -218,10 +218,9 @@ def test_cpp_stores_a_committed_via_on_its_drilled_span(layer, is_micro):
     so the native validator let a B.Cu trace run through a committed
     non-micro F.Cu/In1.Cu via that ``to_sexp`` writes as F.Cu/B.Cu.
     """
-    from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+    from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
 
-    if not is_cpp_available():
-        pytest.skip("native backend unavailable; run kct build-native")
+    require_router_cpp()
 
     rules, grid, pads = _parity_grid()
     grid.mark_route(Route(net=2, net_name="SIG", vias=[_parity_via(is_micro=is_micro)]))

@@ -5,12 +5,13 @@ from dataclasses import replace
 import pytest
 from shapely.geometry import LineString, box
 
-from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.primitives import Pad, Route, Segment
 from kicad_tools.router.rules import DesignRules
+from tests.conftest import require_router_cpp
 
 
 @pytest.mark.parametrize("backend_name", ["python", "cpp"])
@@ -39,8 +40,7 @@ def test_standard_pitch_neighbor_clearance(backend_name, strict, foreign_net):
     assert grid.compute_component_pitches()["U1"] == 2
     assert not grid._component_is_fine_pitch("U1")
     if backend_name == "cpp":
-        if not is_cpp_available():
-            pytest.skip("C++ backend unavailable")
+        require_router_cpp()
         backend = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
     else:
         backend = Router(grid, rules)

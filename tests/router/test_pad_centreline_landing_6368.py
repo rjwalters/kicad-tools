@@ -27,7 +27,6 @@ import math
 
 import pytest
 
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.pad_landing import (
     AXIS_NONE,
@@ -44,10 +43,7 @@ from kicad_tools.router.pad_landing import (
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
 
-requires_cpp = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ router backend not available; run `kct build-native`",
-)
+requires_cpp = pytest.mark.requires_router_cpp
 
 RES = 0.065
 PITCH = 0.65
