@@ -281,10 +281,6 @@ def build_required_by_domain_pair(
     """
     std = get_standard(standard_id)
     ivals = {d: as_domain_interval(v) for d, v in domain_voltages.items()}
-    ids = sorted(ivals)
-    out: dict[tuple[str, str], float] = {}
-    std = get_standard(standard_id)
-    ivals = {d: as_domain_interval(v) for d, v in domain_voltages.items()}
     if domain_intervals:
         # #9602 override: an explicit per-domain interval wins over the value
         # carried in domain_voltages (a domain absent there was never iterated
