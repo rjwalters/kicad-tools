@@ -374,7 +374,17 @@ namespace router {
 // v70 (Issues #9124 + #9208, merged): the first build carrying BOTH fixes --
 // a v69 .so still seats the tangent wedge (no #9124 fix) and a v68 .so lacks
 // the trace-slit refusal, so both older builds must be rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 70;
+// v71 (Issue #9019): ``Pathfinder::set_search_own_net_band`` /
+// ``own_net_band_step_ok`` are new -- the A* refuses a planar step whose swept
+// copper parks in the fab ``pad_spacing`` slit band beside an own-net SMD pad.
+// A v70 .so has no such gate, so Python and native searches would route
+// divergent bytes on a board that resolves a band edge.
+// v72 (Issue #9019 review): the band gate exempts the search's own start/end
+// pads (the leg is unioned with them through the path) and counts refusals
+// (``own_net_band_rejects``) so the caller retries only gate-caused failures.
+// A v71 .so refused every planar pad exit and pushed routes through pad-edge
+// via pairs.
+constexpr int ROUTER_CPP_BUILD_VERSION = 72;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor

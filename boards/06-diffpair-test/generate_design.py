@@ -3633,9 +3633,12 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # Issue #7908: hard-block the inner layers for the classes that
         # declare ``avoid_layers`` (MIPI_CLK).
         strict_layers=True,
-        # Issue #8994: the same-net pad slit-band detection edge for the
-        # jlcpcb 4-layer 1oz stackup, so the C++ pathfinder's via seats stay
-        # out of the band ``kct check`` grades (``physical_copper_gap``).
+        # Issues #8994 / #9019: the same-net pad slit-band detection edge for
+        # the jlcpcb 4-layer 1oz stackup, resolved from the profile table (never
+        # a literal).  The C++ pathfinder's via seats, the grid A* (Python and
+        # C++) and the #1018 taper hold own-net copper out of the ``(0, edge)``
+        # band ``kct check`` grades (``physical_copper_gap``).  ``None`` (no
+        # table entry) leaves the guard off.
         same_net_pad_gap_band_edge_mm=_same_net_pad_gap_edge_mm,
         same_net_trace_gap_band_edge_mm=_same_net_trace_gap_edge_mm,
     )
