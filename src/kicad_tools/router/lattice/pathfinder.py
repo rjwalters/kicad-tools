@@ -350,6 +350,13 @@ class _RouteResult:
     # mid-trunk via-pair move, in path order.  ``runs`` then has one more
     # entry than this list (the run before each via pair, plus the last).
     via_pairs: list[ViaPair] = field(default_factory=list)
+    # Issue #9708: far (band-sealed escape) landings whose emitted stub leaves
+    # a same-net slit against the route body, as ``(end, node, layer)`` with
+    # ``end`` ``"a"`` (start pad) / ``"b"`` (end pad).  Non-empty only on the
+    # result :meth:`LatticePathfinder._route_search` hands to
+    # :meth:`LatticePathfinder._route_search_checked`, which bans them and
+    # searches again; callers never see a non-empty value.
+    far_ban: tuple[tuple[str, NodeKey, int], ...] = ()
 
 
 @dataclass
@@ -1904,6 +1911,9 @@ class LatticePathfinder:
         body_w = getattr(net_class, "trace_width", None) or self.rules.trace_width
         full_half, clr = self._conn_geometry(net_class, net)
         fat = extra_clearance > 0.0 or partner_net is not None
+        # Issue #9708: the landings this call added past the near scan, read
+        # back by :meth:`_route_search` to vet their emitted join.
+        self._last_far_landings: frozenset[tuple[NodeKey, int]] = frozenset()
 
         stubs = self.pad_stubs(
             pad,
@@ -1958,6 +1968,7 @@ class LatticePathfinder:
                     allow_vias=allow_vias,
                     via_in_pad_override=via_in_pad_override,
                 ):
+                    near_states = {(stub[0], stub[1]) for stub in stubs}
                     stubs = self._band_sealed_far_stubs(
                         pad,
                         net,
@@ -1968,6 +1979,11 @@ class LatticePathfinder:
                         kmax=kmax,
                         layers=layers,
                         exempt_pads=exempt_pads,
+                    )
+                    self._last_far_landings = frozenset(
+                        (stub[0], stub[1])
+                        for stub in stubs
+                        if (stub[0], stub[1]) not in near_states
                     )
                 return stubs, body_w
             dead_end = stubs
@@ -2280,15 +2296,24 @@ class LatticePathfinder:
         boundary = self._escape_boundary
         seen: set[tuple[NodeKey, int]] = set()
         frontier: list[tuple[NodeKey, int]] = []
+        # The stub's own legs are pad-attached copper: the first body edge out
+        # of its landing may ride them collinearly (#9517), exactly as
+        # ``_stub_has_egress`` and the A* seed treat it.  Only the SEED state
+        # carries them -- a state reached through the walk has a predecessor.
+        seed_rides: dict[tuple[NodeKey, int], tuple[tuple[Pt, Pt, float], ...]] = {}
         for stub in stubs:
             state = (stub[0], stub[1])
             if state not in seen:
                 seen.add(state)
                 frontier.append(state)
+                seed_rides[state] = tuple(
+                    (c, d, half) for c, d in zip(stub[2], stub[2][1:], strict=False)
+                )
         while frontier:
             if len(seen) > _BAND_SEALED_ESCAPE_BUDGET:
                 return False
             key, layer = frontier.pop()
+            rides = seed_rides.get((key, layer), ())
             point = lattice.node_point(key)
             if obstacles.same_net_pad_band_point_clear(point, layer, net, half, edge_mm):
                 return False
@@ -2307,7 +2332,16 @@ class LatticePathfinder:
             for nbr, _elen in lattice.adj.get(key, ()):
                 edge = (min(key, nbr), max(key, nbr))
                 if not self._body_edge_legal(
-                    edge, layer, net, half, clr, committed, extra=extra, pw=pw, ko=ko
+                    edge,
+                    layer,
+                    net,
+                    half,
+                    clr,
+                    committed,
+                    extra=extra,
+                    pw=pw,
+                    ko=ko,
+                    attached=rides,
                 )[0]:
                     continue
                 if not boundary.segment_clear(
@@ -2766,10 +2800,10 @@ class LatticePathfinder:
         if via_pairs is not None and fat:
             search_kwargs["via_pairs"] = via_pairs
         if not last_resort:
-            return self._route_search(start, end, net_class, **search_kwargs)
+            return self._route_search_checked(start, end, net_class, **search_kwargs)
 
         # Stage (a)+(b): via-in-pad forced OFF regardless of tier.
-        result, reason = self._route_search(
+        result, reason = self._route_search_checked(
             start, end, net_class, via_in_pad_override=False, **search_kwargs
         )
         if result is not None:
@@ -2789,7 +2823,9 @@ class LatticePathfinder:
                 return None, "via-in-pad-tier-unsupported"
             return None, reason
 
-        return self._route_search(start, end, net_class, via_in_pad_override=None, **search_kwargs)
+        return self._route_search_checked(
+            start, end, net_class, via_in_pad_override=None, **search_kwargs
+        )
 
     def _route_search(
         self,
@@ -2811,6 +2847,7 @@ class LatticePathfinder:
         guide: PartnerGuide | None = None,
         mirror: LayerMirror | None = None,
         via_pairs: _ViaPairSpec | None = None,
+        banned_landings: frozenset[tuple[str, NodeKey, int]] = frozenset(),
     ) -> tuple[_RouteResult | None, str]:
         """A* over the (node, layer) graph; returns ``(result, reason)``.
 
@@ -2829,6 +2866,9 @@ class LatticePathfinder:
         filtered stub sets (``(stubs_a, stubs_b)``) instead of recomputing.
         ``via_in_pad_override`` (issue #4475) is forwarded verbatim to every
         :meth:`_via_ok` call this search makes; see that method's docstring.
+        ``banned_landings`` (issue #9708) drops ``(end, node, layer)`` stub
+        landings -- far band-sealed escapes whose emitted join with the body
+        left a slit -- before the search; empty keeps the search unchanged.
         """
         lattice = self.build()
         obstacles = self.obstacles
@@ -2949,6 +2989,7 @@ class LatticePathfinder:
         # The lattice body is emitted (and spaced) at the full class width;
         # the pad-escape legs may taper to a narrower neck (issue #4293).
         body_w = getattr(net_class, "trace_width", None) or self.rules.trace_width
+        far_landed: dict[int, frozenset[tuple[NodeKey, int]]] = {}
         if stubs_override is not None:
             stubs_a, stubs_b = stubs_override
             width_a = width_b = body_w
@@ -2958,7 +2999,7 @@ class LatticePathfinder:
             def escape(pad: Pad) -> tuple[list, float]:
                 if escape_plan and id(pad) in escape_plan:
                     return chosen_stub(escape_plan[id(pad)], committed)
-                return self._escape_stubs(
+                result = self._escape_stubs(
                     pad,
                     net,
                     committed,
@@ -2971,6 +3012,8 @@ class LatticePathfinder:
                     allow_vias=allow_vias,
                     via_in_pad_override=via_in_pad_override,
                 )
+                far_landed[id(pad)] = self._last_far_landings
+                return result
 
             stubs_a, width_a = escape(start)
             stubs_b, width_b = escape(end)
@@ -3020,6 +3063,9 @@ class LatticePathfinder:
 
         stubs_a = boundary_stubs(stubs_a, width_a)
         stubs_b = boundary_stubs(stubs_b, width_b)
+        if banned_landings:
+            stubs_a = [s for s in stubs_a if ("a", s[0], s[1]) not in banned_landings]
+            stubs_b = [s for s in stubs_b if ("b", s[0], s[1]) not in banned_landings]
         if not stubs_a:
             if hard_avoided and had_stubs_a:
                 return None, "layer-constrained-start"
@@ -3938,9 +3984,98 @@ class LatticePathfinder:
         route = self._emit(start, net, net_class, runs, via_points)
         if route is None:
             return None, "empty-route"
+        far_ban = self._far_join_slits(
+            route,
+            [
+                ("a", start_state[:2], start_poly, width_a, far_landed.get(id(start), frozenset())),
+                ("b", end_state[:2], stub_b_poly, width_b, far_landed.get(id(end), frozenset())),
+            ],
+        )
         if found_pairs:
-            return _RouteResult(route, runs, via_points, resources, found_pairs), "ok"
-        return _RouteResult(route, runs, via_points, resources), "ok"
+            return _RouteResult(route, runs, via_points, resources, found_pairs, far_ban), "ok"
+        return _RouteResult(route, runs, via_points, resources, far_ban=far_ban), "ok"
+
+    def _route_search_checked(
+        self, start: Pad, end: Pad, net_class: object | None, **kwargs: Any
+    ) -> tuple[_RouteResult | None, str]:
+        """:meth:`_route_search`, re-run without a far landing whose join slits (#9708).
+
+        A far band-sealed escape landing is vetted only once the whole path
+        is known (:meth:`_far_join_slits`): the stub's own copper can sit a
+        sliver from the arriving body leg.  Each retry bans the offending
+        landings, so the loop is bounded by the finite landing set.
+        """
+        banned: frozenset[tuple[str, NodeKey, int]] = kwargs.pop("banned_landings", frozenset())
+        while True:
+            result, reason = self._route_search(
+                start, end, net_class, banned_landings=banned, **kwargs
+            )
+            if result is None or not result.far_ban:
+                return result, reason
+            banned = banned | frozenset(result.far_ban)
+
+    def _far_join_slits(
+        self,
+        route: Route,
+        ends: Sequence[
+            tuple[str, tuple[NodeKey, int], list[Pt], float, frozenset[tuple[NodeKey, int]]]
+        ],
+    ) -> tuple[tuple[str, NodeKey, int], ...]:
+        """Far landings of ``ends`` whose stub copper slits against the route (#9708).
+
+        Only an end whose selected landing was added by the band-sealed far
+        pass is judged.  The emitted route is measured with the validator's
+        own ``physical_copper_gap`` at the band detection edge; a finding
+        whose closest boundary lies on that end's stub legs blames the
+        landing.  No far landing used (every pre-#9708 route) returns without
+        building anything.
+        """
+        edge_mm = float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
+        judged = [e for e in ends if edge_mm > 0.0 and e[1] in e[4]]
+        if not judged or not route.segments:
+            return ()
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.sexp import parse_string
+        from kicad_tools.validate.rules.physical_gap import check_physical_copper_gap
+
+        names = sorted({s.layer.kicad_name for s in route.segments}, key=str)
+        layer_ids = {"F.Cu": 0, "B.Cu": 31}
+        for name in names:
+            if name not in layer_ids:
+                layer_ids[name] = int(name[2:].split(".")[0]) if name.startswith("In") else 1
+        layers = " ".join(f'({i} "{n}" signal)' for n, i in layer_ids.items())
+        items = [
+            f"(segment (start {s.x1} {s.y1}) (end {s.x2} {s.y2}) (width {s.width}) "
+            f'(layer "{s.layer.kicad_name}") (net 1) (uuid "s{i}"))'
+            for i, s in enumerate(route.segments)
+        ]
+        items.extend(
+            f"(via (at {v.x} {v.y}) (size {v.diameter}) (drill {v.drill}) "
+            f'(layers "F.Cu" "B.Cu") (net 1) (uuid "v{i}"))'
+            for i, v in enumerate(route.vias)
+        )
+        pcb = PCB(
+            parse_string(
+                f"(kicad_pcb (version 20240108) (generator pcbnew) (general (thickness 1.6)) "
+                f'(layers {layers}) (net 0 "") (net 1 "N") {" ".join(items)})'
+            )
+        )
+        findings = [
+            v
+            for v in check_physical_copper_gap(pcb, edge_mm).violations
+            if v.rule_id == "physical_copper_gap" and v.closest_locations
+        ]
+        banned: list[tuple[str, NodeKey, int]] = []
+        for tag, (key, layer), poly, width, _far in judged:
+            reach = width / 2.0 + 1e-3
+            if any(
+                seg_pt_dist(c, d, (px, py)) <= reach
+                for v in findings
+                for px, py in v.closest_locations
+                for c, d in zip(poly, poly[1:], strict=False)
+            ):
+                banned.append((tag, key, layer))
+        return tuple(banned)
 
     def _own_via_floor(self) -> float:
         """Centre-to-centre floor between two of ONE route's vias (issue #6957).

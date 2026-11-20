@@ -680,6 +680,49 @@ def test_unsealed_pad_escape_stubs_are_unchanged() -> None:
     ]
 
 
+def test_far_landing_that_slits_against_the_body_is_not_emitted() -> None:
+    # #9728 review finding 1: the far landing at (4.8, 1.8) is a legal stub,
+    # but arriving at it and turning back up its stub left a 0.094 mm slit
+    # between the incoming diagonal and the stub leg.  The join is vetted on
+    # the emitted route and the landing is banned, so the route is clean.
+    a = _pad(2.0, 1.05, width=0.5, height=0.25)
+    b = _pad(5.0, 1.35, width=0.5, height=0.25, ref="J2")
+    route = _pf([a, b], fine=0.25).route(a, b)
+    assert route is not None
+    findings = [
+        round(v.actual_value, 5)
+        for v in gaps(board(*map(_pad_footprint, (a, b)), *_route_sexps(route)), EDGE)
+    ]
+    assert findings == [], findings
+
+
+def test_sealed_probe_counts_the_selected_stubs_own_copper() -> None:
+    # #9728 review finding 2: a 0.15 mm pad at (2, 1) whose landing (2, 0.8)
+    # exits collinearly to (2, 0.4) is NOT sealed: the first body edge rides
+    # the stub's own legs, exactly as ``_stub_has_egress`` grades it.
+    a = _pad(2.0, 1.0, width=0.15, height=0.15)
+    b = _pad(7.0, 1.0, width=0.4, height=0.4, ref="J2")
+    pf = _pf([a, b], fine=0.4)
+    near = pf._scan_stubs(a, 1, None, HALF, 0.15, kmax=4)
+    stub = next(
+        s for s in near if tuple(round(v, 6) for v in pf.build().node_point(s[0])) == (2.0, 0.8)
+    )
+    assert pf._pad_band_sealed([stub], 1, None, HALF, 0.15, allow_vias=False) is False
+    stubs, _w = pf._escape_stubs(
+        a,
+        1,
+        None,
+        kmax=4,
+        extra_clearance=0.0,
+        partner_net=None,
+        layers=None,
+        exempt_pads=None,
+        net_class=None,
+        allow_vias=True,
+    )
+    assert [(s[0], s[1], s[2]) for s in stubs] == [(s[0], s[1], s[2]) for s in near]
+
+
 # ---------------------------------------------------------------------------
 # Coupled attach doglegs (_pair_attach)
 # ---------------------------------------------------------------------------
