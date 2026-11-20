@@ -47,14 +47,13 @@ different copper).
 
 Updating the goldens
 --------------------
-The ``partial`` board's copper digest is architecture-dependent (#7621): the
-same topology lands with 0.1 mm-shifted jogs on arm64 (macOS) versus x86_64
-(Linux CI), so ``partial.*.copper.sha256`` is a ``{arch: sha256}`` mapping and
-the test compares against the host's entry.  ``--update`` rewrites only the
-host's key; CI's digest must come from the pinned x86_64 image, e.g. on a Mac
+The ``partial`` board has architecture-specific copper (#7621, #9734).
+Each ``copper_by_arch`` entry keeps the segment and via counts with the digest
+measured on that host. ``--update`` rewrites only the host's entry. Generate
+CI's digest on the pinned x86_64 image, e.g. on a Mac
 ``docker run --platform linux/amd64`` the image in ``.github/workflows/ci.yml``
 (``KICAD_IMAGE``), ``uv run kct build-native``, then ``--update``.  ``routable``
-digests are identical on both architectures and stay plain strings.
+uses a single copper observation shared by both architectures.
 
 A later #7377 PR must keep every golden identical, or change only the entries
 its PR description names as intended.  Unrelated router changes can also move
@@ -353,13 +352,12 @@ def _host_arch() -> str:
 
 
 def _resolve_for_host(golden: dict) -> dict:
-    """Collapse a per-architecture ``copper.sha256`` mapping to the host's digest."""
-    sha = golden.get("copper", {}).get("sha256")
-    if not isinstance(sha, dict):
+    """Select the copper observation recorded on this architecture."""
+    if "copper_by_arch" not in golden:
         return golden
-    arch = _host_arch()
-    resolved = sha.get(arch, f"<no golden for host arch {arch!r}; have {sorted(sha)}>")
-    return golden | {"copper": golden["copper"] | {"sha256": resolved}}
+    resolved = golden.copy()
+    resolved["copper"] = resolved.pop("copper_by_arch")[_host_arch()]
+    return resolved
 
 
 # ---------------------------------------------------------------------------
@@ -506,15 +504,13 @@ def regenerate() -> dict:
         for path_key in ENTRY_PATHS:
             with tempfile.TemporaryDirectory(prefix="route-golden-") as tmp:
                 entry = observe(board, path_key, Path(tmp))
+            print(f"{board}/{path_key}: rc={entry['exit_code']} {entry['copper']}", file=sys.stderr)
             note = _NOTES.get((board, path_key))
             if board in ARCH_DEPENDENT_BOARDS:
-                # Keep the other architectures' digests; replace only this host's.
-                prior = existing.get(board, {}).get(path_key, {}).get("copper", {}).get("sha256")
-                by_arch = dict(prior) if isinstance(prior, dict) else {}
-                by_arch[_host_arch()] = entry["copper"]["sha256"]
-                entry["copper"] = entry["copper"] | {"sha256": dict(sorted(by_arch.items()))}
+                by_arch = dict(existing.get(board, {}).get(path_key, {}).get("copper_by_arch", {}))
+                by_arch[_host_arch()] = entry.pop("copper")
+                entry["copper_by_arch"] = dict(sorted(by_arch.items()))
             goldens[board][path_key] = ({"_note": note} if note else {}) | entry
-            print(f"{board}/{path_key}: rc={entry['exit_code']} {entry['copper']}", file=sys.stderr)
     return goldens
 
 
