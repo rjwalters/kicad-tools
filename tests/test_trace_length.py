@@ -991,23 +991,27 @@ class TestDefectTrackCopper:
         pair with different length is rejoined cycle copper (a chord
         bump), not a duplicate of the direct run.
         """
-        pcb_text = PATH_BASE_PCB.replace(
-            '  (net 6 "OPEN")',
-            '  (net 6 "OPEN")\n  (net 7 "CHORD")',
-        ).replace(
-            '    (pad "F" smd rect (at 45 55)',
-            '    (pad "H" smd rect (at 5 58) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 7 "CHORD"))\n'
-            '    (pad "I" smd rect (at 25 58) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 7 "CHORD"))\n'
-            '    (pad "F" smd rect (at 45 55)',
-        ).replace(
-            '  # BRANCH:',
-            '  # CHORD: 20 mm direct run plus a 30 mm rectangular detour between\n'
-            '  # the same attach points (different length: a detour, not an overlay).\n'
-            '  (segment (start 5 58) (end 25 58) (width 0.2) (layer "F.Cu") (net 7))\n'
-            '  (segment (start 5 58) (end 5 70) (width 0.2) (layer "F.Cu") (net 7))\n'
-            '  (segment (start 5 70) (end 25 70) (width 0.2) (layer "F.Cu") (net 7))\n'
-            '  (segment (start 25 70) (end 25 58) (width 0.2) (layer "F.Cu") (net 7))\n'
-            '\n  # BRANCH:',
+        pcb_text = (
+            PATH_BASE_PCB.replace(
+                '  (net 6 "OPEN")',
+                '  (net 6 "OPEN")\n  (net 7 "CHORD")',
+            )
+            .replace(
+                '    (pad "F" smd rect (at 45 55)',
+                '    (pad "H" smd rect (at 5 58) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 7 "CHORD"))\n'
+                '    (pad "I" smd rect (at 25 58) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 7 "CHORD"))\n'
+                '    (pad "F" smd rect (at 45 55)',
+            )
+            .replace(
+                "  # BRANCH:",
+                "  # CHORD: 20 mm direct run plus a 30 mm rectangular detour between\n"
+                "  # the same attach points (different length: a detour, not an overlay).\n"
+                '  (segment (start 5 58) (end 25 58) (width 0.2) (layer "F.Cu") (net 7))\n'
+                '  (segment (start 5 58) (end 5 70) (width 0.2) (layer "F.Cu") (net 7))\n'
+                '  (segment (start 5 70) (end 25 70) (width 0.2) (layer "F.Cu") (net 7))\n'
+                '  (segment (start 25 70) (end 25 58) (width 0.2) (layer "F.Cu") (net 7))\n'
+                "\n  # BRANCH:",
+            )
         )
         pcb_file = tmp_path / "chord.kicad_pcb"
         pcb_file.write_text(pcb_text)
