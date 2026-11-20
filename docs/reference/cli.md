@@ -219,6 +219,7 @@ kct pcb <subcommand> <pcb_file> [options]
 | `model-audit` | Classify every footprint's 3D model coverage (`resolved`, `embedded`, `dangling`, `no_ref`, `unresolved_var`, `hidden_only`, `lcsc_cache_miss`, `lcsc_content_changed`, `placeholder`, `exempt`); `--env host\|pinned`, `--model-dir DIR`, `--format json`. A report: exits 0 regardless of coverage (see [3D model coverage](../guides/lcsc-3d-models.md#3d-model-coverage-audit)) |
 | `diff` | Geometric diff of two boards: which tracks, vias, pads, zones and outline changed (see below) |
 | `reinforce` | Place same-net PTH buttress-wire anchors on a routed net: by default two per single-layer wire leg, at its ends (see below) |
+| `prune` | Remove redundant copper (branches, loops) and snap off-centre ends onto same-net via/pad centres; with a current-paths sidecar it also breaks declared loops so `reinforce` can anchor the run (see below) |
 
 **`move-footprint --map` and the `side` key.** A batch entry takes `x`, `y`,
 optional `rotation` and optional `"side": "front" | "back"`. A part not already
@@ -494,6 +495,53 @@ adds `mask_opening`, `mask_width_mm`, `openings` (`layer`, `start`, `end`,
 `width_mm`, `existing`), `refused_openings` and per-leg `mask_status` /
 `mask_reason`. Refill zone pours afterwards
 (`kicad-cli pcb drc --refill-zones`).
+
+#### `kct pcb prune BOARD`
+
+Remove copper that adds no connectivity — redundant branches, same-layer
+loops — and snap off-centre segment ends onto the same-net via/pad centre
+(#8216). Connectivity follows KiCad (endpoint-anchored track joins, ends
+inside a pad/via/zone): a segment is removed only if every pad and zone
+terminal stays in the same component and no joint becomes overlap-only;
+copper that touches other same-net copper away from a shared endpoint (a
+spur beside a via) is removed only when connectivity also holds over those
+body-touching neighbours; straight end-to-end runs of same-width segments
+are merged into one; locked tracks are never touched. One invocation
+iterates to a fixed point — a pass can expose more redundant copper, so the
+board is re-planned until a pass changes nothing (#8730). With kicad-cli
+available each net's edits are checked with `pcb drc --refill-zones` and
+dropped if they add violations; without that check the file is only written
+with `--unverified`. In-place by default; use `-o` to write elsewhere.
+
+```bash
+kct pcb prune board.kicad_pcb --dry-run
+kct pcb prune board.kicad_pcb --nets VBUS,GND --region 10,10,90,60
+kct pcb prune board.kicad_pcb --current-paths current_paths.json --wide 1.0
+```
+
+| Option | Description |
+|--------|-------------|
+| `BOARD` | Path to `.kicad_pcb` file |
+| `-o`, `--output` `PATH` | Output file path (default: overwrite the board in place) |
+| `--format` `{text,json}` | Output format (default: `text`) |
+| `--dry-run` | Report changes without modifying files |
+| `--nets` `NET[,NET...]` | Only prune these nets (comma-separated names); other copper is untouched |
+| `--region` `x1,y1,x2,y2` | Only apply a net's plan when every edit lies inside this box (board-relative mm); plans straddling it are skipped and reported as `region_skipped` |
+| `--no-drc` | Skip kicad-cli DRC verification |
+| `--project` `PATH.kicad_pro` | Project whose rules (`.kicad_pro` and sibling `.kicad_dru`) DRC verifies under (default: the files beside the board) |
+| `--allow-default-rules` | Verify against KiCad default rules when no project rules are found (otherwise that is an error) |
+| `--current-paths` `FILE` | Declared current-path sidecar. Auto-discovered next to the board exactly as `kct check` auto-loads it (#9747); on the nets it names, also break copper loops (including loops closed through vias) by removing each loop's narrowest segment below `--wide`, so `pcb reinforce` can anchor the run |
+| `--no-current-paths` | Suppress sidecar auto-discovery: no sidecar is loaded (only an explicit `--current-paths` names one), so declared nets get no declared-current width test in planning and the post-plan current-path audit gate (#8687) is disabled. Cannot be combined with `--current-paths` |
+| `--wide` `MM` | With a declared sidecar: width at/above which a segment is never cut. Default (unset): net-relative — cut each loop's narrowest segment whatever its width, provided the branch left behind still meets the declared current's IPC-2221 width on its own layer; refused cuts are reported |
+| `--unverified` | Write the result even when it was not verified with kicad-cli DRC (`--no-drc`, or kicad-cli missing). Without this the file is left untouched |
+
+The `--no-current-paths` row mirrors the parser help as corrected in #9777
+(on `kct route` the same flag only keeps `path_ampacity` inactive — see
+[Declared branch current paths](#declared-branch-current-paths---current-paths)).
+A loop whose segments are all at or above `--wide` is reported, not cut, as
+is any loop the current-path audit still sees afterwards (with its witness).
+Exit codes: `0` pruned (or nothing to remove); `1` a bad argument, a load
+error, or an unverified edit refused rather than written.
 
 ---
 
@@ -1651,8 +1699,8 @@ results are unchanged.
 | `--current-paths PATH` | Declared branch current-path sidecar. Auto-discovered next to the board as `<board-stem>.current_paths.json` or `current_paths.json` (board dir, then `output/`, then `../output/`) when omitted. |
 | `--no-current-paths` | Suppress auto-discovery; `path_ampacity` stays inactive. Cannot be combined with `--current-paths`. |
 
-The same flags exist on `kct check` and `kct pcb reinforce`, so one sidecar
-drives all three consumers:
+The same flags exist on `kct check`, `kct pcb reinforce` and `kct pcb prune`,
+so one sidecar drives all four consumers:
 
 - **`kct route`** runs the `path_ampacity` rule in the post-route DRC against
   each declared branch's *own* current, then re-emits the declarations as
@@ -1664,6 +1712,11 @@ drives all three consumers:
 - **`kct pcb reinforce --current-paths`** treats the declarations as an
   *allow-list*: only copper covered by a resolved, reinforcement-eligible path
   may be anchored, so a Kelvin sense tap is never bridged to its force path.
+- **`kct pcb prune`** auto-discovers the sidecar exactly like `kct check`
+  (#9747); on the declared nets it also breaks copper loops (each loop's
+  narrowest segment below `--wide`) so `reinforce` can anchor the run. Its
+  `--no-current-paths` means more than route's "keep `path_ampacity`
+  inactive" — see [`pcb prune`](#kct-pcb-prune-board).
 
 Resolution **fails closed**. A declared pad that was moved, removed, or no
 longer resolves onto its declared net is reported as `unresolved`, and a net

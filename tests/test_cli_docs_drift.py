@@ -79,6 +79,7 @@ SECTIONS = [
     pytest.param("sch validate", ("sch", "validate"), False, id="sch-validate"),
     pytest.param("probe", ("probe",), False, id="probe"),
     pytest.param("apply", ("apply",), False, id="apply"),
+    pytest.param("kct pcb prune BOARD", ("pcb", "prune"), False, id="pcb-prune"),
 ]
 
 
