@@ -233,6 +233,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_check_parser(subparsers)
     _add_creepage_parser(subparsers)
     _add_creepage_export_rules_parser(subparsers)
+    _add_voltage_map_merge_parser(subparsers)
     _add_sch_parser(subparsers)
     _add_pcb_parser(subparsers)
     _add_lib_parser(subparsers)
@@ -243,6 +244,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_route_stub(subparsers)
     _add_route_auto_parser(subparsers)
     _add_route_link_parser(subparsers)
+    _add_probe_parser(subparsers)
+    _add_apply_parser(subparsers)
     _add_retune_lengths_parser(subparsers)
     _add_reason_parser(subparsers)
     _add_optimize_parser(subparsers)
@@ -804,9 +807,14 @@ def _add_creepage_parser(subparsers) -> None:
             "reference (default 0 V); the reserved key _pair_bounds is a list of "
             '{"nets": [a, b], "max_dv": V, "why": "..."} device-bounded caps that '
             "can only LOWER that pair's |ΔV| (transitive pairs are the author's "
-            "to declare); other _-prefixed keys (e.g. _comment) are "
+            "to declare; `kct voltage-map-merge` also generates them to restore "
+            "scenario correlations, and max_dv: 0 declares 'always the same "
+            "potential'); other _-prefixed keys (e.g. _comment) are "
             "ignored.  Potentials are worst-case DC-equivalent magnitudes -- AC "
             "phase is not modelled, so |ΔV| is conservative for in-phase nets.  "
+            "Authoring one map per operating scenario?  Merge them into a single "
+            "envelope map with `kct voltage-map-merge a.json b.json -o env.json` "
+            "instead of hand-writing ranges + _pair_bounds (issue #9582).  "
             "Requires --standard (and --pollution-degree)."
         ),
     )
@@ -937,7 +945,10 @@ def _add_creepage_export_rules_parser(subparsers) -> None:
         help=(
             "Path to a JSON sidecar mapping net names to their RMS working "
             "potential (volts), same format as `kct creepage --voltage-map`.  "
-            "Without it the command is a clean no-op (nothing written)."
+            "Without it the command is a clean no-op (nothing written).  "
+            "Multiple operating scenarios?  Pre-merge them into one envelope "
+            "map with `kct voltage-map-merge a.json b.json -o env.json` "
+            "(issue #9582)."
         ),
     )
     p.add_argument(
@@ -989,6 +1000,47 @@ def _add_creepage_export_rules_parser(subparsers) -> None:
         help="Print the derived netclasses + rules without writing any files.",
     )
     add_format_flag(p)
+
+
+def _add_voltage_map_merge_parser(subparsers) -> None:
+    """Add voltage-map-merge parser (multi-scenario envelope map, #9582).
+
+    A NEW sibling top-level command: merges two or more per-scenario voltage
+    maps (one per operating mode of the board) into a single envelope map --
+    per-net ``{min, max}`` spans plus generated ``_pair_bounds`` entries
+    restoring each pair's worst per-scenario |dV| -- accepted unchanged by the
+    interval-aware ``--voltage-map`` consumers.  ``kct route``/``kct pcb``
+    collapse ranges to one signed endpoint (#4411) and can understate a
+    sign-flipping pair; the command warns on stderr when its output has such
+    pairs (and carries them in the ``--format json`` document).
+    """
+    p = subparsers.add_parser(
+        "voltage-map-merge",
+        help=(
+            "Merge two or more per-scenario voltage maps into one envelope map "
+            "for the interval-aware --voltage-map consumers (Issue #9582)"
+        ),
+    )
+    p.add_argument(
+        "inputs",
+        nargs="+",
+        metavar="SCENARIO",
+        help="Path to a per-scenario voltage-map JSON sidecar (two or more)",
+    )
+    p.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        help="Path to write the merged envelope map JSON",
+    )
+    add_format_flag(
+        p,
+        help_text=(
+            "Output format (default: text).  json emits one JSON document on "
+            "stdout with the merge summary and the route-understated pairs "
+            '(errors surface as {"error": ...}, exit codes unchanged)'
+        ),
+    )
 
 
 def _add_check_parser(subparsers) -> None:
@@ -3041,7 +3093,11 @@ def _add_pcb_parser(subparsers) -> None:
         help="Sync PCB footprints from schematic netlist",
         description="Compare schematic components against PCB footprints. "
         "Adds missing footprints (placed at board edge), detects renamed "
-        "references, and reports orphaned footprints.",
+        "references, and reports orphaned footprints. Assigns pad nets from "
+        "the schematic netlist, annotates pad pin functions/types, and "
+        "copies schematic values onto matched footprints. Footprint lib ID "
+        "drift is reported, not swapped (kct sync --apply owns swaps); "
+        "exits 1 while a footprint difference is unresolved.",
     )
     pcb_sync_netlist.add_argument("pcb", help="Path to .kicad_pcb file")
     pcb_sync_netlist.add_argument(
@@ -3353,7 +3409,15 @@ def _add_pcb_parser(subparsers) -> None:
         dest="batch_map",
         help="JSON map for batch moves; x/y are board-relative by default "
         "(or absolute page coords with --absolute), "
-        'e.g. \'{"J2": {"x": 10, "y": 10}}\'',
+        'e.g. \'{"J2": {"x": 10, "y": 10}}\'. '
+        'An entry may add "side": "front"|"back": a part not already on that '
+        "side is flipped about its anchor first, then x/y/rotation are applied. "
+        "With a side change, rotation is the stored KiCad angle written AFTER "
+        "the flip (omitted: the flip's 180 - theta), not a front-view angle. "
+        "Explicit rotation: pads land where that same stored angle puts them "
+        "on the front (anchor-at-pad-1 diode, rotation 0: pad 2 at +7.62 mm "
+        "on either face). Omitted rotation: the 180 - theta rewrite mirrors "
+        "pads about the anchor (that diode: pad 2 at -7.62 mm)",
     )
     pcb_move_fp.add_argument(
         "-o",
@@ -4664,6 +4728,28 @@ def _add_route_link_parser(subparsers) -> None:
     add_route_link_arguments(route_link_parser)
 
 
+def _add_probe_parser(subparsers) -> None:
+    """Add probe subcommand parser (Issue #9590)."""
+    from .probe_cmd import add_probe_arguments
+
+    probe_parser = subparsers.add_parser(
+        "probe",
+        help="Check a batch of proposed tracks/vias/arcs against the board; write nothing",
+    )
+    add_probe_arguments(probe_parser)
+
+
+def _add_apply_parser(subparsers) -> None:
+    """Add apply subcommand parser (Issue #9590)."""
+    from .probe_cmd import add_apply_arguments
+
+    apply_parser = subparsers.add_parser(
+        "apply",
+        help="Apply a batch of proposed copper --checked: probe first, write only if all pass",
+    )
+    add_apply_arguments(apply_parser)
+
+
 def _add_route_auto_parser(subparsers) -> None:
     """Add route-auto subcommand parser."""
     route_auto_parser = subparsers.add_parser(
@@ -5491,10 +5577,15 @@ def _add_fix_drc_parser(subparsers) -> None:
     )
     fix_drc_parser.add_argument(
         "--only",
-        choices=["clearance", "drill-clearance", "mask-copper"],
+        choices=["clearance", "drill-clearance", "mask-copper", "copper-gap"],
         help=(
-            "Only fix a specific violation type ('mask-copper' re-centres a "
-            "track entering its own pad off-centre; detected with kct check's rules)"
+            "Only fix a specific violation type. 'mask-copper' re-centres a "
+            "track that enters its own pad off-centre (mask_to_copper); it is "
+            "detected with kct check's rules, not kicad-cli, and is also part "
+            "of the default set when the report carries such findings. "
+            "'copper-gap' moves a via that sits too close to its own pad or "
+            "track (same-net physical_copper_gap slits), also detected with "
+            "kct check's rules and part of the default set."
         ),
     )
     fix_drc_parser.add_argument(

@@ -167,6 +167,36 @@ SMOKE_ARGS: dict[str, Callable[[Fixtures], dict[str, Any]]] = {
         "net_name": "NET1",
         "output_path": f.out_path("routed_auto.kicad_pcb"),
     },
+    # A NET1 segment 8 mm below the y=50 copper line: clean under the probe's
+    # categories, so probe_items succeeds and apply_items_checked writes the
+    # per-test tmp copy (Issue #9590).
+    "probe_items": lambda f: {
+        "pcb_path": f.pcb,
+        "items": [
+            {
+                "type": "segment",
+                "net": "NET1",
+                "layer": "F.Cu",
+                "width": 0.25,
+                "start": [105, 58],
+                "end": [115, 58],
+            }
+        ],
+    },
+    "apply_items_checked": lambda f: {
+        "pcb_path": f.pcb,
+        "items": [
+            {
+                "type": "segment",
+                "net": "NET1",
+                "layer": "F.Cu",
+                "width": 0.25,
+                "start": [105, 58],
+                "end": [115, 58],
+            }
+        ],
+        "backup_path": f.out_path("probe.bak"),
+    },
     "validate_pattern": lambda f: {
         "pcb_path": f.pcb,
         "pattern_type": "ldo",

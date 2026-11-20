@@ -763,13 +763,17 @@ class LintGate:
         The supervised ``--timeout`` worker installs ``_deadline_signal`` (its
         :class:`RouteDeadlineExpired` unwind is left intact); only the default
         disposition -- which would kill the process with no cleanup at all --
-        is replaced.
+        is replaced.  The run-lock early net counts as default here: it only
+        spans acquisition until the first deliberate handler, so this gate
+        replaces it (issue #9628 review).
         """
         if self._sigterm_installed or threading.current_thread() is not threading.main_thread():
             return
         try:
+            from .route_deadline import is_lock_sigterm_net
+
             previous = signal.getsignal(signal.SIGTERM)
-            if previous is not signal.SIG_DFL:
+            if previous is not signal.SIG_DFL and not is_lock_sigterm_net(previous):
                 return
             signal.signal(signal.SIGTERM, _raise_terminated)
         except (ValueError, OSError):

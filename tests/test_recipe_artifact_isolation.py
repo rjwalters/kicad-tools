@@ -15,6 +15,23 @@ def load(name):
     return module
 
 
+def _step_section(script_text: str, step_header: str) -> str:
+    """Return the body of one `step "..."` section of a job script (from the
+    `step` call to the next one), with comment lines dropped. Matched by
+    prefix so trailing qualifiers in the header don't matter."""
+    lines = script_text.splitlines()
+    start = next(
+        i
+        for i, line in enumerate(lines)
+        if line.strip().startswith('step "') and step_header in line
+    )
+    end = next(
+        (i for i, line in enumerate(lines[start + 1 :], start + 1) if line.startswith("step ")),
+        len(lines),
+    )
+    return "\n".join(line for line in lines[start:end] if not line.lstrip().startswith("#"))
+
+
 @pytest.mark.parametrize(
     ("board", "filename"),
     [
@@ -245,11 +262,16 @@ def test_e2e_stages_matching_synthetic_bundle(number, board, gate):
 
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     steps = workflow["jobs"][f"board-{number}-end-to-end"]["steps"]
-    command = next(
-        step["run"]
+    # Issue #9340: the synthetic routing gate lives in the shared job script
+    # the workflow step calls (2am#7561 ruling); assert both legs.
+    script_call = next(
+        step
         for step in steps
-        if step.get("name", "").startswith("Independent synthetic routing gate")
+        if f"scripts/ci/jobs/board-{number}-end-to-end.sh" in (step.get("run") or "")
     )
+    assert not script_call.get("continue-on-error")
+    script = (ROOT / f"scripts/ci/jobs/board-{number}-end-to-end.sh").read_text()
+    command = _step_section(script, "Independent synthetic routing gate")
     assert f"cp -a /tmp/board{number}-ci/. boards/{board}/regression-output/" in command
     assert f"check_{gate}_coverage.py" in command
     assert "--skip-route" in command

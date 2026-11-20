@@ -778,7 +778,18 @@ def _dru_loosenings(before: Mapping[str, Any], after: Mapping[str, Any]) -> list
         # other class's copper governed by the unscoped rules the ``None``
         # probe used to model, so dropping it without a stand-in would hide a
         # real loosening there.
-        scopes.update(("F.Cu", "B.Cu", "In1.Cu"))
+        #
+        # ``In1.Cu`` alone can be masked by a hand rule scoped to it
+        # (Issue #9499): the rule raises the probed representative while the
+        # other inner layers resolve lower and go unprobed.  Also probe the
+        # smallest inner layer no rule names, so no ``(layer "In<N>.Cu")``
+        # rule can stand in for it -- ``In1.Cu`` itself when none is named,
+        # otherwise the first gap in the named chain (one bounded extra
+        # probe; probing every ``In*.Cu`` would be unbounded).
+        k = 1
+        while f"In{k}.Cu" in scopes:
+            k += 1
+        scopes.update(("F.Cu", "B.Cu", "In1.Cu", f"In{k}.Cu"))
         probe_layers = [*sorted(scopes)]
     else:
         probe_layers = [None, *sorted(scopes)]

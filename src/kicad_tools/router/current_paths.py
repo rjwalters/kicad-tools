@@ -225,7 +225,7 @@ from kicad_tools.core.geometry import point_to_segment_distance, segments_inters
 from kicad_tools.core.layers import COPPER_LAYER_ORDER, via_spans_layer
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
     from kicad_tools.manufacturers import DesignRules
     from kicad_tools.schema.pcb import PCB, Footprint, Net, Pad, Segment, Via, Zone
@@ -283,6 +283,14 @@ _PAD_EPS = 1e-6
 # 1 um, far below any annular ring, so it never bridges genuinely separate
 # copper (Issue #7210).
 _VIA_CENTRE_EPS = 1e-3
+
+# Same-layer branches of a parallel group must overlap by more than this
+# (mm) to merge into one conductor (issue #9542). At exactly half the summed
+# widths of centreline offset the two tracks touch along one line with no
+# shared area -- current sharing across a tangency is no better established
+# than across a gap, so that boundary stays ambiguous like a gap. Floating
+# point alone must not flip the verdict either way.
+_SAME_LAYER_OVERLAP_EPS = 1e-6
 
 
 # Which waveform assumption produced a path's thermal design current
@@ -794,9 +802,11 @@ class ParallelGroup:
 
     Attributes:
         branches: One tuple of segments per branch. Each branch lies on a
-            single copper layer, branches sit on pairwise distinct layers, and
-            they follow the same route, so they share current as one wider
-            conductor whose capacity is judged on the summed cross-section.
+            single copper layer and follows the same route. Branches either
+            sit on pairwise distinct layers, or share a layer only when
+            their copper overlaps into one contiguous bar (issue #9542), so
+            they share current as one wider conductor whose capacity is
+            judged on the effective width :attr:`width_mm` reports.
     """
 
     branches: tuple[tuple[Segment, ...], ...]
@@ -805,12 +815,119 @@ class ParallelGroup:
     def segments(self) -> tuple[Segment, ...]:
         return tuple(seg for branch in self.branches for seg in branch)
 
+    @property
+    def same_layer(self) -> bool:
+        """True when two branches share a copper layer (issue #9542)."""
+        layers = [branch[0].layer for branch in self.branches]
+        return len(layers) != len(set(layers))
+
+    def _branches_by_layer(self) -> dict[str, list[tuple[Segment, ...]]]:
+        """The per-layer grouping both :meth:`layer_widths` and :attr:`shape` read."""
+        by_layer: dict[str, list[tuple[Segment, ...]]] = {}
+        for branch in self.branches:
+            by_layer.setdefault(branch[0].layer, []).append(branch)
+        return by_layer
+
+    def layer_widths(self) -> dict[str, float]:
+        """Effective conductor width this group provides, per copper layer.
+
+        Branches on distinct layers each contribute their own narrowest
+        width, so a 2 x 1.0 mm two-layer bar reports 1.0 mm per layer.
+        Branches on one layer overlap into a single bar whose width is the
+        union extent of the merged copper -- centreline offset plus both
+        half-widths (issue #9542) -- never their sum: two 1.0 mm tracks
+        offset 0.6 mm are 1.6 mm of copper, not 2.0 mm. A branch wholly
+        inside another's shadow therefore under-reports, the fail-closed
+        direction.
+        """
+        widths: dict[str, float] = {}
+        for layer, layer_branches in self._branches_by_layer().items():
+            widths[layer] = (
+                _merged_same_layer_width(layer_branches)
+                if len(layer_branches) > 1
+                else _branch_min_width(layer_branches[0])
+            )
+        return widths
+
+    @property
+    def shape(self) -> str:
+        """How :attr:`width_mm` is composed (issue #9560).
+
+        ``"summed"`` -- branches sit on pairwise distinct layers, so the
+        figure is the sum of per-layer widths. ``"merged"`` -- every branch
+        shares one copper layer, so the figure is a single bar's union
+        extent. ``"merged+summed"`` -- both at once: some layer carries an
+        overlapping pair while another carries a branch of its own, so the
+        figure is merged within a layer and summed across layers, and
+        neither word alone describes it. Derived from the same per-layer
+        grouping :meth:`layer_widths` uses, so the label both surfaces
+        print can never disagree with the figure it decorates.
+        """
+        by_layer = self._branches_by_layer()
+        if all(len(branches) == 1 for branches in by_layer.values()):
+            return "summed"
+        return "merged" if len(by_layer) == 1 else "merged+summed"
+
+    @property
+    def width_mm(self) -> float:
+        """The one width figure every surface reports for this group.
+
+        The sum of :meth:`layer_widths` -- merged within a layer, summed
+        across layers -- so ``min_width`` and ``path_ampacity`` can never
+        print two different figures for one group.
+        """
+        return sum(self.layer_widths().values())
+
     def describe(self) -> str:
         parts = [
             f"{branch[0].layer} {min(seg.width for seg in branch):.3f}mm"
             for branch in self.branches
         ]
         return "parallel group " + " + ".join(parts)
+
+
+def _branch_min_width(branch: Sequence[Segment]) -> float:
+    """The branch's pinch width -- the width its capacity is judged on."""
+    return min(seg.width for seg in branch)
+
+
+def _max_branch_distance(a: Sequence[Segment], b: Sequence[Segment]) -> float:
+    """Largest nearest-centreline distance between two branches.
+
+    For each endpoint of either branch's segments, the distance to the
+    closest segment of the other branch; the maximum over both directions.
+    For two branches that step sideways then run parallel, this is their
+    centreline offset (the step's pad-end endpoints sit at distance zero).
+    """
+
+    def one_way(src: Sequence[Segment], dst: Sequence[Segment]) -> float:
+        return max(
+            min(point_to_segment_distance(*point, *ref.start, *ref.end) for ref in dst)
+            for seg in src
+            for point in (seg.start, seg.end)
+        )
+
+    return max(one_way(a, b), one_way(b, a))
+
+
+def _merged_same_layer_width(branches: Sequence[Sequence[Segment]]) -> float:
+    """Union extent of overlapping same-layer branches (issue #9542).
+
+    The extreme ordered pair of branches sets the extent: their centreline
+    offset plus both pinch half-widths. Exact for parallel straight runs of
+    any widths; only reached from :meth:`ParallelGroup.layer_widths` with
+    two or more branches on one layer.
+    """
+    width = 0.0
+    for i, a in enumerate(branches):
+        for b in branches[i + 1 :]:
+            width = max(
+                width,
+                _max_branch_distance(a, b)
+                + _branch_min_width(a) / 2.0
+                + _branch_min_width(b) / 2.0,
+            )
+    return width
 
 
 def _segment_midpoint(segment: Segment) -> tuple[float, float]:
@@ -833,22 +950,30 @@ class MinimumWidth:
 
     Attributes:
         width_mm: The narrowest width along the whole path. A deliberately
-            doubled stretch (:class:`ParallelGroup`) contributes its
-            **summed** width -- the same expression ``path_ampacity``
-            prints for that group -- not one branch's width, so a 2 x 1.0 mm
-            run counts as 2.0 mm rather than 1.0 mm.
+            doubled stretch (:class:`ParallelGroup`) contributes
+            :attr:`ParallelGroup.width_mm` -- the same expression
+            ``path_ampacity`` prints for that group -- not one branch's
+            width, so a 2 x 1.0 mm run counts as 2.0 mm rather than 1.0 mm,
+            and two overlapping 1.0 mm F.Cu tracks offset 0.6 mm count as
+            1.6 mm of merged copper (#9542).
         layer: Copper layer of the element that set ``width_mm``. For a
             parallel group, the layer of its narrowest branch's pinch
             segment.
         position: Midpoint of that segment, in **board** coordinates (mm).
-        parallel_group: True when ``width_mm`` is a group's summed width,
+        parallel_group: True when ``width_mm`` is a group's effective width,
             so a reader never mistakes it for one trace's width.
+        shape: The group's width composition (:attr:`ParallelGroup.shape` --
+            ``"merged"`` / ``"summed"`` / ``"merged+summed"``) when
+            ``parallel_group`` is True, so both label surfaces print the
+            same derivation the figure was computed with; ``None`` for a
+            single segment, whose width is its own (#9557, #9560).
     """
 
     width_mm: float
     layer: str
     position: tuple[float, float]
     parallel_group: bool = False
+    shape: str | None = None
 
 
 @dataclass(frozen=True)
@@ -856,34 +981,52 @@ class LayerChange:
     """One layer change on a resolved path, with the vias that carry it.
 
     Attributes:
-        position: Centroid of the vias (mm).
+        position: Centroid of all parallel vias, centreline and tie (mm).
         from_layer: Layer of the first path segment touching the vias.
         to_layer: The other layer the path continues on.
-        vias: ``(position, drill, pad_diameter)`` per parallel via.
+        vias: ``(position, drill, pad_diameter)`` per parallel via admitted
+            by centreline contact -- grouped array members and packed tie
+            rows. Off-centreline tie vias (#9561) are in :attr:`tie_vias`.
+        tie_vias: Off-centreline same-net vias proved parallel to a
+            :attr:`vias` member (pad overlap with continuous path copper on
+            both joined layers, chained within the tie bound, #9561). Empty
+            unless the change grew through the tie pass.
+        excluded_tie_vias: ``(reason, count)`` per reason for nearby
+            same-net vias the tie pass rejected (off the copper, not
+            spanning both layers, beyond the tie bound), so a finding can
+            say why stitching did not clear it. Empty when nothing nearby
+            was rejected.
     """
 
     position: tuple[float, float]
     from_layer: str
     to_layer: str
     vias: tuple[tuple[tuple[float, float], float, float], ...]
+    tie_vias: tuple[tuple[tuple[float, float], float, float], ...] = ()
+    excluded_tie_vias: tuple[tuple[str, int], ...] = ()
 
     @property
     def count(self) -> int:
+        return len(self.vias) + len(self.tie_vias)
+
+    @property
+    def centreline_count(self) -> int:
+        """Parallel vias admitted by centreline contact (not tie vias)."""
         return len(self.vias)
 
     @property
     def drill(self) -> float:
-        return min(v[1] for v in self.vias)
+        return min(v[1] for v in (*self.vias, *self.tie_vias))
 
     @property
     def pad_diameter(self) -> float:
-        return min(v[2] for v in self.vias)
+        return min(v[2] for v in (*self.vias, *self.tie_vias))
 
     def current_capacity_a(self) -> float:
         """Summed barrel capacity (A) of the parallel vias (issue #8745)."""
         from kicad_tools.physics.ampacity import via_barrel_current_capacity
 
-        return sum(via_barrel_current_capacity(v[1]) for v in self.vias)
+        return sum(via_barrel_current_capacity(v[1]) for v in (*self.vias, *self.tie_vias))
 
 
 #: Clearance allowance (mm) in the packed tie-row gap bound of
@@ -902,6 +1045,17 @@ _TIE_ROW_GAP_CLEARANCE_MM = 0.5
 #: that absorbs the drift while staying negligible against the 5.0 mm
 #: distributed-stitch pitch the bound must never reach.
 _TIE_ROW_GAP_TOLERANCE_MM = 0.05
+
+#: Centre-distance cap (mm) for admitting an off-centreline same-net via
+#: (a "tie via") into an existing layer change's parallel group (#9561):
+#: the via must sit at most this far from a via already counted in that
+#: change -- a centreline via or an already-admitted tie via, so a spread
+#: row chains -- which keeps a via far down the bar or in series elsewhere
+#: on the net out. The cap sits above the widest hand-placed tie gap
+#: reported (within 3.2 mm, #9561) and below the 5.0 mm distributed-stitch
+#: pitch, and is always paired with the both-layer shared-copper proof in
+#: :func:`_layer_changes`, so distance alone never admits a via.
+_TIE_VIA_LINK_MAX_MM = 3.5
 
 
 def _layer_changes(
@@ -930,6 +1084,19 @@ def _layer_changes(
     :data:`_TIE_ROW_GAP_TOLERANCE_MM` and capped at half the distributed
     stitch pitch, so vias at ``STITCH_PITCH_MM`` never group. Without it,
     the historical :data:`_TIE_ROW_GAP_CLEARANCE_MM` bound applies.
+
+    A same-net via the 0.01 mm centreline test never sees can still be
+    *proved parallel* to a change (#9561): a hand-placed tie via inside a
+    wide bar whose pad overlaps one continuous path segment on each joined
+    layer -- a segment both its pad and a counted via's pad touch -- is
+    tied into both layers' copper between them, so the transfer is
+    distributed across the barrels, not series through one. Such a via
+    joins the first change (in path order) it chains to within
+    :data:`_TIE_VIA_LINK_MAX_MM` of, directly or through an already-tied
+    via. Vias near a change that fail the proof (off the copper on a
+    layer, not spanning the pair, or on copper the change does not share)
+    are recorded on :attr:`LayerChange.excluded_tie_vias` instead of
+    counted, so a finding can say why they did not help.
     """
     net = pcb.get_net_by_name(net_name)
     array_of: dict[tuple[float, float], int] = {
@@ -948,6 +1115,32 @@ def _layer_changes(
         layers = list(dict.fromkeys(layer for _, layer in touching))
         if len(layers) >= 2:
             found.append((min(i for i, _ in touching), via, layers[0], layers[1]))
+
+    def _pad_on_copper(via: Via, seg: Segment) -> bool:
+        """True when ``via``'s pad overlaps ``seg``'s width envelope."""
+        return (
+            point_to_segment_distance(*via.position, *seg.start, *seg.end)
+            <= seg.width / 2.0 + via.size / 2.0
+        )
+
+    def _tie_link(anchor: Via, cand: Via, layers: tuple[str, str]) -> bool:
+        """True when ``cand`` is proved parallel to ``anchor`` (#9561).
+
+        Centres within the tie bound, and on each joined layer one path
+        segment whose copper envelope overlaps both pads -- that shared
+        stroke is continuous copper joining the two vias on that layer, so
+        both layers' copper runs between them and the barrels split the
+        transfer instead of carrying it in series.
+        """
+        if math.dist(anchor.position, cand.position) > _TIE_VIA_LINK_MAX_MM:
+            return False
+        return all(
+            any(
+                seg.layer == layer and _pad_on_copper(cand, seg) and _pad_on_copper(anchor, seg)
+                for seg in segments
+            )
+            for layer in layers
+        )
 
     def _row_terminus(item: tuple[int, Via, str, str]) -> bool:
         """True when a parallel branch begins or ends at this via (#8950).
@@ -1059,18 +1252,79 @@ def _layer_changes(
             else ("via", n),
             [],
         ).append(item)
-    changes = []
-    for c in sorted(groups.values(), key=lambda c: min(m[0] for m in c)):
+
+    # Off-centreline tie vias (#9561): same-net vias the centreline test
+    # never admitted, chained into the changes they are proved parallel to.
+    ordered_groups = sorted(groups.values(), key=lambda c: min(m[0] for m in c))
+    for c in ordered_groups:
         c.sort(key=lambda m: m[0])
+    found_ids = {id(item[1]) for item in found}
+    pending = [
+        via for via in pcb.vias if id(via) not in found_ids and _matches_net(via, net, net_name)
+    ]
+    admitted: list[list[Via]] = [[] for _ in ordered_groups]
+    for gi, c in enumerate(ordered_groups):
+        pair = (c[0][2], c[0][3])
+        anchors = [m[1] for m in c]
+        anchors.extend(admitted[gi])
+        grown = True
+        while grown:
+            grown = False
+            for via in list(pending):
+                if not all(via_spans_layer(via.layers, layer) for layer in pair):
+                    continue
+                if any(_tie_link(anchor, via, pair) for anchor in anchors):
+                    anchors.append(via)
+                    admitted[gi].append(via)
+                    pending.remove(via)
+                    grown = True
+
+    def _shares_change_copper(via: Via, anchors: list[Via], layer: str) -> bool:
+        """True when a path segment on ``layer`` carries copper shared by
+        ``via`` and an anchor via -- the change's own copper reaches it."""
+        return any(
+            seg.layer == layer
+            and _pad_on_copper(via, seg)
+            and any(_pad_on_copper(a, seg) for a in anchors)
+            for seg in segments
+        )
+
+    excluded: list[dict[str, int]] = [{} for _ in ordered_groups]
+    for gi, c in enumerate(ordered_groups):
+        pair = (c[0][2], c[0][3])
+        anchors = [m[1] for m in c] + admitted[gi]
+        for via in pending:
+            near = any(
+                math.dist(via.position, anchor.position) <= _TIE_VIA_LINK_MAX_MM
+                for anchor in anchors
+            )
+            if not all(via_spans_layer(via.layers, layer) for layer in pair):
+                if near:
+                    reason = "not spanning both layers"
+                    excluded[gi][reason] = excluded[gi].get(reason, 0) + 1
+                continue
+            if not all(_shares_change_copper(via, anchors, layer) for layer in pair):
+                if near:
+                    reason = "off the bar copper"
+                    excluded[gi][reason] = excluded[gi].get(reason, 0) + 1
+            else:
+                reason = f"beyond the {_TIE_VIA_LINK_MAX_MM:g}mm tie bound"
+                excluded[gi][reason] = excluded[gi].get(reason, 0) + 1
+
+    changes = []
+    for gi, c in enumerate(ordered_groups):
+        positions = [m[1].position for m in c] + [v.position for v in admitted[gi]]
         changes.append(
             LayerChange(
                 position=(
-                    round(sum(m[1].position[0] for m in c) / len(c), 4),
-                    round(sum(m[1].position[1] for m in c) / len(c), 4),
+                    round(sum(p[0] for p in positions) / len(positions), 4),
+                    round(sum(p[1] for p in positions) / len(positions), 4),
                 ),
                 from_layer=c[0][2],
                 to_layer=c[0][3],
                 vias=tuple((m[1].position, m[1].drill, m[1].size) for m in c),
+                tie_vias=tuple((v.position, v.drill, v.size) for v in admitted[gi]),
+                excluded_tie_vias=tuple(excluded[gi].items()) if excluded[gi] else (),
             )
         )
     return tuple(changes)
@@ -1138,11 +1392,13 @@ class PathResolution:
 
         Deliberately doubled copper is measured as one conductor, mirroring
         how ``path_ampacity`` judges it: a :class:`ParallelGroup` contributes
-        a single candidate, its **summed** width
-        ``sum(min(seg.width for seg in branch) for branch in branches)`` --
-        the same expression that rule's own message prints -- while every
-        ungrouped segment contributes its own width. So a stretch doubled on
-        two layers at 1.0 mm enters as 2.0 mm, not twice as 1.0 mm.
+        a single candidate at :attr:`ParallelGroup.width_mm`, its effective
+        width -- per layer, overlapping same-layer branches merge at their
+        union extent while distinct layers each contribute their own narrowest
+        width (#9542) -- the same expression that rule's own message prints.
+        So a stretch doubled on two layers at 1.0 mm enters as 2.0 mm, not
+        twice as 1.0 mm, and two overlapping 1.0 mm F.Cu tracks offset 0.6 mm
+        enter as 1.6 mm of merged copper, not 2.0 mm.
 
         ``sense_taps`` are excluded by construction: a Kelvin sense tap is
         never part of ``segments``, so thin sense copper off an endpoint pad
@@ -1160,10 +1416,10 @@ class PathResolution:
         }
 
         def _group_candidate(group: ParallelGroup) -> MinimumWidth:
-            # The summed-width expression ``path_ampacity`` prints for this
-            # group, so the audit and the check never report two different
-            # "summed width" figures for one group.
-            width = sum(min(seg.width for seg in branch) for branch in group.branches)
+            # The one width figure every surface reports for this group
+            # (``path_ampacity``'s message included), so the audit and the
+            # check never report two different figures for one group.
+            width = group.width_mm
             branch = min(group.branches, key=lambda b: min(seg.width for seg in b))
             pinch = min(branch, key=lambda seg: seg.width)
             return MinimumWidth(
@@ -1171,6 +1427,7 @@ class PathResolution:
                 layer=pinch.layer,
                 position=_segment_midpoint(pinch),
                 parallel_group=True,
+                shape=group.shape,
             )
 
         candidates: list[MinimumWidth] = []
@@ -1219,6 +1476,12 @@ class PathResolution:
 
         ``layer_changes`` itself is unchanged, so an audit still lists every
         via that joins two layers.
+
+        An off-centreline tie via admitted by the #9561 pass never keeps a
+        benign change alive: it chained to a centreline via through copper
+        continuous on both layers, so it sits inside the same doubled run
+        as that via, and the change is dropped on its centreline vias'
+        verdict alone.
         """
         grouped = {id(seg) for group in self.parallel_groups for seg in group.segments}
         if not grouped:
@@ -1298,6 +1561,18 @@ class _CopperGraph:
     adjacency: dict[_Node, list[tuple[_Node, _GraphEdge]]] = field(default_factory=dict)
     pads: dict[tuple[str, str, int], _Node] = field(default_factory=dict)
     internal: dict[_Node, list[Segment]] = field(default_factory=dict)
+    # For each external edge landing on a pad hub, the physical points where
+    # its copper meets pad copper, per hub (#9647). Needed to tell a wholly
+    # pad-internal segment the route continues along from one a branch
+    # merely shares the pad with.
+    attachments: dict[_GraphEdge, list[tuple[_Node, tuple[float, float]]]] = field(
+        default_factory=dict
+    )
+    # Pad centres per hub, in the same terms as ``attachments`` points: the
+    # current's pad-side terminal. A wholly pad-internal segment that only
+    # touches route copper AT the centre is a branch hanging off the
+    # terminal, not copper the declared current rides (#9647).
+    pad_centres: dict[_Node, set[tuple[float, float]]] = field(default_factory=dict)
 
 
 def _copper_node(point: tuple[float, float], layer: str) -> _Node:
@@ -1385,9 +1660,12 @@ def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGra
             node = parents[node]
         return node
 
+    from kicad_tools.core.geometry import rotate_pad_offset
     from kicad_tools.schema.physical_identity import footprint_keys
 
+    graph = _CopperGraph()
     pad_contacts: dict[tuple[str, str, int], list[_Node]] = {}
+    pad_nodes: set[_Node] = set()
     internal_edges: set[_GraphEdge] = set()
     wholly_internal_ids: set[int] = set()
     for component_id, fp in zip(footprint_keys(pcb.footprints), pcb.footprints, strict=True):
@@ -1424,9 +1702,19 @@ def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGra
                     hub = root(group[0])
                     for node in group[1:]:
                         parents[root(node)] = hub
+                    offset = rotate_pad_offset(pad.position[0], pad.position[1], fp.rotation)
+                    graph.pad_centres.setdefault(hub, set()).add(
+                        (fp.position[0] + offset[0], fp.position[1] + offset[1])
+                    )
             pad_contacts[(component_id, pad.number, occurrence)] = nodes
+            pad_nodes.update(nodes)
 
-    graph = _CopperGraph()
+    # A later overlapping pad can contract an earlier group's hub; re-key the
+    # centres to the final roots the rest of the graph is keyed by.
+    for hub in list(graph.pad_centres):
+        centres = graph.pad_centres.pop(hub)
+        graph.pad_centres.setdefault(root(hub), set()).update(centres)
+
     for key, nodes in pad_contacts.items():
         hubs = {root(node) for node in nodes}
         if len(hubs) == 1:
@@ -1442,9 +1730,163 @@ def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGra
             if edge.segment is not None and id(edge.segment) in wholly_internal_ids:
                 graph.internal.setdefault(ra, []).append(edge.segment)
             continue
+        for node, hub in ((a, ra), (b, rb)):
+            if node in pad_nodes:
+                graph.attachments.setdefault(edge, []).append((hub, node[:2]))
         graph.adjacency[ra].append((rb, edge))
         graph.adjacency[rb].append((ra, edge))
     return graph
+
+
+def _pad_segments_touch(a: Segment, b: Segment) -> bool:
+    """Whether two wholly pad-internal segments form series copper.
+
+    Endpoint-on-segment covers shared vertices and T-joints;
+    :func:`segments_intersect` covers copper crossing at an interior point.
+    """
+    return (
+        point_to_segment_distance(*a.start, *b.start, *b.end) <= _PAD_EPS
+        or point_to_segment_distance(*a.end, *b.start, *b.end) <= _PAD_EPS
+        or point_to_segment_distance(*b.start, *a.start, *a.end) <= _PAD_EPS
+        or point_to_segment_distance(*b.end, *a.start, *a.end) <= _PAD_EPS
+        or segments_intersect(*a.start, *a.end, *b.start, *b.end)
+    )
+
+
+def _pad_continuation_chains(
+    internal: Sequence[Segment],
+    centres: Iterable[tuple[float, float]],
+    entries: Iterable[tuple[float, float]],
+    branch_exits: Iterable[tuple[float, float]] = (),
+) -> list[Segment]:
+    """The wholly pad-internal copper a resolved route rides to its terminal.
+
+    The current enters the pad at an off-centre attachment of route copper
+    and flows to the pad centre -- its terminal -- along chained pad-internal
+    segments, across segment and width changes (#9647 review: a split trunk
+    must keep its narrowest buried piece). For each entry point the shortest
+    chain of touching internal segments that reaches the centre is kept; a
+    dead-end spur is never on one, so copper hanging off the route -- a
+    Kelvin/sense tap whose first segment lies wholly inside the pad, even one
+    sharing the trunk's own attachment point -- stays out. When no
+    centre-reaching chain exists from an entry (buried copper that stops
+    short of the terminal), the segments under it are kept as the best
+    on-route evidence rather than silently dropped -- unless ``branch_exits``
+    proves them a branch's buried head (#9677): the pad's external edges
+    leaving at points the declared route itself does not land on. Copper
+    chaining from an entry to such an exit feeds that branch, while copper
+    spanning two of the route's own entries is through-copper the route
+    rides across the pad and stays.
+    """
+    internal = list(internal)
+    centres = list(centres)
+    entries = list(entries)
+    branch_exits = list(branch_exits)
+    if not internal or not centres:
+        return []
+
+    def _touches_point(seg: Segment, point: tuple[float, float]) -> bool:
+        return point_to_segment_distance(*point, *seg.start, *seg.end) <= _PAD_EPS
+
+    goal = {i for i, seg in enumerate(internal) if any(_touches_point(seg, c) for c in centres)}
+
+    def _proven_branch(seed: int) -> bool:
+        # Connectivity the geometric chain above cannot see: a buried
+        # component feeding an external edge that leaves the pad where the
+        # declared route does not land is that branch's head, not the
+        # route's continuation (#9677).
+        if not branch_exits:
+            return False
+        component = {seed}
+        pending = [seed]
+        while pending:
+            i = pending.pop()
+            for j in range(len(internal)):
+                if j not in component and _pad_segments_touch(internal[i], internal[j]):
+                    component.add(j)
+                    pending.append(j)
+        entries_hit = {
+            entry for entry in entries if any(_touches_point(internal[i], entry) for i in component)
+        }
+        if len(entries_hit) >= 2:
+            return False
+        return any(_touches_point(internal[i], point) for i in component for point in branch_exits)
+
+    kept: dict[int, Segment] = {}
+    for entry in entries:
+        if any(math.dist(entry, centre) <= _PAD_EPS for centre in centres):
+            continue
+        seeds = {i for i, seg in enumerate(internal) if _touches_point(seg, entry)}
+        if not seeds:
+            continue
+        # Dijkstra over the segment-touching graph; the pad hub carries a
+        # handful of internal segments, so a plain scan is plenty.
+        dist: dict[int, float] = dict.fromkeys(range(len(internal)), math.inf)
+        for i in seeds:
+            dist[i] = 0.0
+        prev: dict[int, int] = {}
+        chain: list[int] | None = None
+        unvisited = set(dist)
+        while unvisited:
+            i = min(unvisited, key=lambda k: dist[k])
+            if dist[i] == math.inf:
+                break
+            unvisited.remove(i)
+            if i in goal:
+                chain = []
+                while i in prev:
+                    chain.append(i)
+                    i = prev[i]
+                chain.append(i)
+                break
+            for j in unvisited:
+                if dist[i] + _seg_length(internal[j]) < dist[j] and _pad_segments_touch(
+                    internal[i], internal[j]
+                ):
+                    dist[j] = dist[i] + _seg_length(internal[j])
+                    prev[j] = i
+        for i in chain if chain is not None else [i for i in seeds if not _proven_branch(i)]:
+            kept.setdefault(i, internal[i])
+    return [internal[i] for i in sorted(kept)]
+
+
+def _hub_continuation_segments(
+    graph: _CopperGraph, hub: _Node, edges: Iterable[_GraphEdge]
+) -> list[Segment]:
+    """Pad-internal continuation copper the given route edges ride at ``hub``.
+
+    Entry points are the edges' pad attachments that sit beyond the pad
+    centre: copper hanging off the terminal itself carries a branch, not the
+    route (#9647). The declared edges' own landing points are likewise not
+    exits -- a parallel member of the same declared path can share the
+    route's off-centre landing inside a thru-hole pad -- so only an external
+    edge leaving the pad where the declared copper does not land marks the
+    buried copper under it as that branch's (#9677).
+    """
+    internal = graph.internal.get(hub)
+    if not internal:
+        return []
+    centres = graph.pad_centres.get(hub, ())
+    route_edges = set(edges)
+    landings = {
+        point
+        for edge in route_edges
+        for attach_hub, point in graph.attachments.get(edge, [])
+        if attach_hub == hub
+    }
+    entries = [
+        point
+        for point in landings
+        if not any(math.dist(point, centre) <= _PAD_EPS for centre in centres)
+    ]
+    branch_exits = {
+        point
+        for edge, attachments in graph.attachments.items()
+        if edge not in route_edges
+        for attach_hub, point in attachments
+        if attach_hub == hub and point not in landings
+    }
+    return _pad_continuation_chains(internal, centres, entries, branch_exits)
 
 
 def _bfs_path(graph: _CopperGraph, start: _Node, goal: _Node) -> list[Segment] | None:
@@ -1463,13 +1905,31 @@ def _bfs_path(graph: _CopperGraph, start: _Node, goal: _Node) -> list[Segment] |
                 queue.append(nxt)
     if goal not in visited:
         return None
-    evidence = list(graph.internal.get(goal, []))
+    route_edges: list[_GraphEdge] = []
+    node = goal
+    while node != start:
+        prev, edge = parent[node]
+        route_edges.append(edge)
+        node = prev
+    on_route = set(route_edges)
+
+    def internal_evidence(hub: _Node) -> list[Segment]:
+        # Wholly pad-internal copper is evidence only where the route rides
+        # it toward the pad centre -- the current's pad-side terminal: the
+        # chained continuation from the route's pad attachment to the centre
+        # stays, across segment and width changes, while copper hanging off
+        # the route inside the pad (a Kelvin/sense tap whose first segment
+        # starts wholly inside a large endpoint pad, #9647) is a branch and
+        # is excluded -- even when it shares the trunk's attachment point.
+        return _hub_continuation_segments(graph, hub, on_route)
+
+    evidence = internal_evidence(goal)
     node = goal
     while node != start:
         prev, edge = parent[node]
         if edge.segment is not None:
             evidence.append(edge.segment)
-        evidence.extend(graph.internal.get(prev, []))
+        evidence.extend(internal_evidence(prev))
         node = prev
     # A via may split an original segment into several traversed graph edges.
     # Audit/ampacity/reinforcement still operate on whole original segments.
@@ -1924,16 +2384,31 @@ class _SPEdge:
 
 
 def _group_qualifies(branches: list[list[Segment]]) -> bool:
-    """A simple parallel group: one layer per branch, distinct layers, same route."""
+    """A simple parallel group: one layer per branch, same route, overlapped
+    same-layer copper.
+
+    Branches on different layers must follow the same route (each endpoint
+    within half the group's narrowest width of the other branch). Branches
+    on one layer must instead **overlap** -- their copper forms one
+    contiguous bar -- which holds while the centreline offset stays under
+    half the pair's summed widths (issue #9542); a tangency or a real gap
+    does not share current any better than two separate conductors, so it
+    stays unsupported.
+    """
     if any(not b or len({s.layer for s in b}) != 1 for b in branches):
-        return False
-    if len({b[0].layer for b in branches}) != len(branches):
         return False
     tol = min(s.width for b in branches for s in b) / 2.0
     # Branches span the same two junctions, so each must lie on every other.
     for branch in branches:
         for other in branches:
             if other is branch:
+                continue
+            if branch[0].layer == other[0].layer:
+                overlap = (
+                    _branch_min_width(branch) + _branch_min_width(other)
+                ) / 2.0 - _max_branch_distance(branch, other)
+                if overlap <= _SAME_LAYER_OVERLAP_EPS:
+                    return False
                 continue
             for seg in branch:
                 for point in (seg.start, seg.end):
@@ -2022,6 +2497,36 @@ def _reduce_parallel_groups(
         if stubs:
             edges = [e for e in edges if e not in stubs]
             changed = True
+        # Series-merge non-load degree-2 junctions to a fixpoint BEFORE the
+        # grouping pass below. A half-merged junction pair -- some branches
+        # already merged, one still in pieces -- would otherwise qualify and
+        # group with only some of its parallel branches, then group AGAIN
+        # around the merged edge on a later pass, nesting one group inside
+        # another and double-listing the first group's segments across the
+        # two (three overlapping same-layer bars, issue #9542). Series
+        # merging never changes a node's degree besides removing the merged
+        # node itself, so running it straight to exhaustion before grouping
+        # or stub pruning is order-safe.
+        while True:
+            incident: dict[_Node, list[_SPEdge]] = {}
+            for e in edges:
+                incident.setdefault(e.u, []).append(e)
+                incident.setdefault(e.v, []).append(e)
+            merged_one = False
+            for node, inc in incident.items():
+                if node in keep or len(inc) != 2 or inc[0] is inc[1]:
+                    continue
+                a, b = inc
+                ends = [x for e in (a, b) for x in (e.u, e.v) if x != node]
+                if len(ends) != 2 or ends[0] == ends[1]:
+                    continue
+                merged = _SPEdge(ends[0], ends[1], a.segments + b.segments, a.grouped or b.grouped)
+                edges = [e for e in edges if e is not a and e is not b] + [merged]
+                merged_one = True
+                break
+            if not merged_one:
+                break
+            changed = True
         by_pair: dict[frozenset[_Node], list[_SPEdge]] = {}
         for e in edges:
             by_pair.setdefault(frozenset((e.u, e.v)), []).append(e)
@@ -2039,21 +2544,6 @@ def _reduce_parallel_groups(
             )
             edges = [e for e in edges if e not in members] + [merged]
             changed = True
-        incident: dict[_Node, list[_SPEdge]] = {}
-        for e in edges:
-            incident.setdefault(e.u, []).append(e)
-            incident.setdefault(e.v, []).append(e)
-        for node, inc in incident.items():
-            if node in keep or len(inc) != 2 or inc[0] is inc[1]:
-                continue
-            a, b = inc
-            ends = [x for e in (a, b) for x in (e.u, e.v) if x != node]
-            if len(ends) != 2 or ends[0] == ends[1]:
-                continue
-            merged = _SPEdge(ends[0], ends[1], a.segments + b.segments, a.grouped or b.grouped)
-            edges = [e for e in edges if e is not a and e is not b] + [merged]
-            changed = True
-            break
     nodes = {n for e in edges for n in (e.u, e.v)}
     if edges and len(edges) > len(nodes) - 1:
         return None
@@ -2106,15 +2596,50 @@ def describe_witness(witness: dict[str, object], origin: tuple[float, float] = (
     return out
 
 
+def _chain_branch_segments(branch: list[Segment]) -> list[Segment]:
+    """Order a branch's segments into one path-ordered chain.
+
+    Series merging concatenates a branch's edges in reduction order, so a
+    stepped branch reaches the blocking-branches witness as e.g.
+    ``[rejoin, step, run]``; a witness that wants the branch's true
+    endpoints needs them chained first (the ambiguity message of issue
+    #9542, whose stepped bars otherwise render a degenerate start==end
+    span). Segments that do not form one chain keep their given order.
+    """
+    remaining = list(branch)
+    if not remaining:
+        return remaining
+    chain = [remaining.pop(0)]
+    while remaining:
+        tail = _node_key(chain[-1].end)
+        head = _node_key(chain[0].start)
+        for i, seg in enumerate(remaining):
+            if _node_key(seg.start) == tail:
+                chain.append(seg)
+                break
+            if _node_key(seg.end) == head:
+                chain.insert(0, seg)
+                break
+        else:
+            break
+        remaining.pop(i)
+    return chain
+
+
 def _blocking_branches_witness(blockers: list[list[Segment]]) -> list[dict[str, object]]:
-    return [
-        {
-            "layer": b[0].layer,
-            "start": [b[0].start[0], b[0].start[1]],
-            "end": [b[-1].end[0], b[-1].end[1]],
-        }
-        for b in blockers
-    ]
+    witness: list[dict[str, object]] = []
+    for branch in blockers:
+        chain = _chain_branch_segments(list(branch))
+        if not chain:
+            continue
+        witness.append(
+            {
+                "layer": chain[0].layer,
+                "start": [chain[0].start[0], chain[0].start[1]],
+                "end": [chain[-1].end[0], chain[-1].end[1]],
+            }
+        )
+    return witness
 
 
 def _pad_covers(pcb: PCB, ref: str, pad_number: str, point: tuple[float, float]) -> bool:
@@ -2422,17 +2947,45 @@ def resolve_current_path(
         witness = _component_cycle_witness(adjacency, start, arrays)
         if witness and blockers:
             witness["blocking_branches"] = _blocking_branches_witness(blockers)
+        reason = (
+            "declared endpoints sit on a net whose routed copper contains a "
+            "loop/parallel return path reachable from them -- current split "
+            "between branches cannot be determined from a single resolved path"
+        )
+        # Same-layer blocking branches name their own case (issue #9542):
+        # parallel same-layer copper is supported only when the tracks
+        # overlap into one conductor, so say what to draw instead.
+        blocker_layers = [branch[0].layer for branch in blockers if branch]
+        if len(blocker_layers) > len(set(blocker_layers)):
+            reason += (
+                "; parallel same-layer copper resolves only when the tracks "
+                "overlap into one conductor -- use overlapping tracks, a "
+                "zone, or a two-layer parallel group"
+            )
         return PathResolution(
             spec=spec,
             status=STATUS_AMBIGUOUS,
-            reason=(
-                "declared endpoints sit on a net whose routed copper contains a "
-                "loop/parallel return path reachable from them -- current split "
-                "between branches cannot be determined from a single resolved path"
-            ),
+            reason=reason,
             source=source,
             sink=sink,
             witness=witness,
+        )
+
+    # A parallel arm the BFS chain did not ride still owns its pad-internal
+    # copper: each resolved arm's buried continuation to the pad terminal
+    # stays evidence. Taking attachments from a single BFS predecessor chain
+    # left a second arm's buried neck in or out by file order (#9647 review).
+    if parallel_groups:
+        group_ids = {id(seg) for group in parallel_groups for seg in group.segments}
+        arm_edges = {
+            edge
+            for hub_edges in adjacency.adjacency.values()
+            for _, edge in hub_edges
+            if edge.segment is not None and id(edge.segment) in group_ids
+        }
+        arm_hubs = {hub for edge in arm_edges for hub, _ in adjacency.attachments.get(edge, [])}
+        path_segments.extend(
+            seg for hub in arm_hubs for seg in _hub_continuation_segments(adjacency, hub, arm_edges)
         )
 
     # Every member remains physical evidence checked at the full current.

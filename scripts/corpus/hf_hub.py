@@ -24,7 +24,7 @@ DEFAULT_DATASET = "bshada/open-schematics"
 DATASET_LICENSE = "CC-BY-4.0"
 DATASETS_SERVER = "https://datasets-server.huggingface.co"
 HUB_API = "https://huggingface.co/api/datasets"
-USER_AGENT = "kicad-tools-corpus-probe/1 (+https://github.com/rjwalters/kicad-tools)"
+USER_AGENT = "kicad-tools-corpus-probe/1 (+https://github.com/2AMLogic/kicad-tools)"
 
 
 class HubError(RuntimeError):

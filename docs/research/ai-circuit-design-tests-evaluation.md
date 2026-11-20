@@ -85,7 +85,7 @@ Suggested ask: an analyzer run on the existing shared input design, and (optiona
 
 **Body**:
 
-> Hi, and thanks for running this bench. We would like to offer **kicad-tools** (https://github.com/rjwalters/kicad-tools, MIT) as a tool under test.
+> Hi, and thanks for running this bench. We would like to offer **kicad-tools** (https://github.com/2AMLogic/kicad-tools, MIT) as a tool under test.
 >
 > **What it is.** A Python toolkit that lets an AI agent parse, check and modify KiCad schematics and PCBs without a running KiCad GUI: pure-Python DRC, ERC/DRC wrappers, manufacturing-readiness audit, connectivity and LVS-style checks, a native router (C++ backend), placement, zones, and fab exports. Output is JSON. It is a toolkit rather than a design agent, so we suggest classing it as an **analyzer**, and as a **hybrid** if you run it on the generation prompt too.
 >
@@ -93,7 +93,7 @@ Suggested ask: an analyzer run on the existing shared input design, and (optiona
 >
 > **Setup notes** (for a `setup.md`):
 > - Python 3.10+, `uv`, KiCad 8 or newer with `kicad-cli` on PATH.
-> - `git clone https://github.com/rjwalters/kicad-tools && cd kicad-tools`
+> - `git clone https://github.com/2AMLogic/kicad-tools && cd kicad-tools`
 > - `uv sync`
 > - `uv run kct build-native` (builds the C++ router; `uv run kct build-native --check` should report it available)
 > - CLI entry point: `uv run kct --help` (every command can emit JSON)

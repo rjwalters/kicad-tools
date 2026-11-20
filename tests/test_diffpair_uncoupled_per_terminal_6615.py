@@ -382,7 +382,10 @@ COMMITTED = {
         ("USB_MCU_D+", "USB_MCU_D-"): 0.9553,
     },
     "boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb": {
-        (f"LVDS{i}_P", f"LVDS{i}_N"): 1.5412 for i in (1, 2, 3, 4)
+        # Issue #9548: the pad-mask-escape repair re-derived the LVDS launches;
+        # pinned KiCad reads 1.416 mm per pair on the regenerated copper.
+        (f"LVDS{i}_P", f"LVDS{i}_N"): 1.4162
+        for i in (1, 2, 3, 4)
     },
 }
 

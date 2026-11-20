@@ -107,7 +107,7 @@ gap (it is a documentation gap in this page).
 - `run.json` records toolkit `kicad-tools`, the agent and model, prompt hashes
   and the number of continue prompts.
 - The transcript shows `kct` CLI calls and `kct` MCP tool calls. It shows no
-  access to `rjwalters/kicad-tools` `boards/` (PROTOCOL.md §7; `bench/finish`
+  access to `2AMLogic/kicad-tools` `boards/` (PROTOCOL.md §7; `bench/finish`
   scans for it).
 
 ### What counts as a pass
@@ -282,7 +282,7 @@ about 1.5x that figure for the second run.
   workspace under `~/pcba-bench-runs/<run-id>/` can be deleted.
 - Abort immediately on any of: the spend cap reached; a login prompt asking for
   a credential value; the agent being sent anything other than the two allowed
-  prompts; the transcript showing access to `rjwalters/kicad-tools` `boards/`;
+  prompts; the transcript showing access to `2AMLogic/kicad-tools` `boards/`;
   a command that would change a shared tool install (`uv tool install`,
   `pip install --user`, `npm -g`, `apt`).
 - Comment on #7776 with what ran, how long, and why it stopped. A partial run

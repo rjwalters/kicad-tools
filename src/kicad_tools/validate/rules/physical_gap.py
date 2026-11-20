@@ -34,7 +34,13 @@ from typing import Any
 from ...schema.pcb import _fill_token_is_filled
 from ..copper_refs import board_origin, segment_ref, via_ref
 from ..violations import DRCResults, DRCViolation
-from .clearance import _pad_on_layer, _pad_polygon, _repair_fill_polygon, _transform_pad_position
+from .clearance import (
+    _pad_has_no_copper,
+    _pad_on_layer,
+    _pad_polygon,
+    _repair_fill_polygon,
+    _transform_pad_position,
+)
 
 # Polygon approximation and comparison tolerance, in millimetres.
 TOLERANCE = 0.001
@@ -487,6 +493,11 @@ def _collect(pcb):
             sources.append(CopperSource(geom, graphic.layer, "", identity))
         for index, pad in enumerate(fp.pads):
             if pad.type == "np_thru_hole":
+                continue
+            if _pad_has_no_copper(pad):
+                # Issue #9528: a pad with no copper layer (paste-only custom
+                # pads in the stock library) has nothing to measure, and must
+                # not surface as unsupported/unresolved coverage.
                 continue
             if pad.shape == "custom":
                 # Issue #9498: a custom pad contributes its real
