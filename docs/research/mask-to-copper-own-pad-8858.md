@@ -606,3 +606,41 @@ measuring what they always measured.
 
 Remaining under #8858: `board_05_unattended.py` (fresh seed routes,
 0-warnings gate, and the with/without `kct check` timing AC).
+
+**Wide bars and custom pads (issue #9750, 2026-11-20, `f5daee4fa`).** Two
+same-net shapes that a clean layout cannot avoid measured as `violation`
+(condition 4 / condition 1 respectively) and are now `within_own_pad`:
+
+- *A bar wider than its own pad.* The one-crossing allowance
+  `1.45 x width x clearance` models a track narrower than the pad. A 5.5 mm
+  bar ending at the centre of a 2.4 mm pad covers the *whole* perimeter
+  band, so the copper under mask beside the opening is the pad's own
+  perimeter (band area = perimeter x clearance, independent of entry
+  geometry): circle 2.4 passed only because 0.70 mm² happened to sit under
+  the 0.72 mm² allowance while rect 2.4 (0.86 mm²) and circle 3.6 failed --
+  nothing about the layouts differed. `_within_own_pad` condition 4 now
+  allows `A = area(opening.buffer(c+u) - opening.buffer(u))` when the
+  segment still has an authored end strictly inside the pad (the existing
+  gate) and its copper covers that whole ring (`ring.difference(copper)`
+  numerically empty). Round and square pads then agree by construction; a
+  narrower track keeps the one-crossing budget; pass-through / straddle /
+  no-end-inside copper still fails condition 4 first; a positive margin
+  still fails condition 3 before the band is measured. A bar exactly as
+  wide as the pad leaves the ring's far side bare and stays on the plain
+  allowance (measured info: its single flush entry strip, 0.22 mm², is
+  inside the 0.31 mm² budget for a 2.4 mm track).
+- *A track entering a custom pad* (the stock `SOT-89-3` tab): every
+  connection errored on condition 1 because `pad:custom` was outside the
+  plain-shape tuple. The entry class now admits the bare `pad:custom` kind
+  (`_WITHIN_OWN_PAD_ENTRY_OWNER_KINDS`); conditions 2-4 already measure
+  against the caller-supplied real copper outline, so nothing exposed
+  beyond the tab keeps its verdict. The pour-thermal class keeps the plain
+  tuple (`_own_pour_thermal`, #9284 boundary pinned by its own suite), and
+  suffixed kinds (`pad:custom:padstack`, `pad:custom:chamfer`) stay out.
+
+Tests: `tests/test_mask_copper_own_pad_9750.py` (synthetic geometry at the
+issue's scale -- the reproduction board is not committed; the three bar
+reproductions, the pass-through and margin keepers, the tab entry, the
+exposed-beyond-outline error, and the translation sweep). Two pins in
+`tests/test_mask_copper_own_pad_8858.py` that used `pad:custom` as a
+stand-in for "unverified shape" moved to `pad:custom:padstack`.

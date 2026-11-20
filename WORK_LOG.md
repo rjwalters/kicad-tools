@@ -16,6 +16,20 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-20
 
+- **PR #9776**: test: give the remaining _route() verdict tests the 180s timeout cap
+- **Issue #9766** (closed): test flake: test_stranded_pour_unknown_is_unverified[direct] times out (>60s) on Test (sibling of #9115)
+- **PR #9760**: refactor: share the voltage-map sidecar read and non-object check in creepage.engine
+- **Issue #9755** (closed): Consolidate the three near-identical voltage-map sidecar loaders
+- **PR #9753**: fix(mask): excuse wide same-net bars on their own pad and custom-pad entries
+- **Issue #9750** (closed): mask_to_copper: a same-net track wider than its own pad, and any track entering a stock custom pad (SOT-89 tab), are errors with no clean layout available
+- **Issue #9304** (closed): Match-group skew: exclude truly-defect off-path copper without switching rulers (from #9138)
+- **PR #9741**: fix(validate): shed defect copper from the match-group skew ruler (Issue #9304)
+- **Issue #9752** (closed): Padstack-nested pad primitives: flip_footprint_children_to_back and custom_pad_copper still read only the top-level block
+- **PR #9770**: fix: mirror nested padstack pad primitives and exchange front/back blocks like KiCad Flip
+- **Issue #9771** (closed): test flake: two test_route_pairwise_gate_4588 route tests time out (>60s) on Test (siblings of #9766 pattern)
+- **PR #9774**: test: skip chained completion pass in pairwise gate grid routes
+- **Issue #9708** (closed): CI red on main: test_route_pairwise_gate_4588 strict-noop tests route 0% since the lattice own-net pad band (#9060)
+- **PR #9728**: fix: route lattice pads sealed inside their own slit-band shell
 - **PR #9769**: fix: pcb prune and readiness cleanup honour the board's current-paths sidecar
 - **Issue #9747** (closed): readiness --generate: the cleanup's prune step ignores the board's current-paths sidecar, removes one layer of deliberately doubled power copper, and the run then fails its own path_ampacity check
 - **PR #9768**: perf: bucket junction candidates in layout-quality corner counting

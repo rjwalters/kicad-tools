@@ -48,7 +48,7 @@ import json
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
-from kicad_tools.creepage.engine import voltage_map_from_dict
+from kicad_tools.creepage.engine import load_voltage_sidecar, voltage_map_from_dict
 from kicad_tools.creepage.standards import get_standard
 
 
@@ -68,9 +68,7 @@ def load_voltage_intervals(path: str | Path) -> dict[str, tuple[float, float]]:
         ValueError: If the file is not a JSON object, or if any net voltage is
             not a finite real number.
     """
-    raw = json.loads(Path(path).read_text())
-    if not isinstance(raw, dict):
-        raise ValueError(f"voltage map must be a JSON object, got {type(raw).__name__}")
+    raw = load_voltage_sidecar(path)
     intervals = voltage_map_from_dict(raw)[0]
     return {name: (float(iv.lo), float(iv.hi)) for name, iv in intervals.items()}
 
@@ -100,11 +98,7 @@ def load_voltage_map(path: str | Path) -> dict[str, float]:
         ValueError: If the file is not a JSON object, or if any net voltage is
             not a finite real number.
     """
-    raw = json.loads(Path(path).read_text())
-    if not isinstance(raw, dict):
-        # ``voltage_map_from_dict`` raises ``TypeError`` for a non-dict; keep the
-        # historical ``ValueError`` contract for the placement loader's callers.
-        raise ValueError(f"voltage map must be a JSON object, got {type(raw).__name__}")
+    raw = load_voltage_sidecar(path)
     intervals = voltage_map_from_dict(raw)[0]
     return {name: max(abs(iv.lo), abs(iv.hi)) for name, iv in intervals.items()}
 

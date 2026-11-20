@@ -522,6 +522,32 @@ def non_hv_nets_from_path(path: str | Path) -> dict[str, str]:
     return non_hv_nets_from_dict(json.loads(Path(path).read_text()))
 
 
+def load_voltage_sidecar(path: str | Path) -> dict[Any, Any]:
+    """Read a ``--voltage-map`` JSON sidecar and require a top-level object (#9755).
+
+    Shared read + object-check preamble of every voltage-map file loader
+    (:func:`kicad_tools.placement.hv_domains.load_voltage_map` and the
+    ``kicad_tools.router.pairwise_clearance`` ``load_*`` family), so the
+    non-object error contract lives in exactly one place.  Parsing stays with
+    the callers (:func:`voltage_map_from_dict` /
+    :func:`pair_bounds_from_dict`).
+
+    Returns the raw decoded object.
+
+    Raises:
+        ValueError: if the file's top level is not a JSON object
+            (:func:`voltage_map_from_dict` itself raises :class:`TypeError`
+            for a non-dict; the file loaders keep the historical
+            :class:`ValueError` their CLI callers catch).
+    """
+    import json
+
+    raw = json.loads(Path(path).read_text())
+    if not isinstance(raw, dict):
+        raise ValueError(f"voltage map must be a JSON object, got {type(raw).__name__}")
+    return raw
+
+
 def mains_suspect_nets(pcb: PCB) -> list[str]:
     """Sorted board net names that strongly imply a mains/HV conductor.
 
