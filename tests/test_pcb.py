@@ -2085,6 +2085,49 @@ class TestTraceRoutingAPI:
         assert seg.width == pytest.approx(0.25)
         assert seg.layer == "F.Cu"
 
+    def test_add_trace_save_keeps_45_degree_endpoints(self, tmp_path):
+        """Saved endpoints keep 0.0001 mm digits past 100 mm (issue #9818).
+
+        ``.6g`` float formatting wrote ``147.5625`` as ``147.562``, tilting
+        this exact 45-degree leg 0.088 degrees off-angle in the census.
+        """
+        from kicad_tools.router.quantize import segment_angle_census
+
+        # Minimal board with net 1 and no outline, so save() does not
+        # recenter anything and the written coordinates are the added ones.
+        base = tmp_path / "base.kicad_pcb"
+        base.write_text(
+            "(kicad_pcb\n"
+            "\t(version 20241229)\n"
+            '\t(generator "pcbnew")\n'
+            '\t(generator_version "9.0")\n'
+            "\t(general\n\t\t(thickness 1.6)\n\t)\n"
+            '\t(paper "A4")\n'
+            "\t(layers\n"
+            '\t\t(0 "F.Cu" signal)\n'
+            '\t\t(2 "B.Cu" signal)\n'
+            '\t\t(25 "Edge.Cuts" user)\n'
+            "\t)\n"
+            '\t(net 0 "")\n'
+            '\t(net 1 "SIG")\n'
+            ")\n"
+        )
+
+        pcb = PCB.load(str(base))
+        pcb.add_trace((147.5625, 92.3375), (147.4, 92.5), net=1)
+        out = tmp_path / "with_trace.kicad_pcb"
+        pcb.save(str(out))
+
+        text = out.read_text()
+        assert "(start 147.5625 92.3375)" in text
+
+        reloaded = PCB.load(str(out))
+        assert len(reloaded.segments) == 1
+        seg = reloaded.segments[0]
+        assert seg.start == (147.5625, 92.3375)
+        assert seg.end == (147.4, 92.5)
+        assert segment_angle_census(out) == (1, [])
+
     def test_add_trace_net_number_resolves_real_net(self):
         """An int ``net`` is a net NUMBER reference, not a name (issue #9078).
 

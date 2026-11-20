@@ -389,6 +389,33 @@ class TestSExpSerialization:
         # The float 42.0 may be serialized as "42" or "42.0" depending on implementation
         assert "42" in result
 
+    def test_new_float_keeps_router_quantum(self):
+        """New floats at 100-999 mm keep 0.0001 mm digits (issue #9818).
+
+        ``.6g`` rounded 147.5625 to 147.562, tilting exact 45-degree copper.
+        """
+        assert serialize_sexp(SExp.list("start", 147.5625, 92.3375)) == ("(start 147.5625 92.3375)")
+        assert serialize_sexp(SExp.list("start", -147.5625, -92.3375)) == (
+            "(start -147.5625 -92.3375)"
+        )
+        # Up to 6 decimals (1 nm), trailing zeros trimmed.
+        assert serialize_sexp(SExp.list("at", 124.598076, 1.5)) == "(at 124.598076 1.5)"
+
+    def test_new_integral_float_stays_integer(self):
+        """Integer-valued floats still serialize without a decimal point."""
+        assert serialize_sexp(SExp.list("at", 148.0, -3.0)) == "(at 148 -3)"
+
+    def test_new_small_float_survives_round_trip(self):
+        """Small nonzero non-coordinate values stay representable (issue #9818)."""
+        for value in (1e-8, -2.5e-7, 0.0001, 0.0123456):
+            text = serialize_sexp(SExp.list("v", value))
+            assert parse_string(text).get_float(0) == value
+
+    def test_parsed_numeric_spelling_preserved(self):
+        """Parsed number tokens keep their original spelling byte for byte."""
+        text = "(start 147.562500 92.337500)"
+        assert serialize_sexp(parse_string(text)) == text
+
     def test_serialize_multiline_text(self):
         """Serialize multiline text with escaped newlines.
 
