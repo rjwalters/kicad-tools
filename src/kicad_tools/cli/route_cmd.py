@@ -741,6 +741,32 @@ def _restore_route_grid(router: "Autorouter", routes: list["Route"]) -> None:
         router.grid.mark_route_usage(route)
 
 
+def _fmt_secs(value: float) -> str:
+    """Format a computed seconds duration for display (:data:`g` rounding).
+
+    Issue #9581 (PR #9603 review): the budget derivation line formatted
+    every term with ``:.0f``, so a fractional ``--timeout`` was rounded
+    away before the user's eyes -- ``--timeout 120.5`` printed
+    ``--timeout 120s`` and ``0.4`` printed ``--timeout 0s``.  Computed
+    durations (setup, reserves, budget) keep this display rounding; the
+    USER-SUPPLIED value uses :func:`_fmt_secs_exact`.
+    """
+    return f"{float(value):g}"
+
+
+def _fmt_secs_exact(value: float) -> str:
+    """Format a user-supplied seconds value round-trippably.
+
+    Issue #9581 (PR #9603 review, round 2): ``:g`` keeps only six
+    significant digits, so a typed ``--timeout 120.0001`` printed
+    ``--timeout 120s``.  The shortest round-trippable repr keeps every
+    digit the user supplied (``120.0001``), with an integral value still
+    printing bare (``100``).
+    """
+    text = repr(float(value))
+    return text[:-2] if text.endswith(".0") else text
+
+
 def _set_wall_clock_deadline(args) -> None:
     """Stamp a monotonic deadline on ``args`` from ``args.timeout``.
 
@@ -762,6 +788,7 @@ def _set_wall_clock_deadline(args) -> None:
     of ``--timeout``.
     """
     timeout = getattr(args, "timeout", None)
+    typed_timeout = float(timeout) if timeout and timeout > 0 else None
     now = time.monotonic()
     from .route_deadline import remaining_deadline
 
@@ -788,6 +815,31 @@ def _set_wall_clock_deadline(args) -> None:
             float(timeout),
             reserve,
         )
+        # Issue #9581: state the derivation on stdout, at the start of a
+        # ``--complete`` run with ``--timeout`` -- the reserves are real time
+        # off the budget the user typed, and until now they were only visible
+        # in the logger.info line above, which never reaches a redirected
+        # log.  Exactly the values stamped on ``args`` below this branch.
+        if (
+            typed_timeout is not None
+            and getattr(args, "complete", False)
+            and not getattr(args, "quiet", False)
+        ):
+            # Issue #9581 (PR #9603 review): under a supervisor-set invocation
+            # deadline the clamp above shrinks the budget by the time the
+            # invocation already consumed.  Lead with the value the user
+            # typed and give the consumed time its own term, so the printed
+            # arithmetic sums to the flag instead of silently relabelling
+            # the clamped remainder as ``--timeout``.
+            setup_consumed = max(0.0, typed_timeout - float(timeout))
+            print(
+                f"--timeout {_fmt_secs_exact(typed_timeout)}s "
+                f"- setup {_fmt_secs(setup_consumed)}s "
+                f"- auto-fix reserve {_fmt_secs(float(reserve))}s "
+                f"- post-route reserve {_fmt_secs(float(post_route))}s "
+                f"= routing budget "
+                f"{_fmt_secs(float(timeout) - float(reserve) - float(post_route))}s"
+            )
     else:
         args._wall_clock_deadline = None
         args._auto_fix_reserve = 0.0
@@ -19673,12 +19725,26 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
     already exist independently:
 
     * **Timing** -- the lattice netset negotiation's per-connection decline
-      reason (``LatticePathfinder.failure_reasons``, issue #4278) plus the
-      per-link wall-clock budget stats (``LatticeNegotiationStats``,
-      issue #4472): elapsed time, the granted budget, and whether the
-      deadline was hit.  A connection never reached before the deadline is
-      declined with the honest reason ``"deadline-exceeded"`` (see
-      :meth:`~kicad_tools.router.lattice.pathfinder.LatticePathfinder.route_netset`).
+      reason (``LatticePathfinder.failure_reasons``, issue #4278).  The
+      per-link deadline signal IS that reason: ``"deadline-exceeded"``
+      means the deadline cut the best pass before the link reached any
+      decline -- never attempted in ANY pass, or its most recent earlier
+      outcome was a successful route.  A link an earlier pass attempted
+      and declined on its own merits keeps that real reason even when a
+      later truncated pass became the best pass -- unless a still later
+      pass routed it, which clears the record
+      (:meth:`~kicad_tools.router.lattice.pathfinder.LatticePathfinder.route_netset`);
+      any other reason means the link was attempted (and declined or
+      rolled back).  Per link, ``deadline_hit`` is true only for the
+      deadline-exceeded reason; ``attempted`` comes from the negotiation's
+      attempted-keys set (true when the search reached the link in ANY
+      pass), falling back to the reason's complement when the set is
+      absent
+      (issue #9581: they used to be OR-ed with / copied from the
+      whole-run negotiation totals, so once a run hit its deadline every
+      link was flagged as deadline-hit).  Per-link ``elapsed_s`` /
+      ``budget_s`` are ``None`` -- the wall-clock totals are whole-run
+      quantities and stay at report level only.
     * **Blocking copper** -- the SAME obstruction enumeration
       ``kct net-status --why`` prints
       (:func:`~kicad_tools.router.stuck_classifier.classify_stuck_nets`),
@@ -19706,6 +19772,10 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
     if stats is None:
         return None
     reasons: dict[object, str] = dict(getattr(router, "_lattice_failure_reasons", {}) or {})
+    # Issue #9581: keys whose search started in ANY pass of the negotiation.
+    # ``None`` when the router predates the field (duck-typed stand-ins);
+    # the attempted flag then falls back to the reason-derived form below.
+    attempted_keys: frozenset[object] | None = getattr(router, "_lattice_attempted_keys", None)
     # Issue #8396: links committed by the search but rolled back for creepage.
     creepage_refusals: list[dict] = list(getattr(router, "_complete_creepage_refusals", []) or [])
     if not reasons and not creepage_refusals:
@@ -19760,11 +19830,29 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
         net_name = _net_name_for_lattice_key(router, key)
         ep = endpoints.get(key)
         diag = diag_by_net.get(net_name)
+        # Issue #9581: per-link truth.  ``attempted`` is the honest
+        # cross-pass signal -- True when the search reached this link in
+        # ANY pass (the pathfinder's attempted-keys set).  A bare
+        # ``"deadline-exceeded"`` reason cannot carry it: the stamp is
+        # per-PASS, so a link declined on its own merits in an early
+        # pass carries it in a later truncated pass that became the
+        # best pass (the pathfinder now restores the earlier real
+        # reason for such links, as long as that decline is still the
+        # link's most recent outcome -- a pass that routes the link
+        # clears the record, so it reads as the deadline stamp instead;
+        # the set still decides ``attempted`` either way).  ``deadline_hit`` keeps meaning
+        # "this reason is the deadline stamp".  (Both flags used to be
+        # OR-ed with / copied from the whole-run negotiation totals,
+        # so once a run hit its deadline every link was flagged.)
+        deadline_reason = reason == "deadline-exceeded"
         entry: dict = {
             "net": net_name,
             "reason": reason,
             "link": {"start": ep[0], "end": ep[1]} if ep else None,
-            "deadline_hit": bool(reason == "deadline-exceeded" or stats.deadline_hit),
+            "deadline_hit": bool(deadline_reason),
+            "attempted": bool(
+                (key in attempted_keys) if attempted_keys is not None else (not deadline_reason)
+            ),
             # Issue #4979: machine-readable "this residual is layer-
             # constrained" flag.  A link the hard layer intent declined
             # (``layer-constrained-start``/``-end``, or a search the hard
@@ -19775,8 +19863,12 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
             # reason, because the remedy is different (relax/repoint the
             # net-class ``avoid_layers``, or give the net a legal corridor).
             "layer_constrained": _is_layer_constrained_reason(reason),
-            "elapsed_s": round(stats.elapsed_s, 3),
-            "budget_s": round(stats.budget_s, 3) if stats.budget_s is not None else None,
+            # Issue #9581: ``stats.elapsed_s`` / ``stats.budget_s`` are
+            # WHOLE-negotiation totals, not this link's; copying them onto
+            # every entry made a deadline run look like each link burned
+            # the full budget.  Run totals stay at report level only.
+            "elapsed_s": None,
+            "budget_s": None,
             "blocking_copper": list(diag.blocking_nets) if diag else [],
             "nearest_blocker_mm": (
                 round(diag.nearest_blocker_mm, 4)
@@ -19794,10 +19886,15 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
         links.append(
             {
                 **ref,
+                # Issue #9581: a creepage-rolled-back link WAS attempted
+                # (committed by the search, then rolled back for pairwise
+                # creepage) -- attempted, not deadline-hit, and the timing
+                # totals below are run-level quantities, not per link.
                 "deadline_hit": False,
+                "attempted": True,
                 "layer_constrained": False,
-                "elapsed_s": round(stats.elapsed_s, 3),
-                "budget_s": round(stats.budget_s, 3) if stats.budget_s is not None else None,
+                "elapsed_s": None,
+                "budget_s": None,
                 "blocking_copper": [ref["blocking_net"]],
                 "nearest_blocker_mm": ref["measured_mm"],
                 "stuck_classification": None,
@@ -19836,6 +19933,11 @@ def _print_complete_link_report(report: dict) -> None:
         link = entry["link"]
         ep = f"{link['start']} <-> {link['end']}" if link else "(pads unknown)"
         print(f"  [{entry['net']}] {ep} -- {entry['reason']}")
+        # Issue #9581: say explicitly when a link was never attempted
+        # because the run's deadline passed first -- distinct from an
+        # attempted link that the search declined on its own merits.
+        if entry.get("attempted") is False:
+            print("      not attempted: the run's deadline passed before this link was reached")
         if entry.get("required_mm") is not None:
             print(
                 f"      creepage: {entry['net']} vs {entry['blocking_net']}: "
@@ -20480,6 +20582,15 @@ def _list_unverified_sets(output_path: object, *, file=None) -> list[Path]:
 
 
 def _in_process_main(argv: list[str] | None = None) -> int:
+    # Issue #9581: the route command mixes bare print() with flush_print();
+    # with stdout redirected Python block-buffers the bare prints and a
+    # long run shows nothing until exit.  Line-buffer once here -- the
+    # single entry every path shares (CLI, supervised worker, tests) --
+    # rather than sprinkling flush=True over hundreds of call sites.
+    # Guarded: a stream without reconfigure (canned test doubles) keeps
+    # its own buffering.
+    with contextlib.suppress(AttributeError, ValueError):
+        sys.stdout.reconfigure(line_buffering=True)  # type: ignore[union-attr]
     from .route_receipt import run
 
     return run(lambda: _in_process_main_impl(argv))
@@ -20683,8 +20794,8 @@ def _route_parser() -> argparse.ArgumentParser:
         help=(
             "Issue #4477 (epic #4465, Phase 4): write the structured, "
             "machine-readable --complete unroutable-link report to PATH as "
-            "JSON (net, link pad endpoints, elapsed vs the per-link "
-            "deadline, and blocking copper reusing the 'kct net-status "
+            "JSON (run elapsed time and budget, plus each link's net, pad "
+            "endpoints, attempted and deadline_hit flags, and blocking copper from 'kct net-status "
             "--why' obstruction enumeration). Only written when --complete "
             "left one or more links unroutable; a human-readable summary is "
             "always printed regardless of this flag. Ignored without "

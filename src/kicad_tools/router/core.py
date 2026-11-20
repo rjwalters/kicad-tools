@@ -2006,6 +2006,12 @@ class Autorouter:
         self._lattice_net_routes: dict[int, list[Route]] | None = None
         self._lattice_served: set[int] = set()
         self._lattice_negotiation_stats: Any = None
+        # Issue #9581: keys whose search started in ANY pass of the final
+        # lattice negotiation -- the honest per-link ``attempted`` signal
+        # for the --complete report (a "deadline-exceeded" reason is
+        # per-pass and can land on a link an earlier pass declined on its
+        # own merits).
+        self._lattice_attempted_keys: frozenset[object] = frozenset()
         # Issue #4270: per-diff-pair coupled-routing outcomes for the lattice
         # engine ("coupled" or a decline reason), keyed by pair base name.
         self._lattice_pair_outcomes: dict[str, str] = {}
@@ -5667,6 +5673,11 @@ class Autorouter:
                 pf, _negotiate, ran[id(coupled)], coupled, offer, (routes_by_key, stats)
             )
         self._lattice_negotiation_stats = stats
+        # Issue #9581: keep the attempted-keys signal beside the stats --
+        # ``getattr`` because duck-typed pathfinder stand-ins in tests
+        # predate the field (the report falls back to the reason-derived
+        # flag when it is absent).
+        self._lattice_attempted_keys = frozenset(getattr(stats, "attempted_keys", ()) or ())
         self._warn_lattice_pair_nets_routed_twice()
         # Issue #4477 (epic #4465, Phase 4): copy the per-connection decline
         # diagnosis onto the ROUTER (not just the pathfinder) because
