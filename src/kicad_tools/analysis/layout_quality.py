@@ -104,10 +104,13 @@ _CORNER_CLASSES = ("right_angle", "acute", "turn_back")
 # Vertex keys round coordinates to 2 decimals, the same granularity the
 # sharp-trace-corner rule uses to group findings at one vertex.
 _VERTEX_DECIMALS = 2
-# Endpoint-join snap for Edge.Cuts polygonization: 1e-9 mm is far above
-# float rotation noise (~1e-15) and far below KiCad's 1 nm unit, so shared
-# corners compare equal without measurably moving the area.
-_OUTLINE_SNAP_DECIMALS = 9
+# Endpoint-join snap for Edge.Cuts polygonization: 1e-6 mm is KiCad's 1 nm
+# file unit. A board graphic declares its corner rounded to that unit
+# (``48.660254``) while a rotated footprint endpoint is computed
+# (``48.66025403784439``); the two differ by up to ~5e-7 mm, so the snap must
+# be as coarse as the file's own quantization or the shared corner stays open.
+# The residual cost is a vertex moved by <=0.5 nm (~3e-6 mm^2 here).
+_OUTLINE_SNAP_DECIMALS = 6
 
 
 def _classify_angle(angle: float | None) -> str | None:

@@ -691,6 +691,42 @@ def test_rotated_footprint_edge_joins_board_lines():
     assert analyze_layout_quality(pcb).outline_area_mm2 == pytest.approx(50.0, abs=1e-6)
 
 
+MIXED_JOIN_TRIANGLE_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+
+  (gr_line (start {ex} {ey}) (end {ex} 30) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start {ex} 30) (end 40 30) (stroke (width 0.1)) (layer "Edge.Cuts"))
+
+  (footprint "Mech:EdgePiece"
+    (layer "F.Cu")
+    (at 40 30 {rot})
+    (property "Reference" "J9")
+    (fp_line (start 0 0) (end 10 0) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  )
+)
+"""
+
+
+@pytest.mark.parametrize("rot", [30, 45, 60])
+def test_rotated_footprint_edge_joins_board_lines_at_kicad_precision(rot):
+    # The board graphic declares the shared corner at KiCad's 1 nm file
+    # precision while the footprint endpoint is computed in float; the
+    # contour must still close at rotations that are not multiples of 90.
+    rad = math.radians(rot)
+    ex = 40 + 10 * math.cos(rad)
+    ey = 30 - 10 * math.sin(rad)
+    pcb = _load_pcb(MIXED_JOIN_TRIANGLE_PCB.format(rot=rot, ex=f"{ex:.6f}", ey=f"{ey:.6f}"))
+    expected = 0.5 * abs(ex - 40) * abs(30 - ey)
+    assert analyze_layout_quality(pcb).outline_area_mm2 == pytest.approx(expected, abs=1e-4)
+
+
 def test_open_contour_still_none_after_snapping():
     # Control: a genuinely open contour (gap of 1 mm) stays unmeasured.
     pcb = _load_pcb(MIXED_JOIN_PCB.format(rot=90, close_x=41))
@@ -703,7 +739,7 @@ def test_footprint_square_cutout_rotated_not_degenerate(rot):
     # zero-height line (two points, not four), leaving dangles that
     # dropped the whole area to None; it must subtract 36 mm^2.
     pcb = _load_pcb(FP_RECT_ROTATED_CUTOUT_PCB.format(rot=rot, lx1=-3, ly1=-3, lx2=3, ly2=3))
-    assert analyze_layout_quality(pcb).outline_area_mm2 == pytest.approx(100 * 50 - 36.0, abs=1e-6)
+    assert analyze_layout_quality(pcb).outline_area_mm2 == pytest.approx(100 * 50 - 36.0, abs=1e-4)
 
 
 def test_footprint_curve_edge_cuts_returns_none():
@@ -735,7 +771,7 @@ def test_footprint_arc_pair_cutout_matches_gr_arc_representation(rot):
     # every footprint arc and dropped outline_area_mm2 to None.
     gr = analyze_layout_quality(_load_pcb(ARC_PAIR_CUTOUT_PCB)).outline_area_mm2
     fp = analyze_layout_quality(_load_pcb(FP_ARC_PAIR_CUTOUT_PCB.format(rot=rot))).outline_area_mm2
-    assert fp == pytest.approx(gr, abs=1e-9)
+    assert fp == pytest.approx(gr, abs=1e-4)
     assert fp == pytest.approx(100 * 50 - math.pi * 25, abs=0.01)
 
 
@@ -761,7 +797,7 @@ def test_rounded_fp_rect_cutout_matches_gr_rect_representation(rot):
     fp = analyze_layout_quality(
         _load_pcb(ROUNDED_FP_RECT_CUTOUT_PCB.format(rot=rot))
     ).outline_area_mm2
-    assert fp == pytest.approx(gr, abs=1e-6)
+    assert fp == pytest.approx(gr, abs=1e-4)
     assert fp == pytest.approx(100 * 50 - (84.0 + 4.0 * math.pi), abs=0.01)
 
 
@@ -787,7 +823,7 @@ def test_fp_poly_semicircle_cutout_matches_gr_poly_representation(rot):
     fp = analyze_layout_quality(
         _load_pcb(FP_POLY_SEMICIRCLE_CUTOUT_PCB.format(rot=rot))
     ).outline_area_mm2
-    assert fp == pytest.approx(gr, abs=1e-6)
+    assert fp == pytest.approx(gr, abs=1e-4)
     assert fp == pytest.approx(100 * 50 - (100.0 + 12.5 * math.pi), abs=0.01)
 
 
