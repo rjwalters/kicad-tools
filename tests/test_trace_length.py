@@ -914,6 +914,135 @@ class TestMeasureNetPath:
         assert measurement.off_path_length_mm == pytest.approx(0.0, abs=0.05), step_mm
 
 
+class TestDefectTrackCopper:
+    """Defect-copper classification on the path fixtures (Issue #9304).
+
+    The classifier is one uniform rule per member: dead-end branches and
+    terminal-rooted loops whose connected structure exceeds the epsilon
+    are defect; rejoined cycle copper (bumps, parallel duplicates) and
+    the sub-epsilon escape residual are not.
+    """
+
+    @pytest.fixture
+    def analyzer(self) -> TraceLengthAnalyzer:
+        return TraceLengthAnalyzer()
+
+    def test_defect_classification_is_opt_in(self, path_base_pcb: Path, analyzer):
+        """Without ``defect_epsilon_mm`` the field stays ``None``."""
+        pcb = PCB.load(str(path_base_pcb))
+
+        measurement = analyzer.measure_net_path(pcb, "LOOP")
+
+        assert measurement.defect_track_mm is None
+        assert measurement.defect_structures == 0
+
+    def test_loop_through_own_pad_is_defect(self, path_base_pcb: Path, analyzer):
+        """The LOOP net's 20 mm out-and-back is shed as one structure."""
+        pcb = PCB.load(str(path_base_pcb))
+
+        measurement = analyzer.measure_net_path(pcb, "LOOP", defect_epsilon_mm=4.0)
+
+        assert measurement.defect_track_mm == pytest.approx(20.0, abs=0.05)
+        assert measurement.defect_structures == 1
+
+    def test_dead_end_stub_is_defect(self, path_base_pcb: Path, analyzer):
+        """The STUB net's 5 mm mid-trunk dead end is shed."""
+        pcb = PCB.load(str(path_base_pcb))
+
+        measurement = analyzer.measure_net_path(pcb, "STUB", defect_epsilon_mm=4.0)
+
+        assert measurement.defect_track_mm == pytest.approx(5.0, abs=0.05)
+        assert measurement.defect_structures == 1
+
+    def test_small_stub_below_epsilon_is_kept(self, path_base_pcb: Path, analyzer):
+        """A structure under the epsilon stays counted (no new noise).
+
+        The same STUB net measured with a 6 mm epsilon keeps its 5 mm
+        dead end in the figure: the correction fires only where the
+        off-path warning's epsilon already would.
+        """
+        pcb = PCB.load(str(path_base_pcb))
+
+        measurement = analyzer.measure_net_path(pcb, "STUB", defect_epsilon_mm=6.0)
+
+        assert measurement.defect_track_mm == pytest.approx(0.0)
+        assert measurement.defect_structures == 0
+
+    def test_coincident_duplicate_overlay_is_defect(self, path_base_pcb: Path, analyzer):
+        """The DUP net's identical overlapping copy is shed, once.
+
+        Two pieces spanning the same node pair with the same length are
+        overlays of one physical connection (the #9138 review's
+        collinear stubs): one copy stays counted, the extras are defect.
+        A parallel piece with a DIFFERENT length would be a detour and
+        stay kept.
+        """
+        pcb = PCB.load(str(path_base_pcb))
+
+        measurement = analyzer.measure_net_path(pcb, "DUP", defect_epsilon_mm=4.0)
+
+        assert measurement.defect_track_mm == pytest.approx(20.0, abs=0.05)
+        assert measurement.defect_structures == 1
+
+    def test_unequal_parallel_detour_is_not_defect(self, tmp_path: Path, analyzer):
+        """A longer parallel detour between the same attach points stays.
+
+        Unlike a coincident overlay, a detour spanning the same node
+        pair with different length is rejoined cycle copper (a chord
+        bump), not a duplicate of the direct run.
+        """
+        pcb_text = (
+            PATH_BASE_PCB.replace(
+                '  (net 6 "OPEN")',
+                '  (net 6 "OPEN")\n  (net 7 "CHORD")',
+            )
+            .replace(
+                '    (pad "F" smd rect (at 45 55)',
+                '    (pad "H" smd rect (at 5 58) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 7 "CHORD"))\n'
+                '    (pad "I" smd rect (at 25 58) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 7 "CHORD"))\n'
+                '    (pad "F" smd rect (at 45 55)',
+            )
+            .replace(
+                "  # BRANCH:",
+                "  # CHORD: 20 mm direct run plus a 30 mm rectangular detour between\n"
+                "  # the same attach points (different length: a detour, not an overlay).\n"
+                '  (segment (start 5 58) (end 25 58) (width 0.2) (layer "F.Cu") (net 7))\n'
+                '  (segment (start 5 58) (end 5 70) (width 0.2) (layer "F.Cu") (net 7))\n'
+                '  (segment (start 5 70) (end 25 70) (width 0.2) (layer "F.Cu") (net 7))\n'
+                '  (segment (start 25 70) (end 25 58) (width 0.2) (layer "F.Cu") (net 7))\n'
+                "\n  # BRANCH:",
+            )
+        )
+        pcb_file = tmp_path / "chord.kicad_pcb"
+        pcb_file.write_text(pcb_text)
+        pcb = PCB.load(str(pcb_file))
+
+        measurement = analyzer.measure_net_path(pcb, "CHORD", defect_epsilon_mm=4.0)
+
+        assert measurement.defect_track_mm == pytest.approx(0.0)
+        assert measurement.defect_structures == 0
+
+    def test_via_layer_change_and_third_pad_branch_are_not_defect(
+        self, path_base_pcb: Path, analyzer
+    ):
+        """Via joints and branches serving another pad carry signal."""
+        pcb = PCB.load(str(path_base_pcb))
+
+        for name in ("VIAS", "BRANCH"):
+            measurement = analyzer.measure_net_path(pcb, name, defect_epsilon_mm=4.0)
+            assert measurement.defect_track_mm == pytest.approx(0.0), name
+            assert measurement.defect_structures == 0, name
+
+    def test_open_net_defect_stays_none(self, path_base_pcb: Path, analyzer):
+        """An open net has no path model, so no correction either."""
+        pcb = PCB.load(str(path_base_pcb))
+
+        measurement = analyzer.measure_net_path(pcb, "OPEN", defect_epsilon_mm=4.0)
+
+        assert measurement.path_length_mm is None
+        assert measurement.defect_track_mm is None
+
+
 class TestContactGraphBonds:
     """``bonds`` under ``with_bonds=True`` is the full edge set (#9117)."""
 

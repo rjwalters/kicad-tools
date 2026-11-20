@@ -222,7 +222,8 @@ _TEXT_ADVANCE_DEFAULT_QUANTA = 28
 # keep their entire advance. Allow 0.005 mm at each edge for rounding.
 # The #9754 punctuation glyphs join the matching groups; ``\`` is the one
 # measured glyph whose ink overhangs its advance cell (bearings -2/-2), and
-# ``|`` is the only single-stroke glyph (bearings consume its whole advance).
+# the single-stroke ``I`` and ``|`` are the only glyphs whose bearings
+# consume their whole advance (5+5 = 10 and 10+10 = 20).
 _TEXT_BEARINGS = {
     glyph: bearings
     for bearings, glyphs in (
