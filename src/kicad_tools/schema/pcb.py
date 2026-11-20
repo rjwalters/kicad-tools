@@ -7627,6 +7627,39 @@ class PCB:
 
         return via
 
+    def find_vias(
+        self,
+        x: float,
+        y: float,
+        layers: tuple[str, ...] | list[str] = ("F.Cu", "B.Cu"),
+        net: str | int | None = None,
+    ) -> list[Via]:
+        """Find all vias sharing the dedupe key, regardless of size and drill."""
+        from ..core.layers import resolve_via_type
+
+        _, resolved_layers = resolve_via_type(layers, None)
+        if not net:
+            net_number = 0
+        elif isinstance(net, int):
+            resolved_net = self.get_net(net)
+            if resolved_net is None:
+                return []
+            net_number = resolved_net.number
+        else:
+            matched_number = next(
+                (number for number, board_net in self.nets.items() if board_net.name == net),
+                None,
+            )
+            if matched_number is None:
+                return []
+            net_number = matched_number
+        key = _via_dedup_key(net_number, x, y, resolved_layers)
+        return [
+            via
+            for via in self._vias
+            if _via_dedup_key(via.net_number, *via.position, via.layers) == key
+        ]
+
     def add_arc(
         self,
         start: tuple[float, float],

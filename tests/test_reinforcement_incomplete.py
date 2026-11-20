@@ -842,6 +842,11 @@ class TestFullyWiredLegs:
         assert leg.width == pytest.approx(2.0)
         assert leg.points[0] == pytest.approx((20.0, 50.0))
         assert leg.points[-1] == pytest.approx((120.0, 50.0))
+        # The wired stretch runs between the two anchors (Issue #9654):
+        # the ~2.96 mm hole-to-pad stubs at each end stay outside it.
+        assert leg.anchor_arc is not None
+        assert leg.anchor_arc[0] == pytest.approx(2.958, abs=0.01)
+        assert leg.anchor_arc[1] == pytest.approx(97.042, abs=0.01)
 
     def test_missing_anchor_yields_no_leg(self):
         pcb = _reinforced()
