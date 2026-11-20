@@ -1042,6 +1042,59 @@ class TestDefectTrackCopper:
         assert measurement.path_length_mm is None
         assert measurement.defect_track_mm is None
 
+    def test_by_layer_split_and_cross_layer_structure(self, tmp_path: Path, analyzer):
+        """The shed copper is reported per layer, epsilon once per structure.
+
+        One dead-end branch leaves the trunk on F.Cu, drops through a via
+        and keeps going on B.Cu: 3 mm + 3 mm = 6 mm as ONE structure --
+        each half alone sits under the 4 mm epsilon, so only the whole
+        crosses it -- shed as a unit and split ``{"F.Cu": 3, "B.Cu": 3}``
+        so a per-layer-delay consumer charges each piece where it sits
+        (Issue #9767).
+        """
+        pcb_text = (
+            PATH_BASE_PCB.replace(
+                '  (net 6 "OPEN")',
+                '  (net 6 "OPEN")\n  (net 8 "XCROSS")',
+            )
+            .replace(
+                '    (pad "F" smd rect (at 45 55)',
+                '    (pad "H" smd rect (at 5 55) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 8 "XCROSS"))\n'
+                '    (pad "I" smd rect (at 25 55) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 8 "XCROSS"))\n'
+                '    (pad "F" smd rect (at 45 55)',
+            )
+            .replace(
+                "  # BRANCH:",
+                "  # XCROSS: 20 mm trunk with a 3 mm F.Cu stub through a via onto a\n"
+                "  # 3 mm B.Cu dead end -- one cross-layer structure of 6 mm total.\n"
+                '  (segment (start 5 55) (end 25 55) (width 0.2) (layer "F.Cu") (net 8))\n'
+                '  (segment (start 15 55) (end 15 52) (width 0.2) (layer "F.Cu") (net 8))\n'
+                '  (via (at 15 52) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 8))\n'
+                '  (segment (start 15 52) (end 15 49) (width 0.2) (layer "B.Cu") (net 8))\n'
+                "\n  # BRANCH:",
+            )
+        )
+        pcb_file = tmp_path / "xcross.kicad_pcb"
+        pcb_file.write_text(pcb_text)
+        pcb = PCB.load(str(pcb_file))
+
+        measurement = analyzer.measure_net_path(pcb, "XCROSS", defect_epsilon_mm=4.0)
+
+        assert measurement.defect_track_mm == pytest.approx(6.0, abs=0.1)
+        assert measurement.defect_structures == 1
+        assert set(measurement.defect_track_by_layer or {}) == {"F.Cu", "B.Cu"}
+        assert (measurement.defect_track_by_layer or {})["F.Cu"] == pytest.approx(3.0, abs=0.1)
+        assert (measurement.defect_track_by_layer or {})["B.Cu"] == pytest.approx(3.0, abs=0.1)
+
+    def test_by_layer_is_none_without_classification(self, path_base_pcb: Path, analyzer):
+        """``defect_track_by_layer`` follows ``defect_track_mm``'s None."""
+        pcb = PCB.load(str(path_base_pcb))
+
+        measurement = analyzer.measure_net_path(pcb, "STUB")
+
+        assert measurement.defect_track_mm is None
+        assert measurement.defect_track_by_layer is None
+
 
 class TestContactGraphBonds:
     """``bonds`` under ``with_bonds=True`` is the full edge set (#9117)."""

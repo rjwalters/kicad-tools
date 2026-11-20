@@ -627,6 +627,200 @@ class TestCheckPadsRotationSignConvention:
             )
 
 
+# ---------------------------------------------------------------------------
+# Tests: verdict checks for the applicable minimum on each branch (#9724)
+# ---------------------------------------------------------------------------
+
+
+class TestApplicableMinimumVerdicts:
+    """Verdict checks for the applicable minimum on each copper/hole branch.
+
+    Issue #9724: the copper-to-edge comparisons (traces, SMD pads, zones)
+    ride KiCad's probed 500 nm acceptance band via ``drc_clear``, so a
+    shortfall inside that band passes; the hole-minimum branches (vias,
+    through-hole pads) keep the plain 1e-4 epsilon, so the same 400 nm
+    shortfall still flags.  These replace the old source-text assertions
+    (``"_CLEARANCE_EPSILON_MM" in inspect.getsource(...)``), which could
+    not see which *minimum* a branch applies -- the property that actually
+    changed.  Distinct copper (0.3 mm) and hole (0.5 mm) minima make the
+    branch selection observable.
+    """
+
+    #: Inside KiCad's probed band (accepted by pinned kicad-cli), beyond
+    #: the plain epsilon: separates a band verdict from an epsilon verdict.
+    SHORTFALL_INSIDE_BAND_NM = 0.0004
+    #: Beyond the 500 nm band: must flag on every branch.
+    SHORTFALL_BEYOND_BAND_NM = 0.0006
+
+    def _check_segment(self, results, shortfall):
+
+        x = 0.3 + 0.1 - shortfall
+        seg = SimpleNamespace(
+            start=(x, 15.0),
+            end=(x, 16.0),
+            width=0.2,
+            layer="F.Cu",
+            net_number=1,
+        )
+        rule = EdgeClearanceRule()
+        rule._check_segments(
+            _make_pcb(segments=[seg]),
+            _outline_segments(),
+            _design_rules(copper_edge=0.3, hole_edge=0.5),
+            results,
+        )
+
+    def _check_via(self, results, shortfall):
+        x = 0.5 + 0.3 - shortfall  # hole minimum 0.5, via size 0.6
+        via = SimpleNamespace(
+            position=(x, 15.0),
+            size=0.6,
+            drill=0.3,
+            layers=["F.Cu", "B.Cu"],
+            net_number=1,
+        )
+        rule = EdgeClearanceRule()
+        rule._check_vias(
+            _make_pcb(vias=[via]),
+            _outline_segments(),
+            _design_rules(copper_edge=0.3, hole_edge=0.5),
+            results,
+        )
+
+    def _check_pad(self, results, shortfall, pad_type):
+
+        pad = SimpleNamespace(
+            position=(0.0, 0.0),
+            size=(0.8, 0.8),
+            type=pad_type,
+            number="1",
+        )
+        fp = SimpleNamespace(
+            position=(0.3 + 0.4 - shortfall, 15.0),
+            rotation=0.0,
+            layer="F.Cu",
+            reference="U1",
+            pads=[pad],
+        )
+        rule = EdgeClearanceRule()
+        rule._check_pads(
+            _make_pcb(footprints=[fp]),
+            _outline_segments(),
+            _design_rules(copper_edge=0.3, hole_edge=0.5),
+            results,
+        )
+
+    def _check_zone(self, results, shortfall):
+        inset = 0.3 - shortfall
+        polygon = [
+            (inset, inset),
+            (50.0 - inset, inset),
+            (50.0 - inset, 30.0 - inset),
+            (inset, 30.0 - inset),
+        ]
+        zone = SimpleNamespace(
+            polygon=polygon,
+            filled_polygons=[polygon],
+            layer="F.Cu",
+            net_number=1,
+            net_name="GND",
+        )
+        rule = EdgeClearanceRule()
+        rule._check_zones(
+            _make_pcb(zones=[zone]),
+            _outline_segments(),
+            _design_rules(copper_edge=0.3, hole_edge=0.5),
+            results,
+        )
+
+    @staticmethod
+    def _rule_ids(results) -> set[str]:
+        return {v.rule_id for v in results.errors}
+
+    # -- traces: copper minimum, band verdict --------------------------------
+
+    def test_trace_400nm_shortfall_inside_band_passes(self):
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        self._check_segment(results, self.SHORTFALL_INSIDE_BAND_NM)
+        assert results.errors == []
+
+    def test_trace_600nm_shortfall_beyond_band_flags(self):
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        self._check_segment(results, self.SHORTFALL_BEYOND_BAND_NM)
+        assert self._rule_ids(results) == {"edge_clearance_trace"}
+
+    # -- vias: hole minimum, plain epsilon verdict ---------------------------
+
+    def test_via_400nm_shortfall_against_hole_minimum_still_flags(self):
+        """A 400 nm shortfall sits inside the copper band but outside the
+        hole branch's 1e-4 epsilon, so it must flag (no probe evidence
+        extends the band to the separate hole minimum)."""
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        self._check_via(results, self.SHORTFALL_INSIDE_BAND_NM)
+        assert self._rule_ids(results) == {"edge_clearance_via"}
+
+    def test_via_600nm_shortfall_flags(self):
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        self._check_via(results, self.SHORTFALL_BEYOND_BAND_NM)
+        assert self._rule_ids(results) == {"edge_clearance_via"}
+
+    # -- SMD pads: copper minimum, band verdict ------------------------------
+
+    def test_smd_pad_400nm_shortfall_inside_band_passes(self):
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        self._check_pad(results, self.SHORTFALL_INSIDE_BAND_NM, "smd")
+        assert results.errors == []
+
+    def test_smd_pad_600nm_shortfall_beyond_band_flags(self):
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        self._check_pad(results, self.SHORTFALL_BEYOND_BAND_NM, "smd")
+        assert self._rule_ids(results) == {"edge_clearance_pad"}
+
+    # -- through-hole pads: hole minimum, plain epsilon verdict --------------
+
+    def test_thru_hole_pad_400nm_shortfall_against_hole_minimum_still_flags(self):
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        self._check_pad(results, self.SHORTFALL_INSIDE_BAND_NM, "thru_hole")
+        assert self._rule_ids(results) == {"edge_clearance_pad_hole"}
+
+    def test_thru_hole_pad_600nm_shortfall_flags(self):
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        self._check_pad(results, self.SHORTFALL_BEYOND_BAND_NM, "thru_hole")
+        assert self._rule_ids(results) == {"edge_clearance_pad_hole"}
+
+    # -- zones: copper minimum, band verdict ---------------------------------
+
+    def test_zone_400nm_shortfall_inside_band_passes(self):
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        self._check_zone(results, self.SHORTFALL_INSIDE_BAND_NM)
+        assert results.errors == []
+
+    def test_zone_600nm_shortfall_beyond_band_flags(self):
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        self._check_zone(results, self.SHORTFALL_BEYOND_BAND_NM)
+        assert self._rule_ids(results) == {"edge_clearance_zone"}
+
+
 @pytest.mark.parametrize("net_number", [0, 2])
 @pytest.mark.parametrize("filled", [False, True])
 def test_rule_area_is_not_edge_copper_but_real_zone_still_is(net_number, filled):

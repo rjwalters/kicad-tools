@@ -36,9 +36,9 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from kicad_tools.geometry.copper import pad_gate_polygon as _pad_gate_polygon
 from kicad_tools.geometry.copper import pad_waiver_polygon as _pad_waiver_polygon
@@ -270,12 +270,17 @@ class LatticeObstacleModel:
         agent_radius: float,
         pad_extra: list[float] | None = None,
         pad_class_extra: list[float] | None = None,
+        base_clearance: float = 0.0,
     ) -> None:
         self.lattice = lattice
         self.pads = pads
         self.pad_layer_indices = pad_layer_indices
         self.num_layers = num_layers
         self.agent_radius = agent_radius
+        # The board-global trace clearance (issue #9636 review): the floor a
+        # relaxed sibling pad is still held to, so the sibling relaxation
+        # waives only the class surcharge above it -- never the board rule.
+        self._base_clearance = base_clearance
 
         # Inflated keep-out rectangle per pad (pad half-extent + agent radius).
         # Issue #6243: ``pad_extra[i]`` grows pad ``i``'s keep-out by the
@@ -381,17 +386,55 @@ class LatticeObstacleModel:
                 out.update(self._pad_buckets.get((ix, iy), ()))
         return out
 
-    def node_blocked(self, key: NodeKey, layer: int, net: int) -> bool:
-        """True if the node sits in an OTHER-net pad keep-out on ``layer``."""
-        return any(self.pads[idx].net != net for idx in self.node_pads[layer].get(key, ()))
+    def node_blocked(
+        self,
+        key: NodeKey,
+        layer: int,
+        net: int,
+        relax: Mapping[int, float] | None = None,
+        point: Pt | None = None,
+    ) -> bool:
+        """True if the node sits in an OTHER-net pad keep-out on ``layer``.
+
+        ``relax`` / ``point`` (issue #9636): see :meth:`segment_blocked`.
+        """
+        for idx in self.node_pads[layer].get(key, ()):
+            if self.pads[idx].net == net:
+                continue
+            if (
+                relax is not None
+                and point is not None
+                and idx in relax
+                and self.pad_centerline_gap(idx, point, point)
+                > relax[idx] + ka.LATTICE_CLEARANCE_EPSILON_MM
+            ):
+                continue
+            return True
+        return False
 
     def edge_blocked(self, edge: EdgeKey, layer: int, net: int) -> bool:
         """True if the edge crosses an OTHER-net pad keep-out on ``layer``."""
         return any(self.pads[idx].net != net for idx in self.edge_pads[layer].get(edge, ()))
 
-    def segment_blocked(self, a: Pt, b: Pt, layer: int, net: int, extra: float = 0.0) -> bool:
+    def segment_blocked(
+        self,
+        a: Pt,
+        b: Pt,
+        layer: int,
+        net: int,
+        extra: float = 0.0,
+        relax: Mapping[int, float] | None = None,
+    ) -> bool:
         """True if free segment ``a-b`` (e.g. a stub leg) enters an other-net
         pad keep-out on ``layer`` (geometric, not lattice-resource, check).
+
+        ``relax`` (issue #9636) maps a pad index to a smaller centreline-to-
+        outline gap that pad is held to instead of its full keep-out: the
+        caller passes the OTHER pads of the footprint a stub leaves from, whose
+        distance to the origin pad is fixed by the part (so an authored class
+        clearance on their net must not wall that pad in).  The floor is never
+        below the board's base clearance, so only the class surcharge above it
+        is waived.  Pads not in ``relax`` are judged exactly as before.
 
         ``extra`` (issue #4271) inflates every pad keep-out beyond the
         global ``agent_radius`` -- the per-connection surcharge for a net
@@ -410,8 +453,57 @@ class LatticeObstacleModel:
             if extra > 0.0:
                 rect = (rect[0] - extra, rect[1] - extra, rect[2] + extra, rect[3] + extra)
             if seg_rect_intersect(a, b, rect) and self.pad_keepout_hit(idx, a, b, extra):
+                if (
+                    relax is not None
+                    and idx in relax
+                    and self.pad_centerline_gap(idx, a, b)
+                    > relax[idx] + ka.LATTICE_CLEARANCE_EPSILON_MM
+                ):
+                    continue
                 return True
         return False
+
+    def footprint_sibling_floors(
+        self, pad: Pad, net: int, half: float, extra: float = 0.0
+    ) -> dict[int, float]:
+        """Centreline-gap floors for the other-net pads of ``pad``'s footprint (#9636).
+
+        The gap between two pads of one footprint is fixed by the part, so the
+        keep-out an authored class clearance grows around a sibling pad must
+        not wall the origin pad in: copper leaving ``pad`` is held to the gap
+        the part itself leaves between the two pads (``half`` + that
+        outline-to-outline gap) rather than the full class keep-out.  The
+        floor never drops below the board's base clearance (``half`` +
+        ``base_clearance``): a fine-pitch part whose pad gap is narrower than
+        the board rule keeps that rule -- only the class surcharge above base
+        is waived.  Only siblings whose full keep-out (``extra`` is the
+        caller's surcharge over the global agent radius, as for
+        :meth:`segment_blocked`) reaches further than that floor are listed --
+        an ordinary neighbour whose keep-out the part already satisfies is
+        judged exactly as before.  Empty for a pad without a reference
+        designator.
+        """
+        if not pad.ref:
+            return {}
+        out: dict[int, float] = {}
+        own = self._outline_of(pad)
+        for idx, other in enumerate(self.pads):
+            if other is pad or other.ref != pad.ref or other.net == net:
+                continue
+            gap = ka.gap(self._outline_of(other, idx), own)
+            floor = half + max(gap, self._base_clearance)
+            if floor < self._pad_reach[idx] + extra - ka.LATTICE_CLEARANCE_EPSILON_MM:
+                out[idx] = floor
+        return out
+
+    def _outline_of(self, pad: Pad, idx: int | None = None) -> Any:
+        if idx is not None and idx in self._pad_outlines:
+            return self._pad_outlines[idx]
+        shape, rratio = pad_kernel_params(pad)
+        outline = ka.pad_outline(shape, pad.width, pad.height, rratio, pad.rotation, (pad.x, pad.y))
+        if idx is not None:
+            self._pad_outlines[idx] = outline
+        return outline
 
     def same_net_pad_band_blocked(
         self,
