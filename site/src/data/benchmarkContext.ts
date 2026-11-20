@@ -7,12 +7,12 @@ export interface RunContext {
   runtime?: string;
 }
 
-const collectionSource = "https://github.com/rjwalters/kicad-tools/blob/main/benchmarks/external/results/2026-09-12/README.md";
-const partialRouteSource = "https://github.com/rjwalters/kicad-tools/blob/main/benchmarks/external/results/2026-09-15/README.md";
+const collectionSource = "https://github.com/2AMLogic/kicad-tools/blob/main/benchmarks/external/results/2026-09-12/README.md";
+const partialRouteSource = "https://github.com/2AMLogic/kicad-tools/blob/main/benchmarks/external/results/2026-09-15/README.md";
 const parserLimitation = "The routing parser omitted 21 of 49 net names, including all eight USB/SPI rule entries. This limits both STRF protocols; the result does not demonstrate effective USB/SPI tuning. The parser defect (#5302) was fixed after this run.";
 const septemberTwelfthRuntime = "The 2026-09-12 collection ran Linux amd64 through Rosetta on an arm64 host with four CPUs. The container requested 12 GiB, but the Docker VM had about 7.75 GiB available. These attempt durations are not comparable to physical-x86 vendor performance.";
 
-const octoberTwentyFirstSource = "https://github.com/rjwalters/kicad-tools/blob/main/benchmarks/external/results/2026-10-21/README.md";
+const octoberTwentyFirstSource = "https://github.com/2AMLogic/kicad-tools/blob/main/benchmarks/external/results/2026-10-21/README.md";
 const octoberTwentyFirstRuntime = "The 2026-10-21 collection ran on a GitHub-hosted x86_64 Linux runner in the pinned KiCad container (12 GiB limit, 120-minute job limit) with the C++ backend present. Runner CPU and RAM were not recorded, and the reports do not show whether any pass fell back to Python. The durations are not comparable to physical-x86 vendor performance.";
 
 const reviewed: Record<string, RunContext> = {

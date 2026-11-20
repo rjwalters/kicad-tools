@@ -1360,7 +1360,7 @@ Re-derived from this run; item 1 is the one that is #4507's own machinery.
 ---
 
 This is the record of the **T4 manual criterion** of issue
-[#4507](https://github.com/rjwalters/kicad-tools/issues/4507) (router Phase 2 of
+[#4507](https://github.com/2AMLogic/kicad-tools/issues/4507) (router Phase 2 of
 epic #4431, pairwise HV-isolation clearance):
 
 > **Manual**: softstart rev-C loop (`hardware/kicad/output_revc/LAYOUT_NOTES.md`

@@ -16,6 +16,60 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-19
 
+- **Issue #9637** (closed): kct check: LVS compares the board against project.kct's schematic even when the board being checked is a different artifact
+- **PR #9641**: fix(check): use project.kct schematic only for the board it names
+- **Issue #9686** (closed): Release daemon Judge steps promptly when PR checks are pending
+- **PR #9317**: fix: point hard-coded repository URLs at the 2AMLogic organization
+- **Issue #9621** (closed): Router: group mode for similar-length nets without a shared naming convention (length window, escape order)
+- **PR #9633**: feat: add --group-length-window synthetic bus groups for similar-length nets
+- **PR #9688**: docs: hand pending-CI PRs back from daemon Judge steps
+- **Issue #9670** (closed): DRU clearance reading: stale case-insensitivity docstring for memberOfFootprint, and (severity ignore) honoured in only one of three buckets
+- **PR #9672**: fix: skip (severity ignore) DRU rules in all clearance buckets; correct memberOfFootprint docstring
+- **Issue #9663** (closed): route-auto stale-write guard: take the file signature before the load, not after the parse
+- **PR #9664**: fix: take route-auto stale-write signature before the board load
+- **Issue #9648** (closed): path_ampacity does not credit a buttress wire: a fully wired leg is still 'too narrow' at the bare trace width
+- **PR #9650**: fix: credit fully wired buttress wires in path_ampacity
+- **Issue #9667** (closed): changelog.d/9637 needs an .upgrade.md: kct check can newly exit non-zero (INCOMPLETE) on a board the spec does not name
+- **PR #9668**: docs: add 9637 upgrade note for newly-reachable INCOMPLETE exit in kct check
+- **Issue #9602** (closed): Teach kct route / kct pcb to difference voltage-map intervals (signed-collapse consumers, #4411 follow-up)
+- **PR #9613**: fix: difference voltage-map intervals end-to-end in route-time pairwise tables
+- **PR #9587**: feat: add kct voltage-map-merge to merge per-scenario voltage maps into one envelope
+- **Issue #9590** (closed): Add kct probe and kct apply --checked: check a batch of proposed copper, then write atomically
+- **PR #9617**: feat: add kct probe and kct apply --checked for batch copper check-then-write
+- **Issue #9578** (closed): route --complete disagrees with the board's custom clearance rules in both directions (clean input reported as defect; new copper breaks a net-class rule)
+- **PR #9588**: fix: honour footprint-scoped and conditional .kicad_dru clearance rules
+- **Issue #9601** (closed): Audit kct route rows 5/6/9: grid choice, order dependence, trunks under fine-pitch ICs
+- **PR #9624**: fix: surface budget-labelled search give-ups in the routing summary
+- **Issue #9517** (closed): fix: lattice own-net pad band (#9018) strands board 05 VCP (no-path at U2.3 stub end)
+- **PR #9538**: fix: accept collinear continuation of a pad-attached stub in the own-net pad band guard
+- **Issue #9599** (closed): Audit kct route rows 1/2/4: partial copper, shove/rip-up of existing copper, stale-write
+- **PR #9629**: fix(route): list replaceable existing copper (kct route) and refuse stale saves (route-auto)
+- **Issue #9524** (closed): Make readiness copper cleanup (optimize-traces/prune) pad-aware so it keeps mask-clean pad escapes
+- **PR #9535**: fix: guard copper cleanup against breaking mask-clean pad escapes
+- **Issue #9638** (closed): CI staging helper returns success and restores empty files when the backup runs out of space
+- **PR #9639**: ci: abort staging helper when the committed-path backup fails
+- **Issue #9612** (closed): kct net-status: document the --net piece listing, and show it under --why too
+- **PR #9634**: feat: list split-net pieces under kct net-status --net --why
+- **Issue #9579** (closed): route --complete: 'Error saving partial results: index 0 is out of bounds' on the input-clearance exit path
+- **PR #9585**: fix(route): name the failed step and stop reporting a finished partial save as failed
+- **Issue #9591** (closed): Protect inner planes: router zone-split cost and a kct check finding for planes cut by foreign copper
+- **PR #9606**: feat(check): add plane_split advisory for zones cut by foreign tracks
+- **Issue #9595** (closed): Run kct on the PCBJam blind-PCB boards with their briefs and scoring
+- **PR #9630**: bench: add PCBJam blind-PCB study board and first zero-touch result
+- **Issue #9611** (closed): tests/test_ci_jobs_lib.py: GNU-only `find -printf` and a dead sandbox `_lib.sh` copy
+- **PR #9615**: test: replace GNU-only find -printf and drop unused sandbox _lib.sh copy
+- **Issue #9598** (closed): kct net-status: list each piece of a split net with its pads
+- **PR #9605**: feat: list each piece of a split net with its pads in kct net-status --net
+- **Issue #9501** (closed): Support gr_circle and stroked gr_poly primitives in custom_pad_copper
+- **PR #9609**: feat: build gr_circle and stroked gr_poly copper in custom_pad_copper
+- **Issue #9574** (closed): Parts lookup classifies two “LED Indication” catalog entries as inductors
+- **PR #9577**: fix: word-boundary inductor match and LED-before-diode ordering in _categorize_part
+- **Issue #9589** (closed): Allow two-party clean-room reimplementation of GPL KiCad behaviour, and write the policy down
+- **PR #9607**: docs: write down the two-party clean-room reimplementation policy for GPL behaviour
+- **Issue #9412** (closed): Regression test for scripts/ci/jobs/_lib.sh staging helpers (broke twice unreviewed by PR CI)
+- **PR #9583**: test: regression-cover the ci jobs _lib.sh staging helpers
+- **Issue #9580** (closed): route rewrites the uuid of every preserved track and via, so router-added copper cannot be identified
+- **PR #9586**: fix(router): keep the input uuid of preserved tracks and vias
 - **PR #9576**: perf: digest raw mask/copper WKT out of committed kct-check evidence
 - **Issue #9575** (closed): Board 06's re-pinned kct-check evidence is 31.6 MB x 2: geometry_provenance ships the full layers_wkt/source_objects dump
 - **PR #9392**: ci: single-source the gate commands in scripts/ci/jobs/<id>.sh
@@ -3695,29 +3749,6 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - **Issue #5514** (closed): [Epic #5509] Phase 1b: clearance kernel API in router/cpp with Python port and mandatory parity test (no consumer switched)
 - **Issue #5505** (closed): CI runtime: representative-cohort remeasurement and close-out for #5240
 - **Issue #5504** (closed): router: make per-connection avoidance cleanup the default once Board06 U2.B1 stranding is explained
-
-### 2026-09-19
-
-- **PR #5588**: docs(routing-plan): fix understated elapsed_s claim in Cost section
-- **PR #5585**: fix(ci): compare whole copper nodes, not header lines, in the route-determinism gate
-- **PR #5583**: test(ci): size the partial-placement route budget against the native-permit queue (#5579)
-- **Issue #5582** (closed): docs(routing-plan): "Cost" section understates the measured plan-stage elapsed_s by ~60x
-- **PR #5581**: feat(router): run the report-only routing plan stage on every default route (+ --no-routing-plan)
-- **Issue #5580** (closed): ci: board_route_determinism_smoke.sh normalize_copper() compares copper element COUNTS, not geometry
-- **Issue #5579** (closed): flake: test_route_partial_placement_cli deadline-exceeded failures redden the Test job on main
-- **PR #5577**: perf(board06): spatially prune the pour-repair obstacle clearance scans
-- **PR #5576**: fix(ci): credit native-slot wait back to the waiting test's pytest-timeout budget
-- **PR #5574**: fix(judge): restore draft-PR fallback exclusion reverted by installed-surface resync
-- **PR #5573**: test(ci): add evidence-sized pytest-timeout overrides to the three 60s-reaped test groups
-- **Issue #5572** (closed): CI: native-slot wait from KCT_NATIVE_MAX_CONCURRENCY=1 is charged to the waiting test's pytest-timeout budget
-- **PR #5571**: perf(router): hoist loop-invariant clearance lookups in validate_routes
-- **PR #5570**: fix(router): persist add_obstacle keepouts across grid resets
-- **Issue #5567** (closed): Flaky >60s pytest-timeout in tests/router/lattice/test_post_pass_gating.py CLI tests
-- **Issue #5557** (closed): judge-fallback-guard.sh: exclude draft PRs from fallback evaluation
-- **Issue #5556** (closed): CI: Test job flakes on a fixed 60s pytest-timeout hitting an arbitrary test (seen on main and PRs)
-- **Issue #5555** (closed): router: _reset_for_new_trial drops add_obstacle keepouts, silently reopening the grid
-- **Issue #5552** (closed): chore: resync installed Loom surfaces silently reverted merged fix #5543 (draft-PR fallback exclusion)
-- **Issue #5513** (closed): [Epic #5509] Phase 1a: kicad-cli clearance conformance oracle (report-only) with four adapters and named fixtures
 
 ### 2026-07-20 (evening)
 

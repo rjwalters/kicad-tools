@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/rjwalters/kicad-tools/schemas/finding.schema.json",
+  "$id": "https://github.com/2AMLogic/kicad-tools/schemas/finding.schema.json",
   "title": "kicad-tools Finding (schema_version 1)",
   "description": "Shared finding shape carried in the `findings` array of `kct check`, `kct drc` and `kct detect-mistakes` JSON output (Issue #8015). Coordinates are millimetres in the KiCad file frame (y-down).",
   "type": "object",
