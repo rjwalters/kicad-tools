@@ -460,9 +460,7 @@ def _leg_defect_copper(pcb: PCB, net_name: str) -> NetPathMeasurement | None:
     )
 
 
-def _defect_corrected_mm(
-    summed_mm: float, measurement: NetPathMeasurement | None
-) -> float:
+def _defect_corrected_mm(summed_mm: float, measurement: NetPathMeasurement | None) -> float:
     """Apply the #9767 defect-copper correction to one leg's summed figure.
 
     The ruler is the summed kicad-cli length minus the leg's *defect*
