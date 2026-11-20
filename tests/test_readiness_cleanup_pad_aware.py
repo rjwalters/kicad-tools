@@ -296,6 +296,63 @@ class TestRewriteKeepsPadEscapes:
         # old == new: the pass changed nothing, the board keeps what it had.
         assert rewrite_keeps_pad_escapes(crossing, crossing, zones, TOL)
 
+    def test_mixed_layer_chain_is_guarded_on_each_segments_layer(self):
+        """The Kelvin gate hands the guard a whole branch, whose legs meet
+        through a via and so span copper layers (issue #9660): a B.Cu
+        opening must guard the chain's B.Cu leg even when ``old[0]`` is on
+        F.Cu."""
+        zones = [_zone(100.0, 50.0, net="N2", layers=("B.Cu",))]
+        old = [
+            _seg(90.0, 50.0, 95.0, 50.0),
+            _seg(95.0, 50.0, 110.0, 56.0, layer=Layer.B_CU),  # misses the opening
+        ]
+        new = [
+            _seg(90.0, 50.0, 95.0, 50.0),
+            _seg(95.0, 50.0, 110.0, 50.0, layer=Layer.B_CU),  # straight through it
+        ]
+        assert not rewrite_keeps_pad_escapes(old, new, zones, TOL)
+
+    def test_mixed_layer_chain_is_not_over_guarded_by_first_layers_zone(self):
+        """The other direction of #9660: an F.Cu-only opening cannot expose
+        B.Cu copper, so the same rewrite of the B.Cu leg passes."""
+        zones = [_zone(100.0, 50.0, net="N2", layers=("F.Cu",))]
+        old = [
+            _seg(90.0, 50.0, 95.0, 50.0),
+            _seg(95.0, 50.0, 110.0, 56.0, layer=Layer.B_CU),
+        ]
+        new = [
+            _seg(90.0, 50.0, 95.0, 50.0),
+            _seg(95.0, 50.0, 110.0, 50.0, layer=Layer.B_CU),
+        ]
+        assert rewrite_keeps_pad_escapes(old, new, zones, TOL)
+
+    def test_mixed_layer_surviving_end_must_be_on_the_guarded_layer(self):
+        """Endpoint preservation on a mixed-layer chain (#9660): an F.Cu
+        end at the same XY is not the B.Cu escape surviving."""
+        zones = [_zone(100.0, 50.0, layers=("B.Cu",))]
+        old = [
+            _seg(85.0, 50.0, 90.0, 50.0, layer=Layer.B_CU),
+            _seg(90.0, 50.0, 100.0, 50.0, layer=Layer.B_CU),  # B.Cu escape onto the pad
+        ]
+        new = [
+            _seg(85.0, 50.0, 90.0, 50.0, layer=Layer.B_CU),
+            _seg(90.0, 50.0, 100.0, 50.0),  # same-XY end, now on F.Cu
+            _seg(90.0, 50.0, 110.0, 55.0, layer=Layer.B_CU),  # B.Cu copper re-bent away
+        ]
+        assert not rewrite_keeps_pad_escapes(old, new, zones, TOL)
+
+    def test_existing_copper_exemption_requires_the_same_layer(self):
+        """New B.Cu copper over an old F.Cu segment's XY is not copper the
+        board already carries (#9660): identical XY on another layer
+        satisfies nothing."""
+        zones = [_zone(100.0, 50.0, net="N2", layers=("B.Cu",))]
+        old = [
+            _seg(90.0, 40.0, 95.0, 40.0, layer=Layer.B_CU),
+            _seg(96.0, 50.0, 104.0, 50.0),  # F.Cu crossing at the opening's XY
+        ]
+        new = old + [_seg(96.0, 50.0, 104.0, 50.0, layer=Layer.B_CU)]
+        assert not rewrite_keeps_pad_escapes(old, new, zones, TOL)
+
     def test_empty_zones_and_trivial_rewrites_are_allowed(self):
         old = [_seg(0.0, 0.0, 1.0, 0.0)]
         assert rewrite_keeps_pad_escapes(old, old, [], TOL)

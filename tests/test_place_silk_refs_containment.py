@@ -137,7 +137,6 @@ def test_unavailable_outline_is_reported_without_moving(tmp_path, edges):
 @pytest.mark.parametrize(
     "geometry",
     [
-        '(footprint "Cutout" (layer "F.Cu") (at 10 10) (fp_rect (start -2 -2) (end 2 2) (layer "Edge.Cuts") (stroke (width .05) (type solid))))',
         '(gr_rect (start 0 0) (end 100) (layer "Edge.Cuts") (width .05))',
         '(gr_line (start 0 0) (layer "Edge.Cuts") (width .05))',
     ],
@@ -147,6 +146,20 @@ def test_unsupported_or_malformed_additional_edges_cannot_be_ignored(tmp_path, g
     ref = SilkRefPlacer(path).plan().placements[0]
     assert ref.status == "unplaceable"
     assert "board outline unavailable" in ref.reason
+
+
+def test_footprint_edge_cuts_cutout_is_supported_not_ignored(tmp_path):
+    # Issue #9593: a footprint-local fp_rect cut-out on Edge.Cuts is board
+    # outline per KiCad; silkscreen planning must resolve the material (with
+    # the cut-out as a hole) instead of refusing the whole board.
+    geometry = (
+        '(footprint "Cutout" (layer "F.Cu") (at 10 10)'
+        ' (fp_rect (start -2 -2) (end 2 2) (layer "Edge.Cuts") (stroke (width .05) (type solid))))'
+    )
+    path = _board(tmp_path, _rect(0, 0, 100, 60) + geometry)
+    ref = SilkRefPlacer(path).plan().placements[0]
+    assert ref.status in ("placed", "unchanged")
+    assert "footprint-local" not in ref.reason
 
 
 @pytest.mark.parametrize(
