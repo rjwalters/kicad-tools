@@ -32,7 +32,10 @@ from kicad_tools.router.pairwise_clearance import (
     build_attach_zones,
     build_pairwise_clearance_table,
     find_pairwise_violations,
+    load_edge_voltage,
+    load_pair_bounds,
     load_signed_voltage_map,
+    load_voltage_intervals,
     path_pairwise_violation,
     route_pairwise_violation,
     segment_pair_violation,
@@ -296,6 +299,18 @@ def test_load_signed_voltage_map_rejects_a_non_object(tmp_path) -> None:
     path = _write_map(tmp_path, [1, 2, 3])
     with pytest.raises(ValueError):
         load_signed_voltage_map(path)
+
+
+@pytest.mark.parametrize(
+    "loader",
+    [load_edge_voltage, load_pair_bounds, load_voltage_intervals, load_signed_voltage_map],
+    ids=["edge", "pair-bounds", "intervals", "signed"],
+)
+def test_voltage_map_loaders_reject_a_non_object(tmp_path, loader) -> None:
+    """Every sidecar loader keeps the shared non-object ``ValueError`` (#9755)."""
+    path = _write_map(tmp_path, [1, 2, 3])
+    with pytest.raises(ValueError, match="voltage map must be a JSON object"):
+        loader(path)
 
 
 # ---------------------------------------------------------------------------
