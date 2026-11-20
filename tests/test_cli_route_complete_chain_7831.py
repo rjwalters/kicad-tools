@@ -148,10 +148,16 @@ def test_staged_output_never_aliases_input(board, monkeypatch):
 
     monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
     assert _chain_complete_pass(_args(board), None, 2) == 0
-    assert seen["out"] != board and seen["out"].stem != board.stem
+    # Issue #9620 review: staging is a private per-invocation directory beside
+    # -o (the board keeps its own basename inside it), never a same-directory
+    # <stem>.chain* sibling -- the inner pass still never aliases -o.
+    assert seen["out"] != board
+    assert seen["out"].parent != board.parent
+    assert seen["out"].parent.name.startswith(f".{board.stem}.chain-")
     assert board.read_text() == "completed"
     assert board.with_suffix(".routing_plan.json").read_text() == "plan"
     assert not list(board.parent.glob("*.chain*"))
+    assert not list(board.parent.glob(f".{board.stem}.chain-*"))
     assert "real" in control.read_text()
 
 
