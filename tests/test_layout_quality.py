@@ -727,6 +727,91 @@ def test_rotated_footprint_edge_joins_board_lines_at_kicad_precision(rot):
     assert analyze_layout_quality(pcb).outline_area_mm2 == pytest.approx(expected, abs=1e-4)
 
 
+TRANSFORM_JOIN_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+
+  (gr_line (start {p1}) (end {p2}) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_line (start {p2}) (end {p3}) (stroke (width 0.1)) (layer "Edge.Cuts"))
+
+  (footprint "Mech:EdgePiece"
+    (layer "F.Cu")
+    (at 40 30 {rot})
+    (property "Reference" "J9")
+    {graphic}
+  )
+)
+"""
+
+# KiCad-saved coordinates (6 decimals) of a board triangle closed by one
+# rotated footprint edge. The shared corners come from two float paths
+# (footprint rotation + board-origin subtraction vs. the written value), so
+# the copies straddle a fixed-grid rounding boundary (review of #9614).
+_TRANSFORM_JOIN_CASES = {
+    45: (
+        "47.778175 22.221825",
+        "47.778175 29.292893",
+        "40.707107 29.292893",
+        (1, 0),
+        11.000001,
+        (6, -1),
+    ),
+    15: (
+        "53.522962 26.376533",
+        "53.522962 28.964724",
+        "43.863703 28.964724",
+        (4, 0),
+        14.000001,
+        (9, -1),
+    ),
+}
+_TRANSFORM_JOIN_AREAS = {
+    (45, "line"): 25.000001,
+    (15, "line"): 12.500004,
+    # Triangle + the exact circular segment (chord 10, sagitta 1, r=13:
+    # 169*asin(5/13) - 60). KiCad's own polygonization of the arc is coarser
+    # (31.712014 / 19.211992), so the exact value is the reference here.
+    (45, "arc"): 25.000001 + 169 * math.asin(5 / 13) - 60,
+    (15, "arc"): 12.500004 + 169 * math.asin(5 / 13) - 60,
+}
+
+
+@pytest.mark.parametrize("kind", ["line", "arc"])
+@pytest.mark.parametrize("rot", [45, 15])
+def test_rotated_footprint_edge_joins_at_transform_rounding_boundary(rot, kind):
+    p1, p2, p3, (sx, sy), ex, mid = _TRANSFORM_JOIN_CASES[rot]
+    if kind == "line":
+        graphic = (
+            f'(fp_line (start {sx} {sy}) (end {ex} 0) (stroke (width 0.1)) (layer "Edge.Cuts"))'
+        )
+    else:
+        graphic = (
+            f"(fp_arc (start {sx} {sy}) (mid {mid[0]} {mid[1]}) (end {ex} 0) "
+            '(stroke (width 0.1)) (layer "Edge.Cuts"))'
+        )
+    pcb = _load_pcb(TRANSFORM_JOIN_PCB.format(p1=p1, p2=p2, p3=p3, rot=rot, graphic=graphic))
+    area = analyze_layout_quality(pcb).outline_area_mm2
+    assert area is not None
+    assert area == pytest.approx(_TRANSFORM_JOIN_AREAS[(rot, kind)], abs=2e-3)
+
+
+def test_endpoint_clustering_joins_straddling_pair_but_not_a_real_gap():
+    from kicad_tools.analysis.layout_quality import _cluster_endpoints
+
+    # 7.071068 / 7.071069 land in different 1e-6 cells yet are one corner.
+    joined = _cluster_endpoints([((0.0, 0.0), (7.071068, 0.0)), ((7.071069, 0.0), (7.0, 5.0))])
+    assert joined[0][1] == joined[1][0]
+    # A 1e-3 mm gap is a real gap and must survive.
+    gap = _cluster_endpoints([((0.0, 0.0), (7.071, 0.0)), ((7.072, 0.0), (7.0, 5.0))])
+    assert gap[0][1] != gap[1][0]
+
+
 def test_open_contour_still_none_after_snapping():
     # Control: a genuinely open contour (gap of 1 mm) stays unmeasured.
     pcb = _load_pcb(MIXED_JOIN_PCB.format(rot=90, close_x=41))

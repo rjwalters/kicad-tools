@@ -104,13 +104,52 @@ _CORNER_CLASSES = ("right_angle", "acute", "turn_back")
 # Vertex keys round coordinates to 2 decimals, the same granularity the
 # sharp-trace-corner rule uses to group findings at one vertex.
 _VERTEX_DECIMALS = 2
-# Endpoint-join snap for Edge.Cuts polygonization: 1e-6 mm is KiCad's 1 nm
-# file unit. A board graphic declares its corner rounded to that unit
-# (``48.660254``) while a rotated footprint endpoint is computed
-# (``48.66025403784439``); the two differ by up to ~5e-7 mm, so the snap must
-# be as coarse as the file's own quantization or the shared corner stays open.
-# The residual cost is a vertex moved by <=0.5 nm (~3e-6 mm^2 here).
-_OUTLINE_SNAP_DECIMALS = 6
+# Endpoint-join tolerance for Edge.Cuts polygonization, in mm. KiCad writes
+# coordinates at 1e-6 mm (1 nm) precision, so the two copies of one shared
+# corner -- a board graphic's written value and a rotated footprint endpoint
+# (rotation, then the board-origin subtraction) -- can differ by roughly one
+# file unit in either axis. Fixed-grid rounding cannot join them: a pair
+# straddling a rounding boundary (``7.071068`` vs ``7.071069``) lands in
+# different cells however coarse the grid. Endpoints within this distance are
+# therefore clustered and moved to one shared point (<= a few nm, ~1e-5 mm^2
+# on a 100 mm board), far below any real feature of a board outline.
+_OUTLINE_JOIN_TOLERANCE_MM = 2e-6
+
+
+def _cluster_endpoints(
+    segments: list[tuple[tuple[float, float], tuple[float, float]]],
+    tol: float = _OUTLINE_JOIN_TOLERANCE_MM,
+) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    """Move endpoints that lie within ``tol`` of each other onto one point.
+
+    Union-find over a ``tol``-sized spatial hash (each point checks its 3x3
+    neighbouring cells), so it is near-linear. Each cluster collapses onto its
+    first-seen member, which makes the result deterministic and keeps
+    exactly-equal endpoints equal.
+    """
+    points = [pt for seg in segments for pt in seg]
+    parent = list(range(len(points)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    cells: dict[tuple[int, int], list[int]] = {}
+    for idx, (x, y) in enumerate(points):
+        cx, cy = math.floor(x / tol), math.floor(y / tol)
+        for nx in (cx - 1, cx, cx + 1):
+            for ny in (cy - 1, cy, cy + 1):
+                for other in cells.get((nx, ny), ()):
+                    ox_, oy_ = points[other]
+                    if math.hypot(x - ox_, y - oy_) <= tol:
+                        ra, rb = find(idx), find(other)
+                        if ra != rb:
+                            parent[max(ra, rb)] = min(ra, rb)
+        cells.setdefault((cx, cy), []).append(idx)
+    snapped = [(points[find(i)][0] + 0.0, points[find(i)][1] + 0.0) for i in range(len(points))]
+    return [(snapped[2 * i], snapped[2 * i + 1]) for i in range(len(segments))]
 
 
 def _classify_angle(angle: float | None) -> str | None:
@@ -291,17 +330,10 @@ def _outline_area_mm2(pcb: PCB) -> float | None:
         return None
     if not segments:
         return None
-    # Snap every endpoint to a fixed grid (see _OUTLINE_SNAP_DECIMALS) so shared
-    # corners that were computed through different float paths (a rotated
-    # footprint endpoint ``6.1e-16`` vs a board line's ``0``) compare equal;
-    # exact-coordinate polygonization would otherwise see an open contour.
-    snapped = [
-        (
-            (round(a[0], _OUTLINE_SNAP_DECIMALS) + 0.0, round(a[1], _OUTLINE_SNAP_DECIMALS) + 0.0),
-            (round(b[0], _OUTLINE_SNAP_DECIMALS) + 0.0, round(b[1], _OUTLINE_SNAP_DECIMALS) + 0.0),
-        )
-        for a, b in segments
-    ]
+    # Cluster endpoints (see _OUTLINE_JOIN_TOLERANCE_MM) so shared corners
+    # computed through different float paths compare equal; exact-coordinate
+    # polygonization would otherwise see an open contour.
+    snapped = _cluster_endpoints(segments)
     segments = [seg for seg in snapped if seg[0] != seg[1]]
     if not segments:
         return None
