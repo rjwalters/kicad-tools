@@ -696,6 +696,30 @@ def test_far_landing_that_slits_against_the_body_is_not_emitted() -> None:
     assert findings == [], findings
 
 
+def test_far_join_judges_only_the_start_stub_legs(monkeypatch) -> None:
+    # #9728 review (verdict 33c5d96): the start stub polyline handed to
+    # ``_far_join_slits`` must be the stub's own legs, not an alias that grows
+    # into the whole emitted route (which over-banned landings for findings
+    # anywhere along the body).
+    a = _pad(0.0, 0.0, width=0.4, height=0.4)
+    b = _pad(8.0, 0.0, width=0.4, height=0.4, ref="J2")
+    pf = _pf([a, b], fine=0.1)
+    seen: list[list[tuple[float, float]]] = []
+    orig = type(pf)._far_join_slits
+
+    def spy(self, route, ends):
+        seen.extend(list(e[2]) for e in ends)
+        return orig(self, route, ends)
+
+    monkeypatch.setattr(type(pf), "_far_join_slits", spy)
+    route = pf.route(a, b)
+    assert route is not None
+    assert seen, "_far_join_slits was not reached"
+    start_poly = seen[0]
+    assert len(start_poly) <= 4, start_poly
+    assert start_poly[-1] != (8.0, 0.0), "start polyline grew into the route"
+
+
 def test_sealed_probe_counts_the_selected_stubs_own_copper() -> None:
     # #9728 review finding 2: a 0.15 mm pad at (2, 1) whose landing (2, 0.8)
     # exits collinearly to (2, 0.4) is NOT sealed: the first body edge rides

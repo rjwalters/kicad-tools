@@ -3978,7 +3978,7 @@ class LatticePathfinder:
         found_pairs: list[ViaPair] = []
         cur_layer = start_state[1]
         start_poly = list(start_stub[start_state])  # pad -> first node
-        cur_pts: list[Pt] = start_poly
+        cur_pts: list[Pt] = list(start_poly)
         # The start escape legs carry ``width_a`` (neck or full); the lattice
         # body carries ``body_w``; the end escape legs carry ``width_b``.  Each
         # segment is spaced at the width it is EMITTED at (issue #4293).
