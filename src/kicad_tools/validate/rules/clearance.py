@@ -7,8 +7,11 @@ Runtime note on arcs (Issue #9673): an arc's pair distance is minimised
 over its covering chord tessellation, so an arc-vs-arc pair costs the
 product of the two chord counts (at the 1 um sagitta bound a 90 deg arc
 of radius 50 mm is ~125 chords).  The broad-phase ``bounds`` gate keeps
-that off every pair but near neighbours; a heavily arc'd imported board
-has no committed timing under ``boards/`` yet.
+that off every pair but near neighbours; between near neighbours the
+chord search itself prunes with a bounding-box lower bound that cannot
+change the verdict or its witness (Issue #9714, see
+:func:`_arc_pair_clearance`), so large-radius arcs whose element boxes
+mutually overlap no longer pay the full chord product.
 """
 
 from __future__ import annotations
@@ -106,6 +109,22 @@ _MEMOIZE_COPPER_GEOM = True
 #: node this rule measures answer identically.
 ARC_COPPER_SAGITTA_MM: float = 0.001
 
+#: Safety slack on the chord-search pruning bound (Issue #9714), in mm.  A
+#: pair is skipped only when its bounding-box lower bound exceeds the
+#: running best by MORE than this, so the decision can never flip on
+#: last-bit rounding disagreement between the bound (squared axis gaps)
+#: and the kernel's own distance arithmetic.  1 nm is five orders below
+#: the 0.1 um coordinate quantum :data:`ARC_COPPER_SAGITTA_MM` keys
+#: findings on, and orders above the ~1e-13 mm worst-case divergence of
+#: the two computations at board-coordinate scale (<1e4 mm).
+_ARC_PRUNE_EPS_MM: float = 1e-9
+
+#: Chords per merged broad-phase bucket in the pruned arc-pair search
+#: (Issue #9714).  Purely a constant-factor knob: buckets only widen the
+#: ranges of consecutive chord indices one skip decision covers, never
+#: which pairs are evaluated or in what order.
+_CHORD_BUCKET_SIZE: int = 16
+
 
 @dataclass
 class CopperElement:
@@ -191,6 +210,11 @@ class CopperElement:
     # element for it once per candidate pair it takes part in, and it is a pure
     # function of fields that are assigned once at construction.
     _kernel_shape_cache: object = field(default=_GEOM_UNSET, compare=False, repr=False)
+    # Issue #9714: the chord tessellation a pair distance is minimised over,
+    # with its pruning records (see ``_chord_search_data``), memoised for the
+    # same reason -- a heavily arc'd board rebuilds an arc's chord list once
+    # per candidate pair otherwise.
+    _chord_search_cache: object = field(default=_GEOM_UNSET, compare=False, repr=False)
 
     @classmethod
     def from_segment(cls, seg: Segment, origin: Origin = (0.0, 0.0)) -> CopperElement:
@@ -832,18 +856,84 @@ def _element_chord_shapes(elem: CopperElement) -> list[KShape]:
     """The kernel shapes a pair distance is minimised over (Issue #9673).
 
     An arc answers one capsule per chord, at the covering chord width; every
-    other element is its single ``kernel_shape()``.
+    other element is its single ``kernel_shape()``.  Memoised on the element
+    (Issue #9714): the list is a pure function of construction-time fields,
+    and a sweep asks the same element for it once per candidate pair.
     """
+    return _chord_search_data(elem)[0]
+
+
+#: One conservative lower-bound record for the pruned arc-pair search:
+#: ``(lo_x, lo_y, hi_x, hi_y, half_width)`` -- a chord centreline's
+#: axis-aligned box plus half its copper width (Issue #9714).
+_ChordRecord = tuple[float, float, float, float, float]
+
+#: Memoised per-element chord search data (see ``_chord_search_data``).
+_ChordSearchData = tuple[
+    list[KShape], list[_ChordRecord] | None, list[_ChordRecord] | None, _ChordRecord | None
+]
+
+
+def _chord_search_data(elem: CopperElement) -> _ChordSearchData:
+    """``(shapes, prunes, buckets, whole)`` for the pruned pair search.
+
+    **shapes** is :func:`_element_chord_shapes`' list.  The other three
+    entries carry the conservative pruning records of Issue #9714, and are
+    ``None`` exactly when the shapes are not all :class:`KSegment` capsules
+    (an arc against a pad/via/zone counterpart), in which case the pair
+    search stays exhaustive:
+
+    * **prunes** -- one :data:`_ChordRecord` per shape: the centreline's
+      axis-aligned box and half the copper width.
+    * **buckets** -- the same record merged over each run of
+      :data:`_CHORD_BUCKET_SIZE` consecutive shapes.
+    * **whole** -- the record merged over every shape.
+    """
+    cached = elem._chord_search_cache
+    if cached is not _GEOM_UNSET:
+        return cached  # type: ignore[return-value]
     if elem.element_type != "arc":
-        return [elem.kernel_shape()]
-    points = elem.polyline or (
-        (elem.geometry[0], elem.geometry[1]),
-        (elem.geometry[2], elem.geometry[3]),
-    )
-    return [
-        KSegment(x1=a[0], y1=a[1], x2=b[0], y2=b[1], width=elem.arc_chord_width)
-        for a, b in zip(points, points[1:], strict=False)
-    ]
+        shapes: list[KShape] = [elem.kernel_shape()]
+    else:
+        points = elem.polyline or (
+            (elem.geometry[0], elem.geometry[1]),
+            (elem.geometry[2], elem.geometry[3]),
+        )
+        shapes = [
+            KSegment(x1=a[0], y1=a[1], x2=b[0], y2=b[1], width=elem.arc_chord_width)
+            for a, b in zip(points, points[1:], strict=False)
+        ]
+    segments = [shape for shape in shapes if isinstance(shape, KSegment)]
+    if len(segments) != len(shapes):
+        # A pad/via/zone counterpart (non-capsule shapes): no lower-bound
+        # record, so the pair search over these shapes stays exhaustive.
+        data: _ChordSearchData = (shapes, None, None, None)
+    else:
+        prunes = [
+            (
+                min(s.x1, s.x2),
+                min(s.y1, s.y2),
+                max(s.x1, s.x2),
+                max(s.y1, s.y2),
+                s.width / 2.0,
+            )
+            for s in segments
+        ]
+
+        def _merge(records: list[_ChordRecord]) -> _ChordRecord:
+            return (
+                min(r[0] for r in records),
+                min(r[1] for r in records),
+                max(r[2] for r in records),
+                max(r[3] for r in records),
+                max(r[4] for r in records),
+            )
+
+        size = _CHORD_BUCKET_SIZE
+        buckets = [_merge(prunes[start : start + size]) for start in range(0, len(prunes), size)]
+        data = (shapes, prunes, buckets, _merge(prunes))
+    elem._chord_search_cache = data
+    return data
 
 
 def _arc_pair_clearance(elem1: CopperElement, elem2: CopperElement) -> tuple[float, float, float]:
@@ -853,17 +943,108 @@ def _arc_pair_clearance(elem1: CopperElement, elem2: CopperElement) -> tuple[flo
     verdict is the smallest kernel gap across the arc's chords (both sides
     when both elements are arcs).  The overlap refinement and the location
     follow the module's existing conventions: :func:`_overlap_depth` where
-    :func:`_overlap_depth_applies` says so, and :func:`_report_location`'s
-    per-pair-kind positions with the closest chord standing in for the arc.
+    :func:`_overlap_depth_applies` says so, and the closest chord standing
+    in for the arc in the per-pair-kind positions.
+
+    Issue #9714: between two chord capsules the kernel gap is the
+    centreline distance minus both half widths, and the distance between
+    two centrelines is at least the distance between their axis-aligned
+    boxes.  So whenever that box bound already exceeds the running best
+    (plus :data:`_ARC_PRUNE_EPS_MM`), the exact evaluation cannot lower the
+    gap -- and because the exhaustive loop keeps the FIRST pair at an equal
+    minimum (``gap < best`` is strict), a pair that cannot strictly lower
+    the best can never become the witness either.  Skipped pairs therefore
+    change neither the reported gap nor its location, whatever the
+    evaluation order among equal minima.  The skip is applied per chord,
+    per run of :data:`_CHORD_BUCKET_SIZE` consecutive counterpart chords,
+    and per outer run against the counterpart's whole chord extent; a run
+    skip only ever removes a contiguous block from the same row-major
+    walk, so the evaluated pairs keep their exhaustive relative order.
+    Pairs that are not both all-:class:`KSegment` (an arc against a
+    pad/via/zone) keep the exhaustive search unchanged.
     """
-    shapes1 = _element_chord_shapes(elem1)
-    shapes2 = _element_chord_shapes(elem2)
+    shapes1, prunes1, buckets1, _whole1 = _chord_search_data(elem1)
+    shapes2, prunes2, buckets2, whole2 = _chord_search_data(elem2)
     best: tuple[float, KShape, KShape] | None = None
-    for c1 in shapes1:
-        for c2 in shapes2:
-            gap = _kernel_copper_gap(c1, c2)
-            if best is None or gap < best[0]:
-                best = (gap, c1, c2)
+    if prunes1 is None or prunes2 is None:
+        for c1 in shapes1:
+            for c2 in shapes2:
+                gap = _kernel_copper_gap(c1, c2)
+                if best is None or gap < best[0]:
+                    best = (gap, c1, c2)
+    else:
+        # The three pruning records are built and memoised together, so a
+        # non-None ``prunes`` on both sides implies the rest are set too.
+        assert buckets1 is not None and buckets2 is not None and whole2 is not None
+        eps = _ARC_PRUNE_EPS_MM
+        size = _CHORD_BUCKET_SIZE
+        n1 = len(shapes1)
+        n2 = len(shapes2)
+        fx1, fy1, fx2, fy2, fhw2 = whole2
+        best_gap = math.inf
+        for ostart in range(0, n1, size):
+            ox1, oy1, ox2, oy2, ohw1 = buckets1[ostart // size]
+            dx = ox1 - fx2
+            d = fx1 - ox2
+            if d > dx:
+                dx = d
+            dy = oy1 - fy2
+            d = fy1 - oy2
+            if d > dy:
+                dy = d
+            if dx < 0.0:
+                dx = 0.0
+            if dy < 0.0:
+                dy = 0.0
+            t = best_gap + eps + ohw1 + fhw2
+            # Skip the whole outer run when no chord pair inside it can
+            # strictly beat the running best (bbox_dist >= t; squared form,
+            # with ``t <= 0`` meaning even touching boxes cannot beat it).
+            if t <= 0.0 or dx * dx + dy * dy >= t * t:
+                continue
+            oend = min(ostart + size, n1)
+            for i in range(ostart, oend):
+                c1 = shapes1[i]
+                ax1, ay1, ax2, ay2, hw1 = prunes1[i]
+                for jstart in range(0, n2, size):
+                    bx1, by1, bx2, by2, bhw2 = buckets2[jstart // size]
+                    dx = ax1 - bx2
+                    d = bx1 - ax2
+                    if d > dx:
+                        dx = d
+                    dy = ay1 - by2
+                    d = by1 - ay2
+                    if d > dy:
+                        dy = d
+                    if dx < 0.0:
+                        dx = 0.0
+                    if dy < 0.0:
+                        dy = 0.0
+                    t = best_gap + eps + hw1 + bhw2
+                    if t <= 0.0 or dx * dx + dy * dy >= t * t:
+                        continue
+                    jend = min(jstart + size, n2)
+                    for j in range(jstart, jend):
+                        bx1, by1, bx2, by2, hw2 = prunes2[j]
+                        dx = ax1 - bx2
+                        d = bx1 - ax2
+                        if d > dx:
+                            dx = d
+                        dy = ay1 - by2
+                        d = by1 - ay2
+                        if d > dy:
+                            dy = d
+                        if dx < 0.0:
+                            dx = 0.0
+                        if dy < 0.0:
+                            dy = 0.0
+                        t = best_gap + eps + hw1 + hw2
+                        if t <= 0.0 or dx * dx + dy * dy >= t * t:
+                            continue
+                        gap = _kernel_copper_gap(c1, shapes2[j])
+                        if gap < best_gap:
+                            best_gap = gap
+                            best = (gap, c1, shapes2[j])
     assert best is not None  # an arc always yields at least one chord
     gap, s1, s2 = best
 
