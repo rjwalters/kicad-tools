@@ -561,15 +561,21 @@ class PathAmpacityRule(DRCRule):
         within the leg's polyline at the anchor-on-leg tolerance
         (:data:`~kicad_tools.validate.rules.reinforcement_incomplete
         .ANCHOR_ON_LEG_SLACK_MM` beyond the leg's half-width) on the same
-        layer and net -- but the wire is only soldered between the leg's
-        two anchors, so only the sub-span of the segment projected inside
-        the leg's :attr:`WiredLeg.anchor_arc` range is credited; the
-        hole-to-pad stubs outside it are judged at bare copper width
-        (Issue #9654). Each credited stretch gets the wire's copper
-        cross-section expressed as extra trace width at the layer's foil
-        thickness, so adding it to the copper width sums the two sections
-        -- exactly how ``width_for_current`` derives width from required
-        area. A single bare span when no wired leg covers the segment.
+        layer and net **and** it follows that leg's polyline -- both of its
+        endpoints project onto distinct arc positions of it. A segment that
+        only meets a leg side-on (a perpendicular branch stub inside the
+        trunk's corridor, whose endpoints project to one trunk point) does
+        not follow the trunk and is never credited by the trunk's wire:
+        the leg it does follow judges it, and bare copper does when no leg
+        does. But the wire is only soldered between the leg's two anchors,
+        so only the sub-span of the segment projected inside the leg's
+        :attr:`WiredLeg.anchor_arc` range is credited; the hole-to-pad
+        stubs outside it are judged at bare copper width (Issue #9654).
+        Each credited stretch gets the wire's copper cross-section
+        expressed as extra trace width at the layer's foil thickness, so
+        adding it to the copper width sums the two sections -- exactly how
+        ``width_for_current`` derives width from required area. A single
+        bare span when no wired leg covers the segment.
         """
         seg_len = _segment_length(segment)
         bare = _CreditSpan(0.0, seg_len, None, 0.0)
@@ -595,10 +601,12 @@ class PathAmpacityRule(DRCRule):
             t_start = _arc_on_polyline(leg.points, cum, _segment_end(segment, 0))
             t_end = _arc_on_polyline(leg.points, cum, _segment_end(segment, 1))
             if abs(t_end - t_start) <= 1e-6:
-                # Degenerate projection (the segment meets the polyline
-                # side-on): judge it as one point at its midpoint's arc.
-                covered = a0 - 1e-6 <= t_start <= a1 + 1e-6
-                return [full if covered else bare]
+                # Degenerate projection: the segment meets this polyline
+                # side-on (both endpoints project to one polyline point),
+                # so it does not follow this leg -- a perpendicular branch
+                # stub inside the trunk's corridor must be judged by the
+                # leg it follows, never credited by the trunk's wire.
+                continue
             lo, hi = (t_start, t_end) if t_start < t_end else (t_end, t_start)
             c0, c1 = max(lo, a0), min(hi, a1)
             if c1 - c0 <= 1e-6:  # no overlap with the wired span: bare copper

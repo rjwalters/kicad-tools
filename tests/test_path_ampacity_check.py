@@ -974,6 +974,37 @@ def _wired_legs(pcb: PCB, wires: list[dict], spec: CurrentPathSpec) -> list[Wire
     )
 
 
+def _t_junction(specs: list[CurrentPathSpec]) -> tuple[PCB, list[WiredLeg]]:
+    """A reinforced T-junction, wired by the placer itself (Issue #9654).
+
+    A 6.5 mm trunk from J1 at (20, 50) through the junction at (85, 50) to
+    J2 at (150, 50), with a perpendicular branch dropping from the junction
+    through y = 56 and 70 to J3 at (85, 80) at 2, 2 and 6.5 mm. Every leg
+    of every spec is declared reinforcement-eligible, so ``reinforce_net``
+    wires both the trunk and the branch -- the first branch segment sits
+    inside the trunk's corridor with both endpoints projecting to the same
+    trunk point, the shape that must be matched to the leg it follows.
+    """
+    pcb = PCB.create(width=200, height=120, center=False)
+    pcb.add_trace((20, 50), (85, 50), width=6.5, layer="F.Cu", net=_WIRE_NET)
+    pcb.add_trace((85, 50), (150, 50), width=6.5, layer="F.Cu", net=_WIRE_NET)
+    pcb.add_trace((85, 50), (85, 56), width=2.0, layer="F.Cu", net=_WIRE_NET)
+    pcb.add_trace((85, 56), (85, 70), width=2.0, layer="F.Cu", net=_WIRE_NET)
+    pcb.add_trace((85, 70), (85, 80), width=6.5, layer="F.Cu", net=_WIRE_NET)
+    _add_th_pad_footprint(pcb, ref="J1", x=20.0, y=50.0, net=_WIRE_NET, drill=1.0, size=2.0)
+    _add_th_pad_footprint(pcb, ref="J2", x=150.0, y=50.0, net=_WIRE_NET, drill=1.0, size=2.0)
+    _add_th_pad_footprint(pcb, ref="J3", x=85.0, y=80.0, net=_WIRE_NET, drill=1.0, size=2.0)
+    from kicad_tools.pcb.reinforcement_sidecar import build_wire_records
+    from kicad_tools.validate.rules.reinforcement_incomplete import ReinforcementIncompleteRule
+
+    outcome = reinforce_net(pcb, _WIRE_NET, current_paths=specs, all_runs=True)
+    wires = build_wire_records(outcome, 0.0, 0.0)
+    legs = ReinforcementIncompleteRule(specs=specs, wires=wires).fully_wired_legs(
+        pcb, _design_rules_2oz()
+    )
+    return pcb, legs
+
+
 class TestButtressWireCredit:
     def test_hole_to_pad_stub_is_judged_at_copper_width(self) -> None:
         # Issue #9654: the wire is soldered between the two anchors, so the
@@ -1203,6 +1234,74 @@ class TestButtressWireFusing:
         (with_wire,) = [v for v in fused if "wire" in v.message]
         assert "24.700mm effective" in with_wire.message
         assert "16 AWG wire" in with_wire.message
+
+
+class TestButtressWireTJunction:
+    """A wired trunk must not hide an undersized stub on its branch (#9654).
+
+    The first branch segment passes the trunk's midpoint-distance test and
+    both of its endpoints project to the same trunk point: it must be
+    matched to the leg whose polyline it follows (the branch wire), so the
+    2 mm stretch between the junction and the first branch anchor is
+    judged at bare copper -- in either leg order, for both the width and
+    the fusing checks that share the credit spans.
+    """
+
+    @staticmethod
+    def _specs(
+        *, pulsed_a: float | None = None, duty_cycle: float | None = None
+    ) -> list[CurrentPathSpec]:
+        trunk = CurrentPathSpec(
+            name="TRUNK",
+            net_name=_WIRE_NET,
+            source=PathEndpoint("J1", "1"),
+            sink=PathEndpoint("J2", "1"),
+            continuous_a=15.0,
+            reinforcement_eligible=True,
+        )
+        branch = CurrentPathSpec(
+            name="BRANCH",
+            net_name=_WIRE_NET,
+            source=PathEndpoint("J1", "1"),
+            sink=PathEndpoint("J3", "1"),
+            continuous_a=15.0,
+            pulsed_a=pulsed_a,
+            duty_cycle=duty_cycle,
+            pulse_duration_s=1.0 if pulsed_a is not None else None,
+            reinforcement_eligible=True,
+        )
+        return [trunk, branch]
+
+    def test_branch_stub_fails_at_bare_copper_in_either_leg_order(self) -> None:
+        specs = self._specs()
+        pcb, legs = _t_junction(specs)
+        assert len(legs) == 2  # the trunk wire and the branch wire
+        for wired in (legs, legs[::-1]):
+            results = PathAmpacityRule(specs=specs, wired_legs=wired).check(
+                pcb, _design_rules_2oz()
+            )
+            underwidth = [v for v in results.errors if "too narrow" in v.message]
+            assert [v.location for v in underwidth] == [pytest.approx((85.0, 52.604))]
+            assert "width 2.000mm; this stretch is not covered by a wire leg" in (
+                underwidth[0].message
+            )
+            assert "wire =" not in underwidth[0].message
+
+    def test_branch_stub_pulse_fuses_at_bare_copper_in_either_leg_order(self) -> None:
+        specs = self._specs(pulsed_a=100.0, duty_cycle=0.001)
+        pcb, legs = _t_junction(specs)
+        assert len(legs) == 2
+        for wired in (legs, legs[::-1]):
+            results = PathAmpacityRule(specs=specs, wired_legs=wired).check(
+                pcb, _design_rules_2oz()
+            )
+            underwidth = [v for v in results.errors if "too narrow" in v.message]
+            fused = [v for v in results.errors if "would fuse" in v.message]
+            assert [v.location for v in underwidth] == [pytest.approx((85.0, 52.604))]
+            assert [v.location for v in fused] == [pytest.approx((85.0, 52.604))]
+            for v in fused:
+                assert "2.000mm of 2.0oz copper" in v.message
+                assert "wire" not in v.message
 
 
 class TestButtressWireCreditThroughChecker:
