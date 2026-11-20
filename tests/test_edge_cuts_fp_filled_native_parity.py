@@ -141,6 +141,18 @@ CASES: dict[str, tuple[str, str, dict, bool]] = {
     ),
 }
 
+#: Exact flagged-probe sets for the cases whose probes do not follow the
+#: shared aligned-probe invariant (every non-interior/exterior probe flagged):
+#: - outward arc: the probe inside the filled bulge is flagged (no "interior");
+#: - inward arc: the probe in the notch is clear, so nothing is flagged;
+#: - rounded rect: the probe in the removed corner is clear, the deep
+#:   interior of the filled region is flagged.
+_EXPLICIT_FLAGGED: dict[str, set[str]] = {
+    "fp_poly_arc_outward_filled": {"in_arc"},
+    "fp_poly_arc_inward_filled": set(),
+    "fp_rect_rounded_filled": {"interior"},
+}
+
 _BOARD_TMPL = """(kicad_pcb (version 20241229) (generator pcbnew)
   (general (thickness 1.6)) (paper "A4")
   (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (38 "B.Mask" user) (39 "F.Mask" user))
@@ -246,11 +258,16 @@ def test_fp_filled_edge_cuts_probe_parity(tmp_path, case):
     # near-outside and crossing probes stay flagged), the far-exterior
     # probe stays clean, and only a filled cut-out flags the deep-interior
     # probe (#9692's own claim, pinned).
+    assert "exterior" not in kct
+    if case in _EXPLICIT_FLAGGED:
+        # Cases with their own probe sets (no shared invariant): the exact
+        # flagged set is authored per case, derived from what each asserts.
+        assert kct == _EXPLICIT_FLAGGED[case]
+        return
     if filled:
         assert "interior" in kct
     else:
         assert "interior" not in kct
-    assert "exterior" not in kct
     assert set(probes) - {"interior", "exterior"} <= kct
 
 
