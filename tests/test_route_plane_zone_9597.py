@@ -267,12 +267,12 @@ class TestHardRefusalFailsClosed:
         return Route(net=2, net_name="SIG", segments=[seg])
 
     def test_parse_failure_refuses_under_hard_option(self, board: Path, monkeypatch) -> None:
-        from kicad_tools.schema.pcb import PCB
+        import kicad_tools.router.layer_advisories as la
 
         def boom(*a, **k):
             raise RuntimeError("zone parse exploded")
 
-        monkeypatch.setattr(PCB, "load", boom)
+        monkeypatch.setattr(la, "plane_zone_outlines", boom)
         router = _load(board)
         assert router._plane_zone_load_error and "zone parse exploded" in (
             router._plane_zone_load_error
@@ -284,9 +284,11 @@ class TestHardRefusalFailsClosed:
         assert "zone parse exploded" in router.plane_zone_refusals[0]
 
     def test_parse_failure_is_advisory_without_the_option(self, board: Path, monkeypatch) -> None:
-        from kicad_tools.schema.pcb import PCB
+        import kicad_tools.router.layer_advisories as la
 
-        monkeypatch.setattr(PCB, "load", lambda *a, **k: (_ for _ in ()).throw(ValueError("x")))
+        monkeypatch.setattr(
+            la, "plane_zone_outlines", lambda *a, **k: (_ for _ in ()).throw(ValueError("x"))
+        )
         router = _load(board)
         monkeypatch.undo()
         assert router.protect_plane_zones is False
@@ -326,9 +328,7 @@ class TestChainForwarding:
         parser = route_cmd._route_parser()
         outer = ["b.kicad_pcb", "--protect-plane-zones"]
         args = parser.parse_args(outer)
-        argv = route_cmd._chain_complete_argv(
-            args, outer, Path("o.kicad_pcb"), Path("s.kicad_pcb")
-        )
+        argv = route_cmd._chain_complete_argv(args, outer, Path("o.kicad_pcb"), Path("s.kicad_pcb"))
         assert "--protect-plane-zones" in argv
         # The inner argv parses back to the hard option being on.
         assert parser.parse_args([*argv]).protect_plane_zones is True
