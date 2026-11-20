@@ -392,3 +392,23 @@ class TestCliWiring:
         assert len(found) == 1
         assert "crosses zone +3V3 on In2.Cu" in out
         assert "route refused: net SIG" in out and "[+3V3]" in out
+
+
+class TestOptimizeTracesSkipsZoneMarking:
+    """The optimize-traces loader never runs A*, so it must not pay for marks."""
+
+    def test_optimize_loader_passes_mark_plane_zones_false(self):
+        import inspect
+
+        from kicad_tools.cli import optimize_cmd
+
+        src = inspect.getsource(optimize_cmd)
+        assert "mark_plane_zones=False" in src
+
+    def test_load_pcb_for_routing_opt_out_signature(self):
+        import inspect
+
+        from kicad_tools.router.io import load_pcb_for_routing
+
+        param = inspect.signature(load_pcb_for_routing).parameters["mark_plane_zones"]
+        assert param.default is True

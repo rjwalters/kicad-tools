@@ -5471,12 +5471,17 @@ def load_pcb_for_routing(
     project_path: str | Path | None = None,
     router_class_floors: bool = True,
     record_decisions: bool = False,
+    mark_plane_zones: bool = True,
 ) -> tuple[Autorouter, dict[str, int]]:
     """
     Load a KiCad PCB file and create an Autorouter with all components.
 
     Args:
         pcb_path: Path to .kicad_pcb file
+        mark_plane_zones: Issue #9597: parse plane-layer zone outlines and mark
+            them on the grid so A* charges for foreign plane zones. A tool
+            that never runs A* (``kct optimize-traces``) passes ``False`` to
+            skip the second PCB parse and the per-cell marking.
         project_path: The ``.kicad_pro`` whose netclasses the route must honour
             (Issue #6243).  Defaults to ``pcb_path``'s sibling; pass the
             ORIGINAL board's project when ``pcb_path`` is a staged copy.  A
@@ -6458,7 +6463,8 @@ def load_pcb_for_routing(
 
     _zone_stack = router.layer_stack
     if (
-        _zone_stack is not None
+        mark_plane_zones
+        and _zone_stack is not None
         and "(zone" in pcb_text
         and any(layer.layer_type == _ZoneLayerType.PLANE for layer in _zone_stack.layers)
     ):
