@@ -161,6 +161,122 @@ def board_benign_suspect_names_source() -> str:
     return "".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# Cross-face bore-path fixtures (Issue #9704)
+# ---------------------------------------------------------------------------
+
+
+# The Evidence geometry from issue #9704, shifted into the standard outline
+# (100,100) -> (140,120): a 2.0 mm HV run on B.Cu centred on y=106, a 3.2 mm
+# NPTH mounting hole, and another net's 0.3 mm F.Cu track crossing the run in
+# plan at x=107.5.  The two nets share NO copper layer, so the only surface
+# path between them crosses a face boundary: B.Cu run -> NPTH bore rim
+# (1.4 mm) + board thickness (1.6 mm) + rim -> F.Cu track (0.75 mm) = 3.75 mm.
+def board_cross_face_bore_source(
+    hole_x: float = 105.0,
+    hole_y: float = 110.0,
+    *,
+    with_hv_fcu_stub: bool = False,
+) -> str:
+    """Two nets on opposite faces with a non-plated bore between them (#9704).
+
+    ``L_MAINS`` lives only on B.Cu (a 2.0 mm run, copper y in [105, 107]);
+    ``GND`` lives only on F.Cu (a 0.3 mm track at x=107.5, copper x in
+    [107.35, 107.65]).  A bare ``np_thru_hole`` pad (3.2 mm drill) at
+    ``(hole_x, hole_y)`` -- default (105, 110), rim bottom at y=108.4 -- is the
+    bore joining the two faces.  Cross-face surface path through the bore rim:
+    1.4 + 1.6 + 0.75 = 3.75 mm (well under a 6.3 mm HV requirement).  Move the
+    hole far from both conductors with ``hole_x``/``hole_y`` for the negative
+    case (no short bore path -> no cross-face row at all).
+
+    With ``with_hv_fcu_stub`` a far-away F.Cu stub of ``L_MAINS`` makes the pair
+    share F.Cu (a ~25 mm same-face gap), so the bore path must bind by taking
+    the minimum with the existing same-face row.
+    """
+    parts = [_HEADER, _OUTLINE]
+    parts.append(
+        '  (footprint "test:mhole" (layer "F.Cu") '
+        f"(at {hole_x} {hole_y})\n"
+        '    (property "Reference" "MH1" (at 0 0 0) (layer "F.SilkS"))\n'
+        '    (pad "1" np_thru_hole circle (at 0 0) (size 3.2 3.2) (drill 3.2)\n'
+        '      (layers "*.Cu" "*.Mask"))\n'
+        "  )\n"
+    )
+    parts.append(
+        '  (segment (start 102 106) (end 118 106) (width 2.0) (layer "B.Cu") (net 1 "L_MAINS"))\n'
+    )
+    parts.append(
+        '  (segment (start 107.5 101) (end 107.5 111) (width 0.3) (layer "F.Cu") (net 2 "GND"))\n'
+    )
+    if with_hv_fcu_stub:
+        parts.append(
+            '  (segment (start 133 104) (end 137 104) (width 0.5) (layer "F.Cu") '
+            '(net 1 "L_MAINS"))\n'
+        )
+    parts.append(")\n")
+    return "".join(parts)
+
+
+def board_cross_face_edge_wrap_source() -> str:
+    """Two nets on opposite faces near the same board edge (#9704).
+
+    ``L_MAINS`` on F.Cu and ``GND`` on B.Cu both start 1.5 mm from the left
+    board wall (x=100) at the same y, overlapping in plan.  The board-edge
+    wrap path is 1.5 + 1.6 (thickness) + 1.5 = 4.6 mm.
+    """
+    header = _HEADER
+    parts = [header, _OUTLINE]
+    parts.append(
+        '  (segment (start 102 110) (end 112 110) (width 1.0) (layer "F.Cu") (net 1 "L_MAINS"))\n'
+    )
+    parts.append(
+        '  (segment (start 102 110) (end 112 110) (width 1.0) (layer "B.Cu") (net 2 "GND"))\n'
+    )
+    parts.append(")\n")
+    return "".join(parts)
+
+
+def board_cross_face_slot_source() -> str:
+    """Two nets on opposite faces with an interior milled slot between (#9704).
+
+    ``L_MAINS`` (F.Cu) and ``GND`` (B.Cu) sit either side of the standard
+    interior slot (x in [119, 121]): pad copper edges at x=118 and x=122.  The
+    slot wall is crossed at a single rim point, so the path is
+    min over p on the rim of d(F.Cu, p) + d(p, B.Cu) + 1.6 -- here
+    1.0 + 1.6 + 3.0 = 5.6 mm (p on the near wall x=119).
+    """
+    parts = [_HEADER, _OUTLINE, _SLOT]
+    parts.append(_footprint("U1", 117, 110, 1, "L_MAINS"))
+    parts.append(
+        '  (footprint "test:pad" (layer "B.Cu") (at 123 110)\n'
+        '    (pad "1" smd rect (at 0 0) (size 2 2) (layers "B.Cu")\n'
+        '      (net 2 "GND"))\n'
+        "  )\n"
+    )
+    parts.append(")\n")
+    return "".join(parts)
+
+
+def board_same_face_with_bore_source() -> str:
+    """The classic same-face pair plus an off-path NPTH bore (#9704, AC3).
+
+    Same geometry as ``board_source(with_slot=False)`` (two F.Cu pads, 18 mm
+    apart) with a bare NPTH hole added far from the straight path.  The
+    same-face row must be unchanged by the bore's presence.
+    """
+    parts = [_HEADER, _OUTLINE]
+    parts.append(
+        '  (footprint "test:mhole" (layer "F.Cu") (at 135 105)\n'
+        '    (pad "1" np_thru_hole circle (at 0 0) (size 3.2 3.2) (drill 3.2)\n'
+        '      (layers "*.Cu" "*.Mask"))\n'
+        "  )\n"
+    )
+    parts.append(_footprint("U1", 110, 110, 1, "L_MAINS"))
+    parts.append(_footprint("U2", 130, 110, 2, "GND"))
+    parts.append(")\n")
+    return "".join(parts)
+
+
 # Header for the mains-named fixture: unmistakable mains net names (AC_LINE /
 # AC_NEUTRAL / FUSED_LINE) that the broadened HV name-pattern fallback (#4354)
 # must classify as HV without any net-class-map.
