@@ -1750,6 +1750,12 @@ class Autorouter:
         # preferences); aliasing the module-level singleton leaked those
         # writes into every later Autorouter in the same process.
         self.net_class_map = net_class_map or dict(DEFAULT_NET_CLASS_MAP)
+        # Issue #9600 (row 3 review): per-net track widths authored in the
+        # board's ``.kicad_pro`` netclasses (``{net_name: width_mm}``), set by
+        # the PCB loader for the neck census -- an authored assignment wins
+        # over the name-classification map.  Empty when no project sidecar
+        # resolves (diagnostic data; never a routing failure).
+        self.authored_net_widths: dict[str, float] = {}
 
         # Issue #6366: per-net A* heuristic-weight overrides (net id ->
         # weight).  Empty = every net searches at the default weight 1.0.

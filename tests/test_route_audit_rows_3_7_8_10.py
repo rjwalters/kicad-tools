@@ -51,7 +51,7 @@ from kicad_tools.router.clearance_kernel import CLEARANCE_EPSILON_MM
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer
-from kicad_tools.router.primitives import Route, Segment
+from kicad_tools.router.primitives import Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
 
 # The CLI-level rows 8/10 test drives the real negotiated route flow on the
@@ -193,6 +193,215 @@ def test_row3_neck_report_silent_when_copper_is_full_width():
     assert format_neck_report(necks) == ""
 
 
+def _two_pad_bus_board_text() -> str:
+    """Two-pad ``BUS`` net in open space (authored netclass fixture).
+
+    ``BUS`` carries no name-classification width, so only the project's
+    ``netclass_assignments`` can say the net is supposed to be wide.
+    """
+    header = _HEADER.replace("(end 24 28)", "(end 40 40)")
+    body = ""
+    for i, (pin, x, y) in enumerate((("1", 5.0, 5.0), ("2", 30.0, 30.0))):
+        body += (
+            f'(pad "{pin}" smd rect (at {x - 10.0:g} {y - 10.0:g}) (size 1 1) '
+            f'(layers "F.Cu") (net 1 "BUS") '
+            f'(uuid "00000000-0000-0000-0000-00000000001{i + 1}"))\n    '
+        )
+    return (
+        header
+        + '(footprint "Test:U1" (layer "F.Cu") (at 10 10)\n'
+        + '  (property "Reference" "U1" (at 0 -2) (layer "F.SilkS"))\n'
+        + f"  {body})\n"
+        + ")\n"
+    )
+
+
+def _wide_bus_project() -> dict:
+    """Schema-3 project assigning ``BUS`` to a 0.6 mm ``Wide`` netclass."""
+    return {
+        "board": {"design_settings": {}},
+        "net_settings": {
+            "meta": {"version": 3},
+            "classes": [
+                {
+                    "name": "Wide",
+                    "clearance": 0.2,
+                    "track_width": 0.6,
+                    "via_diameter": 0.8,
+                    "via_drill": 0.4,
+                },
+                {
+                    "name": "Default",
+                    "clearance": 0.2,
+                    "track_width": 0.2,
+                    "via_diameter": 0.6,
+                    "via_drill": 0.3,
+                },
+            ],
+            "netclass_assignments": {"BUS": "Wide"},
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("command", "extra"),
+    [
+        (["route", "--layers", "2", "--force"], []),
+        (["route-auto", "--net", "BUS"], []),
+    ],
+    ids=["kct-route", "route-auto"],
+)
+def test_row3_census_uses_authored_netclass_assignment(tmp_path: Path, capsys, command, extra):
+    """Row 3 review: an authored netclass assignment defines the class width.
+
+    The reviewer's case: ``BUS`` assigned to ``Wide`` (0.6 mm) in a
+    schema-3 ``.kicad_pro``, emitted copper at the 0.2 mm board default.
+    Name classification knows nothing about ``BUS``, so a census that only
+    consults the router's class map stays silent -- on both commands.
+    """
+    from kicad_tools.cli import main as kct_main
+
+    board = tmp_path / "bus_two_pad.kicad_pcb"
+    board.write_text(_two_pad_bus_board_text())
+    (tmp_path / "bus_two_pad.kicad_pro").write_text(json.dumps(_wide_bus_project()))
+
+    out_path = tmp_path / "out.kicad_pcb"
+    rc = kct_main([*command, str(board), "-o", str(out_path), "--format", "json", *extra])
+    assert rc == 0
+    doc = json.loads(capsys.readouterr().out)
+    entries = doc["necked_copper"] if "necked_copper" in doc else doc["nets"][0]["necked_copper"]
+    [neck] = entries
+    assert neck["net_name"] == "BUS"
+    assert neck["min_width_mm"] == pytest.approx(0.2), (
+        "the 0.2 mm default-width copper must be measured against the "
+        f"authored 0.6 mm Wide class, not ignored: {neck}"
+    )
+    assert neck["beyond_taper"] is True
+
+
+def test_row3_class_width_lookup_priority():
+    """Authored assignment > classification map > global default."""
+    from kicad_tools.router.neck_report import class_width_lookup
+
+    class _NC:
+        trace_width = 0.3
+
+    lookup = class_width_lookup({"BUS": _NC()}, 0.2, {"BUS": 0.6})
+    assert lookup("BUS") == 0.6
+    assert lookup("UNROUTED") == 0.2
+    unauthored = class_width_lookup({"BUS": _NC()}, 0.2)
+    assert unauthored("BUS") == 0.3
+
+
+def _necked_run_routes(variant: str) -> list[Route]:
+    """Two 0.8 mm necked segments of identical copper, arranged per ``variant``.
+
+    The reviewer's probe geometry: a straight 1.6 mm track whose second
+    half is reversed, split across routes, or moved to another layer.
+    """
+
+    def seg(x1: float, y1: float, x2: float, y2: float, layer=Layer.F_CU) -> Segment:
+        return Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=0.8, layer=layer, net=1, net_name="BUS")
+
+    first = seg(0.0, 0.0, 0.0, 0.8)
+    if variant == "straight":
+        return [Route(net=1, net_name="BUS", segments=[first, seg(0.0, 0.8, 0.0, 1.6)])]
+    if variant == "reversed":
+        return [Route(net=1, net_name="BUS", segments=[first, seg(0.0, 1.6, 0.0, 0.8)])]
+    if variant == "split-routes":
+        return [
+            Route(net=1, net_name="BUS", segments=[first]),
+            Route(net=1, net_name="BUS", segments=[seg(0.0, 0.8, 0.0, 1.6)]),
+        ]
+    if variant == "other-layer":
+        return [Route(net=1, net_name="BUS", segments=[first, seg(0.0, 0.8, 0.0, 1.6, Layer.B_CU)])]
+    if variant == "other-layer-via":
+        route = Route(
+            net=1,
+            net_name="BUS",
+            segments=[first, seg(0.0, 0.8, 0.0, 1.6, Layer.B_CU)],
+        )
+        route.vias.append(
+            Via(
+                x=0.0,
+                y=0.8,
+                drill=0.3,
+                diameter=0.6,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=1,
+                net_name="BUS",
+            )
+        )
+        return [route]
+    raise ValueError(variant)
+
+
+class TestRow3ContiguousRunMeasurement:
+    """Row 3 review: runs come from the copper geometry, not emission order."""
+
+    @staticmethod
+    def _longest_run(routes: list[Route]) -> float:
+        from kicad_tools.router.neck_report import collect_necked_copper
+
+        necks = collect_necked_copper(routes, lambda _name: 1.0)
+        return necks["BUS"].longest_run_mm
+
+    @pytest.mark.parametrize(
+        "variant",
+        ["straight", "reversed", "split-routes", "other-layer-via"],
+    )
+    def test_touching_copper_accumulates_regardless_of_emission(self, variant: str):
+        """Identical copper measures identically: one 1.6 mm run.
+
+        Endpoint orientation, the route boundary and a via-joined layer
+        change must not split (or join) what is electrically one neck.
+        """
+        assert self._longest_run(_necked_run_routes(variant)) == pytest.approx(1.6)
+
+    def test_layer_change_without_via_does_not_join(self):
+        """Copper on B.Cu with no via is a separate piece: 0.8 mm each."""
+        assert self._longest_run(_necked_run_routes("other-layer")) == pytest.approx(0.8)
+
+    def test_beyond_taper_follows_the_run(self):
+        """The long-run warning tracks the geometric run in every case."""
+        from kicad_tools.router.neck_report import collect_necked_copper, necked_net_to_dict
+
+        for variant in ("straight", "reversed", "split-routes", "other-layer-via"):
+            necks = collect_necked_copper(_necked_run_routes(variant), lambda _name: 1.0)
+            entry = necked_net_to_dict(necks["BUS"], long_threshold_mm=1.1)
+            assert entry["beyond_taper"] is True, variant
+        entry = necked_net_to_dict(
+            collect_necked_copper(_necked_run_routes("other-layer"), lambda _name: 1.0)["BUS"],
+            long_threshold_mm=1.1,
+        )
+        assert entry["beyond_taper"] is False
+
+
+def test_row3_authored_netclass_widths_resolution():
+    """``authored_netclass_widths`` mirrors the clearance resolver's rules."""
+    from kicad_tools.core.project_clearance import authored_netclass_widths
+
+    project = _wide_bus_project()
+    resolved = authored_netclass_widths(project, ["BUS", "OTHER"])
+    assert list(resolved) == ["BUS"]
+    assert resolved["BUS"].width == pytest.approx(0.6)
+    assert resolved["BUS"].source_class == "Wide"
+    # Pattern-matched membership resolves too, with the same semantics.
+    project["net_settings"]["netclass_patterns"] = [{"netclass": "Wide", "pattern": "VBUS*"}]
+    resolved = authored_netclass_widths(project, ["VBUS_A", "OTHER"])
+    assert resolved["VBUS_A"].width == 0.6
+    assert "OTHER" not in resolved  # Default-sourced widths are excluded
+    # A project whose named classes declare no track_width resolves to nothing.
+    bare = {
+        "net_settings": {
+            "meta": {"version": 3},
+            "classes": [{"name": "Wide", "clearance": 0.2}],
+            "netclass_assignments": {"BUS": "Wide"},
+        }
+    }
+    assert authored_netclass_widths(bare, ["BUS"]) == {}
+
+
 # ---------------------------------------------------------------------------
 # Row 7: exact-boundary clearance comparisons tolerate float rounding
 # ---------------------------------------------------------------------------
@@ -263,24 +472,53 @@ def test_row7_copper_kernel_accepts_audit_boundary_gap():
 def test_row8_every_reachable_link_routes_and_failures_are_recorded():
     """Row 8: one impossible link must not stop the other links.
 
-    The sealed pad's link fails and is recorded; the three reachable pads
-    still get copper.  "Report each result" is the per-net pad accounting
-    the CLI prints (asserted in the row-10 test) plus this failure record.
+    The sealed pad is declared FIRST in the fixture, so the RSMT edge loop
+    attempts the IMPOSSIBLE link before any reachable one (#9600 review:
+    with the sealed link last, reintroducing the audit's early-stop bug
+    passed this test unchanged).  Every link routed after that failure is
+    evidence the engine continued; the reachable pads' copper is asserted
+    by geometry, not just by route count.  "Report each result" is the
+    per-net pad accounting the CLI prints (asserted in the row-10 test)
+    plus this failure record.
     """
     from kicad_tools.router.io import load_pcb_for_routing
 
     router, net_map = load_pcb_for_routing(str(_SEALED_BOARD))
     assert net_map["BUS"] in router.nets
+    # Sanity: the fixture orders the sealed pad first, or the
+    # impossible-link-before-reachable-links arrangement is gone.
+    assert router.nets[net_map["BUS"]][0] == ("U1", "4"), (
+        "sealed pad U1.4 must be the first declared pad of the fixture"
+    )
     routes = router.route_net(net_map["BUS"])
-    assert len(routes) >= 2, (
+    assert len(routes) >= 3, (
         f"routing stopped at the first failed link: only {len(routes)} link(s) "
-        "routed for a 4-pad net with one sealed pad"
+        "routed for a 4-pad net whose impossible link comes first"
     )
     assert router.routing_failures, "the sealed link must be recorded as a failure"
-    sealed = [f for f in router.routing_failures if "4" in (f.target_pad[1] or "")]
+
+    def _names_pad_four(failure) -> bool:
+        return "4" in (failure.source_pad[1] or "") or "4" in (failure.target_pad[1] or "")
+
+    sealed = [f for f in router.routing_failures if _names_pad_four(f)]
     assert sealed, "no failure record names the sealed pad U1.4; recorded: " + "; ".join(
         f"{f.source_pad}->{f.target_pad}" for f in router.routing_failures
     )
+
+    # The reachable pads got their copper: each pad centre (0.5 mm inside
+    # its 1 mm pad) is touched by the routed tree's endpoints.
+    reachable = {"U1.1": (10.0, 2.0), "U1.2": (2.0, 10.0), "U1.3": (18.0, 10.0)}
+    for name, (px, py) in reachable.items():
+        nearest = min(
+            ((ex - px) ** 2 + (ey - py) ** 2) ** 0.5
+            for route in routes
+            for seg in route.segments
+            for ex, ey in ((seg.x1, seg.y1), (seg.x2, seg.y2))
+        )
+        assert nearest <= 0.6, (
+            f"pad {name} has no routed copper nearer than {nearest:.3f} mm -- "
+            "the link to it was abandoned after the sealed pad's failure"
+        )
 
 
 def test_row10_summary_reports_partial_progress_per_net(capsys, tmp_path: Path):
@@ -412,8 +650,13 @@ def test_rows_8_10_route_auto_partial_progress_is_reported(tmp_path: Path):
     strategy's self-reported status) decides the verdict: one sealed pad
     must not stop the reachable links from routing (row 8), and the
     partial net is reported with per-pad progress, never a bare failure
-    (row 10).
+    (row 10).  The fixture declares the sealed pad FIRST (#9600 review),
+    so the impossible link is attempted before the reachable ones and the
+    written copper for the reachable pads is evidence the engine
+    continued past that failure -- asserted per pad by geometry.
     """
+    import re
+
     from kicad_tools.mcp.tools.routing import route_net_auto
 
     out_path = tmp_path / "out.kicad_pcb"
@@ -431,6 +674,24 @@ def test_rows_8_10_route_auto_partial_progress_is_reported(tmp_path: Path):
     assert written.count("(segment") >= 10, (
         "the reachable links' copper is missing from the written board"
     )
+    # Per-pad: every reachable pad centre is touched by written copper
+    # (pad centres are 0.5 mm inside their 1 mm pads; U1 sits at (10, 10)).
+    endpoints = [
+        (float(m[0]), float(m[1]))
+        for m in re.findall(r"\((?:start|end) (-?[\d.]+) (-?[\d.]+)\)", written)
+    ]
+    assert endpoints, "no segment endpoints parsed from the written board"
+    for name, (px, py) in {"U1.1": (10.0, 2.0), "U1.2": (2.0, 10.0), "U1.3": (18.0, 10.0)}.items():
+        nearest = min(((x - px) ** 2 + (y - py) ** 2) ** 0.5 for x, y in endpoints)
+        assert nearest <= 0.6, (
+            f"pad {name} has no written copper nearer than {nearest:.3f} mm -- "
+            "its link was abandoned after the sealed pad's failure"
+        )
 
 
+# The sealed pad (U1.4, inside the GND ring) is declared FIRST on purpose
+# (#9600 row 8 review): the RSMT edge loop attempts links in pad-declaration
+# order, so the IMPOSSIBLE link comes first and every later link is only
+# routed if the engine continues past the failure -- exactly the early-stop
+# regression this fixture exists to catch.  Keep it first when editing.
 _SEALED_BOARD = Path(__file__).parent / "fixtures" / "route_audit_sealed_box.kicad_pcb"

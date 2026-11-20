@@ -16,6 +16,7 @@ import math
 from dataclasses import dataclass
 from typing import Callable, Iterable, Mapping
 
+from ..core.types import CopperLayer, copper_layers_in_span
 from .primitives import Route
 
 __all__ = [
@@ -36,6 +37,20 @@ NECK_EPSILON_MM = 1e-6
 #: thresholds instead (a run longer than the taper is beyond it).
 DEFAULT_LONG_NECK_MM = 2.0
 
+#: Coordinates are quantised to this resolution (mm) when identifying
+#: touching copper: segment endpoints are grid multiples or KiCad's
+#: 4-decimal output, so nanometre keys absorb float noise without merging
+#: distinct geometry.
+_POINT_KEY_RESOLUTION_MM = 6
+
+
+def _point_key(x: float, y: float, layer: CopperLayer) -> tuple[float, float, CopperLayer]:
+    return (
+        round(x, _POINT_KEY_RESOLUTION_MM),
+        round(y, _POINT_KEY_RESOLUTION_MM),
+        layer,
+    )
+
 
 @dataclass
 class NeckedNet:
@@ -55,64 +70,110 @@ def collect_necked_copper(
     """Measure every net's copper against its class width.
 
     ``class_width_of`` maps a net name to the width that net's copper is
-    supposed to carry (net-class trace width, falling back to the global
-    rule).  A segment narrower than that width (beyond rounding noise) is
-    necked copper; contiguous necked segments along a route -- consecutive
-    in the route's emission order and touching end to start within a cell
-    -- accumulate into runs.
+    supposed to carry (authored netclass assignment, else net-class map,
+    else the global rule -- see :func:`class_width_lookup`).  A segment
+    narrower than that width (beyond rounding noise) is necked copper.
+
+    Contiguous runs are measured from the copper GEOMETRY, not from route
+    emission order (#9600 row 3 review): all of one net's necked segments
+    are joined into runs by endpoint coincidence, regardless of which
+    :class:`Route` emitted them, which endpoint of each segment is its
+    nominal start, or the direction the router traversed it.  Copper on
+    different layers joins only through a via of the same net at the
+    shared point (the via's declared span, in physical stack order), so
+    two electrically disconnected pieces never accumulate into one run.
+    The longest run of a net is the largest such electrically-connected
+    cluster of touching necked segments by total length.
 
     Returns one :class:`NeckedNet` per net that has any necked copper;
     nets routed entirely at class width never appear.
     """
-    by_net: dict[str, NeckedNet] = {}
+    # Per net: every necked segment as (length, width, endpoint keys) and
+    # every via of the net (a via can join runs the routes happened to
+    # split, and is the only thing that joins runs across layers).
+    segments_by_net: dict[str, list[tuple[float, float, tuple, tuple]]] = {}
+    vias_by_net: dict[str, list] = {}
     for route in routes:
         resolved_name = route.net_name or f"Net_{route.net}"
         width_limit = class_width_of(resolved_name)
-        run = 0.0
-        prev_end: tuple[float, float] | None = None
         for seg in route.segments:
-            necked = seg.width < width_limit - NECK_EPSILON_MM
-            length = math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1)
-            touching = (
-                prev_end is not None
-                and math.hypot(seg.x1 - prev_end[0], seg.y1 - prev_end[1]) <= 1e-9
-            )
-            run = (
-                run + length if necked and (touching or run == 0.0) else (length if necked else 0.0)
-            )
-            prev_end = (seg.x2, seg.y2) if necked else None
-            if not necked:
+            if seg.width >= width_limit - NECK_EPSILON_MM:
                 continue
-            entry = by_net.get(resolved_name)
-            if entry is None:
-                entry = NeckedNet(
-                    net_name=resolved_name,
-                    min_width_mm=seg.width,
-                    necked_length_mm=0.0,
-                    longest_run_mm=0.0,
-                    segment_count=0,
+            length = math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1)
+            segments_by_net.setdefault(resolved_name, []).append(
+                (
+                    length,
+                    seg.width,
+                    _point_key(seg.x1, seg.y1, seg.layer),
+                    _point_key(seg.x2, seg.y2, seg.layer),
                 )
-                by_net[resolved_name] = entry
-            entry.min_width_mm = min(entry.min_width_mm, seg.width)
-            entry.necked_length_mm += length
-            entry.longest_run_mm = max(entry.longest_run_mm, run)
-            entry.segment_count += 1
+            )
+        if route.vias:
+            vias_by_net.setdefault(resolved_name, []).extend(route.vias)
+
+    by_net: dict[str, NeckedNet] = {}
+    for net_name, necked_segments in segments_by_net.items():
+        parent: dict[tuple, tuple] = {}
+
+        def find(key: tuple) -> tuple:
+            root = key
+            while parent[root] != root:
+                parent[root] = parent[parent[root]]
+                root = parent[root]
+            return root
+
+        def union(a: tuple, b: tuple) -> None:
+            for key in (a, b):
+                parent.setdefault(key, key)
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[rb] = ra
+
+        for _length, _width, key_a, key_b in necked_segments:
+            # The segment itself is copper: its two endpoints are one.
+            union(key_a, key_b)
+        for via in vias_by_net.get(net_name, ()):
+            span = copper_layers_in_span(via.layers[0], via.layers[1])
+            keys = [_point_key(via.x, via.y, layer) for layer in span]
+            for key in keys[1:]:
+                union(keys[0], key)
+
+        run_length: dict[tuple, float] = {}
+        for length, _width, key_a, _key_b in necked_segments:
+            root = find(key_a)
+            run_length[root] = run_length.get(root, 0.0) + length
+
+        by_net[net_name] = NeckedNet(
+            net_name=net_name,
+            min_width_mm=min(width for _length, width, _ka, _kb in necked_segments),
+            necked_length_mm=sum(length for length, _w, _ka, _kb in necked_segments),
+            longest_run_mm=max(run_length.values()),
+            segment_count=len(necked_segments),
+        )
     return by_net
 
 
 def class_width_lookup(
     net_class_map: Mapping | None,
     default_width: float,
+    authored_widths: Mapping[str, float] | None = None,
 ) -> Callable[[str], float]:
-    """Each net's intended trace width: its net class, else the global rule.
+    """Each net's intended trace width: authored class, net class, else rule.
 
     The one class-width rule shared by every neck-census caller (``kct
     route``'s Results section and JSON diagnostics, ``route-auto``'s result
     document) so the three surfaces cannot disagree about what counts as
-    necked.
+    necked.  Priority (#9600 row 3 review): the board's AUTHORED
+    ``netclass_assignments`` resolved from the project file first (explicit
+    designer intent beats name heuristics), then the router's
+    classification map, then the global rule width the caller holds (PCB
+    rules / ``--trace-width`` override).
     """
 
     def width_of(net_name: str) -> float:
+        authored = (authored_widths or {}).get(net_name)
+        if isinstance(authored, (int, float)) and not isinstance(authored, bool) and authored > 0:
+            return float(authored)
         nc = (net_class_map or {}).get(net_name)
         return getattr(nc, "trace_width", None) or default_width
 

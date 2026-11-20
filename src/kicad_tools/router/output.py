@@ -1021,7 +1021,11 @@ def get_routing_diagnostics_json(
 
     necked = collect_necked_copper(
         router.routes,
-        class_width_lookup(getattr(router, "net_class_map", None), router.rules.trace_width),
+        class_width_lookup(
+            getattr(router, "net_class_map", None),
+            router.rules.trace_width,
+            getattr(router, "authored_net_widths", None),
+        ),
     )
     if necked:
         result_dict["necked_copper"] = [

@@ -948,9 +948,16 @@ def route_net_auto(
     if result.segments:
         produced = Route(net=net_number, net_name=net_name)
         produced.segments.extend(result.segments)
+        produced.vias.extend(getattr(result, "vias", []) or [])
+        # #9600 row 3 review: an authored ``.kicad_pro`` netclass assignment
+        # (or pattern) is the designer's explicit width for this net and wins
+        # over the name-classification map above.
+        from kicad_tools.router.io import authored_net_widths
+
+        authored = authored_net_widths(pcb_path, [net_name])
         necked = collect_necked_copper(
             [produced],
-            class_width_lookup(net_class_map, design_rules.trace_width),
+            class_width_lookup(net_class_map, design_rules.trace_width, authored),
         )
         if necked:
             result_dict["necked_copper"] = [
