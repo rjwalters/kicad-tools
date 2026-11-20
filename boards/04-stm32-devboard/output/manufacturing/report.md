@@ -54,7 +54,7 @@ Demonstrates circuit blocks API
 | Metric | Count |
 |--------|-------|
 | Errors | 0 |
-| Warnings | 30 |
+| Warnings | 0 |
 
 **Status**: PASS
 
@@ -122,21 +122,18 @@ Demonstrates circuit blocks API
 
 | Metric | Count |
 |--------|-------|
-| Errors | 68 |
-| Errors: kct (`--mfr jlcpcb-tier1` rules) | 68 |
+| Errors | 0 |
+| Errors: kct (`--mfr jlcpcb-tier1` rules) | 0 |
 | Errors: kicad-cli (geometric) | 0 |
 | Warnings | 8 |
-| Blocking | 68 |
+| Blocking | 0 |
 
-**Status**: FAIL
+**Status**: PASS
 
 ### Violations by Type
 
 | Violation Type | Count |
 |----------------|-------|
-| dimension_via_drill | 32 |
-| dimension_via_diameter | 18 |
-| dimension_annular_ring | 18 |
 | pour_slot | 8 |
 
 
@@ -145,12 +142,10 @@ Demonstrates circuit blocks API
 
 ## Manufacturing Readiness
 
-**Verdict**: NOT_READY
+**Verdict**: WARNING
 
 ### Action Items
 
-- **[CRITICAL]** Fix 68 blocking DRC violations (dimension_via_drill (32), dimension_via_diameter (18), dimension_annular_ring (18))
-- **[CRITICAL]** Increase min via drill: 0.150mm < 0.300mm required
 - **[OPTIONAL]** Refill zones to verify 3 zone-connected nets, then re-run kct audit
 - **[OPTIONAL]** Review 8 DRC warnings
 

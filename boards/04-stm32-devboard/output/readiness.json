@@ -41,43 +41,43 @@
     "DESIGN_REVIEW.md": "08076e07ddfe0d9ee014e870c1d21d0fd0b756a9df27947f47336e2222dbe6b4",
     "README.md": "c45b02a972642bb12adca3ad0ad9769bcbbbe4113004ef116115dd8006b87182",
     "check_manufacturing.py": "f2067a354c634e60d6f8082dfa27f31211db10d29b2fa56dfe4636ecf3202309",
-    "generate_design.py": "fea2781ab11a351c4769830845f6ff81768c70017728d8eeaec71213724acfbc",
+    "generate_design.py": "efb3cdbeabc22894f68f8cd2bd263f7c0b4e0ad56919012551fbd3f6a33e2ddd",
     "manufacturing_process.py": "0ca581ce5153e9923c3853d3e4a81212f4edc4943931f2083145ff0045674998",
     "output/kicad_tools_pwr.kicad_sym": "bdc924f0386d4cf4c1e0c766e3b6ec577a96da54bddebab047b13b50b8d85837",
     "output/lvs.json": "e71d3622641c6c865b6b7992165ba4ecd3cfd9efaefc877a8c4ec257a057d1f3",
     "output/manufacturing/DESIGN_REVIEW.md": "08076e07ddfe0d9ee014e870c1d21d0fd0b756a9df27947f47336e2222dbe6b4",
-    "output/manufacturing/README.txt": "72548df86d55ef744f5fc1d25ade6f5b77e24c9c2362223ad292a3b5651de10b",
-    "output/manufacturing/assembly-back.pdf": "2aeb374beef2e29c3ef4af69be17deb69c77a3c4e1c60e06e445403ebcc55359",
-    "output/manufacturing/assembly-front.pdf": "fc8dfb167f98d4c8245b65566a5d2f613cb1756b083691c7b2920385a50437ba",
+    "output/manufacturing/README.txt": "f7076deaed04f9d1fbc8b0fb3e3a05f391ffee03dc663090afefa8e5cdc1c905",
+    "output/manufacturing/assembly-back.pdf": "be18f194c5002f92699c348fa8129e00a6884b97e1a74fdaf3c5a26acb7f095e",
+    "output/manufacturing/assembly-front.pdf": "ff020299cb684c557d02a883c7e2e3a139848a972922da294d609d93b24fd9b4",
     "output/manufacturing/bom_jlcpcb.csv": "22f4f6e0ae921146268a6a0c94e0267283a7a8d64f24d90be807bb449873b27f",
     "output/manufacturing/check-report.json": "425f2ccd4dd29d2749a086a2fa6787a46cecaa3c2e81cae81239b364220b7d0f",
     "output/manufacturing/cpl_jlcpcb.csv": "5b6854e3efb25a771146c01fdf51dfff148bf7fc6079d582842f14bcfd2bda20",
     "output/manufacturing/design-source/DESIGN_REVIEW.md": "08076e07ddfe0d9ee014e870c1d21d0fd0b756a9df27947f47336e2222dbe6b4",
     "output/manufacturing/design-source/README.md": "cdcf63b2473322456e32eae0e46afaea602d96edc779f2af6161d2a5616cc958",
     "output/manufacturing/design-source/check_manufacturing.py": "f2067a354c634e60d6f8082dfa27f31211db10d29b2fa56dfe4636ecf3202309",
-    "output/manufacturing/design-source/generate_design.py": "fea2781ab11a351c4769830845f6ff81768c70017728d8eeaec71213724acfbc",
+    "output/manufacturing/design-source/generate_design.py": "efb3cdbeabc22894f68f8cd2bd263f7c0b4e0ad56919012551fbd3f6a33e2ddd",
     "output/manufacturing/design-source/manufacturing_process.py": "0ca581ce5153e9923c3853d3e4a81212f4edc4943931f2083145ff0045674998",
     "output/manufacturing/design-source/project.kct": "9cacd7cb85b1207fb3353da55e04a25a51b7323dc8cc4af416d4f47f252156f0",
-    "output/manufacturing/fill-consistency.json": "f8bed34d97cc0374bb14a5712a5ddba11d4964d49bea6188b6b4572cfbf65dda",
-    "output/manufacturing/gerbers/gerbers.zip": "818a30c1b7dc91df6819009b2d7d99dd1dfec05bea6a49244a15b53f0ca4cc0c",
-    "output/manufacturing/images/assembly.png": "defb0c5a79f5aecf26a9a6d0d8a6c0fecd1e2fdeb58cb79e4c85db61712e3f40",
-    "output/manufacturing/images/layer_B_Cu.png": "cc170df16aebd4c9906e320d0df2090694aa46c1fd35a0c96cdfcb4a89250ebe",
-    "output/manufacturing/images/layer_F_Cu.png": "c1f914f5a3c1c7578837f94cabe856526d59c81317ff6a2beec0b7a566e0ea91",
-    "output/manufacturing/images/pcb_back.png": "b7959b5898db010a67626a3dea9d36dfce7913dacf0068ade1c5b59d1bd4d38e",
-    "output/manufacturing/images/pcb_copper.png": "4965ec274448413023d91e357b886b682131af531f9b251da1b591f596c8fe4f",
-    "output/manufacturing/images/pcb_front.png": "0fe8d09ae099804487215b02203fe35670d582bd2acd02a4cb870e79b7d76829",
+    "output/manufacturing/fill-consistency.json": "3369e42a5c0ea40c718cdf6016b83fa85b04260ad66cf757b282ea30ef9561b6",
+    "output/manufacturing/gerbers/gerbers.zip": "b11b0910fbe7fa84cdc6d22c2a80039be82c1e1a33b212ca1846bc04d12c03cd",
+    "output/manufacturing/images/assembly.png": "a5db94fb615c52966bae1ec2fbf8a9c569b8e41a5fd2d4f1fb03cecdbb4a0ed9",
+    "output/manufacturing/images/layer_B_Cu.png": "4a624101978f380762251daa1551880e6a97b02102c96b5bc450edabfbb2d2d7",
+    "output/manufacturing/images/layer_F_Cu.png": "6735364c236b4443b3e6200b988ac6d1a11b68b87d17f1b389d1a0cb2445d433",
+    "output/manufacturing/images/pcb_back.png": "b688b2be329c41d5a6d54c6a668bb0b0dbef8bef69969a48a8e1671a5b0707a6",
+    "output/manufacturing/images/pcb_copper.png": "23ca6fd3824668d3fdc88d196f1e9071228a2e7b38ef587e18da45919b02a4a5",
+    "output/manufacturing/images/pcb_front.png": "664cca6f63541f0bcf3af259a583cdccf809e9a57b20deaab78cd0a4cfd46417",
     "output/manufacturing/images/schematic_stm32_devboard.png": "e0d58863c7071f9ef5fb2ba4940807a5fbb2a8df6f5321a377cd2f1f2c2f87ba",
-    "output/manufacturing/kicad_project.zip": "0db292695b96088ac1859d2605ef2e73dfb112bdff641f1b07a56a14a7d9ac35",
-    "output/manufacturing/manifest.json": "52edd9dc2cfea9bb706c682dfe7b6fca30d30b4625d19f080f88a50d874423f4",
+    "output/manufacturing/kicad_project.zip": "aa2781213ba3106624eb92060a7850f4abbe9b11875bfb69437a26c31307825b",
+    "output/manufacturing/manifest.json": "f692e2e64ce1aabb0aaf8651a8b97ca60e7a40b5090ff37187d13b5dc63a4d1d",
     "output/manufacturing/manufacturing-requirements.json": "52ef1e5957c569c120a43b82a63c9dff8d3bf5dee2392e473e2e73f20b8fb199",
     "output/manufacturing/native-drc.json": "98b3e1eea2d868b39295d98fe7d9cc52e971a4e399010b203ca3380e6dc71bf4",
     "output/manufacturing/native-erc.json": "a63705556bc9c62121b86b9ba175962761eddaf7107211dc068c4acba96251ff",
     "output/manufacturing/procurement-review.md": "53636d4836b8bd3f1df3e9a1169c02985b65be1d3e678190cc489fbe01e05bbd",
-    "output/manufacturing/report.md": "c7db836331ebdc881988cf6a80f0e38714537e2c6d73c74ed61e336019c97bab",
-    "output/manufacturing/report.pdf": "5fff38c4a04edb2642cb9b8df9ce3d54c88efb4f547382825942e1dd00407ff7",
+    "output/manufacturing/report.md": "74c76e5c10b51209691264b8fc054cc016bade77a17b9aa5b14ad34e9d198908",
+    "output/manufacturing/report.pdf": "77e81c1a5745b4b18e25f5f0f917ecc6d374d1fe5ca45b81a76652a5b29fd31a",
     "output/manufacturing-requirements.json": "52ef1e5957c569c120a43b82a63c9dff8d3bf5dee2392e473e2e73f20b8fb199",
-    "output/manufacturing.zip": "a9f64247969740b6f31f16d5f65650831ea49118645b2b0280691605a32ff2ef",
-    "output/readiness/fill-consistency.json": "f8bed34d97cc0374bb14a5712a5ddba11d4964d49bea6188b6b4572cfbf65dda",
+    "output/manufacturing.zip": "41f48cf1b3f98580fee9160460c66bba91a5d061ca1ff9f6c741a9a8a43c411b",
+    "output/readiness/fill-consistency.json": "3369e42a5c0ea40c718cdf6016b83fa85b04260ad66cf757b282ea30ef9561b6",
     "output/readiness/kct-check.json": "425f2ccd4dd29d2749a086a2fa6787a46cecaa3c2e81cae81239b364220b7d0f",
     "output/readiness/native-drc.json": "98b3e1eea2d868b39295d98fe7d9cc52e971a4e399010b203ca3380e6dc71bf4",
     "output/readiness/native-erc.json": "a63705556bc9c62121b86b9ba175962761eddaf7107211dc068c4acba96251ff",
@@ -92,7 +92,7 @@
     "output/board04_symbols.kicad_sym": "551e09f27d91f87826b728b9436e23f38228bd17430c48a83deaa55cd419c396",
     "output/readiness/native-erc-linux.json": "9dd3742f1e9ebf0f5e44a107badabd035a933bf06552201fb0bb6a2f7eea22d8",
     "output/manufacturing/native-erc-linux.json": "9dd3742f1e9ebf0f5e44a107badabd035a933bf06552201fb0bb6a2f7eea22d8",
-    "output/readiness/known-issues.json": "ff57c006977693dc18d8e9f8f7d5259d5916e20de2af29bf0eedf864d11bd1ce",
+    "output/readiness/known-issues.json": "7164a6fe31ab03b9c2479986b7d8c5aa6d0c4570a83c691ecb65244e411198b1",
     "output/net_class_map.json": "68d7dc586f39f5a0fc360a7ba9017fb0c380b5fa1021003d5761087f86129b40"
   },
   "evidence": {
@@ -106,153 +106,482 @@
       "issue": 6269,
       "kind": "exception",
       "summary": "Paid 0.15 mm mechanical-drill via process (ruling #7147); the generic jlcpcb-tier1 kct check reports the reviewed vias as errors, the board's own check_manufacturing.py models the process",
-      "recorded": "2026-10-19",
+      "recorded": "2026-11-19",
       "errors": [
         {
           "rule": "dimension_annular_ring",
           "at": [
-            144.3,
-            90.25
+            124.65,
+            86.0
           ]
         },
         {
           "rule": "dimension_annular_ring",
           "at": [
-            146.45,
-            89.25
+            124.85,
+            78.0
           ]
         },
         {
           "rule": "dimension_annular_ring",
           "at": [
-            147.15,
-            89.75
+            130.15,
+            79.9
           ]
         },
         {
           "rule": "dimension_annular_ring",
           "at": [
-            147.25,
-            86.5
+            135.0,
+            78.65
           ]
         },
         {
           "rule": "dimension_annular_ring",
           "at": [
-            151.25,
-            86.5
+            135.0,
+            84.65
           ]
         },
         {
           "rule": "dimension_annular_ring",
           "at": [
-            151.75,
-            92.45
+            137.78,
+            83.08
           ]
         },
         {
           "rule": "dimension_annular_ring",
           "at": [
-            155.05,
-            87.25
+            145.0,
+            84.65
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            146.0,
+            104.65
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            146.58,
+            90.75
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            146.65,
+            100.0
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            147.75,
+            86.58
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            151.0,
+            104.65
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            151.65,
+            100.0
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            152.25,
+            94.9
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            154.9,
+            86.75
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            156.0,
+            100.65
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            167.0,
+            90.65
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            175.05,
+            96.35
           ]
         },
         {
           "rule": "dimension_via_diameter",
           "at": [
-            144.3,
-            90.25
+            124.65,
+            86.0
           ]
         },
         {
           "rule": "dimension_via_diameter",
           "at": [
-            146.45,
-            89.25
+            124.85,
+            78.0
           ]
         },
         {
           "rule": "dimension_via_diameter",
           "at": [
-            147.15,
-            89.75
+            130.15,
+            79.9
           ]
         },
         {
           "rule": "dimension_via_diameter",
           "at": [
-            147.25,
-            86.5
+            135.0,
+            78.65
           ]
         },
         {
           "rule": "dimension_via_diameter",
           "at": [
-            151.25,
-            86.5
+            135.0,
+            84.65
           ]
         },
         {
           "rule": "dimension_via_diameter",
           "at": [
-            151.75,
-            92.45
+            137.78,
+            83.08
           ]
         },
         {
           "rule": "dimension_via_diameter",
           "at": [
-            155.05,
-            87.25
+            145.0,
+            84.65
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            146.0,
+            104.65
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            146.58,
+            90.75
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            146.65,
+            100.0
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            147.75,
+            86.58
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            151.0,
+            104.65
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            151.65,
+            100.0
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            152.25,
+            94.9
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            154.9,
+            86.75
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            156.0,
+            100.65
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            167.0,
+            90.65
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            175.05,
+            96.35
           ]
         },
         {
           "rule": "dimension_via_drill",
           "at": [
-            144.3,
-            90.25
+            124.65,
+            86.0
           ]
         },
         {
           "rule": "dimension_via_drill",
           "at": [
-            146.45,
-            89.25
+            124.85,
+            78.0
           ]
         },
         {
           "rule": "dimension_via_drill",
           "at": [
-            147.15,
-            89.75
+            130.15,
+            79.9
           ]
         },
         {
           "rule": "dimension_via_drill",
           "at": [
-            147.25,
-            86.5
+            135.0,
+            78.65
           ]
         },
         {
           "rule": "dimension_via_drill",
           "at": [
-            151.25,
-            86.5
+            135.0,
+            84.65
           ]
         },
         {
           "rule": "dimension_via_drill",
           "at": [
-            151.75,
-            92.45
+            137.25,
+            83.75
           ]
         },
         {
           "rule": "dimension_via_drill",
           "at": [
-            155.05,
-            87.25
+            137.78,
+            83.08
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            143.1,
+            87.4
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            143.35,
+            89.1
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            143.9,
+            90.05
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            145.0,
+            84.65
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            146.0,
+            104.65
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            146.58,
+            90.75
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            146.65,
+            100.0
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            147.75,
+            86.58
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            151.0,
+            104.65
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            151.65,
+            100.0
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            152.25,
+            94.9
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            153.15,
+            93.3
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            154.9,
+            86.75
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            156.0,
+            100.65
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            158.2,
+            87.7
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            158.7,
+            84.5
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            160.45,
+            85.45
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            161.3,
+            86.3
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            163.5,
+            87.7
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            163.85,
+            83.65
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            167.0,
+            90.65
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            169.8,
+            87.15
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            170.95,
+            88.3
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            172.6,
+            87.4
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            175.05,
+            96.35
           ]
         },
         {
