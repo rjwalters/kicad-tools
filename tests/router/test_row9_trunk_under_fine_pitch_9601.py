@@ -30,10 +30,10 @@ from kicad_tools.router.body_surcharge import (
     region_covers_cell,
 )
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.cpp_backend import CppPathfinder, is_cpp_available
+from kicad_tools.router.cpp_backend import CppPathfinder
 from kicad_tools.router.primitives import Layer as LayerEnum
 
-requires_cpp = pytest.mark.skipif(not is_cpp_available(), reason="C++ router backend not available")
+requires_cpp = pytest.mark.requires_router_cpp
 
 BACKENDS = [
     pytest.param(True, id="python"),

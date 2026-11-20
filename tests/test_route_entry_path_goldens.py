@@ -151,14 +151,6 @@ _NOISE_HEADER = re.compile(r"^Iteration \d+\b")
 # ---------------------------------------------------------------------------
 
 
-def _cpp_available() -> bool:
-    try:
-        from kicad_tools.router.cpp_backend import is_cpp_available
-    except ImportError:
-        return False
-    return bool(is_cpp_available())
-
-
 @contextlib.contextmanager
 def _without_kicad_cli():
     """Make every kicad-cli lookup report "not installed" for the run."""
@@ -374,10 +366,7 @@ def _resolve_for_host(golden: dict) -> dict:
 # The golden test
 # ---------------------------------------------------------------------------
 
-requires_cpp = pytest.mark.skipif(
-    not _cpp_available(),
-    reason="C++ router backend not built (uv run kct build-native); goldens pin cpp copper",
-)
+requires_cpp = pytest.mark.requires_router_cpp
 
 CASES = [(b, p) for b in BOARDS for p in ENTRY_PATHS]
 
@@ -532,7 +521,9 @@ def regenerate() -> dict:
 if __name__ == "__main__":
     if "--update" not in sys.argv[1:]:
         sys.exit("usage: python tests/test_route_entry_path_goldens.py --update")
-    if not _cpp_available():
+    from kicad_tools.router.cpp_backend import is_cpp_available
+
+    if not is_cpp_available():
         sys.exit("C++ router backend not built: run `uv run kct build-native` first")
     data = regenerate()
     GOLDENS_PATH.write_text(json.dumps(data, indent=2) + "\n")

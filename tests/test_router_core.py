@@ -14,6 +14,7 @@ from kicad_tools.router.core import (
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import Route, Segment
 from kicad_tools.router.rules import DesignRules
+from tests.conftest import require_router_cpp
 
 
 class TestAutorouterInit:
@@ -5053,15 +5054,14 @@ class TestPerNetAvoidLayersHardConstraint:
         from kicad_tools.router.cpp_backend import (
             CppGrid,
             CppPathfinder,
-            is_cpp_available,
         )
         from kicad_tools.router.grid import RoutingGrid
         from kicad_tools.router.pathfinder import Router
         from kicad_tools.router.primitives import Obstacle, Pad
         from kicad_tools.router.rules import NetClassRouting
 
-        if backend == "cpp" and not is_cpp_available():
-            pytest.skip("C++ router backend not available")
+        if backend == "cpp":
+            require_router_cpp()
 
         rules = DesignRules(
             trace_width=0.25,
@@ -5177,10 +5177,8 @@ class TestPerNetAvoidLayersHardConstraint:
         regression guard: both the native (default) and Python backends must now
         refuse the inner crossing for an ampacity-bearing net.
         """
-        from kicad_tools.router.cpp_backend import is_cpp_available
 
-        if not is_cpp_available():
-            pytest.skip("C++ router backend not available")
+        require_router_cpp()
 
         cpp_route = self._route_hv_net(backend="cpp", target_ampacity=15.0, strict_layers=False)
         py_route = self._route_hv_net(backend="python", target_ampacity=15.0, strict_layers=False)

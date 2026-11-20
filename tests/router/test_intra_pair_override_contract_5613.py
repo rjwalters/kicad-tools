@@ -60,15 +60,13 @@ import dataclasses
 
 import pytest
 
-from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import Pad, Route, Segment
 from kicad_tools.router.rules import DesignRules, NetClassRouting
 
-native = pytest.mark.skipif(
-    not is_cpp_available(), reason="native backend unavailable; run kct build-native"
-)
+native = pytest.mark.requires_router_cpp
 
 TRACE_WIDTH = 0.2
 DEFAULT_CLEARANCE = 0.2

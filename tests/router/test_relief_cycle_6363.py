@@ -30,7 +30,6 @@ from kicad_tools.router.algorithms.negotiated import (
     TargetedRipupOutcome,
 )
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Route, Segment
 
@@ -295,7 +294,7 @@ def test_budget_exhausted_rip_up_does_not_charge_the_pair():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not is_cpp_available(), reason="C++ backend not built")
+@pytest.mark.requires_router_cpp
 def test_victim_partial_copper_is_cleared_on_cpp_grid_before_the_retry():
     from tests.router.test_ripup_cycle_6342 import SEAL, _seal_route, _sealed_board
 
@@ -380,7 +379,7 @@ def test_victim_partial_copper_is_cleared_on_cpp_grid_before_the_retry():
     router.grid.flush_cpp_unmark_deferral()
 
 
-@pytest.mark.skipif(not is_cpp_available(), reason="C++ backend not built")
+@pytest.mark.requires_router_cpp
 def test_flush_discarded_keeps_committed_routes_queued_and_remarks_same_net():
     router = _router(num_nets=2)
     grid = router.grid

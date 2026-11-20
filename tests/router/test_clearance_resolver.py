@@ -39,6 +39,7 @@ from kicad_tools.router.clearance_resolver import (
 )
 from kicad_tools.router.pairwise_clearance import build_pairwise_clearance_table
 from kicad_tools.router.rules import DesignRules, NetClassRouting
+from tests.conftest import require_router_cpp
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -357,11 +358,9 @@ def test_resolver_matches_the_cpp_pairwise_scope() -> None:
     resolver must produce that same number from net *names*, so a Phase 3
     consumer can stop computing it locally.
     """
-    from kicad_tools.router.cpp_backend import is_cpp_available
     from kicad_tools.router.pairwise_clearance import build_cpp_domain_matrix
 
-    if not is_cpp_available():
-        pytest.skip("C++ router backend not available")
+    require_router_cpp()
 
     from kicad_tools.router import router_cpp
 

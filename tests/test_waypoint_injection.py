@@ -7,12 +7,11 @@ pads whose centers do not align with the routing grid.
 
 import math
 
-import pytest
-
 from kicad_tools.router import DesignRules, RoutingGrid
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.primitives import Pad
+from tests.conftest import require_router_cpp
 
 
 def _make_grid(
@@ -424,10 +423,9 @@ class TestWaypointBackendGating:
         """Under the C++ backend the effective flag must be False so the
         sub-grid escape pre-pass and PIN_ACCESS retry stay available."""
         from kicad_tools.router.core import Autorouter
-        from kicad_tools.router.cpp_backend import CppPathfinder, is_cpp_available
+        from kicad_tools.router.cpp_backend import CppPathfinder
 
-        if not is_cpp_available():
-            pytest.skip("C++ backend not built")
+        require_router_cpp()
 
         ar = Autorouter(width=10.0, height=10.0)
         assert isinstance(ar.router, CppPathfinder)
@@ -439,10 +437,9 @@ class TestWaypointBackendGating:
     def test_subgrid_prepass_not_skipped_under_cpp_backend(self):
         """The waypoint gate must not skip the sub-grid pre-pass under cpp."""
         from kicad_tools.router.core import Autorouter
-        from kicad_tools.router.cpp_backend import CppPathfinder, is_cpp_available
+        from kicad_tools.router.cpp_backend import CppPathfinder
 
-        if not is_cpp_available():
-            pytest.skip("C++ backend not built")
+        require_router_cpp()
 
         ar = Autorouter(width=10.0, height=10.0)
         assert isinstance(ar.router, CppPathfinder)
@@ -467,10 +464,8 @@ class TestWaypointBackendGating:
     def test_setter_cannot_force_waypoints_on_cpp_backend(self):
         """Requesting waypoints on a backend without support stays False."""
         from kicad_tools.router.core import Autorouter
-        from kicad_tools.router.cpp_backend import is_cpp_available
 
-        if not is_cpp_available():
-            pytest.skip("C++ backend not built")
+        require_router_cpp()
 
         ar = Autorouter(width=10.0, height=10.0)
         ar.use_waypoint_injection = True
@@ -483,10 +478,8 @@ class TestWaypointBackendGating:
         under cpp this must evaluate True (retry available).
         """
         from kicad_tools.router.core import Autorouter
-        from kicad_tools.router.cpp_backend import is_cpp_available
 
-        if not is_cpp_available():
-            pytest.skip("C++ backend not built")
+        require_router_cpp()
 
         ar = Autorouter(width=10.0, height=10.0)
         assert (not ar.use_waypoint_injection) is True

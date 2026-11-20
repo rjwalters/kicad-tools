@@ -22,7 +22,6 @@ from kicad_tools.router.cpp_backend import (
     CppCoupledPathfinder,
     CppGrid,
     install_pairwise_domains,
-    is_cpp_available,
     replay_route_halo_marks,
     sync_stored_routes,
 )
@@ -131,10 +130,7 @@ def _cpp_pathfinder(grid: RoutingGrid, pathfinder: CoupledPathfinder) -> CppCoup
     return cpp
 
 
-requires_cpp = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ coupled refinement requires the router_cpp backend (kct build-native)",
-)
+requires_cpp = pytest.mark.requires_router_cpp
 
 
 # ---------------------------------------------------------------------------

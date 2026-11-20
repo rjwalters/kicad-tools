@@ -7,16 +7,16 @@ from shapely.geometry import LineString, box
 from shapely.ops import unary_union
 
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.cpp_backend import get_backend_info
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Route, Segment
+from tests.conftest import require_router_cpp
 
 
 @pytest.mark.parametrize("force_python", [True, False])
 @pytest.mark.parametrize("escape_flag", [True, False])
 def test_kelvin_destination_escape_remains_reachable(force_python, escape_flag):
-    if not force_python and not get_backend_info()["available"]:
-        pytest.skip("C++ extension unavailable")
+    if not force_python:
+        require_router_cpp()
     router = Autorouter(
         22, 22, force_python=force_python, physics_enabled=False, per_net_iterations=20000
     )
@@ -75,8 +75,8 @@ def test_destination_exemption_preserves_other_terminal_and_layer_barriers(
 ):
     from kicad_tools.router.kelvin_obstacles import isolate_kelvin_branch
 
-    if not force_python and not get_backend_info()["available"]:
-        pytest.skip("C++ extension unavailable")
+    if not force_python:
+        require_router_cpp()
     router = Autorouter(22, 22, force_python=force_python, physics_enabled=False)
     for ref, x, y in [("R1", 4, 10), ("Q1", 12, 10), ("U1", 16, 12), ("U2", 16, 8)]:
         router.add_component(
@@ -127,8 +127,8 @@ def test_destination_exemption_preserves_other_terminal_and_layer_barriers(
 def test_destination_ownership_uses_component_identity(force_python, shared_copper):
     from kicad_tools.router.kelvin_obstacles import isolate_kelvin_branch
 
-    if not force_python and not get_backend_info()["available"]:
-        pytest.skip("C++ extension unavailable")
+    if not force_python:
+        require_router_cpp()
     router = Autorouter(22, 22, force_python=force_python, physics_enabled=False)
     # Repeated display references occur in distinct hierarchical instances.
     for ref, identity, x, y in [

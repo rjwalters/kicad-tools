@@ -28,6 +28,7 @@ from kicad_tools.router.io import load_pcb_for_routing
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Route, Via
 from kicad_tools.router.rules import NET_CLASS_ANALOG, DesignRules, NetClassRouting
+from tests.conftest import require_router_cpp
 
 # Via at (110, 106), Ø0.8 -> its copper edge is 0.4 mm from the centre.
 VIA_X, VIA_Y, VIA_D = 110.0, 106.0, 0.8
@@ -130,10 +131,9 @@ def test_without_class_floors_the_optimizer_accepted_the_shortcut(loaded):
 
 @pytest.mark.parametrize("gap,valid", [(0.17, False), (0.21, True)])
 def test_native_validator_holds_stored_via_to_its_class(loaded, gap, valid):
-    from kicad_tools.router.cpp_backend import CppGrid, is_cpp_available
+    from kicad_tools.router.cpp_backend import CppGrid
 
-    if not is_cpp_available():
-        pytest.skip("native build required")
+    require_router_cpp()
     from kicad_tools.router import router_cpp
 
     router, nets, _ = loaded

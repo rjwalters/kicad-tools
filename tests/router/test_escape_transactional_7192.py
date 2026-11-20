@@ -16,7 +16,6 @@ import pytest
 
 from kicad_tools.router.algorithms.negotiated import EscapeAttempts, NegotiatedRouter
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Route, Segment
 
@@ -82,7 +81,7 @@ def _setup_window(strategy2_probe=None):
     return router, neg, kept, net_routes
 
 
-@pytest.mark.skipif(not is_cpp_available(), reason="C++ backend not built")
+@pytest.mark.requires_router_cpp
 def test_failed_strategy_copper_flushed_from_cpp_grid():
     router, neg, kept, net_routes = _setup_window()
     fresh = _seg_route(1, 19.0)
