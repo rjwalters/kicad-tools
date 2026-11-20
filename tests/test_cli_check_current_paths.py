@@ -456,3 +456,83 @@ class TestPulsedDeclarationsThroughCheck:
 
         assert result == 1
         assert "duty_cycle" in capsys.readouterr().err
+
+
+class TestInPadBranchIsNotPathEvidence:
+    """Issue #9647: a thin branch whose first segment lies wholly inside a
+    large endpoint pad was counted as the resolved path's copper, so
+    ``path_ampacity`` raised a false "too narrow / would fuse" error on the
+    sense tap's neck instead of the trunk's."""
+
+    BOARD = """(kicad_pcb
+      (version 20240108)
+      (generator "test")
+      (generator_version "8.0")
+      (general (thickness 1.6) (legacy_teardrops no))
+      (paper "A4")
+      (layers
+        (0 "F.Cu" signal)
+        (31 "B.Cu" signal)
+        (44 "Edge.Cuts" user)
+      )
+      (setup (pad_to_mask_clearance 0))
+      (net 0 "")
+      (net 1 "NET1")
+      (gr_rect (start 0 0) (end 200 120)
+        (stroke (width 0.1) (type default))
+        (fill none)
+        (layer "Edge.Cuts")
+      )
+      (footprint "TH:Pad"
+        (layer "F.Cu")
+        (at 20 50)
+        (fp_text reference "J1" (at 0 -3) (layer "F.SilkS"))
+        (pad "1" thru_hole circle (at 0 0) (size 5 5) (drill 0.5) (layers "*.Cu") (net 1 "NET1"))
+      )
+      (footprint "TH:Pad"
+        (layer "F.Cu")
+        (at 120 50)
+        (fp_text reference "J2" (at 0 -3) (layer "F.SilkS"))
+        (pad "1" thru_hole circle (at 0 0) (size 5 5) (drill 0.5) (layers "*.Cu") (net 1 "NET1"))
+      )
+      (footprint "TH:Pad"
+        (layer "F.Cu")
+        (at 130 70)
+        (fp_text reference "R1" (at 0 -3) (layer "F.SilkS"))
+        (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.5) (layers "*.Cu") (net 1 "NET1"))
+      )
+      (segment (start 20 50) (end 60 50) (width 13) (layer "F.Cu") (net 1)
+        (uuid "00000000-0000-0000-0000-000000000001"))
+      (segment (start 60 50) (end 120 50) (width 13) (layer "F.Cu") (net 1)
+        (uuid "00000000-0000-0000-0000-000000000002"))
+      (segment (start 120 50) (end 121 51) (width 0.3) (layer "F.Cu") (net 1)
+        (uuid "00000000-0000-0000-0000-000000000003"))
+      (segment (start 121 51) (end 121 70) (width 0.3) (layer "F.Cu") (net 1)
+        (uuid "00000000-0000-0000-0000-000000000004"))
+      (segment (start 121 70) (end 130 70) (width 0.3) (layer "F.Cu") (net 1)
+        (uuid "00000000-0000-0000-0000-000000000005"))
+    )
+    """
+
+    def test_sense_branch_inside_sink_pad_does_not_fuse(self, tmp_path: Path):
+        pcb = tmp_path / "branch.kicad_pcb"
+        pcb.write_text(self.BOARD)
+        sidecar = _write_sidecar(
+            tmp_path / "cp.json",
+            [
+                _trunk_spec(),
+                CurrentPathSpec(
+                    name="SENSE",
+                    net_name="NET1",
+                    source=PathEndpoint("J2", "1"),
+                    sink=PathEndpoint("R1", "1"),
+                    continuous_a=0.01,
+                ),
+            ],
+        )
+        report = tmp_path / "report.json"
+
+        result = _run_check(pcb, report, extra=["--current-paths", str(sidecar)])
+
+        assert result == 0, report.read_text()
+        assert _path_ampacity_violations(report) == []
