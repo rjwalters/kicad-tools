@@ -2082,6 +2082,33 @@ def required_widths_for(pcb: PCB, current_a: float) -> dict[str, float]:
     return out
 
 
+def current_path_declarations(
+    pcb_path: Path, sidecar: Path
+) -> tuple[list[CurrentPathSpec], set[str], dict[str, dict[str, float]]]:
+    """Load a resolved current-paths sidecar into prune's planning inputs.
+
+    Returns ``(specs, declared_nets, required_widths)``: the parsed specs,
+    the net names they declare, and each declared net's per-layer IPC-2221
+    width (``required_widths_for``, at the board's own stackup copper
+    weight).  Raises on an unreadable sidecar or board; the caller decides
+    whether that is fatal (explicit ``--current-paths``) or a warning
+    (auto-discovered, mirroring ``kct check``'s contract).  Issue #9747:
+    one loader shared by ``kct pcb prune`` and the readiness cleanup.
+    """
+    from kicad_tools.router.current_paths import load_current_path_specs
+
+    specs = load_current_path_specs(sidecar)
+    declared_nets = {spec.net_name for spec in specs}
+    required_widths: dict[str, dict[str, float]] = {}
+    board = PCB.load(pcb_path)
+    for spec in specs:
+        need = required_widths_for(board, spec.thermal_design_current().current_a)
+        have = required_widths.setdefault(spec.net_name, {})
+        for layer, width in need.items():
+            have[layer] = max(have.get(layer, 0.0), width)
+    return specs, declared_nets, required_widths
+
+
 def _plan_declared_loops(
     model: _NetModel,
     plan: NetPlan,
@@ -2644,11 +2671,15 @@ def prune_board(
 def _gate_specs(
     pcb_path: Path, current_paths: Sequence[CurrentPathSpec] | None
 ) -> Sequence[CurrentPathSpec]:
-    """Specs for the audit gate: explicit ones, else the board's sidecar (#8687).
+    """Specs for the audit gate: the caller's, else the board's sidecar (#8687).
 
+    ``current_paths=None`` means "not requested" and keeps the historical
+    discovery (direct callers rely on it).  Any sequence -- including an
+    empty one, an intentional suppression or a sidecar with no paths -- is
+    taken as the caller's resolution and never re-discovered (Issue #9747).
     Discovery only feeds the gate; an unreadable sidecar warns and disables it.
     """
-    if current_paths:
+    if current_paths is not None:
         return current_paths
     from kicad_tools.router.current_paths import (
         discover_current_paths_sidecar,
