@@ -89,12 +89,12 @@
 	)
 	(footprint ""
 		(layer "B.Cu")
-		(uuid "e67d0893-09a5-4d60-a955-02b8a4847e18")
+		(uuid "fab6a638-7e52-4c27-b2b7-76a02d10e155")
 		(at 100 100 150)
 		(property "Reference" "U1"
 			(at 0 0 150)
 			(layer "B.SilkS")
-			(uuid "1d481b9d-e8cf-47e7-a934-98e97dac575b")
+			(uuid "00e016a5-95f5-4f0f-98b9-e7464c303de7")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -105,7 +105,7 @@
 		(property "Value" "MIRROR_GOLDEN"
 			(at 0 0 150)
 			(layer "B.Fab")
-			(uuid "409b9246-7e14-466a-94bc-2c5f8beb9f26")
+			(uuid "83c26b66-2d10-45e2-aae0-dcecd89b2a3f")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -117,7 +117,7 @@
 			(at 0 0 150)
 			(layer "B.Fab")
 			(hide yes)
-			(uuid "d0089647-6fd3-468f-a30e-c5e8b8e3ef30")
+			(uuid "a4b38221-454c-4046-8418-73da37b437bb")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -129,7 +129,7 @@
 			(at 0 0 150)
 			(layer "B.Fab")
 			(hide yes)
-			(uuid "a90790ed-cfc1-4466-ae6f-87360e1dee6a")
+			(uuid "64c7b964-2b53-4598-996c-ab1e875f4b00")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -146,7 +146,7 @@
 				(type default)
 			)
 			(layer "B.SilkS")
-			(uuid "449e1909-4688-4919-a94d-0fcdefa51716")
+			(uuid "979b5433-9220-4ae7-8305-890e3050c3e6")
 		)
 		(pad "1" smd roundrect
 			(at -1.600001 1 150)
@@ -154,7 +154,7 @@
 			(layers "B.Cu" "B.Mask" "B.Paste")
 			(roundrect_rratio 0.25)
 			(thermal_bridge_angle 45)
-			(uuid "9610e48f-2cb3-4f23-a18b-2c2f8dfc6d48")
+			(uuid "5f0e4850-2f6a-4c60-930b-0dba384063a6")
 		)
 		(pad "2" smd roundrect
 			(at -1.6 -0.999999 105)
@@ -162,14 +162,14 @@
 			(layers "B.Cu" "B.Mask" "B.Paste")
 			(roundrect_rratio 0.25)
 			(thermal_bridge_angle 45)
-			(uuid "2a4136b6-7e3b-480a-af60-2cceabd8c3d0")
+			(uuid "4f8ae619-5c53-4952-b306-23d6f7ac338b")
 		)
 		(pad "3" smd rect
 			(at 0.4 0 130)
 			(size 1 0.5)
 			(layers "B.Cu" "B.Mask" "B.Paste")
 			(thermal_bridge_angle 45)
-			(uuid "98599d95-6b82-40e9-82ad-652675a400fd")
+			(uuid "bd5d02c3-5e48-4ff9-88e6-98c4d918c42b")
 		)
 		(pad "4" thru_hole circle
 			(at 2 0.8 150)
@@ -177,7 +177,101 @@
 			(drill 0.6)
 			(layers "*.Cu" "*.Mask")
 			(remove_unused_layers no)
-			(uuid "94607851-a98f-4e18-9df0-8d06fb4afa8b")
+			(uuid "8b8b481d-966c-4588-81bb-5f715b1b3dbd")
+		)
+		(pad "5" smd custom
+			(at 0.4 -1.6 150)
+			(size 0.4 0.4)
+			(layers "B.Cu" "B.Mask" "B.Paste")
+			(options
+				(clearance outline)
+				(anchor circle)
+			)
+			(primitives
+				(gr_poly
+					(pts
+						(xy -0.3 0.2) (xy 0.9 0.2) (xy 0.9 -0.3) (xy 0.2 -0.3) (xy 0.2 -1.1) (xy -0.3 -1.1)
+					)
+					(width 0)
+					(fill yes)
+				)
+			)
+			(uuid "264320af-a57a-4022-bef6-9fde52e25220")
+		)
+		(pad "6" thru_hole custom
+			(at -0.3 2.8 150)
+			(size 0.6 0.6)
+			(drill 0.3)
+			(layers "*.Cu" "*.Mask")
+			(remove_unused_layers no)
+			(options
+				(clearance outline)
+				(anchor circle)
+			)
+			(primitives
+				(gr_poly
+					(pts
+						(xy -0.3 0.2) (xy 0.9 0.2) (xy 0.9 -0.3) (xy 0.2 -0.3) (xy 0.2 -1.1) (xy -0.3 -1.1)
+					)
+					(width 0)
+					(fill yes)
+				)
+				(gr_arc
+					(start -0.1 -0.6)
+					(mid 0.2 -0.5)
+					(end 0.3 -0.2)
+					(width 0.1)
+				)
+			)
+			(uuid "fbf1d763-51a7-401e-acdc-7348ce7e9e32")
+			(padstack
+				(mode front_inner_back)
+				(layer "Inner"
+					(shape custom)
+					(size 0.6 0.6)
+					(options
+						(anchor circle)
+					)
+					(primitives
+						(gr_poly
+							(pts
+								(xy -0.3 0.2) (xy 0.9 0.2) (xy 0.9 -0.3) (xy 0.2 -0.3) (xy 0.2 -1.1) (xy -0.3 -1.1)
+							)
+							(width 0)
+							(fill yes)
+						)
+						(gr_arc
+							(start -0.1 -0.6)
+							(mid 0.2 -0.5)
+							(end 0.3 -0.2)
+							(width 0.1)
+						)
+					)
+				)
+				(layer "B.Cu"
+					(shape custom)
+					(size 0.6 0.6)
+					(options
+						(anchor circle)
+					)
+					(primitives
+						(gr_poly
+							(pts
+								(xy -0.3 0.2) (xy 0.9 0.2) (xy 0.9 -0.3) (xy 0.2 -0.3) (xy 0.2 -1.1) (xy -0.3 -1.1)
+							)
+							(width 0)
+							(fill yes)
+						)
+						(gr_arc
+							(start -0.1 -0.6)
+							(mid 0.2 -0.5)
+							(end 0.3 -0.2)
+							(width 0.1)
+						)
+					)
+					(zone_connect -1)
+				)
+			)
 		)
 		(embedded_fonts no)
 	)
@@ -190,7 +284,7 @@
 		)
 		(fill no)
 		(layer "Edge.Cuts")
-		(uuid "152e74ae-3391-4d38-a205-c02c7b674de8")
+		(uuid "f5876e03-9634-4cca-a372-a54353cfe440")
 	)
 	(embedded_fonts no)
 )

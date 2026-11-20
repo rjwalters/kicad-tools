@@ -39,7 +39,7 @@ kct [--help] [--version] [--verbose] [-q] [--units {mm,mils}] <command> [options
 | | `net-status` | Report net connectivity status for a PCB |
 | | `constraints` | Constraint conflict detection and management |
 | | `detect-mistakes` | Detect common PCB design mistakes |
-| **Repair** | `fix-drc` | Automated DRC violation repair (clearance + drill + mask-copper) |
+| **Repair** | `fix-drc` | Automated DRC violation repair (clearance + drill + mask-copper + copper-gap) |
 | | `fix-erc` | Automated ERC violation repair (PWR_FLAG + no-connect) |
 | | `fix-vias` | Fix vias to meet manufacturer specifications |
 | | `fix-silkscreen` | Fix silkscreen line widths to meet manufacturer specs; `--clip-to-pads` also trims silk lines too close to pads; `--clip-to-holes` clips footprint silk lines/polygons off every drilled hole (run after routing) |
@@ -786,7 +786,8 @@ the top-level `verdict` (`ready`|`warning`|`not_ready`) and adds `gate_verdict`
 
 Automated DRC violation repair. By default it repairs clearance violations by
 nudging traces, drill-clearance violations by de-duplicating or sliding vias,
-and mask-to-copper findings when the report carries them. `--only` restricts
+mask-to-copper findings when the report carries them, and same-net
+`physical_copper_gap` slits when the report carries them. `--only` restricts
 the run to a single repair pass:
 
 | `--only` value | Repairs |
@@ -794,15 +795,18 @@ the run to a single repair pass:
 | `clearance` | Copper-clearance violations between tracks, vias and pads (nudge traces) |
 | `drill-clearance` | Hole-to-hole clearance violations (de-duplicate or slide vias) |
 | `mask-copper` | A track entering its own pad's opening off-centre (see below) |
+| `copper-gap` | Same-net `physical_copper_gap` slits: a via beside its own pad, or a track tangent to its own via (see below) |
 
 ```bash
 kct fix-drc board.kicad_pcb --only mask-copper --dry-run
+kct fix-drc board.kicad_pcb --only copper-gap --dry-run
 ```
 
-Without `--drc-report`, the mask-copper pass detects its findings itself by
-running the pure-Python `kct check` on the board. For the other `--only`
-values (and the default set), detection resolves in order: `--drc-report` if
-given, else kicad-cli's DRC if it is installed, else the pure-Python checker.
+Without `--drc-report`, the mask-copper and copper-gap passes detect their
+findings themselves by running the pure-Python `kct check` on the board. For
+the other `--only` values (and the default set), detection resolves in order:
+`--drc-report` if given, else kicad-cli's DRC if it is installed, else the
+pure-Python checker.
 
 `mask-copper` addresses the `same-net own-pad entry` class of the
 `mask_to_copper` check (see the [mask-to-copper guide](../guides/mask-to-copper.md)):
@@ -815,6 +819,25 @@ it is reverted and reported as unrepaired with a reason:
 move exposed a new finding on the moved segment or its pad) or
 `recheck_unavailable` (the re-check could not run — an unverified move is
 never kept).
+
+`copper-gap` addresses the same-net classes of `physical_copper_gap` (the fab
+cannot see nets, so a sub-spacing slit between two shapes of one net still
+fails the board): a via beside its own pad is moved along the pad-centre ray
+until the gap clears the finding's required value (or snapped to the pad
+centre when the profile declares a via-in-pad process), and a track tangent
+to its own via has the via snapped onto the track's centreline so the copper
+fully merges. Different-net gaps, zone fills and pad-pad / track-track pairs
+are never touched and are listed as unrepaired with a reason; a move that
+would crowd foreign copper or drill too close to another hole is declined,
+and same-net track ends anchored at the via move with it. A via move
+therefore changes the length of the tracks attached to it, so a net under a
+length or skew constraint (a differential pair or match group sitting at its
+limit) can flip a timing check even though the slit itself is repaired — the
+per-move validation checks clearance and hole-to-hole spacing only and cannot
+see a pair-level property such as skew. Detection and the
+post-repair re-check use `kct check`'s rules with the stackup's fab-view gap
+bands resolved (kicad-cli has no such rule), and the pass also runs in the
+default set when the report carries such findings.
 
 ---
 
@@ -1792,7 +1815,7 @@ coerced to `basic` with a printed notice). It is mutually exclusive with
 |--------|-------------|
 | `--complete` | Route only the unconnected links; all other copper is a fixed obstacle |
 | `--complete-exclude-nets NAMES` | Comma-separated nets `--complete` must not route even when reported unconnected — for pour/plane-carried nets (`GND`, `+3V3`, phase nets) whose connectivity comes from a filled zone. Ignored without `--complete`. |
-| `--complete-report PATH` | Write the structured unroutable-link report (net, link pad endpoints, elapsed vs the per-link deadline, blocking copper) as JSON. Link details are written when links remain unroutable. For boards with placement-invalid nets, also records attempt disposition during ordinary routing and early exits. |
+| `--complete-report PATH` | Write the structured unroutable-link report (net, link pad endpoints, whether the search reached each link in any negotiation pass (`attempted`; `deadline_hit` marks links whose reported reason is the deadline stamp, meaning the deadline kept them out of the best pass), blocking copper) as JSON. Link details are written when links remain unroutable. For boards with placement-invalid nets, also records attempt disposition during ordinary routing and early exits. |
 | `--via-in-pad-last-resort` | On the lattice engine, stage a same-net via-in-pad attach as a last resort instead of an opportunistic one: the search first tries an in-layer route or an off-pad via layer change, and only retries with the pad-site via admitted when no such route exists (and only on a fab tier that supports via-in-pad). |
 
 Each link gets a bounded per-link deadline, so a single pathological net cannot
@@ -1940,13 +1963,16 @@ sheet coordinates, as KiCad shows them):
 ```
 
 The items are appended to an in-memory copy of the board and checked with
-the same rule set `kct check` runs (clearances and shorts, zone fills,
+the same rule set `kct check` runs (pairwise clearances and shorts, the
+net-agnostic copper-gap and thin-copper-sliver fab passes, zone fills,
 board edge, trace/via dimensions, authored net-class clearances, via
-placement). Only findings the batch **adds** are reported, so pre-existing
-board problems never fail a probe. Arcs are checked through a 1 um-sagitta
-tessellation. Exit `1` on any added error finding or items-file problem;
-warnings are reported but do not fail. `--format json` emits the full
-report (`ok`, `problems`, `warnings`, per-item attribution).
+placement, THT-to-SMD pad spacing). The copper-gap pass is net-agnostic: a
+same-net parallel track can fail a probe through it even when no pairwise
+clearance rule objects. Only findings the batch **adds** are reported, so
+pre-existing board problems never fail a probe. Arcs are checked through a
+1 um-sagitta tessellation. Exit `1` on any added error finding or
+items-file problem; warnings are reported but do not fail. `--format json`
+emits the full report (`ok`, `problems`, `warnings`, per-item attribution).
 
 | Option | Description |
 |--------|-------------|
@@ -1973,6 +1999,22 @@ read; a board that changed underneath is refused with nothing written.
 A failed probe never writes: the board stays byte-identical. Exit `0`
 written; `1` probe problems; `2` refused (concurrent modification, or a
 KiCad lock under the `error` policy) — nothing is written on `1` or `2`.
+
+An item whose dedupe key is already on the board (net, layer, unordered
+endpoints and width for a track; net, position and layers for a via) is
+skipped by deduplication rather than written — for those items the copper
+the batch asked for is there. The report distinguishes them:
+`items_written` and `items_skipped_as_duplicate` in JSON, and a text line
+that says how many were skipped, so an all-duplicate batch reports `wrote 0
+item(s)` instead of claiming a write that did not happen (Issue #9674).
+
+A via's size and drill are **outside** its dedupe key. A skipped via counts as a
+duplicate if any via sharing its key has the requested size and drill.
+Otherwise it is not written, is counted separately under
+`items_skipped_conflicting`, and the text output names the existing and
+requested size/drill, so an agent that (say) upsizes a via cannot read the
+report as success. Arcs have no deduplication path: each successful apply
+appends them again, and each copy counts as written.
 
 | Option | Description |
 |--------|-------------|

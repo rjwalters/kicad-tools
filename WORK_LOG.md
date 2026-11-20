@@ -14,8 +14,100 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-20
+
+- **Issue #9031** (closed): tests: nested pytest.approx() at test_expand_route_experiment.py:166 blocks any pytest >= 9.2 bump
+- **Issue #9740** (closed): board 07 output/ artifact still carries the pre-repair DQ7/LDQM/UDQM/DQ13 loops; SDRAM gates fire under the #9304 defect-copper ruler
+- **Issue #9720** (closed): kct route leaves a permanent .kct-route.lock.guard file beside the output
+- **PR #9729**: fix: gitignore kct route lock, guard and temp files
+- **Issue #9400** (closed): fix-drc copper-gap: a via move changes attached trace length — document (and consider gating) the length/skew side effect
+- **PR #9736**: docs: note copper-gap via moves change attached trace length
+- **Issue #9684** (closed): Include authored copper arcs in MCP measure_clearance
+- **PR #9727**: fix: collect authored copper arcs in MCP measure_clearance
+- **Issue #9714** (closed): Arc-vs-arc clearance cost is superlinear for large-radius arcs: 50 concentric 50 mm arcs take 12 s
+- **PR #9723**: perf: prune arc-vs-arc chord search in clearance with a bbox lower bound
+- **Issue #9674** (closed): kct probe/apply polish: docs understate the probed categories, and apply reports items that dedupe skipped
+- **PR #9683**: fix: report apply items skipped by dedupe and document all probe check categories
+- **Issue #9138** (closed): Match-group skew producer measures summed PCB copper: dead-end loops and duplicates mask real skew
+- **PR #9179**: fix(validate): report off-path copper alongside derived match-group skew
+- **Issue #9654** (closed): path_ampacity: the unwired hole-to-pad stub inside a credited segment is credited too (#9648 follow-up)
+- **PR #9680**: fix: judge wired-leg hole-to-pad stubs at copper width in path_ampacity
+- **Issue #9717** (closed): route --complete --voltage-map gate waives attach-zone pairs the default kct creepage does not (H2 class of #9685)
+- **PR #9719**: feat: name the attach-zone policy in kct route --complete --voltage-map output
+- **Issue #9715** (closed): EdgeClearanceRule recomputes the violation witness for every trace, not just violating ones
+- **PR #9718**: perf: compute edge-clearance trace witness only on violation
+- **Issue #9649** (closed): pcb reinforce: mask opening is refused for a whole leg when another net crosses it on the opposite layer (layer-agnostic obstacle test, no partial opening)
+- **PR #9657**: fix: mask-opening creepage test is layer-aware and names its obstacle
+- **Issue #9581** (closed): route --complete: budget shorter than --timeout, every open link flagged deadline_hit, no output until exit
+- **PR #9603**: fix: make kct route --complete deadline reporting honest per link
+- **Issue #9628** (closed): kct route: advisory run lock to stop a concurrent second writer from clobbering copper
+- **PR #9631**: feat: add advisory run lock so overlapping kct route runs refuse
+- **Issue #9619** (closed): Align the clearance comparison slack with KiCad's (probe: ~500nm, kct uses 100nm)
+- **PR #9661**: fix: align the shared clearance slack with KiCad's probed 500 nm band
+- **Issue #9685** (closed): route --complete --voltage-map: exits 0 with committed copper that fails kct creepage on the same map (some links are rolled back, others are not)
+- **PR #9698**: fix: audit committed copper against the board edge in route --voltage-map
+- **Issue #9707** (closed): CI red on main: manufacturer-propagation lint fails on new silkscreen DesignRules() calls (#9061, #9082)
+- **PR #9709**: fix(silk): drop zeroed DesignRules placeholders from silkscreen geometry callers
+- **Issue #9626** (closed): route-auto: report necked copper (audit row 3's route-auto half, left undone by #9623)
+- **Issue #9652** (closed): Neck census: no test for `kct route --format json` necked_copper; run contiguity depends on segment emission order
+- **Issue #9600** (closed): Audit kct route rows 3/7/8/10: necks, clearance tolerance, all-links, partial-progress summary
+- **PR #9623**: feat: report necked copper in kct route results; audit rows 3/7/8/10 regression evidence
+- **Issue #9695** (closed): Verify merged native parity for board-level Edge.Cuts circle and polygon strokes
+- **Issue #9673** (closed): Copper arcs are invisible to the pairwise clearance/short rules, and `kct apply` can now write them
+- **PR #9678**: fix: collect copper arcs in the pairwise clearance/short rules
+- **Issue #9703** (closed): Router: cache the orchestrator's under-body footprint derivation instead of recomputing it per net
+- **Issue #9690** (closed): Filled Edge.Cuts shapes (no fill token or fill yes) are cut-outs natively but kct checks only their stroke
+- **Issue #9659** (closed): creepage export-rules: magnitude-only domains drop opposite-polarity and sign-flipping pairs (no rule emitted)
+- **PR #9671**: fix: key creepage export domains by signed interval and difference pairs end-to-end
+- **PR #9693**: fix: treat filled Edge.Cuts shapes as cut-out regions in edge clearance
+- **Issue #9332** (closed): Repair path for same-net fab-parity findings (physical_copper_gap, mask_to_copper own-pad)
+- **PR #9396**: feat: repair same-net physical_copper_gap slits in fix-drc (#9332)
+- **Issue #9677** (closed): current-paths: in-pad sense tap still counted as path evidence when no copper reaches the pad centre (#9647 residual)
+- **PR #9701**: fix: drop empty-goal in-pad tap evidence feeding an off-route external branch
+- **Issue #9632** (closed): Kept-copper audit: (severity ignore) rule leaves the unknown band unreachable (AC3 residue of #9578)
+- **PR #9697**: test: pin (severity ignore) undecided rule as UNKNOWN, not an input defect
+- **Issue #9665** (closed): voltage-map-merge nits: silent net-name normalisation collision in merge_voltage_scenarios; missing machine-output shapes row
+- **PR #9699**: fix: reject within-scenario net-name collisions in merge_voltage_scenarios
+- **Issue #9660** (closed): optimize-traces pad-escape guard resolves the layer from old[0] only, so a multi-layer Kelvin branch is partly unguarded
+- **PR #9694**: fix: resolve the pad-escape guard's layer per segment in rewrite_keeps_pad_escapes
+- **Issue #9622** (closed): Router: cost for splitting free area / keep non-local nets out from under fine-pitch ICs by default
+- **PR #9635**: feat: steer non-local trunks away from fine-pitch IC bodies
+- **Issue #9593** (closed): Handle a board outline drawn inside a footprint (footprint-level Edge.Cuts) everywhere the outline is used
+- **PR #9625**: fix: treat footprint-local Edge.Cuts graphics as board outline
+- **Issue #9644** (closed): route-link uses uncapped spacing when a device bound names an implicit 0 V net
+- **PR #9656**: fix: apply _pair_bounds caps in route-link's omitted-net fallback
+
 ### 2026-11-19
 
+- **Issue #9618** (closed): kct probe/apply: no test applies an arc item; items-file field allowlist is not per-type
+- **PR #9676**: fix: reject items-file fields outside their item type in kct probe/apply
+
+- **Issue #9642** (closed): kct check silk_pad_clearance: board-level gr_line / gr_arc are compared in the wrong frame on origin-offset boards (false errors, and real overlaps missed)
+- **PR #9653**: fix: shift board-level silk into the pads' frame in silk_pad_clearance
+- **Issue #9608** (closed): route_understated_pairs misses _pair_bounds on slash-prefixed net names (false understatement reports)
+- **PR #9682**: fix: normalise net keys in route_understated_pairs bounds lookup
+- **Issue #9666** (closed): path_ampacity wire credit: no real-geometry test for an uncovered stretch
+- **PR #9679**: test: judge the uncovered stretch through reinforce_net-derived wire legs
+- **Issue #9647** (closed): path_ampacity / current-paths-audit: a thin branch that leaves the sink pad is counted as part of the resolved path (false 'would fuse')
+- **PR #9651**: fix(current-paths): exclude a branch buried in an endpoint pad from the resolved path
+- **Issue #9655** (closed): current-paths: a second chained pad-internal segment on the route is dropped from the resolved path
+- **Issue #9637** (closed): kct check: LVS compares the board against project.kct's schematic even when the board being checked is a different artifact
+- **PR #9641**: fix(check): use project.kct schematic only for the board it names
+- **Issue #9686** (closed): Release daemon Judge steps promptly when PR checks are pending
+- **PR #9317**: fix: point hard-coded repository URLs at the 2AMLogic organization
+- **Issue #9621** (closed): Router: group mode for similar-length nets without a shared naming convention (length window, escape order)
+- **PR #9633**: feat: add --group-length-window synthetic bus groups for similar-length nets
+- **PR #9688**: docs: hand pending-CI PRs back from daemon Judge steps
+- **Issue #9670** (closed): DRU clearance reading: stale case-insensitivity docstring for memberOfFootprint, and (severity ignore) honoured in only one of three buckets
+- **PR #9672**: fix: skip (severity ignore) DRU rules in all clearance buckets; correct memberOfFootprint docstring
+- **Issue #9663** (closed): route-auto stale-write guard: take the file signature before the load, not after the parse
+- **PR #9664**: fix: take route-auto stale-write signature before the board load
+- **Issue #9648** (closed): path_ampacity does not credit a buttress wire: a fully wired leg is still 'too narrow' at the bare trace width
+- **PR #9650**: fix: credit fully wired buttress wires in path_ampacity
+- **Issue #9667** (closed): changelog.d/9637 needs an .upgrade.md: kct check can newly exit non-zero (INCOMPLETE) on a board the spec does not name
+- **PR #9668**: docs: add 9637 upgrade note for newly-reachable INCOMPLETE exit in kct check
+- **Issue #9602** (closed): Teach kct route / kct pcb to difference voltage-map intervals (signed-collapse consumers, #4411 follow-up)
+- **PR #9613**: fix: difference voltage-map intervals end-to-end in route-time pairwise tables
 - **PR #9587**: feat: add kct voltage-map-merge to merge per-scenario voltage maps into one envelope
 - **Issue #9590** (closed): Add kct probe and kct apply --checked: check a batch of proposed copper, then write atomically
 - **PR #9617**: feat: add kct probe and kct apply --checked for batch copper check-then-write
@@ -3685,53 +3777,6 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - **Issue #5518** (closed): [Epic #5508] Phase 1c: access-loss witness runs on boards 05 / 06 / 07 with DQ3 as negative control (evidence only)
 - **Issue #5515** (closed): [Epic #5509] Phase 1c: oracle adapters for the remaining 14 consumer groups, kernel adapter, CI wiring, full disagreement table
 - **Issue #5507** (closed): router: preserve power-pad access for Board07 U4.C2 (+1V2)
-
-### 2026-09-20
-
-- **PR #5621**: chore(changelog): reconcile [Unreleased] since v0.20.0
-- **PR #5620**: feat(board06): reuse through-hole pads as pour-bridge termini in sub-stage D (#5606)
-- **PR #5619**: feat(router): replay commit journal into per-pad access witness
-- **PR #5615**: fix(zones): allocate new pours around pre-existing same-layer zones
-- **PR #5614**: fix(router): resume loop rejects accepted goal node + localized strict pad parity check
-- **PR #5612**: fix(ci): cache kicad-cli capability probes to cut native-launch amplification
-- **PR #5611**: feat(router): ordered commit journal + access-witness sidecar
-- **Issue #5610** (closed): [Epic #5508] Phase 1b (PR 2): access-witness replay + net-status/StuckNetDiagnosis consumers
-- **PR #5609**: fix(router): congestion-mark stagnation recovery so board06 converges without the avoidance leak
-- **Issue #5606** (closed): board06: port the through-hole pad pour-bridge reuse (#5564) into sub-stage D
-- **PR #5605**: fix(board06): reuse an existing same-net barrel for a pour bridge
-- **PR #5604**: feat(mcp): migrate to mcp 2.x SDK (FastMCP -> MCPServer) + fastmcp 4 (#5601)
-- **PR #5602**: fix(ci): board06 determinism smoke -- explicit output dir for --step route (#5597)
-- **Issue #5601** (closed): chore(mcp): migrate to fastmcp 4 / mcp 2.x (FastMCP renamed to MCPServer)
-- **PR #5600**: fix(ci): fix board 02/04 determinism-smoke flag drift + raise board-02 timeout
-- **Issue #5599** (closed): router: C++ pathfinder gives up on post-route clearance validation, falls back to slow Python A* (blocks board 02/04 routes)
-- **PR #5598**: fix(ci): delegate board06 smoke + load-independence copper hash to normalize_copper.py
-- **Issue #5597** (closed): board06_determinism_smoke.sh: generate_design.py's default output_dir (regression-output) breaks --step route without an explicit output dir
-- **PR #5596**: fix(tests): compose finite-mode route budget in test_route_artifact_receipt
-- **PR #5595**: feat(router): add pad outlines and zone polygons to the clearance kernel
-- **Issue #5594** (closed): test(router): board02 jlcpcb-tier1 baseline fails on main -- GND net partially routed, 2 of 3 pads stranded
-- **PR #5593**: fix(zones): derive generated zone UUIDs from content so pour fills are reproducible
-- **PR #5592**: feat(router): add exact-geometry clearance kernel for segments, vias and edges
-- **Issue #5591** (closed): pcb: generated boards emit pads with no (uuid ...), so KiCad invents a random one per pad on every load
-- **Issue #5590** (closed): zones: an auto-poured zone that overlaps an equal-priority zone on the same layer is starved of copper
-- **Issue #5589** (closed): feat(router): extend the clearance kernel with pad outlines and zone polygons
-- **Issue #5587** (closed): ci: board_route_determinism_smoke.sh 02 and 04 fail on a loaded host (wall-clock stage deadline / route deadline)
-- **Issue #5586** (closed): ci: two more line-based copper normalizers compare element COUNTS (board06 smoke, load-independence test)
-- **Issue #5584** (closed): flake risk: test_route_artifact_receipt's finite mode carries the same flat-30s route budget fixed in #5579
-- **Issue #5578** (closed): router: zone pour-fill island decomposition is not reproducible run-to-run (routed copper is)
-- **PR #5569**: chore(deps): bump anyio from 4.12.0 to 4.14.2
-- **Issue #5566** (closed): flake: lattice post-pass gating tests time out in native_concurrency acquire
-- **PR #5564**: fix(zones): reuse an existing through-hole pad as a pour-bridge terminus
-- **PR #5562**: chore(deps-dev): bump cmake from 4.4.2 to 4.4.3
-- **PR #5561**: chore(deps): bump the python-minor-patch group across 1 directory with 2 updates
-- **PR #5560**: chore(deps): bump actions/upload-artifact from 4 to 7
-- **PR #5559**: chore(deps): bump astral-sh/setup-uv from 10.0.1 to 10.1.0 in the github-actions group across 1 directory
-- **PR #5558**: chore(deps-dev): bump the site-minor-patch group in /site with 2 updates
-- **Issue #5551** (closed): board06: port the existing-barrel pour-bridge planner into sub-stage D
-- **Issue #5545** (closed): router: cohort-reroute converges on board06 U2.B1 stranding without the stale-penalty leak PR #5541 removes
-- **Issue #5517** (closed): [Epic #5508] Phase 1b: ordered commit journal + offline access-loss witness surfaced in `net-status --why`
-- **Issue #5514** (closed): [Epic #5509] Phase 1b: clearance kernel API in router/cpp with Python port and mandatory parity test (no consumer switched)
-- **Issue #5505** (closed): CI runtime: representative-cohort remeasurement and close-out for #5240
-- **Issue #5504** (closed): router: make per-connection avoidance cleanup the default once Board06 U2.B1 stranding is explained
 
 ### 2026-07-20 (evening)
 

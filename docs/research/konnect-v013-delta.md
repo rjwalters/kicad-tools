@@ -1,6 +1,6 @@
 # Konnect v0.8 to v0.13: what changed since #4880
 
-**Issue**: [#6911](https://github.com/rjwalters/kicad-tools/issues/6911)
+**Issue**: [#6911](https://github.com/2AMLogic/kicad-tools/issues/6911)
 **Checked against**: `origin/main` at `efa31fbf3` (2026-10-17)
 **License**: Konnect is AGPL-3.0, so this note is **ideas only**. Nothing was
 copied or read from its source; the sources are its public

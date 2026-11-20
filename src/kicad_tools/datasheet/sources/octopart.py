@@ -66,7 +66,7 @@ class OctopartDatasheetSource(HTTPDatasheetSource):
         """Get default HTTP headers for Octopart requests."""
         return {
             "Accept": "application/json",
-            "User-Agent": "kicad-tools/1.0 (https://github.com/rjwalters/kicad-tools)",
+            "User-Agent": "kicad-tools/1.0 (https://github.com/2AMLogic/kicad-tools)",
         }
 
     def _rate_limit(self) -> None:

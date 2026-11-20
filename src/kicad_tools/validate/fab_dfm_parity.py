@@ -67,7 +67,7 @@ from .violations import DRCViolation
 Status = Literal["covered", "partial", "not_covered"]
 
 #: Where the observed categories/thresholds came from (counts are hand-recorded).
-SOURCE = "https://github.com/rjwalters/kicad-tools/issues/8838"
+SOURCE = "https://github.com/2AMLogic/kicad-tools/issues/8838"
 RETRIEVED = "2026-11-12"
 
 #: Manufacturer ids the table applies to (``jlcpcb`` and its ``jlcpcb-tier*`` profiles).
@@ -108,10 +108,14 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "partial",
         True,
         # Non-pad copper spacing: the pair-type clearance ids with no pad on
-        # either side (segment/via gaps -- the fab's trace_spacing
-        # population), plus the trace-band-graded fab-view findings
-        # (``#trace`` qualified key, issue #8972).
+        # either side (segment/arc/via gaps -- the fab's trace_spacing
+        # population; the arc pairs since issue #9713), plus the
+        # trace-band-graded fab-view findings (``#trace`` qualified key,
+        # issue #8972).
         (
+            "clearance_arc_arc",
+            "clearance_arc_segment",
+            "clearance_arc_via",
             "clearance_segment_segment",
             "clearance_segment_via",
             "clearance_via_via",
@@ -135,12 +139,13 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         ("clearance", "physical_copper_gap"),
         "partial",
         True,
-        # Pad-involving clearance ids plus the pad populations of the
-        # physical pass: pad-band-graded and mask-bridge findings via the
+        # Pad-involving clearance ids (``clearance_arc_pad`` since #9713)
+        # plus the pad populations of the physical pass: pad-band-graded and mask-bridge findings via the
         # ``#pad`` qualified key, and the bare id for the bandless emit
         # sites (the legacy opt-in pass, zone-fill `info` findings) so the
         # partition stays total (issue #8972).
         (
+            "clearance_arc_pad",
             "clearance_pad_pad",
             "clearance_pad_segment",
             "clearance_pad_via",

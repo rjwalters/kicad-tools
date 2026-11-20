@@ -44,6 +44,12 @@ def _init_type_category_map() -> None:
             ViolationType.CLEARANCE_PAD_SEGMENT: ViolationCategory.ROUTING,
             ViolationType.CLEARANCE_PAD_VIA: ViolationCategory.ROUTING,
             ViolationType.CLEARANCE_SEGMENT_SEGMENT: ViolationCategory.ROUTING,
+            # Copper-arc pair kinds (Issue #9673): reroute-the-arc, same
+            # routing-domain remediation as the other clearance subtypes.
+            ViolationType.CLEARANCE_ARC_ARC: ViolationCategory.ROUTING,
+            ViolationType.CLEARANCE_ARC_PAD: ViolationCategory.ROUTING,
+            ViolationType.CLEARANCE_ARC_SEGMENT: ViolationCategory.ROUTING,
+            ViolationType.CLEARANCE_ARC_VIA: ViolationCategory.ROUTING,
             # Segment vs foreign zone fill (Issue #3527): fixable by
             # rerouting the trace (or refilling the stale zone) -- same
             # routing-domain remediation as the other clearance subtypes.
@@ -155,6 +161,13 @@ class ViolationType(Enum):
     CLEARANCE_PAD_VIA = "clearance_pad_via"
     CLEARANCE_PAD_PAD = "clearance_pad_pad"
     CLEARANCE_SEGMENT_SEGMENT = "clearance_segment_segment"
+    # Authored copper-arc copper vs the pairwise rule's other objects
+    # (Issue #9673): the arc is one reporting unit, so these are distinct
+    # pair kinds, not ``clearance_segment_*`` spellings.
+    CLEARANCE_ARC_ARC = "clearance_arc_arc"
+    CLEARANCE_ARC_PAD = "clearance_arc_pad"
+    CLEARANCE_ARC_SEGMENT = "clearance_arc_segment"
+    CLEARANCE_ARC_VIA = "clearance_arc_via"
     # Segment copper vs foreign-net zone *fill* copper (Issue #3527).
     # Covers both hard shorts (overlap, negative actual_value) and
     # sub-minimum gaps to committed filled_polygon geometry.
@@ -376,6 +389,12 @@ class ViolationType(Enum):
             "clearance_segment_segment": cls.CLEARANCE_SEGMENT_SEGMENT,
             "clearance_segment_via": cls.CLEARANCE_SEGMENT_VIA,
             "clearance_via_via": cls.CLEARANCE_VIA_VIA,
+            # Copper-arc pair kinds (Issue #9673) -- explicit so the enum
+            # round trip in ``DRCViolation.to_dict`` resolves exactly.
+            "clearance_arc_arc": cls.CLEARANCE_ARC_ARC,
+            "clearance_arc_pad": cls.CLEARANCE_ARC_PAD,
+            "clearance_arc_segment": cls.CLEARANCE_ARC_SEGMENT,
+            "clearance_arc_via": cls.CLEARANCE_ARC_VIA,
             # Net-0 stray-copper bridge (Issue #3816).  MUST be aliased
             # explicitly -- the fuzzy "clearance" fallback below would
             # otherwise drop through to the generic CLEARANCE type and

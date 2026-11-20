@@ -402,6 +402,29 @@ def load_voltage_intervals(path: str | Path) -> dict[str, tuple[float, float]]:
     return {name: (iv.lo, iv.hi) for name, iv in intervals.items()}
 
 
+def load_edge_voltage(path: str | Path) -> float:
+    """Load the reserved ``_edge_voltage`` reference potential of a sidecar (#9685).
+
+    Counterpart to :func:`load_signed_voltage_map` reading the same file through
+    the same parse contract (:func:`kicad_tools.creepage.engine.voltage_map_from_dict`),
+    which is where the ``0.0`` V default and the scalar-only rule live -- so the
+    router and the census cannot disagree about the board-edge / earth reference
+    a copper-to-Edge.Cuts pair is differenced against.
+
+    Raises:
+        ValueError: If the file is not a JSON object or ``_edge_voltage`` is not
+            a finite real scalar.
+    """
+    from kicad_tools.creepage.engine import voltage_map_from_dict
+
+    raw = json.loads(Path(path).read_text())
+    if not isinstance(raw, dict):
+        # ``voltage_map_from_dict`` raises ``TypeError`` for a non-dict; keep the
+        # ``ValueError`` contract the CLI loaders already catch.
+        raise ValueError(f"voltage map must be a JSON object, got {type(raw).__name__}")
+    return voltage_map_from_dict(raw)[1]
+
+
 def load_pair_bounds(path: str | Path) -> dict[frozenset[str], tuple[float, str]]:
     """Load the reserved ``_pair_bounds`` list from a ``--voltage-map`` sidecar (#8043).
 
@@ -450,7 +473,10 @@ def route_understated_pairs(
     """
     from kicad_tools.creepage.engine import pair_bounds_from_dict, voltage_map_from_dict
 
-    intervals, _ = voltage_map_from_dict(data)
+    # ``voltage_map_from_dict`` keeps as-authored keys while
+    # ``pair_bounds_from_dict`` normalises them (#9608); normalise the interval
+    # keys so the bounds lookup below keys the same nets on either convention.
+    intervals = {_norm_net_key(name): iv for name, iv in voltage_map_from_dict(data)[0].items()}
     bounds = pair_bounds_from_dict(data)
     scalars = {name: _signed_endpoint(iv) for name, iv in intervals.items()}
     out: dict[frozenset[str], tuple[float, float]] = {}
@@ -2207,6 +2233,140 @@ def find_pairwise_violations(
                 tolerance=tolerance,
                 collect=out,
             )
+    return out
+
+
+def edge_required_clearances(
+    net_voltages: Mapping[str, float],
+    *,
+    edge_voltage: float,
+    standard_id: str = "iec60664",
+    pollution_degree: int = 2,
+    material_group: str = "IIIa",
+    hv_threshold: float = 30.0,
+    net_intervals: Mapping[str, tuple[float, float]] | None = None,
+) -> dict[str, float]:
+    """Per-net creepage requirement (mm) against the board edge (#9685).
+
+    The census scores one ``net vs <board edge>`` pair per HV net
+    (``creepage/engine.py``, ``BOARD_EDGE_LABEL``), differencing the net's
+    interval against the degenerate ``(_edge_voltage, _edge_voltage)``
+    reference; the router's pairwise model had no counterpart, so
+    ``route --complete --voltage-map`` could commit copper closer to
+    ``Edge.Cuts`` than the map requires and still exit 0.  This builder closes
+    that gap through the SAME delta-V -> creepage step every other pair uses
+    (:func:`kicad_tools.placement.hv_domains.build_required_by_domain_pair` --
+    no forked lookup): the edge enters as a pseudo-domain at
+    ``edge_voltage`` and the resulting edge column is extracted.
+
+    ``_pair_bounds`` caps deliberately do NOT apply: the census never bounds an
+    edge pair (``_pair_requirement(..., edge=True)`` skips the bound), and a
+    device-internal |dV| declaration says nothing about net-to-earth stress.
+
+    The returned values are the raw table lookups, NOT floored at ``dru``: the
+    caller does not know the DRU floor at preload time.  Consumers skip a net
+    whose value is at/below the floor (no widening) exactly as
+    :meth:`PairwiseClearanceTable.required_clearance` does for net pairs.
+
+    Raises:
+        StandardLookupError: If an edge-pair |Delta V| exceeds the highest
+            tabulated row -- fail loud, exactly like the net-pair build.
+    """
+    from kicad_tools.creepage.engine import BOARD_EDGE_LABEL
+    from kicad_tools.placement.hv_domains import build_required_by_domain_pair
+
+    pseudo = dict(net_voltages)
+    pseudo[BOARD_EDGE_LABEL] = float(edge_voltage)
+    intervals: dict[str, tuple[float, float]] | None = None
+    if net_intervals is not None:
+        intervals = dict(net_intervals)
+        intervals[BOARD_EDGE_LABEL] = (float(edge_voltage), float(edge_voltage))
+    required = build_required_by_domain_pair(
+        pseudo,
+        standard_id=standard_id,
+        pollution_degree=pollution_degree,
+        material_group=material_group,
+        hv_threshold=hv_threshold,
+        domain_intervals=intervals,
+    )
+    out: dict[str, float] = {}
+    for (a, b), mm in required.items():
+        if a == BOARD_EDGE_LABEL:
+            out[b] = float(mm)
+        elif b == BOARD_EDGE_LABEL:
+            out[a] = float(mm)
+    return out
+
+
+def board_edge_pairwise_violations(
+    routes: Iterable[Route],
+    edge_required: Mapping[str, float],
+    *,
+    edge_geometry: Any,
+    id_to_name: Mapping[int, str] | None = None,
+    floor: float,
+    tolerance: float = _PASS_TOLERANCE,
+) -> list[PairwiseViolation]:
+    """Scan routed copper against the ``Edge.Cuts`` outline (#9685).
+
+    The board-edge analogue of the ``foreign_pads`` walk in
+    :func:`find_pairwise_violations`: for every route whose net carries an edge
+    requirement above ``floor``, the route's whole copper footprint (fused
+    trace segments on every layer PLUS vias -- the census unions across layers
+    for its ``kind="edge"`` rows) is measured edge-to-edge against
+    ``edge_geometry`` (shapely linework built by
+    :func:`kicad_tools.creepage.engine.board_edge_geometry`, already shifted
+    into this module's sheet-absolute frame by the caller).  One worst-case
+    violation per offending route.
+
+    Two deliberate asymmetries with the census, both in the conservative
+    direction or neutral:
+
+    * The measurement is straight-line shapely distance, not the census's
+      bridged surface path -- a slot between the copper and the outer edge can
+      make the census's creepage (detour) LARGER than this distance, so a
+      slot-detour pair the census passes may be flagged here.  It can never
+      let a pair the census fails pass here.
+    * Attach zones never apply: the board edge is not a net terminating on a
+      rated footprint, and the census waives no edge row.
+    """
+    import shapely
+
+    from kicad_tools.creepage.engine import BOARD_EDGE_LABEL
+
+    out: list[PairwiseViolation] = []
+    for route in routes:
+        name = _resolve_net_name(id_to_name, route.net, route.net_name)
+        required = float(edge_required.get(_norm_net_key(name), 0.0))
+        if required <= floor + tolerance:
+            continue
+        fused = _fuse_collinear_runs(route.segments)
+        if not fused and not route.vias:
+            continue
+        copper = _copper_polygons(fused, route.vias)
+        polys = [poly for _, poly, _ in copper.segments] + [poly for poly, _ in copper.vias]
+        if not polys:
+            continue
+        union = shapely.union_all(polys)
+        gap = float(union.distance(edge_geometry))
+        if gap >= required - tolerance:
+            continue
+        line = shapely.shortest_line(union, edge_geometry)
+        if line is None or line.is_empty:
+            gx, gy = union.centroid.x, union.centroid.y
+        else:
+            (x1, y1), (x2, y2) = line.coords[0], line.coords[-1]
+            gx, gy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        out.append(
+            PairwiseViolation(
+                net_a=name,
+                net_b=BOARD_EDGE_LABEL,
+                actual_mm=gap,
+                required_mm=required,
+                x=gx,
+                y=gy,
+            )
+        )
     return out
 
 

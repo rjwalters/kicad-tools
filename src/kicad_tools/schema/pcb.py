@@ -20,7 +20,15 @@ logger = logging.getLogger(__name__)
 
 from kicad_tools.sexp import SExp
 
-from ..core.board_outline import board_outline_bounds, legacy_arc_points
+from ..core.board_outline import (
+    board_outline_bounds,
+    footprint_outline_graphics,
+    is_degenerate_closed_curve,
+    legacy_arc_points,
+    outline_graphics,
+    outline_node_points,
+)
+from ..core.outline_tessellation import tessellate_cubic
 from ..core.schematic_uuids import UuidMinter
 from ..core.sexp_file import load_footprint, load_pcb, save_pcb
 from ..core.version import KICAD_BOARD_FORMAT_VERSION, KICAD_GENERATOR_VERSION
@@ -1506,11 +1514,41 @@ class BoardGraphic:
     mid: tuple[float, float] | None = None  # Appended for positional compatibility
     points: list[tuple[float, float]] = field(default_factory=list)
     fill: str = ""  # raw (fill ...) token: yes/no (KiCad 7+), solid/none (legacy)
+    # Top-level ``(width N)`` on pre-KiCad-6 files, when no ``(stroke ...)``
+    # node is present.  ``None`` when the token is absent.  KiCad's legacy
+    # convention ties the *default* fill of a circle/rect to a zero stroke
+    # width (Issue #9690), so the Edge.Cuts fill resolution needs it.
+    legacy_width: float | None = None
 
     @property
     def is_filled(self) -> bool:
         """True when the shape's interior is printed, not just its outline."""
         return _fill_token_is_filled(self.fill)
+
+    @property
+    def is_filled_cutout(self) -> bool:
+        """KiCad's fill resolution of this shape as an Edge.Cuts cut-out.
+
+        Black-box probed against the pinned kicad-cli image (Issue #9690),
+        for the three closed board-level shapes:
+
+        * an explicit ``(fill yes)`` / ``(fill solid)`` token is filled, an
+          explicit ``(fill no)`` / ``(fill none)`` token is not;
+        * with **no** fill token, a ``gr_circle`` / ``gr_rect`` follows
+          KiCad's legacy convention -- filled exactly when the effective
+          stroke width is zero (no stroke node, ``(stroke (width 0) ...)``,
+          or a legacy ``(width 0)``);
+        * with no fill token, a ``gr_poly`` is never filled.
+
+        Only the Edge.Cuts consumers may read this: the silkscreen default
+        for an absent token stays "not filled" (:pyattr:`is_filled`,
+        Issue #5811).
+        """
+        if self.fill.strip():
+            return _fill_token_is_filled(self.fill)
+        if self.graphic_type == "poly":
+            return False
+        return not (self.stroke_width or (self.legacy_width or 0.0))
 
     @classmethod
     def from_sexp(cls, sexp: SExp, graphic_type: str) -> BoardGraphic:
@@ -1529,6 +1567,11 @@ class BoardGraphic:
         if stroke := sexp.find("stroke"):
             if width := stroke.find("width"):
                 graphic.stroke_width = width.get_float(0) or 0.0
+        elif width := sexp.find("width"):
+            # Pre-KiCad-6 legacy stroke width; feeds the Edge.Cuts fill
+            # default above (Issue #9690).  Kept out of ``stroke_width`` so
+            # silk consumers keep seeing today's 0.0 for legacy files.
+            graphic.legacy_width = width.get_float(0)
 
         # Start/end points
         if start := sexp.find("start"):
@@ -2887,6 +2930,25 @@ class EdgeContour:
         return self.bbox[3] - self.bbox[1]
 
 
+@dataclass(frozen=True)
+class FilledOutlineRegion:
+    """The interior of a filled Edge.Cuts shape -- a cut-out region.
+
+    KiCad treats a filled ``gr_circle`` / ``gr_poly`` / ``gr_rect`` on
+    Edge.Cuts as a cut-out: copper anywhere inside it violates
+    ``copper_edge_clearance`` with actual 0.0 mm (Issue #9690, black-box
+    probed on the pinned kicad-cli image).  A circle region carries its
+    ``center`` and ``radius``; a poly/rect region carries its ``ring`` of
+    vertices.  Coordinates are **board-relative**, matching
+    :meth:`PCB.get_board_outline_segments`.
+    """
+
+    shape_type: str  # "circle" | "poly" | "rect"
+    center: tuple[float, float] | None = None  # circle
+    radius: float | None = None  # circle, in mm
+    ring: tuple[tuple[float, float], ...] = ()  # poly / rect vertices
+
+
 @dataclass
 class StackupLayer:
     """Stackup layer definition."""
@@ -4154,23 +4216,33 @@ class PCB:
         return board_outline_bounds(self._sexp)
 
     def _edge_cuts_poly_chains_sexp(self) -> list[list[tuple[float, float]]]:
-        """Collect ``gr_poly``/``gr_curve`` Edge.Cuts vertex chains.
+        """Collect ``gr_poly`` Edge.Cuts vertex chains.
 
-        ``gr_curve`` is not parsed into the in-memory
-        ``_graphic_lines``/``_graphic_arcs``/``_graphics`` collections at all,
-        and while ``gr_poly`` now lands in ``_graphics`` (Issue #5811, so that
-        board-level polygon *silk* is visible to the clearance checks) its
-        ``BoardGraphic`` carries no outline-chain accessor.  So this still
-        walks ``self._sexp`` directly (like :meth:`_edge_cuts_bbox_sexp`) and
-        returns each polygon/curve's ordered ``(pts (xy ...))`` vertex list in
-        **sheet-absolute** coordinates.  It is the sole Edge.Cuts reader for
-        these two tags: ``BoardOutline``'s ``_graphics`` loop dispatches only
+        ``gr_poly`` is not parsed into the in-memory ``_graphic_lines``/
+        ``_graphic_arcs`` collections at all, and while it now lands in
+        ``_graphics`` (Issue #5811, so that board-level polygon *silk* is
+        visible to the clearance checks) its ``BoardGraphic`` carries no
+        outline-chain accessor.  So this still walks ``self._sexp``
+        directly (like :meth:`_edge_cuts_bbox_sexp`) and returns each
+        polygon's ordered ``(pts (xy ...))`` vertex list in
+        **sheet-absolute** coordinates.  It is the sole Edge.Cuts reader
+        for this tag: ``BoardOutline``'s ``_graphics`` loop dispatches only
         on ``rect``/``circle``/``bezier``, so the added ``poly`` entries
         cannot double-count an outline.
 
+        Footprint-local ``fp_poly`` Edge.Cuts graphics are included,
+        re-emitted in board coordinates by the shared core reader.
+
+        ``gr_curve``/``fp_curve`` are **not** collected here: a cubic is not
+        its control polygon, and treating it as one both mis-shaped the
+        outline and gave an open curve an implicit closing edge that native
+        KiCad reports as ``invalid_outline``.  Curves are tessellated by
+        their consumers (see :meth:`get_board_outline` and
+        :meth:`get_board_outline_segments`).
+
         Returns:
             A list of vertex chains; each chain is an ordered list of
-            ``(x, y)`` tuples.  Empty if no ``gr_poly``/``gr_curve`` Edge.Cuts
+            ``(x, y)`` tuples.  Empty if no ``gr_poly`` Edge.Cuts
             geometry is present.
         """
 
@@ -4178,25 +4250,63 @@ class PCB:
             layer_node = node.find_child("layer")
             return bool(layer_node and layer_node.get_string(0) == "Edge.Cuts")
 
-        chains: list[list[tuple[float, float]]] = []
-        for child in self._sexp.iter_children():
-            if child.tag not in ("gr_poly", "gr_curve"):
-                continue
-            if not _on_edge_cuts(child):
-                continue
+        def _chain_from(node: SExp) -> list[tuple[float, float]]:
             chain: list[tuple[float, float]] = []
-            for pts in child.find_all("pts"):
+            for pts in node.find_all("pts"):
                 for xy in pts.find_children("xy"):
                     x, y = xy.get_float(0), xy.get_float(1)
                     if x is not None and y is not None:
                         chain.append((x, y))
-            if child.tag == "gr_curve":
-                from kicad_tools.core.board_outline import is_degenerate_closed_curve
+            return chain
 
-                if is_degenerate_closed_curve(chain):
-                    continue
+        chains: list[list[tuple[float, float]]] = []
+        for child in self._sexp.iter_children():
+            if child.tag != "gr_poly":
+                continue
+            if not _on_edge_cuts(child):
+                continue
+            chain = _chain_from(child)
             if chain:
                 chains.append(chain)
+        for child in footprint_outline_graphics(self._sexp):
+            if child.tag != "gr_poly":
+                continue
+            chain = _chain_from(child)
+            if chain:
+                chains.append(chain)
+        return chains
+
+    def _edge_cuts_curve_chains_sexp(self) -> list[list[tuple[float, float]]]:
+        """Tessellated ``gr_curve``/``fp_curve`` Edge.Cuts chains.
+
+        Each cubic is flattened with the shared certified tessellation
+        (:func:`kicad_tools.core.outline_tessellation.tessellate_cubic`),
+        so the chain follows the true curve rather than its control
+        polygon.  A chain keeps the curve's authored endpoints and gets
+        **no** implicit closing edge: native KiCad reports a lone open
+        curve as ``invalid_outline`` and only accepts the contour once a
+        neighbouring graphic closes it, so the implicit edge both invented
+        area and duplicated an explicit closing line's segment (which then
+        broke the one-mate-per-endpoint stitching walk).  A genuinely
+        closed cubic (first == last control point) tessellates to a chain
+        whose ends already meet.  Degenerate closed curves (a cubic that
+        closes along one exact line) enclose no area and are skipped, as in
+        :meth:`_edge_cuts_bbox_sexp`.
+
+        Returns:
+            A list of tessellated point chains in sheet-absolute
+            coordinates.  Empty if no Edge.Cuts curve geometry is present.
+        """
+        chains: list[list[tuple[float, float]]] = []
+        for child in outline_graphics(self._sexp):
+            if child.tag != "gr_curve":
+                continue
+            chain = outline_node_points(child)
+            if len(chain) != 4:
+                raise ValueError("Malformed Edge.Cuts gr_curve: expected four cubic control points")
+            if is_degenerate_closed_curve(chain):
+                continue
+            chains.append(tessellate_cubic(chain))
         return chains
 
     @staticmethod
@@ -5114,6 +5224,14 @@ class PCB:
         :meth:`_edge_cuts_bbox_sexp`).  Without this, a board whose outline is
         a single ``gr_poly`` would silently return ``[]``.
 
+        Footprint-local Edge.Cuts graphics (``fp_*`` on Edge.Cuts, which KiCad
+        treats as board outline -- e.g. SparkFun's IoT RedBoard ESP32-P4)
+        participate too: the core reader re-emits them as board-frame
+        ``gr_line``/``gr_arc`` nodes, chained like any other segment.
+        Malformed footprint graphics raise ``ValueError`` (fail-loud, like
+        :attr:`board_size`); board-level graphics keep their tolerant
+        in-memory parsing.
+
         Segments do not need to be stored in end-to-end path order, and the
         Edge.Cuts layer may contain more than one closed contour (mounting
         holes, fiducial marks, stray shapes) alongside the real board edge.
@@ -5135,11 +5253,24 @@ class PCB:
         edge_rects = [
             g for g in self._graphics if g.layer == "Edge.Cuts" and g.graphic_type == "rect"
         ]
-        # gr_poly / gr_curve are not parsed into the in-memory collections, so
-        # recover their vertex chains straight off the S-expression tree.
+        # gr_poly is not parsed into the in-memory collections, so its
+        # vertex chains are recovered straight off the S-expression tree.
         poly_chains = self._edge_cuts_poly_chains_sexp()
+        # Curves contribute their tessellated chain with no implicit
+        # closing edge (see _edge_cuts_curve_chains_sexp); a lone open
+        # curve therefore cannot close a polygon, matching native
+        # ``invalid_outline``, while curve + closing line chains normally.
+        curve_chains = self._edge_cuts_curve_chains_sexp()
+        footprint_nodes = list(footprint_outline_graphics(self._sexp))
 
-        if not edge_lines and not edge_arcs and not edge_rects and not poly_chains:
+        if (
+            not edge_lines
+            and not edge_arcs
+            and not edge_rects
+            and not poly_chains
+            and not curve_chains
+            and not footprint_nodes
+        ):
             return []
 
         # Build a list of all line segments (including arc endpoints)
@@ -5156,14 +5287,39 @@ class PCB:
         for rect in edge_rects:
             segments.extend(self._rect_to_segments(rect.start, rect.end))
 
-        # Each gr_poly / gr_curve contributes edges between consecutive
-        # vertices (and a closing edge back to the first vertex) so the shared
-        # segment-stitching logic below can walk them like any other outline.
+        for node in footprint_nodes:
+            points = outline_node_points(node)
+            tag = node.tag or ""
+            if tag == "gr_line":
+                segments.append((points[0], points[1]))
+            elif tag == "gr_arc":
+                segments.append((points[0], points[1]))
+                segments.append((points[1], points[2]))
+            # gr_poly: already contributed by ``poly_chains`` above
+            # (``_edge_cuts_poly_chains_sexp`` walks footprint polys too);
+            # emitting them here as well would double every edge and break
+            # the strict one-mate-per-endpoint stitching walk below.
+            # gr_curve: already contributed tessellated by
+            # ``curve_chains``. gr_circle: a ring cannot chain into a
+            # simple closed polygon under the strict
+            # one-mate-per-endpoint walk below, so it is skipped --
+            # identical to the board-level treatment.
+
+        # Each gr_poly contributes edges between consecutive vertices (and
+        # a closing edge back to the first vertex -- a polygon is authored
+        # closed) so the shared segment-stitching logic below can walk them
+        # like any other outline. A polygon is the only graphic that gets
+        # an implicit closing edge.
         for chain in poly_chains:
             for i in range(len(chain) - 1):
                 segments.append((chain[i], chain[i + 1]))
             if len(chain) >= 3:
                 segments.append((chain[-1], chain[0]))
+
+        # Each curve contributes its tessellated chain as consecutive
+        # edges between its true endpoints, with no implicit closure.
+        for chain in curve_chains:
+            segments.extend(zip(chain[:-1], chain[1:], strict=True))
 
         if not segments:
             return []
@@ -5348,9 +5504,21 @@ class PCB:
     ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
         """Get board outline as a list of line segments.
 
-        Returns all Edge.Cuts graphic elements as line segments.
-        Handles gr_line, gr_arc, and gr_rect elements.
+        Returns all Edge.Cuts graphic elements as line segments: lines,
+        two-chord arcs, rects, polygon boundaries (with their authored
+        closing edge), tessellated cubics (no implicit closing edge -- see
+        :meth:`_edge_cuts_curve_chains_sexp`) and certified circle rings.
         More useful for distance calculations than the polygon.
+
+        Footprint-local Edge.Cuts graphics (``fp_*``, which KiCad treats
+        as board outline) participate with the same treatment as their
+        board-level counterparts: an outline drawn as an ``fp_poly`` used
+        to return **zero** segments here, silently switching
+        ``EdgeClearanceRule`` off for the whole board (#9593).  Malformed
+        footprint graphics raise ``ValueError`` (fail-loud, like
+        :attr:`board_size`); malformed board-level poly/curve/circle
+        graphics are skipped, matching the tolerant in-memory parsing of
+        the board-level line/arc collections.
 
         Returns:
             List of ((x1, y1), (x2, y2)) tuples representing line segments.
@@ -5371,6 +5539,85 @@ class PCB:
             if graphic.layer == "Edge.Cuts" and graphic.graphic_type == "rect":
                 segments.extend(self._rect_to_segments(graphic.start, graphic.end))
 
+        def _poly_edges(
+            chain: list[tuple[float, float]],
+        ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+            # A polygon is authored closed: consecutive edges plus the
+            # closing edge back to the first vertex. A zero-length edge
+            # (an authored repeat of the first vertex, or the closing edge
+            # of a chain that already ends where it starts) carries no
+            # boundary and is dropped.
+            if len(chain) < 3:
+                return []
+            edges = list(zip(chain, chain[1:] + chain[:1], strict=True))
+            return [e for e in edges if e[0] != e[1]]
+
+        def _curve_edges(
+            chain: list[tuple[float, float]],
+        ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+            # Tessellated cubic: consecutive edges between its authored
+            # endpoints, no implicit closure.
+            return list(zip(chain[:-1], chain[1:], strict=True))
+
+        def _circle_edges(
+            center: tuple[float, float], end: tuple[float, float]
+        ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+            from ..core.board_outline import circle_tessellation_points
+
+            radius = math.dist(center, end)
+            if radius <= 0:
+                raise ValueError(
+                    "Malformed Edge.Cuts gr_circle: zero-radius circle has no boundary"
+                )
+            ring = circle_tessellation_points(center, radius)
+            return list(zip(ring, ring[1:] + ring[:1], strict=True))
+
+        def _outline_segments_of(
+            node: SExp,
+        ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+            tag = node.tag or ""
+            if tag == "gr_poly":
+                return _poly_edges(outline_node_points(node))
+            if tag == "gr_curve":
+                chain = outline_node_points(node)
+                if len(chain) != 4:
+                    raise ValueError(
+                        "Malformed Edge.Cuts gr_curve: expected four cubic control points"
+                    )
+                if is_degenerate_closed_curve(chain):
+                    return []
+                return _curve_edges(tessellate_cubic(chain))
+            if tag == "gr_circle":
+                center, end = outline_node_points(node)
+                return _circle_edges(center, end)
+            return []
+
+        for node in footprint_outline_graphics(self._sexp):
+            tag = node.tag or ""
+            points = outline_node_points(node)
+            if tag == "gr_line":
+                segments.append((points[0], points[1]))
+            elif tag == "gr_arc":
+                segments.append((points[0], points[1]))
+                segments.append((points[1], points[2]))
+            elif tag in ("gr_poly", "gr_curve", "gr_circle"):
+                segments.extend(_outline_segments_of(node))
+
+        # Board-level poly/curve/circle graphics reach this method through
+        # the same representation (they never enter the in-memory
+        # line/arc/rect collections), parsed tolerantly like those
+        # collections: a malformed one is skipped, not fatal.
+        for node in self._sexp.iter_children():
+            if (node.tag or "") not in ("gr_poly", "gr_curve", "gr_circle"):
+                continue
+            layer_node = node.find_child("layer")
+            if layer_node is None or layer_node.get_string(0) != "Edge.Cuts":
+                continue
+            try:
+                segments.extend(_outline_segments_of(node))
+            except ValueError:
+                continue
+
         # Transform from sheet-absolute to board-relative coordinates
         # so that outline segments match footprint positions (which are
         # converted to board-relative in _detect_board_origin).
@@ -5379,6 +5626,80 @@ class PCB:
             segments = [((x1 - ox, y1 - oy), (x2 - ox, y2 - oy)) for (x1, y1), (x2, y2) in segments]
 
         return segments
+
+    def get_board_outline_filled_regions(self) -> list[FilledOutlineRegion]:
+        """Filled Edge.Cuts shapes as cut-out regions (Issue #9690).
+
+        KiCad treats a filled ``gr_circle`` / ``gr_poly`` / ``gr_rect`` on
+        Edge.Cuts as a cut-out region rather than a stroke: copper inside it
+        violates ``copper_edge_clearance`` with actual 0.0 mm.  Whether a
+        shape is filled follows KiCad's own resolution -- see
+        :pyattr:`BoardGraphic.is_filled_cutout` for the probed matrix (in
+        short: an explicit filled token always fills; with the token absent
+        only a zero-stroke-width circle/rect fills, never a poly).
+
+        Stroke-only (unfilled) shapes get no interior semantics from this
+        method; their boundary is still board edge through
+        :meth:`get_board_outline_segments`, which emits a rect's four edges,
+        a poly's closed vertex chain and a circle's tessellated ring for
+        every fill resolution (Issue #9690 review).
+
+        Returns:
+            List of :class:`FilledOutlineRegion` in **board-relative**
+            coordinates, one per filled closed Edge.Cuts shape.
+        """
+        regions: list[FilledOutlineRegion] = []
+
+        for graphic in self._graphics:
+            if graphic.layer != "Edge.Cuts":
+                continue
+            if graphic.graphic_type not in ("circle", "poly", "rect"):
+                continue
+            if not graphic.is_filled_cutout:
+                continue
+
+            if graphic.graphic_type == "circle":
+                if graphic.center is None:
+                    continue
+                cx, cy = graphic.center
+                # ``end`` is a point on the circumference (#8540).
+                radius = math.hypot(graphic.end[0] - cx, graphic.end[1] - cy)
+                if radius <= 0.0:
+                    continue
+                regions.append(
+                    FilledOutlineRegion(shape_type="circle", center=(cx, cy), radius=radius)
+                )
+            elif graphic.graphic_type == "rect":
+                x1, y1 = graphic.start
+                x2, y2 = graphic.end
+                regions.append(
+                    FilledOutlineRegion(
+                        shape_type="rect",
+                        ring=((x1, y1), (x2, y1), (x2, y2), (x1, y2)),
+                    )
+                )
+            else:  # poly
+                if len(graphic.points) < 3:
+                    continue
+                regions.append(FilledOutlineRegion(shape_type="poly", ring=tuple(graphic.points)))
+
+        # Transform from sheet-absolute to board-relative coordinates, the
+        # same shift get_board_outline_segments applies so that regions,
+        # segments and copper coordinates share one frame.
+        ox, oy = self._board_origin
+        if ox != 0.0 or oy != 0.0:
+            shifted: list[FilledOutlineRegion] = []
+            for region in regions:
+                center = (region.center[0] - ox, region.center[1] - oy) if region.center else None
+                ring = tuple((x - ox, y - oy) for x, y in region.ring)
+                shifted.append(
+                    FilledOutlineRegion(
+                        shape_type=region.shape_type, center=center, radius=region.radius, ring=ring
+                    )
+                )
+            regions = shifted
+
+        return regions
 
     # ------------------------------------------------------------------
     # Edge.Cuts contour analysis and manipulation
@@ -7305,6 +7626,39 @@ class PCB:
         self._sexp.append(via.to_sexp(offset=(ox, oy)))
 
         return via
+
+    def find_vias(
+        self,
+        x: float,
+        y: float,
+        layers: tuple[str, ...] | list[str] = ("F.Cu", "B.Cu"),
+        net: str | int | None = None,
+    ) -> list[Via]:
+        """Find all vias sharing the dedupe key, regardless of size and drill."""
+        from ..core.layers import resolve_via_type
+
+        _, resolved_layers = resolve_via_type(layers, None)
+        if not net:
+            net_number = 0
+        elif isinstance(net, int):
+            resolved_net = self.get_net(net)
+            if resolved_net is None:
+                return []
+            net_number = resolved_net.number
+        else:
+            matched_number = next(
+                (number for number, board_net in self.nets.items() if board_net.name == net),
+                None,
+            )
+            if matched_number is None:
+                return []
+            net_number = matched_number
+        key = _via_dedup_key(net_number, x, y, resolved_layers)
+        return [
+            via
+            for via in self._vias
+            if _via_dedup_key(via.net_number, *via.position, via.layers) == key
+        ]
 
     def add_arc(
         self,

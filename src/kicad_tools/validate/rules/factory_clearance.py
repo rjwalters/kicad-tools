@@ -78,6 +78,7 @@ def check_pth_hole_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
 
     from .clearance import (
         ClearanceRule,
+        _arc_copper_geom,
         _collect_zone_fills,
         _element_to_shapely_geom,
         _pad_on_layer,
@@ -106,6 +107,12 @@ def check_pth_hole_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
             if elem.element_type == "segment":
                 x1, y1, x2, y2, width = elem.geometry
                 geom = LineString(((x1, y1), (x2, y2))).buffer(width / 2, quad_segs=64)
+            elif elem.element_type == "arc":
+                # Issue #9673: arcs are track copper on their own layer, so
+                # they count on inner AND outer layers like the segment arm
+                # above -- the covering chord footprint the pairwise rules
+                # measure (``_arc_copper_geom``), never a pad/via shape.
+                geom = _arc_copper_geom(elem)
             elif inner_minimum is not None:
                 geom = _element_to_shapely_geom(elem)
             else:
@@ -175,13 +182,26 @@ def check_silk_pad_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
     from shapely import STRtree
 
     from .clearance import _pad_polygon
-    from .silkscreen import _fp_transform, _silk_side, _stroke_geometry
+    from .silkscreen import (
+        _board_frame_shift,
+        _fp_transform,
+        _graphic_anchor,
+        _silk_side,
+        _stroke_geometry,
+    )
 
     strokes: list[tuple[Any, Any, str, tuple[float, float]]] = []
     for fp in pcb.footprints:
         for graphic in fp.graphics:
             strokes.append((graphic, _fp_transform(fp), fp.reference, fp.position))
-    strokes.extend((graphic, None, "board", graphic.start) for graphic in pcb.graphics)
+    # Board-level gr_* keep the file's sheet-absolute coordinates while pads
+    # are board-relative; shift strokes and reported locations (Issue #9642).
+    to_board = _board_frame_shift(pcb)
+    has_origin = any(getattr(pcb, "_board_origin", (0.0, 0.0)))
+    board_xf = to_board if has_origin else None
+    strokes.extend(
+        (graphic, board_xf, "board", to_board(_graphic_anchor(graphic))) for graphic in pcb.graphics
+    )
     apertures = []
     for fp in pcb.footprints:
         for pad in fp.pads:

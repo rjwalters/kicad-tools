@@ -1,7 +1,7 @@
 # Clearance-kernel epic (#5509): acceptance audit
 
-Audit for [#7577](https://github.com/rjwalters/kicad-tools/issues/7577), the operator-authorized
-bounded audit of epic [#5509](https://github.com/rjwalters/kicad-tools/issues/5509)
+Audit for [#7577](https://github.com/2AMLogic/kicad-tools/issues/7577), the operator-authorized
+bounded audit of epic [#5509](https://github.com/2AMLogic/kicad-tools/issues/5509)
 (*one clearance kernel -- search, commit and final validation must agree with kicad-cli DRC*).
 
 This is an evidence-to-criteria reconciliation built from **existing artifacts only**. It is not a

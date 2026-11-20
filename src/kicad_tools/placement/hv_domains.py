@@ -179,14 +179,58 @@ def derive_ref_domains_from_declaration(
     return ref_domains, domain_voltages
 
 
+# ---------------------------------------------------------------------------
+# Interval pair differencing (#9659)
+# ---------------------------------------------------------------------------
+
+# A domain voltage is either a signed scalar (a degenerate closed interval) or
+# a closed ``(lo, hi)`` interval pair (any 2-sequence -- the creepage engine's
+# ``VoltageInterval`` named tuple included).
+DomainVoltage = float | tuple[float, float]
+
+
+def as_domain_interval(value: DomainVoltage) -> tuple[float, float]:
+    """Coerce a domain voltage to a closed ``(lo, hi)`` interval.
+
+    A scalar ``v`` is the degenerate interval ``(v, v)`` -- **signed**, so a
+    bipolar pair such as ``{A: +150, B: -150}`` differences to 300 V exactly as
+    the signed route loader (#4867) and the creepage census (#4411) read it.  A
+    pair-like value is normalised to a plain float tuple.
+    """
+    if isinstance(value, (int, float)):
+        v = float(value)
+        return (v, v)
+    try:
+        lo, hi = value
+    except (TypeError, ValueError) as e:
+        raise TypeError(f"domain voltage must be a scalar or a (lo, hi) pair, got {value!r}") from e
+    return (float(lo), float(hi))
+
+
+def interval_pair_dv(a: DomainVoltage, b: DomainVoltage) -> float:
+    """Worst-case ``|dV|`` between two closed interval domain voltages.
+
+    ``dv = max(|a.hi - b.lo|, |b.hi - a.lo|)`` -- the same end-to-end
+    differencing the creepage census uses per net pair (#4411): a swinging
+    node's excursion cannot hide behind its dominant static value.  Two
+    degenerate (scalar) intervals collapse to ``|v - w|``, so scalar inputs
+    reproduce the pre-interval behaviour exactly.  Shared by the export-rules
+    domain matrix (#9659); route-time tables are expected to converge on it.
+    """
+    a_lo, a_hi = as_domain_interval(a)
+    b_lo, b_hi = as_domain_interval(b)
+    return max(abs(a_hi - b_lo), abs(b_hi - a_lo))
+
+
 def build_required_by_domain_pair(
-    domain_voltages: Mapping[str, float],
+    domain_voltages: Mapping[str, DomainVoltage],
     *,
     standard_id: str = "iec60664",
     pollution_degree: int = 2,
     material_group: str = "IIIa",
     hv_threshold: float = 30.0,
     pair_bounds: Mapping[frozenset[str], tuple[float, str]] | None = None,
+    include_intra_domain: bool = False,
     domain_intervals: Mapping[str, tuple[float, float]] | None = None,
 ) -> dict[tuple[str, str], float]:
     """Build the per-domain-pair required-creepage table.
@@ -199,7 +243,11 @@ def build_required_by_domain_pair(
     including when the threshold is zero.
 
     Args:
-        domain_voltages: ``{domain_id: voltage_magnitude}``.
+        domain_voltages: ``{domain_id: voltage}`` where a voltage is either a
+            **signed** scalar (degenerate interval -- signs are load-bearing,
+            #4867) or a closed ``(lo, hi)`` interval pair.  Interval values are
+            differenced end-to-end via :func:`interval_pair_dv` (#9659), so a
+            swinging domain can never collapse against its peers.
         standard_id: Creepage standard id (``iec60664`` / ``iec62368``).
         pollution_degree: IEC pollution degree (1, 2 or 3).
         material_group: Insulation material group (``I``/``II``/``IIIa``/``IIIb``).
@@ -208,13 +256,20 @@ def build_required_by_domain_pair(
             ``frozenset({domain_a, domain_b})`` -> ``(max_dv, why)``. The pair's
             ``|ΔV|`` becomes ``min(|ΔV|, max_dv)``: a bound only lowers.
             ``None`` (default) leaves behaviour unchanged.
+        include_intra_domain: When ``True``, also emit ``(domain, domain)``
+            self-pairs for domains whose own interval span reaches
+            *hv_threshold* (a swinging ``[-150, +150]`` domain holds 300 V
+            across its own members, #9659).  Scalar (degenerate) domains span
+            ``0 V`` and never produce a self-pair, so the default ``False``
+            contract is unchanged for every existing caller.
         domain_intervals: Optional per-domain closed ``[lo, hi]`` working-voltage
-            intervals (#4411, consumed end-to-end for issue #9602). When either
-            domain of a pair carries an interval the pair stress is the census'
-            worst-case endpoint combination
-            ``dv = max(|a.hi - b.lo|, |b.hi - a.lo|)`` instead of the scalar
-            ``abs(va - vb)``; a domain absent from the mapping stays the
-            degenerate interval ``(v, v)`` built from its scalar, so an
+            intervals (#4411, consumed end-to-end for issue #9602). When a
+            domain of a pair carries an entry here it **overrides** the
+            interval derived from its *domain_voltages* value, and the pair
+            stress is the census' worst-case endpoint combination
+            ``dv = max(|a.hi - b.lo|, |b.hi - a.lo|)`` (via
+            :func:`interval_pair_dv`, #9659); a domain absent from the mapping
+            keeps its *domain_voltages* value (scalar or interval), so an
             all-scalar (or ``None``) input is unchanged by construction.
 
     Returns:
@@ -225,37 +280,35 @@ def build_required_by_domain_pair(
             tabulated row (no silent extrapolation).
     """
     std = get_standard(standard_id)
-    ids = sorted(domain_voltages)
+    ivals = {d: as_domain_interval(v) for d, v in domain_voltages.items()}
+    if domain_intervals:
+        # #9602 override: an explicit per-domain interval wins over the value
+        # carried in domain_voltages (a domain absent there was never iterated
+        # on main either, so unknown keys stay ignored).
+        for d, iv in domain_intervals.items():
+            if d in ivals:
+                ivals[d] = as_domain_interval(iv)
+    ids = sorted(ivals)
     out: dict[tuple[str, str], float] = {}
-    for i in range(len(ids)):
-        for j in range(i + 1, len(ids)):
-            a, b = ids[i], ids[j]
-            va, vb = domain_voltages[a], domain_voltages[b]
-            # Issue #9602: difference intervals end-to-end like the creepage
-            # census. A collapsed scalar cannot be right for both banks of a
-            # sign-flipping pair (the #4867 failure mode for ranges): two nets
-            # both spanning -150..150 collapse to the same endpoint and
-            # difference to 0 V, while the census sees 300 V.
-            iv_a = domain_intervals.get(a) if domain_intervals else None
-            iv_b = domain_intervals.get(b) if domain_intervals else None
-            if iv_a is not None or iv_b is not None:
-                lo_a, hi_a = iv_a if iv_a is not None else (va, va)
-                lo_b, hi_b = iv_b if iv_b is not None else (vb, vb)
-                dv = max(abs(hi_a - lo_b), abs(hi_b - lo_a))
-            else:
-                dv = abs(va - vb)
-            if pair_bounds:
-                bound = pair_bounds.get(frozenset((a, b)))
-                if bound is not None:
-                    dv = min(dv, bound[0])
-            if dv == 0.0 or dv < hv_threshold:
-                continue
-            # Explicitly basic (also the #7082 default): placement never
-            # takes the reinforced opt-in used by kct creepage / kct audit.
-            required, _prov = std.required_creepage(
-                dv, pollution_degree, material_group, insulation="basic"
-            )
-            out[(a, b)] = required
+    pairs: list[tuple[str, str]] = [
+        (ids[i], ids[j]) for i in range(len(ids)) for j in range(i + 1, len(ids))
+    ]
+    if include_intra_domain:
+        pairs.extend((d, d) for d in ids)
+    for a, b in pairs:
+        dv = interval_pair_dv(ivals[a], ivals[b])
+        if pair_bounds and a != b:
+            bound = pair_bounds.get(frozenset((a, b)))
+            if bound is not None:
+                dv = min(dv, bound[0])
+        if dv == 0.0 or dv < hv_threshold:
+            continue
+        # Explicitly basic (also the #7082 default): placement never
+        # takes the reinforced opt-in used by kct creepage / kct audit.
+        required, _prov = std.required_creepage(
+            dv, pollution_degree, material_group, insulation="basic"
+        )
+        out[(a, b)] = required
     return out
 
 

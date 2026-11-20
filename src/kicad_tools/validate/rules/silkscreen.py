@@ -80,10 +80,134 @@ from kicad_tools.silkscreen._silk_defaults import (  # noqa: E402
     SILK_HOLE_CLEARANCE_MM,
 )
 
-# Per-character width factor used to approximate a stroked-font text bounding
-# box.  KiCad's true glyph metrics are not modeled; a simple per-character box
-# is sufficient to reproduce the kicad-cli silk findings.
-_TEXT_CHAR_WIDTH_FACTOR = 0.7
+# Per-character advance widths for KiCad's stroke font, in quanta of
+# ``size / 21`` (KiCad quantizes glyph advances to 1/21 of the font size --
+# every measured advance landed on an exact integer multiple).  The text
+# bounding box used to approximate a whole string as
+# ``0.7 * size * len(text) + thickness`` (Issue #9515): a single average that
+# under-covered KiCad's plotted ink badly for wide glyphs and long digit runs
+# (measured under-coverage: "ABCD" +0.77 mm, "1234567890" +2.14 mm,
+# "MMMMMMMMMM" +3.95 mm at 1.0 mm / 0.15 mm), which loosened
+# ``silk_over_copper`` / ``silk_overlap`` / ``silk_hole_overlap`` -- a pad or
+# silk item inside KiCad's ink but outside the box is silently missed, and
+# since #9433 honours justification the whole error lands at the far end of a
+# justified label.
+#
+# The table below was measured by plotting probe ``gr_text`` strings on
+# F.SilkS with kicad-cli 10.0.6 (the pinned CI image) and scanning the gerber
+# stroke vertices plus the round aperture diameter: for every probed glyph the
+# plotted ink width of a repeated-glyph string is exactly
+# ``(n - 1) * advance + ink``, and all advances are integer quanta.
+# Advance measures pen travel. The first and last glyphs' side bearings
+# locate the horizontal stroke endpoints inside that travel. The tables
+# describe ordinary single-line stroke text; other fonts/styles are unmeasured.
+_TEXT_CHAR_ADVANCE_QUANTA: dict[str, int] = {
+    # uppercase (advance quanta; 'M'/'W' widest at 24)
+    "A": 18,
+    "B": 21,
+    "C": 21,
+    "D": 21,
+    "E": 19,
+    "F": 18,
+    "G": 21,
+    "H": 22,
+    "I": 10,
+    "J": 16,
+    "K": 21,
+    "L": 17,
+    "M": 24,
+    "N": 22,
+    "O": 22,
+    "P": 21,
+    "Q": 22,
+    "R": 21,
+    "S": 20,
+    "T": 16,
+    "U": 22,
+    "V": 18,
+    "W": 24,
+    "X": 20,
+    "Y": 18,
+    "Z": 20,
+    # digits are uniform in KiCad's stroke font
+    "0": 20,
+    "1": 20,
+    "2": 20,
+    "3": 20,
+    "4": 20,
+    "5": 20,
+    "6": 20,
+    "7": 20,
+    "8": 20,
+    "9": 20,
+    # lowercase ('m' widest at 28; i/j narrow like 'I')
+    "a": 19,
+    "b": 19,
+    "c": 18,
+    "d": 19,
+    "e": 18,
+    "f": 12,
+    "g": 19,
+    "h": 19,
+    "i": 10,
+    "j": 10,
+    "k": 17,
+    "l": 11,
+    "m": 28,
+    "n": 19,
+    "o": 19,
+    "p": 19,
+    "q": 19,
+    "r": 13,
+    "s": 17,
+    "t": 12,
+    "u": 19,
+    "v": 16,
+    "w": 22,
+    "x": 17,
+    "y": 16,
+    "z": 17,
+    # symbols and space (measured)
+    "!": 10,
+    "%": 24,
+    "'": 10,
+    "(": 14,
+    ")": 14,
+    "+": 26,
+    "-": 26,
+    ".": 10,
+    "/": 22,
+    ":": 10,
+    "?": 18,
+    "_": 16,
+    " ": 16,
+}
+#: Advance for glyphs not in the measured set: the widest measured advance
+#: (lowercase ``m``).
+_TEXT_ADVANCE_DEFAULT_QUANTA = 28
+
+# Side bearings (left, right) in size/21 units, from centred single-glyph
+# Gerber extrema after subtracting the round aperture. Unmeasured glyphs
+# keep their entire advance. Allow 0.005 mm at each edge for rounding.
+_TEXT_BEARINGS = {
+    glyph: bearings
+    for bearings, glyphs in (
+        ((4, 5), "adgq"),
+        ((5, 4), "bkpBDEKPR"),
+        ((4, 4), "ceiosCGOS015689!%'.:?"),
+        ((2, 2), "ftATVY/"),
+        ((5, 5), "hmnuHIMNU+-"),
+        ((1, 4), "j"),
+        ((5, 3), "lF("),
+        ((5, 2), "rL"),
+        ((3, 3), "vwxyzWXZ7"),
+        ((3, 5), "J)"),
+        ((4, 3), "Q4"),
+        ((3, 4), "23"),
+    )
+    for glyph in glyphs
+}
+_TEXT_WIDTH_GUARD_MM = 0.01
 
 # Floating-point tolerance for clearance comparisons (0.1 micron), matching
 # ``edge.py``'s ``_CLEARANCE_EPSILON_MM``.
@@ -205,6 +329,7 @@ def check_silkscreen_line_width(
     min_width = design_rules.min_silkscreen_width_mm
 
     # Check board-level graphics (never suppressed -- no footprint context)
+    to_board = _board_frame_shift(pcb)
     for graphic in pcb.graphics:
         if not is_silkscreen_layer(graphic.layer):
             continue
@@ -217,7 +342,7 @@ def check_silkscreen_line_width(
                         f"Silkscreen line width {graphic.stroke_width:.2f}mm "
                         f"< minimum {min_width:.2f}mm"
                     ),
-                    location=graphic.start,
+                    location=to_board(_graphic_anchor(graphic)),
                     layer=graphic.layer,
                     actual_value=graphic.stroke_width,
                     required_value=min_width,
@@ -656,16 +781,9 @@ def _text_bbox_geometry(
 ) -> _Geometry | None:
     """Build a shapely box approximating a stroked-text bounding box.
 
-    ``center`` is the text *anchor* in board coordinates -- the box centre for
-    the default (centred) justification.  ``justify`` is the text's
-    ``(justify ...)`` tokens (Issue #9433): ``left`` starts the box at the
-    anchor and extends it along the text direction, ``right`` ends it at the
-    anchor, ``top`` hangs it below the anchor and ``bottom`` stands it above.
-    The offset is applied in the text's own (unrotated) frame and the box is
-    then rotated about the anchor, so rotated justified text lands correctly.
-    ``mirror`` (back-side text) reverses the horizontal direction -- verified
-    against KiCad's plotted output: ``left`` behaves as unmirrored ``right``
-    and vice versa.  ``top``/``bottom`` are unaffected.  ``angle`` is the absolute
+    ``center`` is the board-coordinate text anchor. Side bearings place the
+    ink within the justified run. Mirroring reflects the horizontal interval
+    about the anchor before rotation. ``angle`` is the absolute
     board-frame text angle in KiCad degrees (positive turns toward negative
     board y); the default ``0`` yields the axis-aligned box.  Returns ``None``
     for empty text.
@@ -673,20 +791,27 @@ def _text_bbox_geometry(
     from shapely.affinity import rotate  # type: ignore[import-untyped]
     from shapely.geometry import box
 
-    n = len(text)
-    if n == 0:
+    if not text:
         return None
-    width = font_size[0] * n * _TEXT_CHAR_WIDTH_FACTOR + font_thickness
+    quantum = font_size[0] / 21.0
+    advance = quantum * sum(
+        _TEXT_CHAR_ADVANCE_QUANTA.get(c, _TEXT_ADVANCE_DEFAULT_QUANTA) for c in text
+    )
+    left = quantum * _TEXT_BEARINGS.get(text[0], (0, 0))[0]
+    right = quantum * _TEXT_BEARINGS.get(text[-1], (0, 0))[1]
+    aperture = min(font_thickness, min(font_size) / 4)
+    width = advance - left - right + aperture + _TEXT_WIDTH_GUARD_MM
     height = font_size[1] + font_thickness
     cx, cy = center
-    # Mirrored text swaps left/right (verified against KiCad plots).
-    h_left, h_right = "left", "right"
-    if "mirror" in justify:
-        h_left, h_right = h_right, h_left
-    if h_left in justify:
-        cx += width / 2.0
-    elif h_right in justify:
-        cx -= width / 2.0
+    offset = (left - right) / 2
+    # Plotted left/right strings shift from their centred positions by half
+    # the advance plus 0.6579 aperture diameters (0.098684 mm at 0.15 mm).
+    shift = advance / 2 + 0.6579 * aperture
+    if "left" in justify:
+        offset += shift
+    elif "right" in justify:
+        offset -= shift
+    cx += -offset if "mirror" in justify else offset
     # Board y grows downward: ``top`` anchors the top edge, box extends +y.
     if "top" in justify:
         cy += height / 2.0
@@ -815,6 +940,37 @@ def _arc_geometry(
         # Collinear / degenerate points: print the chord.
         points = [start, end]
     return LineString(points).buffer(width / 2.0)
+
+
+def _board_frame_shift(pcb: PCB) -> Callable[[tuple[float, float]], tuple[float, float]]:
+    """Return a function mapping board-level (``gr_*``) file coordinates to the board frame.
+
+    ``PCB.load`` shifts footprints (and so pads) into the board-relative
+    frame and records the shift in ``pcb._board_origin``; board-level
+    graphics keep the file's sheet-absolute coordinates (Issues #8561,
+    #9642).  Rules that compare board-level silk against pads, or report its
+    location, must apply this shift.  Identity on zero-origin boards.
+    """
+    ox, oy = getattr(pcb, "_board_origin", (0.0, 0.0))
+
+    def to_board(p: tuple[float, float]) -> tuple[float, float]:
+        return (p[0] - ox, p[1] - oy)
+
+    return to_board
+
+
+def _graphic_anchor(graphic: FootprintGraphic | BoardGraphic) -> tuple[float, float]:
+    """One representative file-frame point per silk shape, for reported locations.
+
+    A parsed ``gr_circle`` / ``fp_circle`` carries its centre in ``center``
+    and leaves ``start`` at the parse default ``(0, 0)``, so reporting
+    ``graphic.start`` sends users to the file origin instead of the shape
+    (Issue #9642).  Every other shape has a real ``start`` -- a poly's is
+    seeded from its first vertex at parse time.
+    """
+    if graphic.graphic_type == "circle" and graphic.center is not None:
+        return graphic.center
+    return graphic.start
 
 
 def _stroke_geometry(
@@ -1121,7 +1277,7 @@ def _iter_silk_elements(
             side,
             geom,
             label,
-            to_board(board_graphic.start),
+            to_board(_graphic_anchor(board_graphic)),
             board_graphic.layer,
             board_graphic.uuid,
             _graphic_descriptor("gr", board_graphic),
@@ -1159,6 +1315,7 @@ def iter_unmodeled_silk_graphics(
                 graphic.uuid,
             )
 
+    to_board = _board_frame_shift(pcb)
     for board_graphic in pcb.graphics:
         if _silk_side(board_graphic.layer) is None:
             continue
@@ -1167,7 +1324,7 @@ def iter_unmodeled_silk_graphics(
         yield (
             f"gr_{board_graphic.graphic_type}",
             board_graphic.graphic_type,
-            board_graphic.start,
+            to_board(_graphic_anchor(board_graphic)),
             board_graphic.layer,
             board_graphic.uuid,
         )
@@ -1492,9 +1649,13 @@ def silk_hits_hole(silk: _Geometry, hole: _Geometry, clearance_mm: float) -> boo
 
 def check_silk_hole_overlap(
     pcb: PCB,
-    design_rules: DesignRules,
+    design_rules: DesignRules | None = None,
 ) -> DRCResults:
     """Silkscreen over a drilled hole (via, PTH or NPTH).
+
+    ``design_rules`` is unused (the threshold is the shared
+    :data:`SILK_HOLE_CLEARANCE_MM` constant) and may be omitted by callers
+    that have no manufacturer profile (Issue #9707).
 
     Unlike :func:`check_silk_over_copper` this tests the **drill** circle, not
     the mask aperture, so silk over a *tented* via hole is reported (Issue
