@@ -23139,12 +23139,12 @@ def _publish_transaction(moves: list[tuple[Path, Path | None]]) -> None:
         for dest, src in moves:
             if dest not in backups:
                 if dest.exists():
-                    bak = dest.with_name(f".{dest.name}.bak-{uuid.uuid4().hex[:8]}")
+                    backup_path = dest.with_name(f".{dest.name}.bak-{uuid.uuid4().hex[:8]}")
                     try:
-                        os.link(dest, bak)
+                        os.link(dest, backup_path)
                     except OSError:
-                        shutil.copy2(dest, bak)
-                    backups[dest] = bak
+                        shutil.copy2(dest, backup_path)
+                    backups[dest] = backup_path
                 else:
                     backups[dest] = None
             if src is None:
