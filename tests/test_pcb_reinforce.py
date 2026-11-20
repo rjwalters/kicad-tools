@@ -3326,6 +3326,127 @@ class TestMaskOpening:
         assert not result.refused_openings
         assert len(_mask_lines(pcb, "B.Mask")) == 1
 
+    def test_far_face_track_through_npth_bore_refuses(self):
+        """#9657: creepage runs along every insulating surface, and the
+        bare bore of an NPTH hole is one -- far-face copper reached
+        across the bore blocks the opening (the layer-agnostic test on
+        main refused this; the layer-aware test must not regress it)."""
+        from kicad_tools.router.pairwise_clearance import build_pairwise_clearance_table
+        from kicad_tools.schema.pcb import Footprint, Pad
+
+        table = build_pairwise_clearance_table(
+            {"FUSED_LINE": 600.0, "OTHER": 0.0}, dru=0.0, hv_threshold=30.0
+        )
+        assert table.required_clearance("FUSED_LINE", "OTHER") == pytest.approx(6.3)
+        pcb = _back_straight_run_pcb()
+        # 3.2 mm net-less NPTH mounting hole at (65, 54): its bore wall
+        # sits 1.4 mm from the strip edge (y = 51).
+        pcb._footprints.append(
+            Footprint(
+                name="Mech:MountingHole",
+                layer="F.Cu",
+                position=(65.0, 54.0),
+                rotation=0.0,
+                reference="H1",
+                value="M3",
+                pads=[
+                    Pad(
+                        number="1",
+                        type="np_thru_hole",
+                        shape="circle",
+                        position=(0.0, 0.0),
+                        size=(3.2, 3.2),
+                        layers=["*.Cu", "*.Mask"],
+                        drill=3.2,
+                    )
+                ],
+            )
+        )
+        # OTHER on the FAR face, crossing the run just past the hole.
+        pcb.add_trace((67.5, 45.0), (67.5, 60.0), width=0.3, layer="F.Cu", net="OTHER")
+        result = reinforce_net(pcb, "FUSED_LINE", pairwise_clearance=table)
+        assert result.placed_count == 2
+        assert not result.openings and not _mask_lines(pcb, "B.Mask")
+        (ref,) = result.refused_openings
+        assert ref.rule == "mask_opening_voltage_map_pairwise"
+        assert ref.required_mm == pytest.approx(6.3)
+        assert ref.actual_mm < ref.required_mm
+        assert ref.obstacle_net == "OTHER"
+        assert ref.obstacle_layer == "F.Cu"
+        assert ref.obstacle_kind == "track"
+        assert ref.obstacle_at == pytest.approx((67.5, 50.0))
+        assert result.legs[0].mask_status == "refused"
+        assert "track on F.Cu at (" in result.legs[0].mask_reason
+
+    def test_far_face_track_with_opening_out_of_reach_still_opens(self):
+        """#9657: the far face only re-enters the test where a non-plated
+        opening shortens the path -- the same NPTH hole well beyond the
+        requirement changes nothing."""
+        from kicad_tools.router.pairwise_clearance import build_pairwise_clearance_table
+        from kicad_tools.schema.pcb import Footprint, Pad
+
+        table = build_pairwise_clearance_table(
+            {"FUSED_LINE": 600.0, "OTHER": 0.0}, dru=0.0, hv_threshold=30.0
+        )
+        pcb = _back_straight_run_pcb()
+        # Bore wall 27.4 mm from the strip edge: far outside 6.3 mm.
+        pcb._footprints.append(
+            Footprint(
+                name="Mech:MountingHole",
+                layer="F.Cu",
+                position=(65.0, 80.0),
+                rotation=0.0,
+                reference="H1",
+                value="M3",
+                pads=[
+                    Pad(
+                        number="1",
+                        type="np_thru_hole",
+                        shape="circle",
+                        position=(0.0, 0.0),
+                        size=(3.2, 3.2),
+                        layers=["*.Cu", "*.Mask"],
+                        drill=3.2,
+                    )
+                ],
+            )
+        )
+        pcb.add_trace((67.5, 45.0), (67.5, 60.0), width=0.3, layer="F.Cu", net="OTHER")
+        result = reinforce_net(pcb, "FUSED_LINE", pairwise_clearance=table)
+        assert result.placed_count == 2
+        assert result.legs[0].mask_status == "opened"
+        assert not result.refused_openings
+        assert len(_mask_lines(pcb, "B.Mask")) == 1
+
+    def test_far_face_track_around_board_edge_refuses(self):
+        """#9657: the board outline is a non-plated opening too -- the
+        path can wrap around the edge, so far-face copper near the same
+        stretch of edge blocks an opening that runs near the outline."""
+        from kicad_tools.router.pairwise_clearance import build_pairwise_clearance_table
+
+        table = build_pairwise_clearance_table(
+            {"FUSED_LINE": 600.0, "OTHER": 0.0}, dru=0.0, hv_threshold=30.0
+        )
+        pcb = PCB.create(width=200, height=100, center=False)
+        for i in range(4):
+            pcb.add_trace(
+                (20.0 + 25.0 * i, 95.0),
+                (20.0 + 25.0 * (i + 1), 95.0),
+                width=2.0,
+                layer="B.Cu",
+                net="FUSED_LINE",
+            )
+        # OTHER on the far face, 3 mm beyond the outline edge (y = 100).
+        pcb.add_trace((60.0, 99.0), (75.0, 99.0), width=0.3, layer="F.Cu", net="OTHER")
+        result = reinforce_net(pcb, "FUSED_LINE", pairwise_clearance=table)
+        assert result.placed_count == 2
+        assert not result.openings and not _mask_lines(pcb, "B.Mask")
+        (ref,) = result.refused_openings
+        assert ref.rule == "mask_opening_voltage_map_pairwise"
+        assert ref.obstacle_net == "OTHER"
+        assert ref.obstacle_layer == "F.Cu"
+        assert result.legs[0].mask_status == "refused"
+
     def test_same_face_track_refused_with_obstacle_location(self):
         """#9649: a same-face crossing still refuses, and now locates the
         obstacle (layer, kind, coordinates)."""
@@ -3463,6 +3584,19 @@ class TestMaskOpening:
         poly = _FilledPolyObstacle([(-20.0, -20.0), (20.0, -20.0), (20.0, 20.0), (-20.0, 20.0)])
         assert _obstacle_point("zone", poly, 0.0, 0.0) == (0.0, 0.0)
         assert _obstacle_point("zone", poly, 25.0, 0.0) == pytest.approx((20.0, 0.0))
+
+    def test_point_to_arc_distance(self):
+        """#9657: exact planar distance to a 3-point arc, the gate's
+        curved-outline case."""
+        from kicad_tools.pcb.reinforce import _point_to_arc_distance
+
+        # Quarter circle on the origin, radius 2: (2,0) -> (√2,√2) -> (0,2).
+        s, m, e = (2.0, 0.0), (2.0**0.5, 2.0**0.5), (0.0, 2.0)
+        assert _point_to_arc_distance((4.0, 0.0), s, m, e) == pytest.approx(2.0)
+        assert _point_to_arc_distance((1.0, 0.0), s, m, e) == pytest.approx(1.0)
+        assert _point_to_arc_distance((0.5, 0.5), s, m, e) == pytest.approx(2.0 - 0.5**0.5)
+        # Outside the arc's angular span: the nearer endpoint wins.
+        assert _point_to_arc_distance((0.0, -3.0), s, m, e) == pytest.approx(13.0**0.5)
 
     def test_shifted_board_text_and_json_agree_on_obstacle_location(self, tmp_path, capsys):
         """#9657: on a board with a nonzero sheet origin the prose obstacle
