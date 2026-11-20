@@ -1376,7 +1376,7 @@ class TestDefectCopperRuler:
     def test_one_ruler_across_mixed_members(self, defect_ruler_pcb):
         """Bump kept + stub/loop shed by the same rule: skew 31 - 20.
 
-        Under the summed ruler the same group would measure 42 - 26 = 5
+        Under the summed ruler the same group would measure 42 - 20 = 22
         (both defects masking real length differences); shedding only
         defect copper corrects it to 11.
         """
