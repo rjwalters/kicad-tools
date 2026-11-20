@@ -34,6 +34,8 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -374,7 +376,13 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "benchmark compare": ["--baseline", "{dir}/missing_baseline.json"],
     "benchmark report": ["{dir}/missing_results.json"],
     # -- artifact producers (error / dry-run paths are hermetic) -----------
-    "render": ["{pcb}", "-o", "{dir}/render"],
+    # Issue #9803: the 3D ray-traces made this the heaviest native leaf
+    # (~10 s own work measured on the pinned 10.0.6 image; 18-49 s wall in
+    # extended CI under the 2-slot native gate), hugging the 50 s deadline.
+    # ``--no-3d`` still performs both real ``pcb export svg`` invocations and
+    # reports the written plots in its JSON document; the 3D flag mapping and
+    # output contract keep their own coverage in tests/test_render_cmd.py.
+    "render": ["{pcb}", "-o", "{dir}/render", "--no-3d"],
     "panel": ["{pcb}", "-o", "{dir}/panel.kicad_pcb"],
     "pipeline": ["{pcb}", "--dry-run"],
     "create-pcb": ["{sch}", "--dry-run"],
@@ -505,6 +513,11 @@ NEEDS_KICAD_CLI: frozenset[str] = frozenset(
 )
 
 _SUBPROCESS_TIMEOUT_S = 50
+# Issue #9803: the most wall-clock seconds a queued child may be reimbursed
+# for.  The extended-CI failures this addresses needed single-digit seconds
+# (the passing distribution hugs the 50 s deadline); 30 s bounds worst-case
+# hang detection at 50 s + 30 s while leaving 3x margin over that tail.
+_SLOT_CREDIT_CAP_S = 30.0
 _MPLCONFIGDIR = Path(tempfile.gettempdir()) / "kct-contract-mplconfig"
 
 
@@ -592,6 +605,17 @@ def _hermetic_env(scratch: Path) -> dict[str, str]:
             "MPLCONFIGDIR": str(_MPLCONFIGDIR),
         }
     )
+    # Issue #9803: when the native-concurrency gate is active (extended CI
+    # sets ``KCT_NATIVE_MAX_CONCURRENCY=2``), the child's ``kicad-cli``
+    # launches queue for a shared slot and that queue time is charged to this
+    # test's subprocess deadline -- the gate deliberately never credits
+    # ``subprocess`` timeouts (#5572 credits only pytest-timeout's).  A private
+    # permit log per child makes the waits measurable so the deadline can be
+    # reimbursed (see ``_communicate_with_slot_credit``).  An explicit
+    # ``KCT_NATIVE_SLOT_LOG``/observer configuration is left alone so the CI
+    # native observer keeps collecting those records.
+    if not (env.get("KCT_NATIVE_SLOT_LOG") or env.get("KCT_NATIVE_OBSERVER_OUTPUT")):
+        env["KCT_NATIVE_SLOT_LOG"] = str(scratch / "_native-slot-log")
     return env
 
 
@@ -645,6 +669,12 @@ def test_format_json_flag_variant_stdout_is_a_single_json_document(variant, tmp_
     _assert_single_json_document(variant, argv, scratch, timeout_s=2 * _SUBPROCESS_TIMEOUT_S)
 
 
+# The marker rationale is the variant test's, plus #9803: the inner guard
+# reimburses a queued child's measured native-slot wait into its deadline
+# (capped at ``_SLOT_CREDIT_CAP_S``), so the per-test cap must leave that
+# guard -- which kills the process group and names the leaf in its message --
+# authoritative through ``_SUBPROCESS_TIMEOUT_S + _SLOT_CREDIT_CAP_S``.
+@pytest.mark.timeout(2 * _SUBPROCESS_TIMEOUT_S + 30)
 @pytest.mark.parametrize("leaf", sorted(CONTRACT_ARGV))
 def test_format_json_stdout_is_a_single_json_document(leaf, tmp_path):
     if leaf in NEEDS_KICAD_CLI and not _kicad_cli_available():
@@ -653,19 +683,211 @@ def test_format_json_stdout_is_a_single_json_document(leaf, tmp_path):
     scratch = tmp_path / "proj"
     shutil.copytree(PROJECT_FIXTURE, scratch)
     argv = [*leaf.split(), *_expand(CONTRACT_ARGV[leaf], scratch), "--format", "json"]
-    _assert_single_json_document(leaf, argv, scratch)
+    doc = _assert_single_json_document(leaf, argv, scratch)
+    check = _CONTENT_CHECKS.get(leaf)
+    if check is not None:
+        assert isinstance(doc, dict), (
+            f"kct {leaf} --format json: expected a JSON object, got {doc!r}"
+        )
+        check(doc)
+
+
+def _check_render_doc(doc: dict) -> None:
+    """Issue #9803: the exercised path must report the plots it generated."""
+    boards = doc.get("boards")
+    assert isinstance(boards, list) and boards, doc
+    outputs = boards[0].get("outputs", {})
+    assert {"pcb-front", "pcb-back"} <= set(outputs), (
+        f"render did not report both SVG plots as generated output: {doc}"
+    )
+
+
+def _check_zones_fill_doc(doc: dict) -> None:
+    """Issue #9803: the exercised path is the real fill, not a dry-run/error."""
+    assert doc.get("filled") is True, doc
+
+
+# Leaves whose JSON payload must prove the real output path ran (#9803
+# acceptance): an early error, a dry-run, or a narrowed argv that silently
+# stopped generating output would otherwise still parse as one document.
+_CONTENT_CHECKS: dict[str, Callable[[dict], None]] = {
+    "render": _check_render_doc,
+    "zones fill": _check_zones_fill_doc,
+}
+
+
+def _child_slot_queue_s(child: subprocess.Popen, env: dict[str, str]) -> float:
+    """Seconds the child has spent waiting for a native permit, so far.
+
+    Reads the gate's own JSONL permit records for the child's PID: completed
+    waits arrive as ``acquire.waited_s``; the launch currently queued surfaces
+    through its periodic ``waiting`` heartbeats (the last one's ``waited_s``
+    is the in-flight total).  A torn tail line -- the child appends while we
+    read -- is ignored; the next timeout cycle re-reads.
+    """
+    directory = env.get("KCT_NATIVE_SLOT_LOG") or env.get("KCT_NATIVE_OBSERVER_OUTPUT")
+    if not directory:
+        return 0.0
+    path = Path(directory) / f"slots-{child.pid}.jsonl"
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return 0.0
+    total = 0.0
+    in_flight = 0.0
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        event = record.get("event")
+        if event == "acquire":
+            total += float(record.get("waited_s") or 0.0)
+            in_flight = 0.0
+        elif event == "waiting":
+            in_flight = float(record.get("waited_s") or 0.0)
+        elif event in ("release", "unbounded"):
+            in_flight = 0.0
+    return total + in_flight
+
+
+def _communicate_with_slot_credit(
+    child: subprocess.Popen, timeout_s: float, env: dict[str, str]
+) -> tuple[str, str]:
+    """``communicate()`` whose deadline measures the child's own work.
+
+    Extended CI bounds native ``kicad-cli`` concurrency
+    (``KCT_NATIVE_MAX_CONCURRENCY=2``) and the gate deliberately never credits
+    ``subprocess`` timeouts (#5572 credits pytest-timeout only), so a contract
+    child queued behind the shared slots was charged pool queue time against
+    this test's 50 s deadline -- measured as the whole gap between ~3 s of own
+    work and 18-49 s walls for ``zones fill`` (#9803).  This is the #5572
+    pattern on the subprocess side: the deadline is extended by exactly the
+    queue time the child's own permit records show, capped so hang detection
+    stays bounded, and a child that merely hangs (no queue records) still hits
+    the plain ``timeout_s`` deadline.
+    """
+    start = time.monotonic()
+    budget = timeout_s
+    while True:
+        try:
+            return child.communicate(timeout=budget)  # type: ignore[return-value]
+        except subprocess.TimeoutExpired:
+            waited = _child_slot_queue_s(child, env)
+            allowed = timeout_s + min(waited, _SLOT_CREDIT_CAP_S)
+            budget = allowed - (time.monotonic() - start)
+            if budget <= 0:
+                raise
+
+
+def _sleep_child(seconds: float) -> subprocess.Popen:
+    return subprocess.Popen(
+        [sys.executable, "-c", f"import time; time.sleep({seconds})"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+
+
+def _write_slot_records(log_dir: Path, pid: int, events: list[dict]) -> None:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps({"time_ns": i * 1_000_000, "pid": pid, **e}) for i, e in enumerate(events)]
+    (log_dir / f"slots-{pid}.jsonl").write_text("\n".join(lines) + "\n")
+
+
+def test_child_slot_queue_s_sums_acquires_and_in_flight_heartbeat(tmp_path):
+    class _Fake:  # noqa: D401 - minimal stand-in with the attribute actually read
+        pid = 4242
+
+    env = {"KCT_NATIVE_SLOT_LOG": str(tmp_path)}
+    _write_slot_records(
+        tmp_path,
+        4242,
+        [
+            {"event": "acquire", "waited_s": 2.0},
+            {"event": "release", "slot": 0},
+            {"event": "waiting", "waited_s": 1.0},
+            {"event": "waiting", "waited_s": 1.4},
+        ],
+    )
+    # Completed waits plus the still-queued launch's latest heartbeat.
+    assert _child_slot_queue_s(_Fake(), env) == pytest.approx(3.4)
+    # A resolved wait replaces its heartbeats instead of adding to them.
+    _write_slot_records(
+        tmp_path,
+        4242,
+        [
+            {"event": "waiting", "waited_s": 1.0},
+            {"event": "acquire", "waited_s": 1.6},
+        ],
+    )
+    assert _child_slot_queue_s(_Fake(), env) == pytest.approx(1.6)
+
+
+def test_child_slot_queue_s_tolerates_missing_log_and_torn_tail(tmp_path):
+    class _Fake:
+        pid = 4243
+
+    env = {"KCT_NATIVE_SLOT_LOG": str(tmp_path)}
+    assert _child_slot_queue_s(_Fake(), env) == 0.0  # no records yet
+    assert _child_slot_queue_s(_Fake(), {}) == 0.0  # nothing configured
+    log = tmp_path / "slots-4243.jsonl"
+    log.write_text('{"event": "waiting", "waited_s": 2.0}\n{"event": "wait')  # torn tail
+    assert _child_slot_queue_s(_Fake(), env) == pytest.approx(2.0)
+
+
+def test_communicate_without_queue_records_keeps_the_plain_deadline():
+    child = _sleep_child(30)
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            _communicate_with_slot_credit(child, 1.0, {})
+    finally:
+        os.killpg(child.pid, signal.SIGKILL)
+        child.communicate()
+
+
+def test_communicate_extends_deadline_by_measured_queue_wait(tmp_path):
+    child = _sleep_child(2.5)
+    env = {"KCT_NATIVE_SLOT_LOG": str(tmp_path)}
+    _write_slot_records(tmp_path, child.pid, [{"event": "acquire", "waited_s": 4.0}])
+    start = time.monotonic()
+    try:
+        _communicate_with_slot_credit(child, 1.0, env)
+        # 2.5 s of own work finished although the plain deadline was 1.0 s.
+        assert time.monotonic() - start >= 2.0
+    finally:
+        child.communicate()
+
+
+def test_communicate_credit_is_capped(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "_SLOT_CREDIT_CAP_S", 2.0)
+    child = _sleep_child(30)
+    env = {"KCT_NATIVE_SLOT_LOG": str(tmp_path)}
+    _write_slot_records(tmp_path, child.pid, [{"event": "acquire", "waited_s": 900.0}])
+    start = time.monotonic()
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            # allowed wall = 1.0 + min(900, cap 2.0) = 3.0 s, not 900 s.
+            _communicate_with_slot_credit(child, 1.0, env)
+        assert time.monotonic() - start < 10.0
+    finally:
+        os.killpg(child.pid, signal.SIGKILL)
+        child.communicate()
 
 
 def _assert_single_json_document(
     leaf: str, argv: list[str], scratch: Path, timeout_s: int = _SUBPROCESS_TIMEOUT_S
-) -> None:
+) -> object | None:
     # Own process group: a hung grandchild (e.g. kicad-cli, #5877) would keep the
     # pipes open after killing only the direct child, blocking communicate()
     # forever. Kill the whole group on timeout instead.
+    env = _hermetic_env(scratch)
     child = subprocess.Popen(
         [sys.executable, "-m", "kicad_tools.cli", "--verbose", *argv],
         cwd=scratch,
-        env=_hermetic_env(scratch),
+        env=env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -673,11 +895,15 @@ def _assert_single_json_document(
         start_new_session=True,
     )
     try:
-        stdout, stderr = child.communicate(timeout=timeout_s)
+        stdout, stderr = _communicate_with_slot_credit(child, timeout_s, env)
     except subprocess.TimeoutExpired:
+        waited = _child_slot_queue_s(child, env)
         os.killpg(child.pid, signal.SIGKILL)
         child.communicate()
-        pytest.fail(f"kct {' '.join(argv)} did not finish within {timeout_s}s")
+        pytest.fail(
+            f"kct {' '.join(argv)} did not finish within {timeout_s}s "
+            f"(own-work deadline; native slot queue wait recorded: {waited:.1f}s)"
+        )
     proc = subprocess.CompletedProcess(child.args, child.returncode, stdout, stderr)
 
     crash = _CRASH_RE.search(proc.stderr)
@@ -688,7 +914,7 @@ def _assert_single_json_document(
         )
 
     if proc.returncode != 0 and not proc.stdout.strip():
-        return  # user error reported on stderr only; stdout is not corrupted
+        return None  # user error reported on stderr only; stdout is not corrupted
 
     try:
         doc = json.loads(proc.stdout)
@@ -702,6 +928,7 @@ def _assert_single_json_document(
     error = doc.get("error") if isinstance(doc, dict) else None
     if isinstance(error, str) and _CRASH_RE.search(error):
         pytest.fail(f"kct {leaf} --format json reported a crash in its error field: {error!r}")
+    return doc
 
 
 @pytest.mark.parametrize("path", _help_nodes(), ids=lambda p: " ".join(p))
