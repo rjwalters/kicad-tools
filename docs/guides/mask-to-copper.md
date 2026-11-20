@@ -239,7 +239,8 @@ All of these must hold, otherwise the measurement keeps its verdict:
   "thermal relief for through-hole pads only" counts only on a plated
   through-hole pad. The relief gap and spoke width are the pad's overrides when
   set, otherwise the zone's. A solid, "none" or unreadable connection never
-  qualifies, and a custom `zone_connection` DRC rule already makes the native run
+  qualifies as thermal (solid has its own class, below), and a custom
+  `zone_connection` DRC rule already makes the native run
   incomplete;
 - **the fill shows the spokes**: it overlaps the pad by more than `u`;
 - **nothing beyond the pad is exposed**, exactly as for `within_own_pad`, so pour
@@ -255,8 +256,8 @@ So the copper this class excuses is the spokes and only the spokes: each spoke's
 crossing of the pad edge out to 0.15 mm. The pour body must lie at least 0.15 mm
 from the opening. These stay errors:
 
-- a solid pad-to-pour connection (untested by the fab), whatever the fill looks
-  like, and a thermal declaration whose fill is solid around the pad;
+- a thermal declaration whose fill is solid around the pad, and a solid
+  declaration whose fill shows spokes or no join;
 - a same-net pour not connected to the pad, a separate same-net zone or island
   beside the opening, or extra copper of the same zone in the band;
 - a pour body inside 0.15 mm of the opening, even with spokes. The fab result
@@ -269,8 +270,31 @@ from the opening. These stay errors:
 
 The measurement records `pour_spokes`, `pour_relief_gap_mm` and
 `pour_spoke_width_mm`; for this class `beside_owner_excess_mm2` is the non-spoke
-copper found in the band (0). A solid-connection fab result would be the evidence
-to revisit the class.
+copper found in the band (0).
+
+### A pad solid-connected to its own pour
+
+A same-net zone the pad is **solid**-connected to is `own_pour_solid` at info
+(Issue #9436). JLCDFM (`--mfr jlcpcb`, 2026-11-18) reported 0 danger / 0 warning
+for 13 such pads at 0 mm expansion. The conditions are those above except the
+spoke band, which does not apply (a solid pour body lies inside it):
+
+- a plain pad with a mask margin of 0 or more;
+- the *effective* connection is solid: the pad's override, else its footprint's,
+  else the zone's; "thermal relief for through-hole pads only" counts as solid on
+  an SMD pad;
+- the fill overlaps the pad by more than `u` and nothing is exposed beyond the pad;
+- every piece of the zone within the examined band touches the pad, so a
+  disconnected same-zone island beside the opening stays an error;
+- the fill shows no relief gap: no free pocket against the pad edge that fill of
+  the zone closes off within the probe (twice the thermal gap, at least 0.5 mm).
+  That is what spokes of any width look like, so a declaration the fill does not
+  bear out keeps its verdict. A cut running out to the probe's edge (another
+  net's clearance clipping the pour) still counts as solid.
+
+An unconnected same-net pour, a positive expansion with pour in the ring,
+different-net pour and unreadable connection data stay errors. The measurement
+has no `pour_*` fields.
 
 ## Declare a particular connected escape
 

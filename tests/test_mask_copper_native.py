@@ -595,8 +595,9 @@ _OWN_POUR_NATIVE = {
     # pour body a relief gap (board 01: 0.2 mm) away.
     "thermal": ("GND", "", 0.2, 0.2, 0.3, "0", "own_pour_thermal"),
     "thermal_gap0.3": ("GND", "", 0.2, 0.3, 0.4, "0", "own_pour_thermal"),
-    # Solid connection: untested by the fab.
-    "solid": ("GND", " yes", 0.2, 0.2, 0.3, "0", "violation"),
+    # Solid connection, 0 mm expansion: the fab reported nothing for 13 such
+    # pads (Issue #9436), so info.
+    "solid": ("GND", " yes", 0.2, 0.2, 0.3, "0", "own_pour_solid"),
     # Same-net pour not connected to the pad, 0.05 mm beside the opening.
     "unconnected": ("GND", " no", 0.05, 0.2, 0.3, "0", "violation"),
     # Thermal, but spokes exposed through a 0.05 mm expansion ring.
@@ -670,7 +671,9 @@ def test_native_own_pour_thermal_only_for_spokes(tmp_path, native_options, case)
     assert len(zone) == 1, result.to_dict()
     measurement = zone[0]
     assert measurement.disposition == expected, result.to_dict()
-    assert result.passed is (expected in ("own_pour_thermal", "warning")), result.to_dict()
+    assert result.passed is (expected in ("own_pour_thermal", "own_pour_solid", "warning")), (
+        result.to_dict()
+    )
     mask = read_native_gerber(native_options["artifact_dir"] / f"{case}-F_Mask.gbr")
     copper = read_native_gerber(native_options["artifact_dir"] / f"{case}-F_Cu.gbr")
     pad = box(9.5, 9.5, 10.5, 10.5)
@@ -687,6 +690,8 @@ def test_native_own_pour_thermal_only_for_spokes(tmp_path, native_options, case)
         assert len(pieces) == 4
         assert all(p.area <= spoke * 0.15 * 1.05 for p in pieces)
     elif case == "solid":
+        # The plot: nothing beyond the pad, and one solid ring of pour around it.
+        assert beyond < 0.000002
         assert len(pieces) == 1 and pieces[0].area > 4 * 1.0 * 0.15 * 0.95
     elif case == "thermal_exp0.05":
         assert beyond > 0.001

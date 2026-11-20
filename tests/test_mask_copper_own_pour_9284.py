@@ -1,9 +1,12 @@
 """``own_pour_thermal``: a pad tied to its own pour by thermal spokes (issue #9284).
 
+``own_pour_solid`` (issue #9436) is covered here too: a pad solid-connected to
+its own pour is info, with negatives for each guard.
+
 The fab evidence (#8858, JLCDFM on board 01's Gerbers) lists no item for a pad
 joined to its own same-net pour by thermal spokes at 0 mm mask expansion, with
 the pour body a relief gap (0.2 and 0.3 mm) away. That shape alone reads
-``own_pour_thermal`` at info. A solid connection, a pour not connected to the
+``own_pour_thermal`` at info. A pour not connected to the
 pad, any pour copper exposed through a positive expansion, a pour body inside
 the examined band, and different-net pour all keep their measured verdict.
 Evidence: ``docs/research/mask-to-copper-own-pad-8858.md``.
@@ -83,13 +86,14 @@ def _geometry(
     zone_conn="default",
     island=None,
     side="F",
+    pad=PAD,
 ):
     from kicad_tools.validate.mask_copper_geometry import AttributedMaskGeometry
     from kicad_tools.validate.mask_export_geometry import ExportedMaskGeometry
 
     mask, cu = f"{side}.Mask", f"{side}.Cu"
-    opening = PAD.buffer(margin, join_style="mitre") if margin else PAD
-    copper = [PAD, fill] + ([island] if island is not None else [])
+    opening = pad.buffer(margin, join_style="mitre") if margin else pad
+    copper = [pad, fill] + ([island] if island is not None else [])
     exported = ExportedMaskGeometry(
         "a" * 64, None, None, "10.0.6", {}, layers={mask: opening, cu: unary_union(copper)}
     )
@@ -98,7 +102,7 @@ def _geometry(
             "kind": owner_kind,
             "net": owner_net,
             "pad_ref": "R2/2",
-            "layers_geometry": {mask: opening, cu: PAD},
+            "layers_geometry": {mask: opening, cu: pad},
             "margin_mm": {mask: margin},
             "zone_connection": pad_connection() if owner_conn == "default" else owner_conn,
         },
@@ -193,14 +197,180 @@ def test_declared_thermal_precedence(owner_conn, zone_conn, pth):
 # --- everything the evidence does not cover keeps its verdict --------------------------
 
 
-def test_solid_connected_own_pour_stays_an_error():
-    """A solid pad-to-pour connection is untested by the fab: error."""
+def test_solid_connected_own_pour_is_info():
+    """Issue #9436: the fab reports nothing for a pad solid in its own pour."""
     fill = box(-3, -3, 4, 4)
     result, m = _measure(_geometry(fill, owner_conn=pad_connection(pad=SOLID)))
-    assert m.disposition == "violation"
+    assert m.disposition == "own_pour_solid"
     assert m.pour_spokes is None
+    assert _severity(result) == "info"
+    assert result.passed
+
+
+def test_solid_and_spoke_connected_pads_share_a_severity_class():
+    solid, _ = _measure(_geometry(box(-3, -3, 4, 4), owner_conn=pad_connection(pad=SOLID)))
+    spoked, _ = _measure(_geometry(thermal_fill()))
+    assert _severity(solid) == _severity(spoked) == "info"
+
+
+@pytest.mark.parametrize(
+    "owner_conn,zone_conn",
+    [
+        (pad_connection(pad=SOLID), zone_connection()),  # pad override in a thermal zone
+        (pad_connection(footprint=SOLID), zone_connection()),  # footprint override
+        (pad_connection(), zone_connection(code=SOLID)),  # zone default
+        (pad_connection(pad=INHERITED, footprint=INHERITED), zone_connection(code=SOLID)),
+        # Thermal for through-hole pads resolves solid on an SMD pad ...
+        (pad_connection(pth=False), zone_connection(code=THT_THERMAL)),
+    ],
+)
+def test_effectively_solid_connection_is_info(owner_conn, zone_conn):
+    result, m = _measure(_geometry(box(-3, -3, 4, 4), owner_conn=owner_conn, zone_conn=zone_conn))
+    assert m.disposition == "own_pour_solid"
+    assert _severity(result) == "info"
+
+
+def test_thermal_for_through_hole_on_a_plated_pad_is_not_solid():
+    """On a plated through-hole pad that setting is thermal relief, so solid fill errors."""
+    result, m = _measure(
+        _geometry(
+            box(-3, -3, 4, 4),
+            owner_conn=pad_connection(pth=True),
+            zone_conn=zone_connection(code=THT_THERMAL),
+        )
+    )
+    assert m.disposition == "violation"
     assert _severity(result) == "error"
-    assert not result.passed
+
+
+def test_solid_declared_but_fill_shows_spokes_stays_an_error():
+    result, m = _measure(
+        _geometry(thermal_fill(), owner_conn=pad_connection(pad=SOLID), zone_conn=zone_connection())
+    )
+    assert m.disposition == "violation"
+    assert _severity(result) == "error"
+
+
+@pytest.mark.parametrize("top", [0.75, 0.88])
+def test_solid_fill_clipped_by_other_net_clearance_is_still_info(top):
+    """Issue #9436 review: a solid join clipped over 12-25% of the pad is info.
+
+    The rim coverage of such a fill is 62-69%, inside the band a perimeter
+    fraction cannot separate from thermal spokes; the spoke-width bound can.
+    """
+    fill = box(-3, -3, 4, top)
+    result, m = _measure(_geometry(fill, owner_conn=pad_connection(pad=SOLID)))
+    assert m.disposition == "own_pour_solid"
+    assert _severity(result) == "info"
+
+
+def test_solid_declared_but_round_pad_fill_shows_spokes_stays_an_error():
+    """Issue #9436 review: a spoke crossing a curved edge contacts more than its width.
+
+    On a circle r=0.5 mm, four 0.3 mm spokes contact 1.218 mm, above a bound
+    that omits _ENTRY_CROSSING_FACTOR (1.2 mm); the factor keeps it an error.
+    """
+    from shapely.geometry import Point
+
+    round_pad = Point(0.5, 0.5).buffer(0.5, quad_segs=64)
+    fill = thermal_fill(pad=round_pad)
+    result, m = _measure(
+        _geometry(
+            fill,
+            pad=round_pad,
+            owner_kind="pad:circle",
+            owner_conn=pad_connection(pad=SOLID),
+            zone_conn=zone_connection(),
+        )
+    )
+    assert m.disposition == "violation"
+    assert _severity(result) == "error"
+
+
+def test_solid_fill_ignores_declared_spoke_width():
+    """Issue #9436: a solid join is judged by its fill, not a spoke width it never uses."""
+    result, m = _measure(
+        _geometry(
+            box(-3, -3, 4, 4),
+            owner_conn=pad_connection(pad=SOLID),
+            zone_conn=zone_connection(spoke=0.0),
+        )
+    )
+    assert m.disposition == "own_pour_solid"
+    assert _severity(result) == "info"
+
+
+@pytest.mark.parametrize("spoke,spokes", [(0.5, 4), (0.4, 2), (0.9, 4)])
+@pytest.mark.parametrize("declared_spoke", [0.1, 0.3])
+def test_solid_declared_relief_gap_with_wide_spokes_stays_an_error(spoke, spokes, declared_spoke):
+    """Issue #9436 review: spokes wider than declared are still a relief gap."""
+    result, m = _measure(
+        _geometry(
+            thermal_fill(gap=0.2, spoke=spoke, spokes=spokes),
+            owner_conn=pad_connection(pad=SOLID),
+            zone_conn=zone_connection(spoke=declared_spoke),
+        )
+    )
+    assert m.disposition == "violation"
+    assert _severity(result) == "error"
+
+
+def test_solid_join_plus_same_zone_island_beside_opening_stays_an_error():
+    """Issue #9436 review: a disconnected island of the joined zone is not the pad's pour."""
+    # Solid pour joined along the pad's bottom edge, an island 0.04 mm above it.
+    joined = box(-3, -3, 4, 0.0)
+    island = box(0.2, 1.04, 0.8, 1.3)
+    fill = unary_union([joined, island])
+    result, m = _measure(_geometry(fill, owner_conn=pad_connection(pad=SOLID)))
+    assert m.disposition == "violation"
+    assert _severity(result) == "error"
+
+
+def test_solid_fill_notched_through_two_pad_edges_is_still_info():
+    fill = box(-3, -3, 4, 4).difference(box(0.3, 0.3, 0.7, 1.5)).difference(box(-1, 0.3, 0.3, 0.7))
+    result, m = _measure(_geometry(fill, owner_conn=pad_connection(pad=SOLID)))
+    assert m.disposition == "own_pour_solid"
+    assert _severity(result) == "info"
+
+
+def test_solid_unconnected_same_net_island_stays_an_error():
+    island = box(-3, -3, 4, 4).difference(PAD.buffer(0.05, join_style="mitre"))
+    result, m = _measure(
+        _geometry(thermal_fill(spokes=0), owner_conn=pad_connection(pad=SOLID), island=island),
+        conductor=ISLAND,
+    )
+    assert m.disposition == "violation"
+    assert _severity(result, ISLAND) == "error"
+
+
+def test_solid_connection_with_positive_expansion_stays_an_error():
+    result, m = _measure(
+        _geometry(box(-3, -3, 4, 4), margin=0.05, owner_conn=pad_connection(pad=SOLID))
+    )
+    assert m.disposition == "violation"
+    assert _severity(result) == "error"
+
+
+def test_solid_connection_different_net_pour_is_unchanged():
+    result, m = _measure(
+        _geometry(box(-3, -3, 4, 4), net="VCC", owner_conn=pad_connection(pad=SOLID))
+    )
+    assert m.disposition == "violation"
+    assert _severity(result) == "error"
+
+
+def test_solid_connection_without_connection_data_fails_closed():
+    result, m = _measure(_geometry(box(-3, -3, 4, 4), owner_conn=None))
+    assert m.disposition == "violation"
+    assert _severity(result) == "error"
+
+
+def test_own_pour_solid_payload_round_trips():
+    result, _ = _measure(_geometry(box(-3, -3, 4, 4), owner_conn=pad_connection(pad=SOLID)))
+    loaded = MaskCopperAssessment.from_dict(result.to_dict())
+    assert loaded.measurements == result.measurements
+    assert any(m.disposition == "own_pour_solid" for m in loaded.measurements)
+    assert loaded.passed
 
 
 def test_solid_geometry_declared_thermal_stays_an_error():

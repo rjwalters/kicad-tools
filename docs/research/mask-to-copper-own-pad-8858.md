@@ -299,8 +299,23 @@ between 0.09 and 0.15 mm is untested, so it stays an **error** rather than
 dropping to a warning; that is stricter than a different-net pour at the same
 distance (a warning), and deliberately so until a fab result covers it.
 
-**Stays an error:** a solid connection (declared, or a thermal declaration
-whose fill is solid); a same-net pour not connected to the pad, or another
+**Solid connection (Issue #9436).** The consumer board that raised this had 13
+pads solid-connected to their own-net pour; JLCDFM (`--mfr jlcpcb`, 2026-11-18)
+reported 0 danger / 0 warning for them, so "solid is untested" no longer holds
+and that shape is `own_pour_solid` at info. It requires a plain pad shape with a
+margin of 0 or more, an *effective* solid zone connection (pad override, else
+footprint, else zone; "thermal for through-hole" on an SMD pad counts as solid),
+fill overlapping the pad beyond `u`, nothing exposed beyond the pad, no same-zone
+island within the band (every piece touches the pad), and no relief gap (a free
+pocket against the pad edge that zone fill closes off within twice the thermal
+gap, at least 0.5 mm; a cut running out to that edge, i.e. another net's clearance,
+does not count). The 13 consumer pads were not re-measured against this
+rule (the board is not in this repo). There is no band test: a solid pour body lies inside
+the band by definition. A declared-solid pad whose fill shows spokes keeps its
+verdict. The class was not re-measured on the fab here; the evidence is as
+stated on the issue.
+
+**Stays an error:** a thermal declaration whose fill is solid; a same-net pour not connected to the pad, or another
 same-net zone or island in the band; a pour body inside 0.15 mm; spokes wider
 than declared or more than four pieces; any positive expansion wider than `u`;
 different-net pour keeps its measured verdict.
@@ -315,7 +330,7 @@ or widens.
 **Native.** `test_native_own_pour_thermal_only_for_spokes` fills the pour with
 the pinned pcbnew and checks the Gerbonara-read plot: spoke-connected (gaps 0.2
 and 0.3 mm) is info with nothing beyond the pad and exactly four spoke pieces in
-the 0.15 mm band; solid, unconnected same-net (0.05 mm), 0.05 mm expansion, and
+the 0.15 mm band; solid (an error when written, `own_pour_solid` info since #9436), unconnected same-net (0.05 mm), 0.05 mm expansion, and
 a 0.1 mm relief gap are errors; a different-net pour at 0.12 mm is a warning.
 
 ### Effect, boards 00-07 (`--mfr jlcpcb`, pinned image, 2026-11-17)
@@ -334,13 +349,15 @@ a 0.1 mm relief gap are errors; a different-net pour at 0.12 mm is a warning.
 Warnings are unchanged on every board. Board 01's two remaining errors are the
 two via rings (family C), unchanged.
 
+*Counts in the table above predate #9436, which turns the solid pads below to info.*
+
 **Board 03's 51 own-pour findings:** 45 are spoke-connected (thermal declared,
 spokes confirmed in the fill, relief gap 0.2 mm, spoke 0.25 or 0.3 mm; fill spokes-only out to
 ≥ 0.19 mm from the opening) and are now info. 6 are **solid** (pad-level solid override: U1 pads
-5, 15, 23, 35, 43 and U2 pad 2) and stay errors. Board 04 has 11 spoke-connected
+5, 15, 23, 35, 43 and U2 pad 2) and stayed errors (info since #9436). Board 04 has 11 spoke-connected
 pads with a **0.1 mm** relief gap; their pour body sits inside the 0.15 mm band,
-so they stay errors (untested geometry), plus 5 solid pads. Board 05 has one
-solid pad that stays an error.
+so they stay errors (untested geometry), plus 5 solid pads (info since #9436). Board 05 has one
+solid pad (info since #9436).
 
 ### Parity in the other direction (different-net pour, board 01)
 
