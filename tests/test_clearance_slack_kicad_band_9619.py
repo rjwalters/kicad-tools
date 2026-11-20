@@ -33,6 +33,16 @@ refined at 1 nm, on three pair shapes --
   the parallel pair (500 nm accepted, 501 nm flagged), so the band is not a
   parallel-tracks-only artefact.
 
+The #9724 leg (2026-11-20, same image digest and kicad-cli) probed
+``copper_edge_clearance`` the same way -- one 0.2 mm track parallel to a
+straight rectangular-board edge under a 0.5 mm
+``min_copper_edge_clearance`` -- and found the *same* 500 nm cut-off:
+500 nm accepted, 501 nm flagged (0/400/500 clear, 501/510/600 flagged in
+one run).  ``edge.py``'s copper-to-edge comparisons (traces, SMD pads,
+zones) therefore ride ``drc_clear`` too; its hole-minimum branches (vias,
+through-hole pads) keep the plain 1e-4 epsilon -- the copper-edge probe
+cannot establish a tolerance for a separate hole minimum.
+
 The rule-level tests below run everywhere and pin the checker's verdicts on
 those exact boards.  The black-box tests additionally re-run
 ``kicad-cli pcb drc`` on the same boards -- the pinned 10.0.6 binary is
@@ -44,6 +54,7 @@ this test instead of silently diverging from kct.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import shutil
@@ -59,9 +70,11 @@ from kicad_tools.validate.rules.base import (
     KICAD_CLEARANCE_BAND_MM,
 )
 from kicad_tools.validate.rules.clearance import ClearanceRule
+from kicad_tools.validate.rules.edge import EdgeClearanceRule
 
 MIN_CLEARANCE = 0.127
 TRACK_WIDTH = 0.2
+MIN_EDGE_CLEARANCE = 0.5
 
 _HEADER = """(kicad_pcb (version 20241229) (generator "probe_9619")
 \t(general (thickness 1.6) (legacy_teardrops no))
@@ -175,6 +188,73 @@ CASES = [
     pytest.param(pad_track_board, 501, False, id="pad-track-501nm-beyond-band"),
     pytest.param(pad_track_board, 510, False, id="pad-track-510nm-beyond-band"),
 ]
+
+
+#: The copper-to-edge project: the #9724 probe board's `.kicad_pro`.  The
+#: netclass block is ``_PROJECT``'s; the edge minimum lives in
+#: ``board.design_settings.rules.min_copper_edge_clearance`` (the key
+#: ``kicad-cli pcb drc`` reads for its ``copper_edge_clearance`` check).
+_EDGE_PROJECT = {
+    **copy.deepcopy(_PROJECT),
+    "board": {
+        "design_settings": {
+            "rules": {
+                "min_clearance": MIN_CLEARANCE,
+                "min_track_width": TRACK_WIDTH,
+                "min_copper_edge_clearance": MIN_EDGE_CLEARANCE,
+            },
+        },
+    },
+}
+
+
+def edge_board(shortfall_nm: int) -> str:
+    """One horizontal 0.2 mm track above a straight rectangular-board edge.
+
+    The board is a 100 x 100 mm rectangle (``gr_rect`` on Edge.Cuts, four
+    straight edges -- no arc approximation can touch the measured cut-off);
+    the track runs parallel to the bottom edge with its copper envelope
+    ``0.5 mm - shortfall`` above it (integer-nm coordinates throughout).
+    """
+    y_nm = 10_000_000 + 100_000 + 500_000 - shortfall_nm
+    return (
+        '(kicad_pcb (version 20241229) (generator "probe_9724")\n'
+        "\t(general (thickness 1.6) (legacy_teardrops no))\n"
+        '\t(paper "A4")\n'
+        '\t(layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))\n'
+        '\t(net 0 "") (net 1 "N1")\n'
+        "\t(gr_rect (start 10 10) (end 110 110) (stroke (width 0.05) (type solid))\n"
+        '\t\t(layer "Edge.Cuts") (fill none))\n'
+        + f"\t(segment (start 50 {_fmt(y_nm)}) (end 70 {_fmt(y_nm)}) (width 0.2) "
+        + '(layer "F.Cu") (net 1))\n'
+        + ")\n"
+    )
+
+
+#: The #9724 probe points on the copper-to-edge leg.  ``expect`` is the
+#: *violation* expectation both engines must agree on: 0 nm is the control
+#: exactly at the minimum, 400 nm sits inside the band but beyond the old
+#: 1e-4 epsilon (the false positive the move to ``drc_clear`` removed), the
+#: 500/501 pair is the 1 nm refinement of the cut-off, and 600 nm is the
+#: clearly-violating control.
+EDGE_CASES = [
+    pytest.param(0, True, id="edge-0nm-at-minimum"),
+    pytest.param(400, True, id="edge-400nm-inside-band"),
+    pytest.param(500, True, id="edge-500nm-inside-band"),
+    pytest.param(501, False, id="edge-501nm-beyond-band"),
+    pytest.param(600, False, id="edge-600nm-beyond-band"),
+]
+
+
+class _EdgeRules:
+    """Minimal rule source: one copper-to-edge floor, nothing else."""
+
+    min_copper_to_edge_mm = MIN_EDGE_CLEARANCE
+    min_hole_to_edge_mm = 0.7  # distinct minimum, unused by the trace branch
+
+
+def _edge_rule_violation_count(board: str) -> int:
+    return EdgeClearanceRule().check(PCB(parse_string(board)), _EdgeRules()).error_count
 
 
 class _Rules:
@@ -299,4 +379,61 @@ def test_pinned_kicad_cli_agrees_with_the_checker(
         f"pinned kicad-cli reported {kicad_clearance} clearance violations and "
         f"kct reported {errors}; the probed expectation is {expected} "
         f"(case {build.__name__}({value}))"
+    )
+
+
+@pytest.mark.parametrize(("shortfall_nm", "expect_clear"), EDGE_CASES)
+def test_edge_rule_verdict_matches_the_pinned_probe(shortfall_nm: int, expect_clear: bool) -> None:
+    """``EdgeClearanceRule``'s trace verdict reproduces the pinned kicad-cli
+    verdict on every #9724 edge probe board.
+
+    Probe (same method as the module docstring's clearance leg, on the
+    copper-to-edge rule: straight rectangular edge, 0.5 mm
+    ``min_copper_edge_clearance``, 10 nm sweep refined at 1 nm): 500 nm
+    accepted, 501 nm flagged -- the same cut-off as the copper-clearance
+    band, which is why ``edge.py``'s copper-to-edge comparisons moved onto
+    ``drc_clear`` (#9724).  The 400 nm row is the false positive that move
+    removed: inside KiCad's band but beyond the old 1e-4 epsilon."""
+    errors = _edge_rule_violation_count(edge_board(shortfall_nm))
+    assert errors == (0 if expect_clear else 1), (
+        "the edge checker must agree with pinned kicad-cli 10.0.6 at the band "
+        f"edge (edge_board({shortfall_nm} nm shortfall): expected "
+        f"{'no finding' if expect_clear else 'a finding'}, got {errors})"
+    )
+
+
+@pytest.mark.pr_required
+@pytest.mark.parametrize(("shortfall_nm", "expect_clear"), EDGE_CASES)
+def test_pinned_kicad_cli_agrees_on_copper_edge_clearance(
+    shortfall_nm: int, expect_clear: bool, tmp_path: Path
+) -> None:
+    """Black-box: ``kicad-cli pcb drc`` on the #9724 edge board returns the
+    pinned ``copper_edge_clearance`` verdict *and* the same verdict
+    ``EdgeClearanceRule`` just returned.
+
+    Same tripwire contract as the clearance leg above: a future KiCad that
+    changes the copper-to-edge acceptance band flips these rows while the
+    rule rows do not, so the disagreement goes red instead of silent."""
+    _pinned_kicad_cli()  # hard-fails unless the pinned binary answers
+    from kicad_tools.cli.runner import run_drc
+
+    board = edge_board(shortfall_nm)
+    errors = _edge_rule_violation_count(board)
+    stem = tmp_path / f"probe_edge_{shortfall_nm}"
+    pcb = stem.with_suffix(".kicad_pcb")
+    pcb.write_text(board)
+    stem.with_suffix(".kicad_pro").write_text(json.dumps(_EDGE_PROJECT))
+    report = stem.with_suffix(".rpt.json")
+    result = run_drc(pcb, output_path=report, format="json", schematic_parity=False)
+    assert result.success, f"kicad-cli run failed: {result.stderr}"
+    kicad_edge = sum(
+        1
+        for violation in json.loads(report.read_text()).get("violations", [])
+        if violation.get("type") == "copper_edge_clearance"
+    )
+    expected = 0 if expect_clear else 1
+    assert kicad_edge == expected == errors, (
+        f"pinned kicad-cli reported {kicad_edge} copper_edge_clearance violations "
+        f"and kct reported {errors}; the probed expectation is {expected} "
+        f"(edge_board({shortfall_nm} nm shortfall))"
     )
