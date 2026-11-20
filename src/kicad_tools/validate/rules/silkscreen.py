@@ -101,6 +101,13 @@ from kicad_tools.silkscreen._silk_defaults import (  # noqa: E402
 # Advance measures pen travel. The first and last glyphs' side bearings
 # locate the horizontal stroke endpoints inside that travel. The tables
 # describe ordinary single-line stroke text; other fonts/styles are unmeasured.
+#
+# Issue #9754 completed the printable-ASCII set: the remaining twenty
+# punctuation glyphs (``# @ & $ * = < > [ ] { } " , ; | ^ ` ~ \``) measured
+# the same way all advance at most 27 quanta (``@`` widest), so
+# :data:`_TEXT_ADVANCE_DEFAULT_QUANTA` is a measured bound over *every*
+# printable-ASCII glyph, not just the widest measured one.  Only non-ASCII
+# code points (and the unmeasured fonts/styles above) fall back to it.
 _TEXT_CHAR_ADVANCE_QUANTA: dict[str, int] = {
     # uppercase (advance quanta; 'M'/'W' widest at 24)
     "A": 18,
@@ -181,29 +188,61 @@ _TEXT_CHAR_ADVANCE_QUANTA: dict[str, int] = {
     "?": 18,
     "_": 16,
     " ": 16,
+    # remaining printable-ASCII punctuation (measured, Issue #9754;
+    # '@' widest at 27)
+    "#": 21,
+    "@": 27,
+    "&": 26,
+    "$": 20,
+    "*": 16,
+    "=": 26,
+    "<": 26,
+    ">": 26,
+    "[": 14,
+    "]": 14,
+    "{": 14,
+    "}": 14,
+    '"': 16,
+    ",": 10,
+    ";": 10,
+    "|": 20,
+    "^": 12,
+    "~": 15,
+    "`": 8,
+    "\\": 14,
 }
-#: Advance for glyphs not in the measured set: the widest measured advance
-#: (lowercase ``m``).
+#: Advance for glyphs not in the measured set.  Since #9754 measured the
+#: remaining printable-ASCII punctuation, this is a measured bound over
+#: every printable-ASCII glyph (the widest advance is lowercase ``m`` at 28);
+#: only non-ASCII code points and unmeasured fonts/styles fall back to it.
 _TEXT_ADVANCE_DEFAULT_QUANTA = 28
 
 # Side bearings (left, right) in size/21 units, from centred single-glyph
 # Gerber extrema after subtracting the round aperture. Unmeasured glyphs
 # keep their entire advance. Allow 0.005 mm at each edge for rounding.
+# The #9754 punctuation glyphs join the matching groups; ``\`` is the one
+# measured glyph whose ink overhangs its advance cell (bearings -2/-2), and
+# ``|`` is the only single-stroke glyph (bearings consume its whole advance).
 _TEXT_BEARINGS = {
     glyph: bearings
     for bearings, glyphs in (
         ((4, 5), "adgq"),
-        ((5, 4), "bkpBDEKPR"),
-        ((4, 4), "ceiosCGOS015689!%'.:?"),
-        ((2, 2), "ftATVY/"),
-        ((5, 5), "hmnuHIMNU+-"),
+        ((5, 4), "bkpBDEKPR&"),
+        ((4, 4), "ceiosCGOS015689!%'.:?@$\",;"),
+        ((2, 2), "ftATVY/#^"),
+        ((5, 5), "hmnuHIMNU+-=<>"),
         ((1, 4), "j"),
         ((5, 3), "lF("),
         ((5, 2), "rL"),
-        ((3, 3), "vwxyzWXZ7"),
+        ((3, 3), "vwxyzWXZ7*"),
         ((3, 5), "J)"),
-        ((4, 3), "Q4"),
-        ((3, 4), "23"),
+        ((4, 3), "Q4{"),
+        ((3, 4), "23}"),
+        ((6, 3), "["),
+        ((3, 6), "]"),
+        ((2, 3), "~`"),
+        ((10, 10), "|"),
+        ((-2, -2), "\\"),
     )
     for glyph in glyphs
 }
