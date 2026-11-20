@@ -327,17 +327,18 @@ def _pair_board(tmp_path: Path, *, route_dat_n: bool = True) -> PCB:
 def test_routed_pair_group_reports_both_qualifying_legs(tmp_path: Path, caplog):
     """A fully routed group visits both net IDs of each differential pair.
 
-    Lane entries stay pair-averaged: CLK = (40 + 20) / 2 = 30 mm,
-    DAT = (20 + 26) / 2 = 23 mm, so the skew is 7.0 mm with the default
-    tolerance, while the off-path reporting names each qualifying leg
-    (CLK_P's loop, DAT_N's stub) individually.
+    Lane entries stay pair-averaged, after the Issue #9304 defect-copper
+    exclusion: CLK = (40 - 20 + 20) / 2 = 20 mm, DAT = (20 + 26 - 6) / 2
+    = 20 mm, so the skew is 0.0 mm with the default tolerance, while the
+    off-path reporting names each qualifying leg (CLK_P's loop, DAT_N's
+    stub) individually.
     """
     pcb = _pair_board(tmp_path)
 
     with caplog.at_level(logging.WARNING, logger="kicad_tools.validate.match_group_skew"):
         skew_data, _g, thresholds = derive_group_skew_data(pcb, PAIR_NET_CLASS_MAP)
 
-    assert skew_data["DDR_DATA"] == pytest.approx(7.0, abs=0.05)
+    assert skew_data["DDR_DATA"] == pytest.approx(0.0, abs=0.05)
     assert thresholds["DDR_DATA"] == pytest.approx(0.5)
     messages = [r.getMessage() for r in caplog.records if "off-path" in r.getMessage()]
     assert len(messages) == 2
