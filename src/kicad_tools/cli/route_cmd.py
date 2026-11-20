@@ -71,6 +71,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from kicad_tools.core.kicad_lock import check_kicad_lock
+from kicad_tools.router.neck_report import (
+    class_width_lookup,
+    collect_necked_copper,
+    format_neck_report,
+)
 from kicad_tools.sexp.scan import has_unquoted
 
 from .route_deadline import record_stage, restore_stage
@@ -4334,6 +4339,22 @@ def _finalize_routes(
             f"-- have segments, not all pads connected"
         )
         flush_print(f"  Unrouted:        {unrouted_count}/{nets_to_route} -- no segments at all")
+        neck_report = format_neck_report(
+            collect_necked_copper(
+                router.routes,
+                class_width_lookup(
+                    getattr(router, "net_class_map", None),
+                    router.rules.trace_width,
+                    getattr(router, "authored_net_widths", None),
+                ),
+            ),
+            # A contiguous neck longer than the taper distance (plus one
+            # grid cell of placement slack, the same bound the row-3
+            # geometry test uses) is beyond the #1018 taper: call it long.
+            long_threshold_mm=(router.rules.neck_down_distance + router.grid.resolution),
+        )
+        if neck_report:
+            flush_print(neck_report)
 
     return route_sexp, stats, cleanup_stats
 

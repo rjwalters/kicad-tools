@@ -1525,9 +1525,13 @@ def silk_hits_hole(silk: _Geometry, hole: _Geometry, clearance_mm: float) -> boo
 
 def check_silk_hole_overlap(
     pcb: PCB,
-    design_rules: DesignRules,
+    design_rules: DesignRules | None = None,
 ) -> DRCResults:
     """Silkscreen over a drilled hole (via, PTH or NPTH).
+
+    ``design_rules`` is unused (the threshold is the shared
+    :data:`SILK_HOLE_CLEARANCE_MM` constant) and may be omitted by callers
+    that have no manufacturer profile (Issue #9707).
 
     Unlike :func:`check_silk_over_copper` this tests the **drill** circle, not
     the mask aperture, so silk over a *tented* via hole is reported (Issue
