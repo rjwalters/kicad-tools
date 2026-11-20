@@ -4080,15 +4080,15 @@ class LatticePathfinder:
             if name not in layer_ids:
                 layer_ids[name] = int(name[2:].split(".")[0]) if name.startswith("In") else 1
         layers = " ".join(f'({i} "{n}" signal)' for n, i in layer_ids.items())
+        # Serialise through the #3907 / #6485 choke points (``Segment.to_sexp``
+        # / ``Via.to_sexp``) rather than hand-building s-expression text; the
+        # synthetic board has one net, so every item is pinned to ``net 1``.
         items = [
-            f"(segment (start {s.x1} {s.y1}) (end {s.x2} {s.y2}) (width {s.width}) "
-            f'(layer "{s.layer.kicad_name}") (net 1) (uuid "s{i}"))'
+            replace(s, net=1, net_name="").to_sexp(uuid=f"s{i}")
             for i, s in enumerate(route.segments)
         ]
         items.extend(
-            f"(via (at {v.x} {v.y}) (size {v.diameter}) (drill {v.drill}) "
-            f'(layers "F.Cu" "B.Cu") (net 1) (uuid "v{i}"))'
-            for i, v in enumerate(route.vias)
+            replace(v, net=1, net_name="").to_sexp(uuid=f"v{i}") for i, v in enumerate(route.vias)
         )
         pcb = PCB(
             parse_string(
