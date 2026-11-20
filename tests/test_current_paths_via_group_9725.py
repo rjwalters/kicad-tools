@@ -122,6 +122,27 @@ def test_two_barrels_too_few_for_the_current_still_fail_the_check():
     assert found[0].actual_value == pytest.approx(2 * one)
 
 
+@pytest.mark.parametrize("exit_y", [42.4, 44.8])
+def test_inner_layer_exit_cannot_claim_outer_bar_capacity(exit_y):
+    pcb = tripled()
+    # Keep the bottom lane as an exit from the proved pair, but route the
+    # declared path to a separate sink through just one inner-layer ring.
+    _add_pad_footprint(pcb, ref="J3", x=80, y=exit_y, net="P")
+    pcb.add_trace((30, exit_y), (80, exit_y), width=2, layer="In1.Cu", net="P")
+    spec = _spec(current_a=2.5 * via_barrel_current_capacity(DRILL), sink="J3")
+    resolution = resolve_current_path(pcb, spec)
+    assert resolution.status == "ambiguous"
+    assert not resolution.layer_changes
+    findings = PathAmpacityRule([spec]).check(pcb, _design_rules_2oz())
+    assert any(v.severity == "error" and "is ambiguous" in v.message for v in findings.violations)
+
+
+def test_offset_inner_layer_track_touching_a_ring_rejects_group():
+    pcb = tripled()
+    pcb.add_trace((31, 42.4), (80, 42.4), width=0.4, layer="In1.Cu", net="P")
+    assert resolve_current_path(pcb, _spec()).status == "ambiguous"
+
+
 def test_two_vias_only_resolve_with_two_barrels():
     """(d) two vias."""
     result = resolve_current_path(tripled(count=2), _spec())

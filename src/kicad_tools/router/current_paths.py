@@ -2272,6 +2272,8 @@ def _mid_path_via_groups(
     * the row must be a layer change: copper leaves it on ``La`` AND on
       ``Lb``, and not on both layers at two or more barrels each (that is a
       run doubled through the row -- stitching, judged as parallel copper);
+    * a barrel contacting copper on a third layer permits a transfer the two
+      bars do not prove, so the whole row stays uncontracted;
     * a via that qualifies for two layer pairs is left to neither.
 
     Contracting a group treats its barrels as sharing the transfer, so the
@@ -2367,9 +2369,9 @@ def _mid_path_via_groups(
         exits: dict[str, set[tuple[float, float]]] = {la: set(), lb: set()}
         for node in nodes:
             for other, edge in graph.adjacency[node]:
-                if other not in nodes and node[2] in exits:
-                    exits[node[2]].add(node[:2])
-        if not exits[la] or not exits[lb]:
+                if other not in nodes:
+                    exits.setdefault(node[2], set()).add(node[:2])
+        if len(exits) != 2 or not exits[la] or not exits[lb]:
             continue
         if len(exits[la]) >= 2 and len(exits[lb]) >= 2:
             continue
@@ -2380,7 +2382,15 @@ def _mid_path_via_groups(
             for edge in links[layer][pair]
             if edge.segment is not None
         ]
-        if not _via_group_contacts_modeled(pcb, net_name, group, group_pairs, bars, (la, lb)):
+        other_rings = [
+            (pos, layer, vias[pos].size / 2.0)
+            for pos in group
+            for layer in spans[pos]
+            if layer not in (la, lb)
+        ]
+        if not _via_group_contacts_modeled(
+            pcb, net_name, group, group_pairs, bars, (la, lb), other_rings
+        ):
             continue
         result.append(_ViaArray(nodes, edges, list({id(s): s for s in bars}.values())))
     return result
@@ -2416,8 +2426,9 @@ def _via_group_contacts_modeled(
     pairs: list[frozenset[tuple[float, float]]],
     bars: list[Segment],
     layers: tuple[str, str],
+    other_rings: list[tuple[tuple[float, float], str, float]],
 ) -> bool:
-    """No same-net via or pad meets a group's bar spans unmodeled (#9725).
+    """Reject unmodeled bar contacts and any contact on another ring (#9725).
 
     The bar span between two linked barrels is the straight stroke between
     their centres at the narrowest bar width on that layer. A non-member
@@ -2435,6 +2446,17 @@ def _via_group_contacts_modeled(
         for pair in pairs:
             a, b = tuple(pair)
             strokes.append((layer, LineString((a, b)).buffer(width / 2.0)))
+    # An offset track can touch a ring without meeting its centre. Pads
+    # and non-member vias must clear these same rings as well as the bars.
+    for pos, layer, radius in other_rings:
+        if any(
+            seg.layer == layer
+            and _matches_net(seg, net, net_name)
+            and point_to_segment_distance(*pos, *seg.start, *seg.end) <= radius + seg.width / 2.0
+            for seg in pcb.segments
+        ):
+            return False
+        strokes.append((layer, Point(pos).buffer(radius)))
     for via in pcb.vias:
         if not _matches_net(via, net, net_name) or _node_key(via.position) in group:
             continue
