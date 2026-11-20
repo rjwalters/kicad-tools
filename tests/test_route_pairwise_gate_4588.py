@@ -292,6 +292,11 @@ def _route_args(pcb: Path, out: Path, engine: str, vmap: Path | None) -> list[st
         # The gate is deliberately NOT a DRC sub-step: --skip-drc must not
         # disable it (and keeps these tests free of a kicad-cli dependency).
         "--skip-drc",
+        # These assertions exercise the selected engine's pairwise clearance,
+        # not the follow-on connectivity probe; skipping the chained
+        # ``--complete`` pass (covered by test_cli_route_complete_chain_7831)
+        # keeps the grid routes inside CI's 60 s per-test cap (Issue #9771).
+        "--no-chain-complete",
     ]
     if vmap is not None:
         args += [

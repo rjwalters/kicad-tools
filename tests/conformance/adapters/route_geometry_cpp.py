@@ -97,6 +97,7 @@ class RouteGeometryCppAdapter:
     name = "route_geometry_cpp"
     group = 5
     pair_kinds = ROUTED_COPPER_KINDS
+    native_backend = "router_cpp"  # Issue #9705: rows fail, never skip
 
     def available(self) -> bool:
         return router_cpp_module() is not None

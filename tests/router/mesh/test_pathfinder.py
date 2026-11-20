@@ -27,7 +27,7 @@ from kicad_tools.router.primitives import (
     is_segment_45_enforcement_enabled,
 )
 
-pytest.importorskip("kicad_tools.router.router_cpp")
+pytestmark = pytest.mark.requires_router_cpp
 
 _REPO = Path(__file__).resolve().parents[3]
 _CHARLIEPLEX = _REPO / "boards/02-charlieplex-led/output/charlieplex_3x3.kicad_pcb"

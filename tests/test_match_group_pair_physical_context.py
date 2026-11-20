@@ -16,6 +16,7 @@ from kicad_tools.router.match_group_length import MatchGroup, MatchGroupSource, 
 from kicad_tools.router.match_group_tuning import _post_insertion_clearance_detail_pair_group
 from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
+from tests.conftest import require_router_cpp
 
 
 def route(net, start, end, y, *, escape=False):
@@ -35,8 +36,8 @@ def setup_pair(*, reference_length=10, via_counts=(0, 0, 1, 1), force_python=Tru
     ar = Autorouter(
         width=45, height=45, force_python=force_python, rules=DesignRules(grid_resolution=0.1)
     )
-    if not force_python and ar.grid._cpp_grid is None:
-        pytest.skip("C++ backend unavailable")
+    if not force_python:
+        require_router_cpp()
     ar.net_names = {n: f"N{n}" for n in range(1, 7)}
     for net, y in [(1, 10), (2, 11), (3, 25), (4, 26)]:
         escape = route(net, 5, 6, y, escape=True)

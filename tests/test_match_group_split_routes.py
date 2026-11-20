@@ -16,6 +16,7 @@ from kicad_tools.router.match_group_length import MatchGroup, MatchGroupSource
 from kicad_tools.router.optimizer import make_collision_checker
 from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
+from tests.conftest import require_router_cpp
 
 
 def fragment(net, x1, x2, y, *, escape=False):
@@ -34,8 +35,8 @@ def setup_routes(*, force_python=True, escape=True, reference_length=12):
         force_python=force_python,
         rules=DesignRules(grid_resolution=0.1),
     )
-    if not force_python and ar.grid._cpp_grid is None:
-        pytest.skip("C++ backend unavailable")
+    if not force_python:
+        require_router_cpp()
     ar.net_names = {1: "D1", 2: "D2"}
     ar.routes = [
         fragment(1, 5, 6, 10, escape=escape),

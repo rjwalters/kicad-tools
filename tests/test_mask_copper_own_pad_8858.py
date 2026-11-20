@@ -412,7 +412,8 @@ def test_via_just_outside_its_pad_is_an_error_too():
 
 
 @pytest.mark.parametrize(
-    "owner_kind", ["pad:custom", "pad:rect:padstack", "pad:roundrect:chamfer", "pad:trapezoid"]
+    "owner_kind",
+    ["pad:custom:padstack", "pad:rect:padstack", "pad:roundrect:chamfer", "pad:trapezoid"],
 )
 def test_unverified_pad_shapes_fail_closed(owner_kind):
     result, m = _only(_segment((0.5, 0.5), (2.0, 0.5), owner_kind=owner_kind))
@@ -710,7 +711,9 @@ def test_failed_condition_names_the_gate_for_a_pass_through_error():
 
 
 def test_failed_condition_1_owner_shape_or_solder_mask_defined():
-    result, m = _only(_segment((0.5, 0.5), (2.0, 0.5), owner_kind="pad:custom"))
+    # A bare pad:custom now qualifies through its real outline (issue #9750,
+    # pinned in test_mask_copper_own_pad_9750.py); the suffixed kinds stay out.
+    result, m = _only(_segment((0.5, 0.5), (2.0, 0.5), owner_kind="pad:custom:padstack"))
     assert m.disposition == "violation"
     assert m.within_own_pad_failed_condition == 1
     result, m = _only(_segment((0.5, 0.5), (2.0, 0.5), margin=-0.05))

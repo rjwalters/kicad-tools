@@ -41,6 +41,7 @@ from kicad_tools.router.rules import (
     NetClassRouting,
     ZoneRules,
 )
+from tests.conftest import require_router_cpp
 
 
 class TestRoutePcb:
@@ -4335,7 +4336,8 @@ class TestLoadExistingRoutes:
         )
         cpp_grid = router.grid._cpp_grid
         if cpp_grid is None:
-            pytest.skip("C++ backend not available")
+            require_router_cpp()
+        assert cpp_grid is not None, "C++ grid expected once the extension is built"
         layer_idx = router.grid.layer_to_index(Layer.F_CU.value)
         gx, gy = router.grid.world_to_grid(116.0, 113.095)
         assert router.grid.grid[layer_idx][gy][gx].blocked

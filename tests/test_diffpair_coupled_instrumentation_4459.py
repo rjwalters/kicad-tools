@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import pytest
 
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.diffpair_routing import (
     COUPLED_OUTCOME_GUIDE_MISSING,
     COUPLED_OUTCOME_JOINT_PLATEAU,
@@ -267,10 +266,7 @@ def _make_pf(grid: RoutingGrid, use_cpp: bool) -> CoupledPathfinder:
     return pf
 
 
-@pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="rejection-histogram wiring requires the router_cpp backend (kct build-native)",
-)
+@pytest.mark.requires_router_cpp
 def test_cpp_path_populates_rejection_histogram_on_budget_exit():
     """On a budget-exited C++ joint search ``last_rejections`` is non-empty.
 
@@ -296,10 +292,7 @@ def test_cpp_path_populates_rejection_histogram_on_budget_exit():
     assert dominant_rejection(pf.last_rejections) in _KNOWN_REJECTION_KEYS
 
 
-@pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="corridor rejection test requires the router_cpp backend (kct build-native)",
-)
+@pytest.mark.requires_router_cpp
 def test_cpp_path_reports_corridor_rejections_inside_tight_corridor():
     """A corridor-bounded C++ search records ``corridor`` frontier pruning."""
     grid = _make_grid()
@@ -329,10 +322,7 @@ def test_cpp_path_reports_corridor_rejections_inside_tight_corridor():
     )
 
 
-@pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="backend-marker test requires the router_cpp backend (kct build-native)",
-)
+@pytest.mark.requires_router_cpp
 def test_last_coupled_backend_marker_tracks_backend():
     """``last_coupled_backend`` distinguishes the C++ vs pure-Python search."""
     pads = _simple_pair_pads()

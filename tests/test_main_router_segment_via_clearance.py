@@ -39,6 +39,7 @@ from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.primitives import Route, Segment, Via
 from kicad_tools.router.rules import DEFAULT_NET_CLASS_MAP, DesignRules
+from tests.conftest import require_router_cpp
 
 
 def _make_rules() -> DesignRules:
@@ -434,13 +435,9 @@ class TestCppBackendSegmentForeignContext:
         """
         from kicad_tools.router.cpp_backend import (
             CppPathfinder,
-            is_cpp_available,
         )
 
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available in this environment")
+        require_router_cpp()
 
         # Construct via the lightweight ``__new__`` path -- we only
         # exercise the setter, not the full constructor (which requires

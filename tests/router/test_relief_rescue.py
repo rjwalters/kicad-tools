@@ -47,6 +47,7 @@ from kicad_tools.router.core import Autorouter
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.primitives import Route, Segment
+from tests.conftest import require_router_cpp
 
 
 def _make_simple_router(num_nets: int = 3) -> Autorouter:
@@ -438,13 +439,17 @@ class TestCppReliefBindings:
     """C++ backend exposes the relief / usage-parity surface."""
 
     def test_bindings_present(self):
-        router_cpp = pytest.importorskip("kicad_tools.router.router_cpp")
+        require_router_cpp()
+        from kicad_tools.router import router_cpp
+
         assert hasattr(router_cpp.Grid3D, "decrement_usage")
         assert hasattr(router_cpp.Grid3D, "reset_usage")
         assert hasattr(router_cpp.Pathfinder, "set_relief_mode")
 
     def test_relief_mode_roundtrip(self):
-        router_cpp = pytest.importorskip("kicad_tools.router.router_cpp")
+        require_router_cpp()
+        from kicad_tools.router import router_cpp
+
         grid = router_cpp.Grid3D(100, 100, 2, 0.25)
         rules = router_cpp.DesignRules()
         pf = router_cpp.Pathfinder(grid, rules, True)
@@ -455,7 +460,9 @@ class TestCppReliefBindings:
         assert pf.relief_mode is False
 
     def test_decrement_usage_clamps_at_zero(self):
-        router_cpp = pytest.importorskip("kicad_tools.router.router_cpp")
+        require_router_cpp()
+        from kicad_tools.router import router_cpp
+
         grid = router_cpp.Grid3D(10, 10, 2, 0.25)
         grid.decrement_usage(5, 5, 0)  # already 0 -> stays 0 (no underflow)
         grid.increment_usage(5, 5, 0)
@@ -1457,8 +1464,8 @@ def _require_backend(router: Autorouter, force_python: bool) -> None:
     from kicad_tools.router.cpp_backend import CppPathfinder
 
     is_cpp = isinstance(router.router, CppPathfinder)
-    if not force_python and not is_cpp:
-        pytest.skip("C++ router extension not built")
+    if not force_python:
+        require_router_cpp()
     assert is_cpp is not force_python
 
 

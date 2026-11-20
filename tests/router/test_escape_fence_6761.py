@@ -17,7 +17,7 @@ import math
 
 import pytest
 
-from kicad_tools.router.cpp_backend import CppPathfinder, is_cpp_available
+from kicad_tools.router.cpp_backend import CppPathfinder
 from kicad_tools.router.pad_lanes import (
     ESCAPE_FENCE_DISABLE_ENV,
     LANE_LENGTH_MM,
@@ -41,7 +41,7 @@ from .test_pad_lane_budget_6382 import (
     _Grid,
 )
 
-requires_cpp = pytest.mark.skipif(not is_cpp_available(), reason="C++ router backend not available")
+requires_cpp = pytest.mark.requires_router_cpp
 
 RES = 0.05
 TRACE_BAND = 0.2 + 0.15 + 0.1  # 0.4 mm trace + clearance + min foreign half width

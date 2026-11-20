@@ -22,7 +22,6 @@ import numpy as np
 import pytest
 
 from kicad_tools.router import io as io_module
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.edge_keepout import (
     compute_edge_keepout_floor,
     edge_copper_half_extent,
@@ -39,7 +38,7 @@ BACKENDS = [
     pytest.param(
         False,
         id="cpp",
-        marks=pytest.mark.skipif(not is_cpp_available(), reason="C++ backend not built"),
+        marks=pytest.mark.requires_router_cpp,
     ),
 ]
 

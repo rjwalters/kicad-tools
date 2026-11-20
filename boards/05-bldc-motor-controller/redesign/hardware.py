@@ -474,6 +474,7 @@ def build_schematic():
 # relocate a finding onto a neighbouring hole.
 REFERENCE_OFFSETS = {
     "R4": (0, 1.65),
+    "R8": (-0.45, -1.65),  # clear the routed via at (148.41, 107.90)
     "R11": (0.6, 1.8),
     "RV1": (0, 6.0),
     "C2": (0.6, -1.68),

@@ -24,12 +24,7 @@ import sys
 
 import pytest
 
-from kicad_tools.router.cpp_backend import is_cpp_available
-
-pytestmark = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ router backend not built (run `kct build-native`)",
-)
+pytestmark = pytest.mark.requires_router_cpp
 
 
 def test_import_router_cpp_reports_no_nanobind_leak() -> None:

@@ -18,8 +18,11 @@ from kicad_tools.placement.hv_domains import (
     derive_ref_domains_from_declaration,
     derive_ref_domains_from_voltage_map,
     detect_derived_tap_exempt_pairs,
+    domain_intervals_for,
     load_hv_domains,
+    load_voltage_intervals,
     load_voltage_map,
+    selection_magnitude,
 )
 
 
@@ -305,3 +308,98 @@ class TestDetectDerivedTapExemptPairs:
         a = detect_derived_tap_exempt_pairs(nets, ref_domains, vm)
         b = detect_derived_tap_exempt_pairs(nets, ref_domains, vm)
         assert a == b
+
+
+class TestSignedPairStress:
+    """Issue #9710: magnitude selects the domain; signed intervals set the spacing."""
+
+    def test_load_voltage_intervals_keeps_signs_and_ranges(self, tmp_path) -> None:
+        p = tmp_path / "v.json"
+        p.write_text(
+            json.dumps(
+                {
+                    "_comment": "doc",
+                    "/POS": 150,
+                    "/NEG": -150,
+                    "/SW": {"min": -150, "max": 150},
+                }
+            )
+        )
+        assert load_voltage_intervals(p) == {
+            "/POS": (150.0, 150.0),
+            "/NEG": (-150.0, -150.0),
+            "/SW": (-150.0, 150.0),
+        }
+        # The magnitude view is unchanged for existing callers.
+        assert load_voltage_map(p) == {"/POS": 150.0, "/NEG": 150.0, "/SW": 150.0}
+
+    def test_load_voltage_intervals_rejects_non_dict(self, tmp_path) -> None:
+        p = tmp_path / "v.json"
+        p.write_text(json.dumps([1, 2]))
+        with pytest.raises(ValueError, match="JSON object"):
+            load_voltage_intervals(p)
+
+    def test_selection_magnitude(self) -> None:
+        assert selection_magnitude(-150.0) == 150.0
+        assert selection_magnitude((-200.0, 150.0)) == 200.0
+
+    def test_interval_map_selects_by_magnitude_first_seen(self) -> None:
+        nets = [
+            Net(name="/POS", pins=[("U1", "1")]),
+            Net(name="/SW", pins=[("U1", "2"), ("U2", "1")]),
+            Net(name="/BIG", pins=[("U2", "2")]),
+        ]
+        intervals = {"/POS": (150.0, 150.0), "/SW": (-150.0, 150.0), "/BIG": (-200.0, 10.0)}
+        ref_domains, domain_voltages = derive_ref_domains_from_voltage_map(nets, intervals)
+        # U1 ties at 150 -> first-seen /POS; U2 picks /BIG (|-200| > 150).
+        assert ref_domains == {"U1": "/POS", "U2": "/BIG"}
+        assert domain_voltages == {"/POS": 150.0, "/BIG": 200.0}
+        assert domain_intervals_for(domain_voltages, intervals) == {
+            "/POS": (150.0, 150.0),
+            "/BIG": (-200.0, 10.0),
+        }
+
+    def test_bipolar_map_pair_is_300v(self) -> None:
+        nets = [Net(name="/POS", pins=[("R1", "1")]), Net(name="/NEG", pins=[("C1", "1")])]
+        intervals = {"/POS": (150.0, 150.0), "/NEG": (-150.0, -150.0)}
+        _, domain_voltages = derive_ref_domains_from_voltage_map(nets, intervals)
+        required = build_required_by_domain_pair(
+            domain_voltages, domain_intervals=domain_intervals_for(domain_voltages, intervals)
+        )
+        assert required == {("/NEG", "/POS"): pytest.approx(3.2)}
+        # Without the intervals the magnitude view collapses the pair (the #9710 bug).
+        assert build_required_by_domain_pair(domain_voltages) == {}
+
+    def test_declaration_keeps_signed_voltage(self) -> None:
+        declaration = {
+            "P": {"refs": ["R1"], "voltage": 150},
+            "M": {"refs": ["C1"], "voltage": -150},
+        }
+        ref_domains, domain_voltages = derive_ref_domains_from_declaration(
+            ["R1", "C1"], declaration
+        )
+        assert ref_domains == {"R1": "P", "C1": "M"}
+        assert domain_voltages == {"P": 150.0, "M": -150.0}
+        assert build_required_by_domain_pair(domain_voltages) == {("M", "P"): pytest.approx(3.2)}
+
+    def test_declaration_overlap_ranks_by_magnitude_first_declared(self) -> None:
+        declaration = {
+            "low": {"refs": ["R*"], "voltage": 3.3},
+            "neg": {"refs": ["R1"], "voltage": -150},
+            "pos": {"refs": ["R1", "R2"], "voltage": 150},
+        }
+        ref_domains, _ = derive_ref_domains_from_declaration(["R1", "R2", "R3"], declaration)
+        # R1: |-150| beats 3.3 and ties +150 -> first-declared "neg".
+        assert ref_domains == {"R1": "neg", "R2": "pos", "R3": "low"}
+
+    @pytest.mark.parametrize("parent", [-150.0, (-150.0, 150.0)])
+    def test_tap_exemption_with_negative_or_swinging_parent(self, parent) -> None:
+        nets = [
+            Net(name="/AC_LINE", pins=[("R1", "1"), ("J1", "2")]),
+            Net(name="/V_AC_SENSE_RAW", pins=[("R1", "2"), ("C5", "1")]),
+        ]
+        intervals = {"/AC_LINE": parent, "/V_AC_SENSE_RAW": 1.65}
+        ref_domains, _ = derive_ref_domains_from_voltage_map(nets, intervals)
+        magnitudes = {n: selection_magnitude(v) for n, v in intervals.items()}
+        exempt, _ = detect_derived_tap_exempt_pairs(nets, ref_domains, magnitudes)
+        assert exempt == {frozenset({"C5", "R1"}), frozenset({"C5", "J1"})}

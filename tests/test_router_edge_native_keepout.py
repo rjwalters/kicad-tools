@@ -2,17 +2,18 @@
 
 import pytest
 
-from kicad_tools.router.cpp_backend import CppGrid, is_cpp_available
+from kicad_tools.router.cpp_backend import CppGrid
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Route, Segment
 from kicad_tools.router.rules import DesignRules
+from tests.conftest import require_router_cpp
 
 
 @pytest.mark.parametrize("native", [False, True])
 def test_late_edge_keepout_matches_backend_and_survives_ripup(native):
-    if native and not is_cpp_available():
-        pytest.skip("C++ backend unavailable")
+    if native:
+        require_router_cpp()
     grid = RoutingGrid(5, 5, DesignRules(grid_resolution=0.1, trace_width=0.2))
     cpp = CppGrid.from_routing_grid(grid) if native else None
     # A snapshot may already exist when late static geometry is added.

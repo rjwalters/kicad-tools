@@ -70,6 +70,12 @@ class ReportDataCollector:
         schematic_path: Optional explicit schematic forwarded to
             ``ManufacturingAudit`` so the report's ERC runs against it when
             auto-resolution from the PCB path would not find it (#7153).
+        design_rules: Optional reviewed :class:`DesignRules` the audit's DRC
+            and compatibility sections evaluate against, instead of the
+            manufacturer profile's stock floors (Issue #9536).  A board whose
+            reviewed fabrication process the generic tier cannot model (board
+            04's paid 0.15 mm drill, #6269) reports the verdict of the process
+            it will actually be ordered with.
     """
 
     def __init__(
@@ -80,6 +86,7 @@ class ReportDataCollector:
         skip_erc: bool = False,
         net_class_map_path: str | Path | None = None,
         schematic_path: str | Path | None = None,
+        design_rules: Any | None = None,
     ) -> None:
         self.pcb_path = Path(pcb_path)
         self.schematic_path = Path(schematic_path) if schematic_path is not None else None
@@ -89,6 +96,7 @@ class ReportDataCollector:
         self.net_class_map_path = (
             Path(net_class_map_path) if net_class_map_path is not None else None
         )
+        self.design_rules = design_rules
 
     def collect_all(self, output_dir: Path) -> dict[str, Path]:
         """Run all collectors, write JSON files, return mapping of name to path.
@@ -124,6 +132,7 @@ class ReportDataCollector:
                 skip_erc=self.skip_erc,
                 net_class_map_path=self.net_class_map_path,
                 schematic_path=self.schematic_path,
+                design_rules=self.design_rules,
             )
             audit_result = audit.run()
         except Exception:
@@ -444,6 +453,19 @@ class ReportDataCollector:
         # so the native share is the remainder.  ``blocking_count`` and
         # ``passed`` are left untouched.
         data["manufacturer"] = self.manufacturer
+        # Issue #9536: when a reviewed DesignRules override drove the audit,
+        # the ``--mfr`` profile's stock floors were NOT the rules the counts
+        # were computed under.  Record the override so the report names the
+        # rules actually used rather than attributing the counts to the
+        # profile (a generic ``--mfr`` run can report many more errors).
+        if self.design_rules is not None:
+            dr = self.design_rules
+            data["rules_override"] = (
+                "reviewed fabrication process: via drill "
+                f"{dr.min_via_drill_mm:g} mm, via diameter "
+                f"{dr.min_via_diameter_mm:g} mm, annular ring "
+                f"{dr.min_annular_ring_mm:g} mm"
+            )
         by_type = data.get("violations_by_type") or {}
         geometric = sum(
             int(count) for key, count in by_type.items() if str(key).startswith("kicad-cli:")

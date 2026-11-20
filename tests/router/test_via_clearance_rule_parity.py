@@ -3,12 +3,13 @@
 import pytest
 
 from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
-from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.primitives import Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
+from tests.conftest import require_router_cpp
 
 
 def context(trace=0.15, via_clearance=0.2, gap=0.18):
@@ -55,7 +56,7 @@ def test_closer_legal_trace_does_not_hide_via_violation():
     assert location == (via.x, via.y)
 
 
-@pytest.mark.skipif(not is_cpp_available(), reason="native router required")
+@pytest.mark.requires_router_cpp
 @pytest.mark.parametrize("partner", [-1, 1])
 @pytest.mark.parametrize(
     "trace,via_floor,gap,legal",
@@ -100,7 +101,7 @@ def test_native_commit_keeps_via_floor_for_partner(partner, trace, via_floor, ga
         assert reverse.violation_type == 4
 
 
-@pytest.mark.skipif(not is_cpp_available(), reason="native router required")
+@pytest.mark.requires_router_cpp
 @pytest.mark.parametrize("method", ["route", "route_resumable"])
 def test_native_search_uses_via_floor_before_commit(method):
     rules, grid, via, _ = context()
@@ -131,8 +132,7 @@ def test_supplemental_foreign_context_enforces_via_floor(backend):
         router.set_segment_foreign_context(foreign_vias=[via])
         assert not router._validate_route_clearance(route, exclude_net=2)
     else:
-        if not is_cpp_available():
-            pytest.skip("native router required")
+        require_router_cpp()
         router = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
         router.set_segment_foreign_context(foreign_vias=[via])
         start = Pad(

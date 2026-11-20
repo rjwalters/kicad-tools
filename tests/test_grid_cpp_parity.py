@@ -36,11 +36,11 @@ from __future__ import annotations
 
 import pytest
 
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import Via
 from kicad_tools.router.rules import DesignRules
+from tests.conftest import require_router_cpp
 
 # --------------------------------------------------------------------------- #
 # Fixtures                                                                    #
@@ -156,8 +156,7 @@ class TestMarkViaReservationParity:
         divergence under Issue #2709).  A failing assertion here means the
         C++ reservation port regressed or the marshalling path broke.
         """
-        if not is_cpp_available():
-            pytest.skip("C++ router backend not built (run: kct build-native)")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid
 
@@ -216,8 +215,7 @@ class TestMarkViaReservationParity:
         ``reserve_corridor_cells`` mirrors incrementally onto the attached
         C++ grid; verify a foreign-net via then skips the late reservation.
         """
-        if not is_cpp_available():
-            pytest.skip("C++ router backend not built (run: kct build-native)")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid
 
@@ -256,8 +254,7 @@ class TestMarkViaReservationParity:
         an unreserved cell -- matching
         ``RoutingGrid.get_corridor_attractor_bonus`` exactly.
         """
-        if not is_cpp_available():
-            pytest.skip("C++ router backend not built (run: kct build-native)")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid
 
@@ -358,8 +355,7 @@ class TestLateralTraceReservationParity:
 
     def test_mark_segment_keepout_parity_cpp(self, grid_4layer: RoutingGrid) -> None:
         """C++ ``Grid3D::mark_segment`` mirrors the Python lateral keep-out."""
-        if not is_cpp_available():
-            pytest.skip("C++ router backend not built (run: kct build-native)")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid
 
@@ -394,8 +390,7 @@ class TestLateralTraceReservationParity:
         ``_is_trace_blocked`` treat a foreign-reserved cell as a hard block
         while the owning net still passes -- and the two backends agree.
         """
-        if not is_cpp_available():
-            pytest.skip("C++ router backend not built (run: kct build-native)")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
         from kicad_tools.router.pathfinder import Router
@@ -435,8 +430,7 @@ class TestLateralTraceReservationParity:
         step into a foreign-reserved cell must still be blocked on both
         backends.
         """
-        if not is_cpp_available():
-            pytest.skip("C++ router backend not built (run: kct build-native)")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
         from kicad_tools.router.pathfinder import Router
@@ -466,8 +460,7 @@ class TestLateralTraceReservationParity:
         ``has_reservations`` / ``bool(self._reserved_for_nets)`` fast path
         short-circuits to zero extra work.
         """
-        if not is_cpp_available():
-            pytest.skip("C++ router backend not built (run: kct build-native)")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
         from kicad_tools.router.pathfinder import Router
@@ -518,8 +511,7 @@ class TestSoftReservationParity:
 
     def test_soft_reservation_does_not_block_foreign_trace(self, grid_4layer: RoutingGrid) -> None:
         """SOFT reservation: foreign lateral trace passes on both backends."""
-        if not is_cpp_available():
-            pytest.skip("C++ router backend not built (run: kct build-native)")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
         from kicad_tools.router.pathfinder import Router
@@ -556,8 +548,7 @@ class TestSoftReservationParity:
         self, grid_4layer: RoutingGrid
     ) -> None:
         """SOFT reservation: foreign segment CLAIMS the cell (no keep-out)."""
-        if not is_cpp_available():
-            pytest.skip("C++ router backend not built (run: kct build-native)")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid
         from kicad_tools.router.primitives import Segment
@@ -597,8 +588,7 @@ class TestSoftReservationParity:
         ``is_reserved_for`` (which drives ``corridor_attractor_bonus``) still
         reports the owner net on both backends.
         """
-        if not is_cpp_available():
-            pytest.skip("C++ router backend not built (run: kct build-native)")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid
 
@@ -623,8 +613,7 @@ class TestSoftReservationParity:
 
     def test_hard_vs_soft_last_writer_wins(self, grid_4layer: RoutingGrid) -> None:
         """Re-reserving the same cell flips its strength (last-writer-wins)."""
-        if not is_cpp_available():
-            pytest.skip("C++ router backend not built (run: kct build-native)")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
         from kicad_tools.router.pathfinder import Router

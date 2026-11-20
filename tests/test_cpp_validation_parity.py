@@ -15,7 +15,6 @@ import pytest
 
 from kicad_tools.router.cpp_backend import (
     CppGrid,
-    is_cpp_available,
 )
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
@@ -26,10 +25,7 @@ from kicad_tools.router.primitives import (
 from kicad_tools.router.rules import DesignRules
 
 # Marker for tests requiring the C++ backend
-requires_cpp = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ router backend not available",
-)
+requires_cpp = pytest.mark.requires_router_cpp
 
 
 def _make_grid_and_rules(

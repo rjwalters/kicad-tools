@@ -7,11 +7,12 @@ import pytest
 
 from kicad_tools.cli import main as cli_main
 from kicad_tools.router.cache import CacheKey, SubProblemSignature
-from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad, Route, Segment
 from kicad_tools.router.rules import DesignRules
+from tests.conftest import require_router_cpp
 from tests.route_cli import route_args
 
 
@@ -48,6 +49,7 @@ def fixture(strict, foreign_net=2, **rules_kwargs):
 
 @pytest.mark.parametrize("foreign_net", [0, 2])
 @pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.requires_router_cpp
 def test_python_and_cpp_reject_same_component_subclearance_in_strict_mode(strict, foreign_net):
     """Issue #5004: this fixture configures NO clearance relaxation for
     U1 at all (no ``fine_pitch_clearance``, no ``component_clearances``
@@ -66,14 +68,14 @@ def test_python_and_cpp_reject_same_component_subclearance_in_strict_mode(strict
     assert clearance == pytest.approx(0.125)
     deficit, _ = grid.worst_segment_pad_deficit(bad, 1, exclude_refs={"U1", "J1"})
     assert deficit == pytest.approx(0.025)
-    if is_cpp_available():
-        backend = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
-        violation = backend._validate_route_clearance(
-            Route(net=1, net_name="SIGNAL", segments=[bad]), start, end, 5
-        )
-        assert violation is not None
+    backend = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
+    violation = backend._validate_route_clearance(
+        Route(net=1, net_name="SIGNAL", segments=[bad]), start, end, 5
+    )
+    assert violation is not None
 
 
+@pytest.mark.requires_router_cpp
 def test_explicit_component_override_still_honored_in_default_mode():
     """Issue #5004: an EXPLICITLY configured smaller clearance for U1
     keeps the same-component carve-out active in default (non-strict)
@@ -91,14 +93,14 @@ def test_explicit_component_override_still_honored_in_default_mode():
     # 0.1mm floor, so the carve-out applies and the segment validates
     # (leaving no other foreign pad in this fixture to report against).
     assert valid is True
-    if is_cpp_available():
-        backend = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
-        violation = backend._validate_route_clearance(
-            Route(net=1, net_name="SIGNAL", segments=[bad]), start, end, 5
-        )
-        assert violation is None
+    backend = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
+    violation = backend._validate_route_clearance(
+        Route(net=1, net_name="SIGNAL", segments=[bad]), start, end, 5
+    )
+    assert violation is None
 
 
+@pytest.mark.requires_router_cpp
 def test_legacy_fine_pitch_carveout_opt_in_restores_pitch_only_exemption():
     """Issue #5004: the pre-fix pitch-only exemption (any fine-pitch
     component's foreign-net pads unconditionally excused, even with NO
@@ -110,20 +112,18 @@ def test_legacy_fine_pitch_carveout_opt_in_restores_pitch_only_exemption():
         bad, exclude_net=1, exclude_refs={"U1", "J1"}
     )
     assert valid is True
-    if is_cpp_available():
-        backend = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
-        violation = backend._validate_route_clearance(
-            Route(net=1, net_name="SIGNAL", segments=[bad]), start, end, 5
-        )
-        assert violation is None
+    backend = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
+    violation = backend._validate_route_clearance(
+        Route(net=1, net_name="SIGNAL", segments=[bad]), start, end, 5
+    )
+    assert violation is None
 
 
 @pytest.mark.parametrize("backend_name", ["python", "cpp"])
 def test_strict_fine_pitch_pad_still_escapes_along_its_long_axis(backend_name):
     rules, grid, start, end, _ = fixture(True)
     if backend_name == "cpp":
-        if not is_cpp_available():
-            pytest.skip("C++ backend unavailable")
+        require_router_cpp()
         backend = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
     else:
         from kicad_tools.router.pathfinder import Router
@@ -189,8 +189,7 @@ def test_off_grid_qfp_escape_keeps_trace_radius_inside_seed_pad(backend_name, st
     for pad in (start, neighbor, end):
         grid.add_pad(pad)
     if backend_name == "cpp":
-        if not is_cpp_available():
-            pytest.skip("C++ backend unavailable")
+        require_router_cpp()
         backend = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
         rejected = []
         validate = backend._validate_route_clearance

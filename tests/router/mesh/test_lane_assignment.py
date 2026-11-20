@@ -46,7 +46,7 @@ from kicad_tools.router.primitives import Pad
 from kicad_tools.router.quantize import is_45_aligned
 from kicad_tools.router.rules import DesignRules
 
-router_cpp = pytest.importorskip("kicad_tools.router.router_cpp")
+pytestmark = pytest.mark.requires_router_cpp
 
 
 def _pad(x: float, y: float, net: int, ref: str, w: float = 0.6, h: float = 0.6) -> Pad:

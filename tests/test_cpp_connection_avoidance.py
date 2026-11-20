@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from kicad_tools.router.cpp_backend import CppPathfinder
+from tests.conftest import require_router_cpp
 
 
 @pytest.mark.parametrize("timing", [False, True])
@@ -44,11 +45,10 @@ def test_next_connection_starts_without_prior_clearance_penalties(timing, outcom
 @pytest.mark.parametrize("timing", [False, True])
 @pytest.mark.parametrize("outcome", ["success", "failure", "exception"])
 def test_connection_cleanup_clears_native_grid(monkeypatch, timing, outcome):
-    from kicad_tools.router.cpp_backend import CppGrid, is_cpp_available
+    from kicad_tools.router.cpp_backend import CppGrid
     from kicad_tools.router.rules import DesignRules
 
-    if not is_cpp_available():
-        pytest.skip("C++ backend not available")
+    require_router_cpp()
     grid = CppGrid(cols=20, rows=20, layers=2, resolution=0.127)
     finder = CppPathfinder(grid, DesignRules())
     finder.enable_per_call_timing(timing)
@@ -102,11 +102,10 @@ def test_default_clears_penalties_between_connections(monkeypatch, timing):
     ``clear_avoidance_after_connection`` explicitly, so this is the behaviour
     every production ``route()`` call gets.
     """
-    from kicad_tools.router.cpp_backend import CppGrid, is_cpp_available
+    from kicad_tools.router.cpp_backend import CppGrid
     from kicad_tools.router.rules import DesignRules
 
-    if not is_cpp_available():
-        pytest.skip("C++ backend not available")
+    require_router_cpp()
     grid = CppGrid(cols=20, rows=20, layers=2, resolution=0.127)
     finder = CppPathfinder(grid, DesignRules())
     finder.enable_per_call_timing(timing)

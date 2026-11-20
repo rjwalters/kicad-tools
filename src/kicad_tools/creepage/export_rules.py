@@ -428,7 +428,12 @@ def apply_netclass_assignments(project_data: dict, plan: ExportPlan) -> None:
 
     # Re-add the current domains.  The class's own clearance is set to the DRU
     # floor -- the elevated pairwise minima live in the .kicad_dru rules, not the
-    # class definition, so this never over-constrains a domain against itself.
+    # class definition.  A swinging domain (own interval spanning >=
+    # hv_threshold) IS constrained against itself, but by its emitted
+    # same-netclass .kicad_dru rule, which carries the higher minimum between
+    # *distinct* nets of the domain (KiCad's clearance constraint never applies
+    # within one net -- pinned on kicad-cli 10.0.6 by #9712); the class
+    # clearance itself stays at the floor.
     for dname in sorted(plan.domain_voltages):
         add_netclass_definition(project_data, dname, clearance=plan.dru_floor_mm or 0.2)
 

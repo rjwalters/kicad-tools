@@ -37,7 +37,6 @@ import pytest
 from kicad_tools.router.cpp_backend import (
     CppGrid,
     CppPathfinder,
-    is_cpp_available,
     replay_route_halo_marks,
     sync_stored_routes,
 )
@@ -51,7 +50,7 @@ CANDIDATE = (55, 56)
 LAYER = 2  # an inner layer: the via halo covers every layer
 BLOCKERS = ["none", "keepout", "obstacle", "region_bound"]
 
-native = pytest.mark.skipif(not is_cpp_available(), reason="native router required")
+native = pytest.mark.requires_router_cpp
 
 #: Widest-trace buffer the route is marked with: ``int((0.3 + 0.2 + 0.3) /
 #: 0.127) + 1 == 7`` cells, so the ``(-5, -4)`` candidate (6.40 cells) is

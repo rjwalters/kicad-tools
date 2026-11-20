@@ -26,16 +26,12 @@ import math
 
 import pytest
 
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules, NetClassRouting
 
-requires_cpp = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ router backend not available; run `kct build-native`",
-)
+requires_cpp = pytest.mark.requires_router_cpp
 
 # Board 05 U2 (TI PWP0028C) geometry: 1.575 x 0.4 mm pads at 0.65 mm pitch,
 # 0.065 mm grid, 0.4 mm wide phase traces.

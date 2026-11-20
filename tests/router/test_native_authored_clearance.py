@@ -11,13 +11,13 @@ import math
 
 import pytest
 
-from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad, Route, Segment
 from kicad_tools.router.rules import DesignRules
 
-pytestmark = pytest.mark.skipif(not is_cpp_available(), reason="native build required")
+pytestmark = pytest.mark.requires_router_cpp
 
 
 def _seg(router_cpp, x1, y1, x2, y2, width, layer, net):

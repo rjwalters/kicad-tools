@@ -31,7 +31,6 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.router import DesignRules, load_pcb_for_routing
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad, Route, Segment
@@ -121,7 +120,7 @@ class TestStaticHaloRipupRestore:
         assert bool(grid._blocked[0, gy, gx]) is False
         assert int(grid._net[0, gy, gx]) == 0
 
-    @pytest.mark.skipif(not is_cpp_available(), reason="C++ backend not built")
+    @pytest.mark.requires_router_cpp
     def test_cpp_ripup_restores_static_halo(self) -> None:
         """C++ Grid3D parity: unmark_segment restores static cells."""
         from kicad_tools.router import router_cpp  # type: ignore[attr-defined]
@@ -147,7 +146,7 @@ class TestStaticHaloRipupRestore:
         assert cell2.blocked is False
         assert cell2.net == 0
 
-    @pytest.mark.skipif(not is_cpp_available(), reason="C++ backend not built")
+    @pytest.mark.requires_router_cpp
     def test_cpp_ripup_restores_static_halo_via(self) -> None:
         """C++ Grid3D parity: unmark_via restores static cells."""
         from kicad_tools.router import router_cpp  # type: ignore[attr-defined]

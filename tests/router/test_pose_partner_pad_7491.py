@@ -19,14 +19,11 @@ from __future__ import annotations
 
 import pytest
 
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import LayerStack
 from kicad_tools.router.rules import DesignRules
 
-pytestmark = pytest.mark.skipif(
-    not is_cpp_available(), reason="C++ router backend not available; run `kct build-native`"
-)
+pytestmark = pytest.mark.requires_router_cpp
 
 CLEARANCE = 0.15
 

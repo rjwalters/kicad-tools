@@ -16,7 +16,7 @@ from kicad_tools.router.mesh.pathfinder import MeshPathfinder
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
 
-pytest.importorskip("kicad_tools.router.router_cpp")
+pytestmark = pytest.mark.requires_router_cpp
 
 _OUTLINE = [(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)]
 

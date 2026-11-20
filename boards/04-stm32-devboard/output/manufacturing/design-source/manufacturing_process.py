@@ -414,7 +414,9 @@ def _apply_moves(pcb_path, doc, ox, oy):
                 math.dist(p, v.position) < 0.001 for p in [segment.start, segment.end]
             ):
                 layers.add(segment.layer)
-        new = select_offpad_position(pcb, v, ref, new, sorted(layers))
+        new = tuple(
+            round(value, 6) for value in select_offpad_position(pcb, v, ref, new, sorted(layers))
+        )
         node = doc.find_children("via")[i]
         at = node.find_child("at")
         at.set_atom(0, new[0] + ox)

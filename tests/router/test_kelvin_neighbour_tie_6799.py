@@ -16,10 +16,10 @@ from shapely.geometry import LineString, Point, box
 from shapely.ops import unary_union
 
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.cpp_backend import get_backend_info
 from kicad_tools.router.path import create_intra_ic_routes
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
+from tests.conftest import require_router_cpp
 
 SENSE = 1
 PITCH = 0.65
@@ -107,8 +107,8 @@ def _is_tie(route) -> bool:
 @pytest.mark.parametrize("force_python", [True, False])
 @pytest.mark.parametrize("mode", ["mst", "negotiated"])
 def test_adjacent_duplicate_pins_tie_and_every_terminal_connects(force_python, mode):
-    if not force_python and not get_backend_info()["available"]:
-        pytest.skip("C++ extension unavailable")
+    if not force_python:
+        require_router_cpp()
     router = _board(force_python)
 
     routes = (

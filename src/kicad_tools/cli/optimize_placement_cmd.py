@@ -769,18 +769,26 @@ def _build_hv_context(
         build_required_by_domain_pair,
         derive_ref_domains_from_declaration,
         derive_ref_domains_from_voltage_map,
+        domain_intervals_for,
         load_hv_domains,
-        load_voltage_map,
+        load_voltage_intervals,
     )
 
+    domain_intervals: dict[str, tuple[float, float]] | None = None
     if voltage_map_path is not None:
-        voltage_map = load_voltage_map(voltage_map_path)
-        ref_domains, domain_voltages = derive_ref_domains_from_voltage_map(nets, voltage_map)
-        source = f"voltage map ({len(voltage_map)} nets)"
+        # Issue #9710: keep each net's SIGNED [lo, hi] interval.  The domain is
+        # still selected by largest |V| (first-seen ties), but the pair stress
+        # is differenced end-to-end on the selected nets' intervals -- the
+        # magnitude view would read +150 V / -150 V as a 0 V pair.
+        net_intervals = load_voltage_intervals(voltage_map_path)
+        ref_domains, domain_voltages = derive_ref_domains_from_voltage_map(nets, net_intervals)
+        domain_intervals = domain_intervals_for(domain_voltages, net_intervals)
+        source = f"voltage map ({len(net_intervals)} nets)"
     else:
         assert hv_domains_path is not None  # guaranteed by the guards above
         declaration = load_hv_domains(hv_domains_path)
         refs = [c.reference for c in components]
+        # Declared voltages come back signed (issue #9710).
         ref_domains, domain_voltages = derive_ref_domains_from_declaration(refs, declaration)
         source = f"hv-domains declaration ({len(declaration)} domains)"
 
@@ -791,6 +799,7 @@ def _build_hv_context(
             pollution_degree=pollution_degree,
             material_group=material_group,
             hv_threshold=hv_threshold,
+            domain_intervals=domain_intervals,
         )
     except StandardLookupError as e:
         raise ValueError(f"creepage lookup failed: {e}") from e

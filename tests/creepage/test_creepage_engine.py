@@ -581,6 +581,20 @@ def test_voltage_map_from_dict_rejects_non_dict():
         voltage_map_from_dict([("A", 1)])
 
 
+def test_load_voltage_sidecar_passes_object_through_and_rejects_non_object(tmp_path):
+    """The shared sidecar read keeps the file loaders' ``ValueError`` contract (#9755)."""
+    from kicad_tools.creepage.engine import load_voltage_sidecar
+
+    good = tmp_path / "v.json"
+    good.write_text('{"/AC_LINE": 150, "_comment": "doc"}')
+    assert load_voltage_sidecar(good) == {"/AC_LINE": 150, "_comment": "doc"}
+
+    bad = tmp_path / "arr.json"
+    bad.write_text("[1, 2, 3]")
+    with pytest.raises(ValueError, match="voltage map must be a JSON object, got list"):
+        load_voltage_sidecar(bad)
+
+
 def test_same_potential_pair_requires_zero_and_skips_lookup(tmp_path):
     # Two nets at equal mapped voltage -> dv == 0 -> required 0.0, trivial PASS,
     # and NO standard-table lookup (no creepage provenance attached).

@@ -50,12 +50,19 @@ def refresh_copper_gerbers(
         if members.search(info.filename):
             data = fresh_members[info.filename]
             replaced.append(info.filename)
+        # Issue #9536: fixed member metadata (order and compress_type
+        # preserved) so a repeated refresh writes a byte-identical archive
+        # instead of carrying the exporter's wall-clock entry stamps.
+        info = zipfile.ZipInfo(info.filename, date_time=(1980, 1, 1, 0, 0, 0))
+        info.compress_type = zipfile.ZIP_DEFLATED
+        info.create_system = 3
+        info.external_attr = 0o100644 << 16
         out.append((info, data))
     if not replaced:
         raise RuntimeError(f"no members matching {members.pattern!r} in {archive}")
     with zipfile.ZipFile(archive, "w") as new:
         for info, data in out:
-            new.writestr(info, data, compress_type=info.compress_type)
+            new.writestr(info, data, compresslevel=9)
     return replaced
 
 

@@ -25,13 +25,13 @@ import pytest
 from kicad_tools.router.clearance_resolver import trace_via_clearance_mm
 from kicad_tools.router.clearance_shapes import copper_gap, segment_shape, via_shape
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.diffpair import DifferentialPairConfig
 from kicad_tools.router.diffpair_routing import CoupledPathfinder, DiffPairRouter
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules, NetClassRouting
+from tests.conftest import require_router_cpp
 
 # Issue #6448: the deprecated grid coupled pre-pass is exercised on purpose here.
 pytestmark = pytest.mark.filterwarnings("ignore:route_diffpair_prepass.*:DeprecationWarning")
@@ -40,7 +40,7 @@ BACKENDS = [
     "python",
     pytest.param(
         "cpp",
-        marks=pytest.mark.skipif(not is_cpp_available(), reason="C++ backend not built"),
+        marks=pytest.mark.requires_router_cpp,
     ),
 ]
 
@@ -270,8 +270,7 @@ def test_no_via_in_an_smd_pad_when_the_fab_cannot_fill_it(backend):
 
 
 def test_backends_agree_on_the_converging_pair():
-    if not is_cpp_available():
-        pytest.skip("C++ backend not built")
+    require_router_cpp()
     _, _, _, py = _converging_pair(0.7, "python")
     _, _, _, cpp = _converging_pair(0.7, "cpp")
     assert py is not None and cpp is not None

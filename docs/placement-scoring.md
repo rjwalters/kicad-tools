@@ -219,7 +219,16 @@ Two mutually-exclusive sources:
 - **`--voltage-map v.json`** — a flat `{net_name: volts}` object (reuses the
   per-net ΔV model format). Each footprint's domain is the *name of its
   highest-magnitude-voltage net* (a footprint touching a 150 V mains net lands
-  in that mains domain); the domain's voltage is that magnitude.
+  in that mains domain; ties keep the first-seen net). A range entry
+  `{"min": lo, "max": hi}` ranks by `max(|lo|, |hi|)`.
+
+  The magnitude only **selects** the domain. The required spacing between two
+  domains is looked up at the **signed, end-to-end** difference of the selected
+  nets' `[lo, hi]` intervals, `max(|a.hi - b.lo|, |b.hi - a.lo|)` — the same
+  rule the `kct creepage` census uses (issue #9710). So a `+150 V` net and a
+  `-150 V` net are a 300 V pair (3.2 mm at PD2 / IIIa, basic), as are two
+  distinct nets that each swing `[-150, +150]`; two nets at the same fixed
+  potential get no keepout. Derived-tap detection still ranks by magnitude.
 
   ```json
   {"/AC_LINE": 150, "/AC_NEUTRAL": 150, "/REF_1V65": 1.65, "/GATE_BUS": 12}
@@ -236,7 +245,9 @@ Two mutually-exclusive sources:
   }
   ```
 
-  A ref matching more than one domain resolves to the higher-voltage domain.
+  A ref matching more than one domain resolves to the higher-|voltage| domain
+  (first-declared on a tie). Declared voltages are **signed**: a `-150` domain
+  and a `+150` domain are a 300 V pair (issue #9710).
 
 ### Tuning knobs
 

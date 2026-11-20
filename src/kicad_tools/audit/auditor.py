@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from kicad_tools.manufacturers.base import DesignRules
     from kicad_tools.schema.pcb import PCB
 
 logger = logging.getLogger(__name__)
@@ -946,6 +947,7 @@ class ManufacturingAudit:
         hv_overvoltage_category: str = "II",
         hv_insulation: str = "basic",
         schematic_path: str | Path | None = None,
+        design_rules: DesignRules | None = None,
     ):
         """Initialize the audit.
 
@@ -983,6 +985,13 @@ class ManufacturingAudit:
             schematic_path: Explicit schematic for ``.kicad_pcb`` input, used
                 instead of auto-resolution (issue #7153).  Ignored for
                 ``.kicad_pro`` input.
+            design_rules: Reviewed design rules the DRC and compatibility
+                sections audit under, instead of the manufacturer profile's
+                stock floors (Issue #9536).  A board whose reviewed
+                fabrication process the generic tier cannot model (board 04's
+                paid 0.15 mm drill, #6269) is judged by the process it will
+                actually be ordered with -- the same override the board's own
+                gating checker applies.
         """
         self.path = Path(project_or_pcb)
         self.manufacturer = manufacturer
@@ -994,6 +1003,7 @@ class ManufacturingAudit:
         self.net_class_map_path = (
             Path(net_class_map_path) if net_class_map_path is not None else None
         )
+        self.design_rules_override = design_rules
         # HV / isolation (creepage) audit configuration (issue #4333).
         self.hv_net_class = hv_net_class or "HV"
         self.hv_min_mm = hv_min_mm
@@ -1417,6 +1427,15 @@ class ManufacturingAudit:
                 copper_oz_outer=stackup_outer,
                 copper_oz_inner=stackup_inner,
             )
+            if self.design_rules_override is not None:
+                # Issue #9536: audit a board whose reviewed fabrication
+                # process the profile's stock floors cannot model under its
+                # own reviewed rules -- the same override
+                # ``check_manufacturing.make_checker`` applies to the gating
+                # checker, so the report's DRC section states the verdict of
+                # the process the board ships under instead of the generic
+                # tier's.
+                checker.design_rules = self.design_rules_override
 
             # Match the ``kct check`` CLI's pad_grid tolerance policy
             # (auto-derive per-board, issue #3061) so the audit -- and the
@@ -1773,7 +1792,11 @@ class ManufacturingAudit:
 
         try:
             profile = self._get_profile()
-            rules = profile.get_design_rules(layers=self.layers or 2, copper_oz=self.copper_oz)
+            rules = (
+                self.design_rules_override
+                if self.design_rules_override is not None
+                else profile.get_design_rules(layers=self.layers or 2, copper_oz=self.copper_oz)
+            )
 
             # Get PCB design minimums
             min_trace = self._get_min_trace_width(pcb)

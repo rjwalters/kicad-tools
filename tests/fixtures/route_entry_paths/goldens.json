@@ -157,7 +157,8 @@
         "Saving routed PCB",
         "Output Connectivity Verification",
         "DRC Validation",
-        "Routing Suggestions"
+        "Routing Suggestions",
+        "Coarser-grid retry skipped: 1 geometric failure(s) (/D:no_path); not a budget-only failure"
       ],
       "files": [
         "failed_nets.json",
@@ -196,7 +197,8 @@
         "Saving routed PCB",
         "Output Connectivity Verification",
         "DRC Validation",
-        "Routing Suggestions"
+        "Routing Suggestions",
+        "Coarser-grid retry skipped: 1 geometric failure(s) (/D:no_path); not a budget-only failure"
       ],
       "files": [
         "failed_nets.json",
@@ -236,7 +238,8 @@
         "Saving routed PCB",
         "Output Connectivity Verification",
         "DRC Validation",
-        "Routing Suggestions"
+        "Routing Suggestions",
+        "Coarser-grid retry skipped: 1 geometric failure(s) (/D:no_path); not a budget-only failure"
       ],
       "files": [
         "failed_nets.json",
@@ -277,7 +280,8 @@
         "Saving routed PCB",
         "Output Connectivity Verification",
         "DRC Validation",
-        "Routing Suggestions"
+        "Routing Suggestions",
+        "Coarser-grid retry skipped: 1 geometric failure(s) (/D:no_path); not a budget-only failure"
       ],
       "files": [
         "failed_nets.json",

@@ -26,14 +26,10 @@ import math
 import pytest
 
 from kicad_tools.cli.stitch_cmd import find_all_pad_bboxes
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.via_clearance import same_net_pad_gap_acceptable
 from kicad_tools.sexp import parse_string
 
-requires_cpp = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ router backend not available",
-)
+requires_cpp = pytest.mark.requires_router_cpp
 
 # Fixture stack: a small 20 x 20 mm grid at 0.05 mm resolution so every
 # probe below lands on the lattice.  Pad centre / board centre is (10, 10).

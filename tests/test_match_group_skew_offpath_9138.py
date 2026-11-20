@@ -2,14 +2,15 @@
 
 ``derive_group_skew_data`` sums every segment and via on a member net, so a
 same-net dead-end loop, an overlapping duplicate or a stub inflates that
-net's "length" and can mask real skew.  The producer keeps the summed
-kicad-cli figure -- the one ruler the router's match-group tuner
-length-matches against; both ways of shedding off-path copper measurably
-manufacture skew on this repo's boards -- and reports any net whose
+net's "length" and can mask real skew.  The producer reports any net whose
 off-path copper (Issue #9117's ``TraceLengthAnalyzer.measure_net_path``)
 exceeds ``OFF_PATH_REPORT_EPSILON_MM``, so the inflation is loud instead of
-silent.  Deciding which copper is truly defect and excluding exactly that
-is split out of Issue #9138 (see the constant's rationale).
+silent.  Since Issue #9304 the figure is also corrected: each member's
+skew figure is its summed kicad-cli length minus the defect copper one
+uniform classifier isolates (dead-end branches, terminal-rooted loops --
+per connected structure, epsilon-gated), with rejoined cycle copper and
+the sub-epsilon escape residual kept, so defect-free members measure the
+summed figure byte-for-byte and no ruler ever switches per member.
 """
 
 from __future__ import annotations
@@ -96,20 +97,27 @@ def _loop_board(tmp_path: Path) -> PCB:
     return _write(tmp_path, body, rows)
 
 
-def test_loop_is_reported_and_summed_figure_kept(tmp_path: Path, caplog):
-    """AC 2: the loop is reported; the figure stays the summed semantics."""
+def test_loop_is_reported_and_excluded_from_figure(tmp_path: Path, caplog):
+    """AC 2: the loop is reported; #9304: it is also shed from the figure.
+
+    DQ0's 20 mm pad-rooted loop is defect copper above the epsilon, so
+    its figure is the summed 40 mm minus the loop; the group's skew
+    collapses to the real 0.5 mm spread instead of the loop-masked
+    20.0 mm the summed ruler reports.
+    """
     pcb = _loop_board(tmp_path)
     lengths = [measure_pcb_net(pcb, n) for n in (1, 2, 3)]
+    assert lengths[0] == pytest.approx(40.0, abs=0.05)  # premise: loop summed in
 
     with caplog.at_level(logging.WARNING, logger="kicad_tools.validate.match_group_skew"):
         skew_data, _groups, _thresholds = derive_group_skew_data(pcb, NET_CLASS_MAP)
 
-    assert skew_data["DDR_DATA"] == pytest.approx(max(lengths) - min(lengths), abs=1e-6)
-    assert skew_data["DDR_DATA"] == pytest.approx(20.0, abs=0.05)
+    assert skew_data["DDR_DATA"] == pytest.approx(0.5, abs=0.05)
     messages = [r.getMessage() for r in caplog.records if "off-path" in r.getMessage()]
     assert len(messages) == 1
     assert "DQ0" in messages[0]
     assert "20.0" in messages[0]
+    assert "excluded from the measured length" in messages[0]
 
 
 def test_connected_third_pad_reports_difference_from_selected_path(tmp_path: Path, caplog):
@@ -122,7 +130,8 @@ def test_connected_third_pad_reports_difference_from_selected_path(tmp_path: Pat
 
     assert (
         "[match-group-skew] DDR_DATA: net BRANCH total track length exceeds the selected "
-        "pad-to-pad path length by 5.000 mm (off-path copper included in summed length)"
+        "pad-to-pad path length by 5.000 mm (off-path copper; no part of it is "
+        "topologically isolable as defect, the measured length keeps it all)"
     ) in caplog.messages
 
 
@@ -167,10 +176,11 @@ def test_member_above_old_threshold_measured_by_same_ruler_as_siblings(tmp_path:
     One member carries 6.0 mm of dead-end stub (above both the 2.0 mm
     cutoff an earlier iteration of this change switched rulers at and
     the landed reporting epsilon), a sibling 5.0 mm, the third is
-    clean.  Every member is measured with the same summed ruler, so
-    the group's skew is exactly the summed spread -- the 2 mm step an
-    earlier per-member threshold injected into ``max - min`` is gone
-    -- and both stubs are reported.
+    clean.  Every member is measured by the same #9304 rule -- both
+    stubs exceed the epsilon, so both are shed, neither member's ruler
+    differs from its siblings' and the 2 mm step an earlier per-member
+    threshold injected into ``max - min`` is gone: the skew is the real
+    0.5 mm spread -- and both stubs are reported.
     """
     rows = {1: ("DQ0", 10.0, 25.0), 2: ("DQ1", 20.0, 25.0), 3: ("DQ2", 30.0, 25.5)}
     body = (
@@ -182,12 +192,16 @@ def test_member_above_old_threshold_measured_by_same_ruler_as_siblings(tmp_path:
     )
     pcb = _write(tmp_path, body, rows)
     lengths = [measure_pcb_net(pcb, n) for n in (1, 2, 3)]
+    assert lengths[0] == pytest.approx(lengths[2] + 5.5, abs=0.05)  # premise
 
     with caplog.at_level(logging.WARNING, logger="kicad_tools.validate.match_group_skew"):
         skew_data, _g, _t = derive_group_skew_data(pcb, NET_CLASS_MAP)
 
-    assert skew_data["DDR_DATA"] == pytest.approx(max(lengths) - min(lengths), abs=1e-6)
-    assert skew_data["DDR_DATA"] == pytest.approx(5.5, abs=0.05)
+    assert skew_data["DDR_DATA"] == pytest.approx(0.5, abs=0.05)
+    stubs_reported = [
+        r.getMessage() for r in caplog.records if r.getMessage().count("excluded") >= 1
+    ]
+    assert len(stubs_reported) == 2
     messages = [r.getMessage() for r in caplog.records if "off-path" in r.getMessage()]
     assert len(messages) == 2
     assert any("DQ0" in m and "6.0" in m for m in messages)

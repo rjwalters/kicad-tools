@@ -2,17 +2,17 @@
 
 import pytest
 
-from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad, Route, Via
 from kicad_tools.router.rules import DesignRules
+from tests.conftest import require_router_cpp
 
 
 @pytest.mark.parametrize("foreign_net", [0, 2])
 def test_cached_native_via_policy_tracks_legacy_toggle(foreign_net):
-    if not is_cpp_available():
-        pytest.skip("native backend unavailable; requires current native build")
+    require_router_cpp()
     rules = DesignRules(trace_width=0.1, trace_clearance=0.15, grid_resolution=0.05)
     grid = RoutingGrid(10, 10, rules)
     foreign = Pad(5, 5, 0.3, 0.3, foreign_net, "FOREIGN", ref="U1", pin="1")

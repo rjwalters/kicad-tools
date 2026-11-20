@@ -6,10 +6,11 @@ import pytest
 
 from kicad_tools.router import DesignRules
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.cpp_backend import CppGrid, is_cpp_available
+from kicad_tools.router.cpp_backend import CppGrid
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad, Route, Segment, Via
+from tests.conftest import require_router_cpp
 
 
 def rules():
@@ -60,8 +61,7 @@ def test_python_shape_backstops(shape, valid, angle):
 @pytest.mark.parametrize("late", [False, True])
 @pytest.mark.parametrize("kind", ["segment", "via"])
 def test_native_shape_backstops(shape, valid, angle, late, kind):
-    if not is_cpp_available():
-        pytest.skip("requires rebuilt native backend")
+    require_router_cpp()
     from kicad_tools.router import router_cpp
 
     pad, seg, via = witness(shape, angle)
@@ -89,8 +89,8 @@ def test_native_shape_backstops(shape, valid, angle, late, kind):
 @pytest.mark.parametrize("force_python", [False, True])
 @pytest.mark.parametrize("kind", ["segment", "via"])
 def test_real_finalization(shape, demoted, force_python, kind):
-    if not force_python and not is_cpp_available():
-        pytest.skip("requires rebuilt native backend")
+    if not force_python:
+        require_router_cpp()
     pad, seg, via = witness(shape)
     router = Autorouter(20, 20, rules=rules(), force_python=force_python)
     router.add_component(

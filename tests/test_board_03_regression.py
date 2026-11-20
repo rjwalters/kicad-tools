@@ -77,6 +77,7 @@ from kicad_tools.router import (
     create_net_class_map,
     load_pcb_for_routing,
 )
+from tests.conftest import require_router_cpp
 
 # Issue #3436: CI runs the suite with `-n auto --timeout=60`.  Board
 # generation / real-library scans beat 60s alone, but on the 4-core CI
@@ -514,6 +515,7 @@ def test_no_python_fallbacks(routed_board_03) -> None:
     router, _net_map = routed_board_03
 
     info = router.backend_info
+    require_router_cpp()
     if info.get("active") != "cpp":
         pytest.skip("C++ backend not active; fallback pinning not applicable")
 

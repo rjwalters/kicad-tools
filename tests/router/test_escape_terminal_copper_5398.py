@@ -22,7 +22,6 @@ from shapely.geometry import LineString, Point
 from shapely.ops import unary_union
 
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.cpp_backend import get_backend_info
 from kicad_tools.router.escape import (
     EscapeDirection,
     EscapeRoute,
@@ -32,6 +31,7 @@ from kicad_tools.router.escape import (
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
+from tests.conftest import require_router_cpp
 
 NET = 1
 NET_NAME = "ISENSE_B-"
@@ -199,8 +199,8 @@ def test_escaped_terminal_does_not_waive_foreign_via_clearance(force_python):
     0.10 mm from its copper, against a 0.15 mm rule.  With the terminal
     sized to the escape conductor the search has to route around it.
     """
-    if not force_python and not get_backend_info()["available"]:
-        pytest.skip("C++ extension unavailable")
+    if not force_python:
+        require_router_cpp()
 
     # Issue #6272: a trace/via pair is held to max(trace_clearance,
     # via_clearance), so pin via_clearance to the 0.15 mm rule this scenario
@@ -370,8 +370,8 @@ def test_endpoint_waiver_corner_routes_without_native_retry_fallback(force_pytho
     The narrow control has no grid center inside the endpoint square. It
     must connect using off-grid handling, without inventing a larger waiver.
     """
-    if not force_python and not get_backend_info()["available"]:
-        pytest.skip("C++ extension unavailable")
+    if not force_python:
+        require_router_cpp()
     width = 0.05 if narrow_off_grid else 0.2
     endpoint = 10.085 if narrow_off_grid else 10.025
     rules = DesignRules(
@@ -468,8 +468,8 @@ def test_endpoint_waiver_corner_routes_without_native_retry_fallback(force_pytho
 @pytest.mark.parametrize("force_python", [True, False])
 def test_fine_pitch_escape_keeps_conductor_seeds_without_disabling_pad_inset(force_python):
     """Board 04: pad-tail erosion must not erase a committed escape endpoint."""
-    if not force_python and not get_backend_info()["available"]:
-        pytest.skip("C++ extension unavailable")
+    if not force_python:
+        require_router_cpp()
     rules = DesignRules(trace_width=0.2, grid_resolution=0.05, strict_pad_clearance=True)
     router = Autorouter(20, 20, rules=rules, force_python=force_python, physics_enabled=False)
     physical = Pad(8, 10, 0.3, 1.55, NET, NET_NAME, ref="U2", pin="5")

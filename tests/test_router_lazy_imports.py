@@ -58,10 +58,9 @@ def test_unknown_export_raises_attribute_error():
 
 
 def test_native_backend_reload_preserves_usable_types():
-    from kicad_tools.router.cpp_backend import is_cpp_available
+    from tests.conftest import require_router_cpp
 
-    if not is_cpp_available():
-        pytest.skip("requires the native router extension")
+    require_router_cpp()
     fresh("""
 from kicad_tools.router import cpp_backend
 original = cpp_backend.router_cpp
@@ -78,6 +77,7 @@ def test_cli_parser_import_does_not_load_check_cmd():
     fresh("""
 import sys
 import kicad_tools.cli.parser
+from tests.conftest import require_router_cpp
 assert 'kicad_tools.cli.check_cmd' not in sys.modules
 assert 'numpy' not in sys.modules
 """)

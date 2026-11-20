@@ -14,6 +14,7 @@ from kicad_tools.router.layers import Layer
 from kicad_tools.router.length import LengthTracker
 from kicad_tools.router.optimizer import make_collision_checker
 from kicad_tools.router.primitives import Pad, Route, Segment, Via
+from tests.conftest import require_router_cpp
 
 
 def fragment(net, a, b, y, escape=False):
@@ -27,10 +28,7 @@ def fragment(net, a, b, y, escape=False):
 
 def setup(shorter=1, *, native=False, escape_length=1, split=False):
     if native:
-        from kicad_tools.router.cpp_backend import is_cpp_available
-
-        if not is_cpp_available():
-            pytest.skip("matching C++ backend unavailable")
+        require_router_cpp()
     ar = Autorouter(width=60, height=40, force_python=not native)
     ar.net_names = {1: "SIG_P", 2: "SIG_N"}
     for net, y in [(1, 10), (2, 20)]:

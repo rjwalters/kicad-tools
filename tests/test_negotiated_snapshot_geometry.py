@@ -10,6 +10,7 @@ from kicad_tools.router.layers import Layer
 from kicad_tools.router.optimizer import make_collision_checker
 from kicad_tools.router.primitives import Route, Segment
 from kicad_tools.router.rules import DesignRules
+from tests.conftest import require_router_cpp
 
 
 @pytest.mark.parametrize("force_python", [True, False])
@@ -19,8 +20,8 @@ def test_forced_best_restore_updates_obstacles_and_rejects_optimizer_shortcut(
 ):
     rules = DesignRules(grid_resolution=0.1, trace_width=0.2, trace_clearance=0.15)
     router = Autorouter(width=15, height=15, rules=rules, force_python=force_python)
-    if not force_python and router.grid._cpp_grid is None:
-        pytest.skip("C++ backend unavailable")
+    if not force_python:
+        require_router_cpp()
     layer = Layer.F_CU
     kept = Route(net=6, net_name="B", segments=[Segment(9.3, 8.3, 9.3, 3.4, 0.2, layer, net=6)])
     discarded = Route(net=7, net_name="C", segments=[Segment(8, 11, 8.1, 11, 0.2, layer, net=7)])

@@ -55,14 +55,6 @@ from kicad_tools.manufacturers.attach_zone_dru import has_attach_zone_block
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARDS = REPO_ROOT / "boards"
 
-PENDING_REPIN = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "recipe emits the attach-zone block, but the evidence re-pin is refused "
-        "on main by redundant_copper_* warnings (#8399)"
-    ),
-)
-
 
 def _export_writer(routed: Path) -> None:
     """``kct export --mfr jlcpcb`` writes the sidecars next to the input board."""
@@ -100,7 +92,11 @@ CASES: dict[str, tuple[str, Callable[[Path], None]]] = {
 PARAMS = [
     pytest.param("01-voltage-divider", id="board01"),
     pytest.param("02-charlieplex-led", id="board02"),
-    pytest.param("04-stm32-devboard", id="board04", marks=PENDING_REPIN),
+    # Board 04's evidence was re-pinned from the #9536 regen: the recipe's
+    # attach-zone DRU is committed byte-for-byte and the re-pin is no longer
+    # refused (its gate is check_manufacturing.py -- 0 errors, only pour_slot
+    # warnings -- so the #8399 redundant_copper_* refusal premise is gone).
+    pytest.param("04-stm32-devboard", id="board04"),
     pytest.param("06-diffpair-test", id="board06"),
 ]
 

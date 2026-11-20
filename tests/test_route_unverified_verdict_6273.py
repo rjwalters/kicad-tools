@@ -88,6 +88,11 @@ def stranded_pour_unknown(monkeypatch):
 # =============================================================================
 
 
+# Every real-route test in this file pays the route-phase cost that #9115
+# measured at 6.5-21.1 s under CI load (see the timing note on the
+# advisory-pad test below), so they take the same 180 s cap instead of CI's
+# 60 s default (#9766).
+@pytest.mark.timeout(180)
 @pytest.mark.parametrize("extra", list(PATHS.values()), ids=list(PATHS))
 def test_baseline_run_with_drc_is_still_a_success(tmp_path, capsys, extra) -> None:
     """Control: the same board with DRC actually run exits 0."""
@@ -96,6 +101,7 @@ def test_baseline_run_with_drc_is_still_a_success(tmp_path, capsys, extra) -> No
     assert "UNVERIFIED" not in out
 
 
+@pytest.mark.timeout(180)
 @pytest.mark.parametrize("extra", list(PATHS.values()), ids=list(PATHS))
 def test_drc_skipped_for_time_banner_and_exit(tmp_path, capsys, no_time_for_drc, extra) -> None:
     rc, out = _route(tmp_path, capsys, extra)
@@ -109,6 +115,7 @@ def test_drc_skipped_for_time_banner_and_exit(tmp_path, capsys, no_time_for_drc,
     assert "kct check" in out
 
 
+@pytest.mark.timeout(180)
 @pytest.mark.parametrize("extra", list(PATHS.values()), ids=list(PATHS))
 def test_drc_skipped_for_time_json_verdict(tmp_path, capsys, no_time_for_drc, extra) -> None:
     rc, out = _route(tmp_path, capsys, [*extra, "--format", "json", "--quiet"])
@@ -118,6 +125,7 @@ def test_drc_skipped_for_time_json_verdict(tmp_path, capsys, no_time_for_drc, ex
     assert doc["summary"]["verdict"] == "unverified"
 
 
+@pytest.mark.timeout(180)
 @pytest.mark.parametrize("extra", list(PATHS.values()), ids=list(PATHS))
 def test_stranded_pour_unknown_is_unverified(
     tmp_path, capsys, stranded_pour_unknown, extra

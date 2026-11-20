@@ -20,7 +20,11 @@ from kicad_tools.validate.rules import silkscreen as silk  # noqa: E402
 TEXT = "ABCD"
 SIZE = (1.0, 1.0)
 THICK = 0.15
-WIDTH = len(TEXT) * SIZE[0] * silk._TEXT_CHAR_WIDTH_FACTOR + THICK
+# Measured ABCD centreline bearings are 2/21 mm at A and 4/21 mm at D.
+ADVANCE = 81 / 21
+SHIFT = ADVANCE / 2 + 0.6579 * THICK
+LEFT = -ADVANCE / 2 + 2 / 21 - THICK / 2 - 0.005
+RIGHT = ADVANCE / 2 - 4 / 21 + THICK / 2 + 0.005
 HEIGHT = SIZE[1] + THICK
 
 
@@ -30,16 +34,16 @@ def _bbox(center, angle=0.0, justify=()):
     return geom.bounds
 
 
-def test_default_is_centred_and_unchanged():
+def test_default_uses_centred_glyph_run():
     assert _bbox((10, 20)) == _bbox((10, 20), justify=())
     minx, miny, maxx, maxy = _bbox((10, 20))
-    assert (minx, maxx) == pytest.approx((10 - WIDTH / 2, 10 + WIDTH / 2))
+    assert (minx, maxx) == pytest.approx((10 + LEFT, 10 + RIGHT))
     assert (miny, maxy) == pytest.approx((20 - HEIGHT / 2, 20 + HEIGHT / 2))
 
 
-def test_left_starts_at_anchor_right_ends_at_anchor():
-    assert _bbox((10, 20), justify=("left",))[0] == pytest.approx(10)
-    assert _bbox((10, 20), justify=("right",))[2] == pytest.approx(10)
+def test_justified_ink_is_inset_from_anchor():
+    assert _bbox((10, 20), justify=("left",))[0] == pytest.approx(10 + SHIFT + LEFT)
+    assert _bbox((10, 20), justify=("right",))[2] == pytest.approx(10 - SHIFT + RIGHT)
 
 
 def test_top_hangs_below_anchor_bottom_stands_above():
@@ -50,15 +54,15 @@ def test_top_hangs_below_anchor_bottom_stands_above():
 
 def test_combined_vertical_and_horizontal_tokens():
     minx, miny, maxx, maxy = _bbox((10, 20), justify=("left", "bottom"))
-    assert (minx, maxy) == pytest.approx((10, 20))
-    assert (maxx, miny) == pytest.approx((10 + WIDTH, 20 - HEIGHT))
+    assert (minx, maxy) == pytest.approx((10 + SHIFT + LEFT, 20))
+    assert (maxx, miny) == pytest.approx((10 + SHIFT + RIGHT, 20 - HEIGHT))
 
 
 def test_three_justifications_same_ink_same_geometry():
     """Anchors shifted so the ink is in the same place give identical boxes."""
     centre = _bbox((20, 20))
-    left = _bbox((20 - WIDTH / 2, 20), justify=("left",))
-    right = _bbox((20 + WIDTH / 2, 20), justify=("right",))
+    left = _bbox((20 - SHIFT, 20), justify=("left",))
+    right = _bbox((20 + SHIFT, 20), justify=("right",))
     assert left == pytest.approx(centre)
     assert right == pytest.approx(centre)
 
@@ -68,10 +72,10 @@ def test_rotated_left_justified_matches_rotated_centred(angle):
     """Rotation is about the anchor, so a left text's ink lies along its own axis."""
     import math
 
-    # Centre of a left-justified box sits +width/2 along the text direction.
+    # Justification shifts the run along its local text direction.
     # KiCad positive angles turn toward negative board y.
     theta = math.radians(angle)
-    dx, dy = (WIDTH / 2) * math.cos(theta), -(WIDTH / 2) * math.sin(theta)
+    dx, dy = SHIFT * math.cos(theta), -SHIFT * math.sin(theta)
     anchor = (20.0, 20.0)
     centred_at = (anchor[0] + dx, anchor[1] + dy)
     assert _bbox(anchor, angle, ("left",)) == pytest.approx(_bbox(centred_at, angle))
@@ -79,26 +83,23 @@ def test_rotated_left_justified_matches_rotated_centred(angle):
 
 def test_rotated_90_left_extends_toward_negative_y():
     minx, miny, maxx, maxy = _bbox((20, 20), 90, ("left",))
-    assert maxy == pytest.approx(20)
-    assert miny == pytest.approx(20 - WIDTH)
+    assert maxy == pytest.approx(20 - SHIFT - LEFT)
+    assert miny == pytest.approx(20 - SHIFT - RIGHT)
     assert (minx, maxx) == pytest.approx((20 - HEIGHT / 2, 20 + HEIGHT / 2))
 
 
-def test_mirror_swaps_left_and_right():
-    """Verified vs KiCad 10.0.6: ``left mirror`` behaves as unmirrored ``right``."""
-    assert _bbox((10, 20), justify=("mirror", "left")) == pytest.approx(
-        _bbox((10, 20), justify=("right",))
+@pytest.mark.parametrize("justify", ["left", "right"])
+def test_mirror_reflects_both_ink_edges_about_anchor(justify):
+    l, bottom, r, top = _bbox((10, 20), justify=(justify,))
+    assert _bbox((10, 20), justify=("mirror", justify)) == pytest.approx(
+        (20 - r, bottom, 20 - l, top)
     )
-    assert _bbox((10, 20), justify=("mirror", "right")) == pytest.approx(
-        _bbox((10, 20), justify=("left",))
-    )
-    assert _bbox((10, 20), justify=("mirror", "left"))[2] == pytest.approx(10)
 
 
 def test_mirror_left_rotated_90_extends_toward_positive_y():
     minx, miny, maxx, maxy = _bbox((20, 20), 90, ("left", "mirror"))
-    assert miny == pytest.approx(20)
-    assert maxy == pytest.approx(20 + WIDTH)
+    assert miny == pytest.approx(20 + SHIFT + LEFT)
+    assert maxy == pytest.approx(20 + SHIFT + RIGHT)
 
 
 def test_mirror_leaves_vertical_tokens_alone():
@@ -152,8 +153,8 @@ def _load(tmp_path: Path, name: str, justify: str, shift: float) -> PCB:
 
 _CASES = [
     ("centre", "", 0.0),
-    ("left", " (justify left)", -WIDTH / 2),
-    ("right", " (justify right)", WIDTH / 2),
+    ("left", " (justify left)", -SHIFT),
+    ("right", " (justify right)", SHIFT),
 ]
 
 

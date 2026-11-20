@@ -76,12 +76,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from kicad_tools.router.cpp_backend import is_cpp_available
-
-pytestmark = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ router backend not built -- run `uv run kct build-native`",
-)
+pytestmark = pytest.mark.requires_router_cpp
 
 FIXTURE = Path(__file__).parent / "fixtures" / "board07_coupled_tmds_d1"
 

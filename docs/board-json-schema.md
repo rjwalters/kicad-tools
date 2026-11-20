@@ -83,6 +83,7 @@ It validates saved readiness evidence using file content hashes.
 | `manifest_generated_at` | string  | no       | Manifest build timestamp (ISO-8601) |
 | `lvs_clean`             | boolean | no       | `true` iff `output/lvs.json` reports `clean: true`. Omitted when `lvs.json` is absent (board has not run LVS yet). |
 | `lvs_mismatches`        | integer | no       | Count of mismatches recorded in `output/lvs.json`. Omitted when `lvs.json` is absent. |
+| `layout_quality`        | object  | no       | Layout-quality metrics over the board's selected PCB (issue #9594); see [`layout_quality`](#layout-quality) below. Omitted when no PCB is selectable or parseable. |
 
 ### Paths are relative to `board.json`
 
@@ -353,6 +354,67 @@ All fields except `$schema`, `schema_version`, `generated_at`, `slug` and
 parsed, the field is **omitted** from the output rather than emitted as `null`.
 Downstream consumers should treat a missing key as "unknown".
 
+## `layout_quality`
+
+`layout_quality` is an additive optional object in schema v1 (no
+`schema_version` bump, per the policy below). It carries the layout-quality
+metrics a reviewer reads first (issue #9594, method after the PCBJam blind-PCB
+study's metric set). These are **metrics, not findings**: nothing in the block
+is or feeds a `kct check` rule; `sharp_trace_corner` already warns on acute
+corners and turn-backs and its threshold stays untouched.
+
+The block is computed from the board's **measured PCB**: the project's routed
+artifact (`artifacts.pcb_routed` / `artifacts.routed`) when declared — the
+copper a reviewer judges — else the declared `artifacts.pcb`, else the single
+`output/*.kicad_pcb`. A declared-but-invalid path omits the block rather than
+falling through to another revision:
+
+```json
+"layout_quality": {
+  "pcb_path": "output/bldc_controller_routed.kicad_pcb",
+  "pcb_sha256": "<SHA-256 of the measured PCB>",
+  "via": {"track": 110, "ground": 27, "total": 137},
+  "corners": {
+    "right_angle": 19,
+    "acute": 6,
+    "turn_back": 6,
+    "per_net": {"GND_SENSE": {"right_angle": 0, "acute": 2, "turn_back": 0}}
+  },
+  "total_track_length_mm": 1378.344,
+  "outline_area_mm2": 6300.0
+}
+```
+
+The example is board 05's real block (`per_net` truncated to one net). A
+board with differential pairs additionally carries `diff_pair_skew`, one
+entry per pair:
+`[{"net_positive": "USB_D+", "net_negative": "USB_D-", "skew_mm": 0.42}]`.
+A board whose project declares `artifacts.net_class_map_sidecar`
+additionally carries `match_group_skew`, one entry per declared match
+group with every member routed, e.g. board 07's real
+`{"SDRAM_ADDRESS": 2.452, "SDRAM_BYTE0": 0.104, "SDRAM_BYTE1": 2.842,
+"SDRAM_COMMAND": 0.949}`.
+
+| Field | Meaning |
+|---|---|
+| `pcb_path` / `pcb_sha256` | The measured PCB (routed artifact preferred; see above), relative to the board directory, and its hash: a re-routed board cannot be mistaken for the measured one. |
+| `via.track` / `via.ground` | A via is a **ground via** when its net name classifies as ground under the router's net-name patterns (`kicad_tools.router.net_class.classify_from_name`: GND, GNDA, GNDD, AGND, DGND, PGND, SGND, VSS, GROUND, CGND, CHASSIS, EARTH, SHIELD, and the `_GND`/`_VSS`/`_AGND`/`_DGND` suffixes). Every other via — including net-less vias — is a **track via**: copper carrying a signal or supply to another layer, where a high count means the routing ran out of room. `total` is the partition's sum. |
+| `corners.right_angle` / `.acute` / `.turn_back` | Same-net, same-layer joins of straight segments, counted per interior angle at the shared endpoint: right angle 89–91 deg, acute 10–89 deg (the acid-trap range `sharp_trace_corner` warns on), turn-back under 10 deg (overlaps / dead-end stubs, usually router debris). Obtuse bends and straight pass-throughs are not corners. Vertices under same-net pad/via copper are joints and are skipped; stacked duplicate segments count once. |
+| `corners.per_net` | Per-net breakdown of the same three classes; present only when at least one corner was counted. |
+| `total_track_length_mm` | Summed straight-segment centreline length plus analytic arc length. |
+| `outline_area_mm2` | Edge.Cuts polygon area (cutouts subtract, islands inside cutouts add back). Every contour is measured — footprint-owned `fp_*` graphics included; curved contours are tessellated to a certified chord error (≤1e-4 mm arcs/cubics, ~1e-5 mm circles), so the value is exact on straight-edge boards. Omitted when the outline is absent, open, crossing, or holds geometry the module cannot measure (`fp_curve`). |
+| `diff_pair_skew` | One entry per detected differential pair, from the existing `TraceLengthAnalyzer` (`find_differential_pairs` + `analyze_diff_pair`); present only when the board has pairs. |
+| `match_group_skew` | Per declared match group (in mm), from the existing `validate.match_group_skew.derive_group_skew_data`; present only when the project declares `artifacts.net_class_map_sidecar` and every group member is routed. Groups with an unrouted member are omitted, matching the producer-side tracker's gating. |
+
+Boards whose PCB is not selectable (ambiguous candidates, declared-but-missing
+artifact, invalid project specification) or unparseable omit the whole block,
+like any other optional field; the block never changes `status`. The fleet
+router benchmark (`benchmarks/external/fleet_routers/run.py`) reports the same
+block per routed case (`score.layout_quality`, alongside
+`score.layout_quality_input` for the copper-stripped input) and deliberately
+does **not** include it in the fixed-placement comparison — routing is
+supposed to change it.
+
 ## Schema versioning policy
 
 This file is the data contract for the Phase 2 Astro site, so stability matters:
@@ -484,6 +546,7 @@ Additive development fields:
 | `diagnostics` | Explanations of missing, ambiguous, malformed or unsupported metadata/evidence. |
 | `native_drc_geometry_violations` | Count of all entries in the bound native `violations` array, including warnings. |
 | `native_drc_unconnected_items` | Separate count from the bound native `unconnected_items` array. |
+| `layout_quality` | Layout-quality metrics bound to the selected PCB (`layout_quality` section above); identical block to the manufacturing path. |
 
 `part_count` counts PCB footprints (including non-BOM footprints), not unique
 BOM rows or schematic symbols. `layer_count` counts actual PCB copper layers.

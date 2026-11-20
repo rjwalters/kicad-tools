@@ -24,7 +24,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.edge_keepout import edge_keepout_radius
 from kicad_tools.router.io import load_pcb_for_routing
 from kicad_tools.router.mesh.obstacles import ObstacleModel
@@ -39,9 +38,7 @@ from tests.router.test_edge_cut_floor_6043 import (
     _seg_seg,
 )
 
-pytestmark = pytest.mark.skipif(
-    not is_cpp_available(), reason="mesh triangulation needs the C++ router backend"
-)
+pytestmark = pytest.mark.requires_router_cpp
 
 CLEARANCES = [
     pytest.param(None, id="ec-none"),

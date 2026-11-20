@@ -61,40 +61,43 @@ from collections.abc import Callable
 
 import pytest
 
-from tests.conformance.adapters.grid_cpp import GridCppAdapter
 from tests.conformance.oracle import OracleResult, kicad_cli_available, run_oracle
 from tests.conformance.report import MIGRATED_GROUPS
 
 requires_kicad_cli = pytest.mark.skipif(not kicad_cli_available(), reason="kicad-cli not installed")
 """Module-level gate for tests that need ``kicad-cli`` as ground truth."""
 
-requires_cpp = pytest.mark.skipif(
-    not GridCppAdapter().available(), reason="C++ router backend not built"
-)
+requires_cpp = pytest.mark.requires_router_cpp
 """Gate for rows that drive ``router_cpp.Grid3D`` (the ``grid_cpp`` adapter).
 
-The capability probe is the adapter's own :meth:`available`, so a machine
-where the extension is missing skips exactly the rows the report would have
-rendered ``not measured`` -- one answer, not two.  Build it with
-``uv run kct build-native``.
+Issue #9705: a row that needs the compiled extension FAILS with the build
+hint (``tests/conftest.py`` ``pytest_runtest_setup``) when it is missing --
+it no longer silently skips -- so a worktree or CI leg whose
+``uv run kct build-native`` step broke cannot report a green run with the
+native rows missing. Build it with ``uv run kct build-native``.
 """
 
 
 def requires_adapter(adapter: object) -> pytest.MarkDecorator:
-    """Skip mark derived from *this* adapter's own capability probe.
+    """Requirement mark derived from *this* adapter's own capability probe.
 
     The generalisation of :data:`requires_cpp` to every adapter, and the
-    reason Phase 1c does not accumulate one hand-written ``skipif`` per
-    native consumer.  Three adapters now need a compiled extension and they
-    do not all need the *same* one -- ``drc_cpp`` probes
-    ``drc/cpp_backend.is_cpp_available`` while the grid adapters probe
-    ``router_cpp`` -- so hard-coding a single router-extension mark would
-    skip the wrong rows on a half-built tree.
+    reason Phase 1c does not accumulate one hand-written gate per native
+    consumer.  Several adapters need a compiled extension and they do not all
+    need the *same* one -- ``drc_cpp`` probes ``drc/cpp_backend.is_cpp_available``
+    while the grid adapters probe ``router_cpp`` -- so hard-coding a single
+    router-extension gate would gate the wrong rows on a half-built tree.
 
-    Keeping the probe as ``adapter.available()`` preserves the invariant that
-    matters: a row the *report* would render ``not measured`` is exactly a row
-    the *suite* skips.  One answer, not two.
+    Adapters tagged ``native_backend = "router_cpp"`` (Issue #9705) return
+    the ``requires_router_cpp`` marker, whose setup hook FAILS the row with
+    the build hint when the extension is missing -- the row cannot silently
+    skip out of a green run.  Every other adapter keeps the skip: its
+    prerequisite is its own (``drc_cpp``'s separate extension, shapely, the
+    kicad-cli fill), and only the *router* extension is under the no-skips
+    ruling.
     """
+    if getattr(adapter, "native_backend", None) == "router_cpp":
+        return pytest.mark.requires_router_cpp
     probe = getattr(adapter, "available", None)
     available = True if probe is None else bool(probe())
     name = getattr(adapter, "name", repr(adapter))
@@ -250,14 +253,50 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
 
+def _item_needs_router_cpp(item: pytest.Item) -> bool:
+    """Whether *item*'s adapter row drives the compiled router extension."""
+    callspec = getattr(item, "callspec", None)
+    if callspec is None:
+        return False
+    adapter = callspec.params.get("adapter")
+    if getattr(adapter, "native_backend", None) == "router_cpp":
+        return True
+    name = callspec.params.get("adapter_name")
+    if isinstance(name, str):
+        from tests.conformance.report import ADAPTERS
+
+        return any(
+            adapter.name == name and getattr(adapter, "native_backend", None) == "router_cpp"
+            for adapter in ADAPTERS
+        )
+    return False
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Auto-``xfail`` every ``consumer`` item whose group is not yet migrated."""
     del config
+    # The adapter's own probe, not a direct ``kicad_tools`` import: the truth
+    # side of the harness must not import the code it measures.
+    from tests.conformance.adapters.grid_cpp import GridCppAdapter
+
+    router_cpp_built = GridCppAdapter().available()
+
     for item in items:
         if item.get_closest_marker("consumer") is None:
             continue
         if item_group(item) in MIGRATED_GROUPS:
             # Switched to the kernel in its own epic phase: the whole point of
             # that phase is that this row stops being allowed to disagree.
+            continue
+        if _item_needs_router_cpp(item) and not router_cpp_built:
+            # Issue #9705: the row's ``requires_router_cpp`` marker fails it
+            # with the build hint at setup. A plain xfail would absorb that
+            # ``Failed`` (it is a ``BaseException``, matched by ``raises is
+            # None``) and turn the missing extension back into a silent green
+            # XFAIL -- so this xfail only absorbs ``AssertionError``, the
+            # measured disagreement it exists for. The hint stays a failure.
+            item.add_marker(
+                pytest.mark.xfail(strict=False, reason=CONSUMER_XFAIL_REASON, raises=AssertionError)
+            )
             continue
         item.add_marker(pytest.mark.xfail(strict=False, reason=CONSUMER_XFAIL_REASON))

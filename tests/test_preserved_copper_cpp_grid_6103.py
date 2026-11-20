@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from kicad_tools.router.cpp_backend import CppPathfinder, is_cpp_available
+from kicad_tools.router.cpp_backend import CppPathfinder
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.io import load_pcb_for_routing
 from kicad_tools.router.rules import DesignRules
@@ -27,7 +27,7 @@ from kicad_tools.router.rules import DesignRules
 DETOUR = Path(__file__).parent / "fixtures" / "route_6103" / "detour.kicad_pcb"
 ARC = Path(__file__).parent / "fixtures" / "route_auto_6107" / "arc_on_path.kicad_pcb"
 
-needs_cpp = pytest.mark.skipif(not is_cpp_available(), reason="C++ router backend not built")
+needs_cpp = pytest.mark.requires_router_cpp
 
 
 def _load(path: Path = DETOUR, **kwargs):

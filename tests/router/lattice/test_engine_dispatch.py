@@ -13,6 +13,7 @@ import pytest
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad
+from tests.conftest import require_router_cpp
 from tests.route_cli import route_args
 
 
@@ -104,7 +105,7 @@ def test_grid_strategy_never_constructs_lattice_state() -> None:
 
 
 def test_mesh_strategy_never_constructs_lattice_state() -> None:
-    pytest.importorskip("kicad_tools.router.router_cpp")
+    require_router_cpp()
     router = _two_pad_router("mesh")
     router.route_net(1)
     assert router._mesh_pathfinder is not None

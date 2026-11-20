@@ -340,6 +340,12 @@ Three conventions this batch adds:
   contract. `metrics.generated_at` is the one deliberately volatile field
   (it belongs to the board.json contract), so determinism is asserted
   modulo that key.
+- **`boards[].metrics.layout_quality` (issue #9594).** The board.json
+  artifact gained an additive optional `layout_quality` block (track/ground
+  via split, corner counts, track length, outline area, diff-pair skew),
+  bound to the selected PCB's `sha256`. It flows through the envelope's
+  `boards[].metrics` unchanged; boards whose PCB is not selectable omit it.
+  Field reference: `docs/board-json-schema.md` → `layout_quality`.
 - **Producers say whether they produced.** Anything that can run without
   writing (`--dry-run`) reports it structurally: `saved`/`output_path`
   rather than exit 0 alone.

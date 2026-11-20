@@ -23,6 +23,15 @@ new git worktrees (`.loom/worktrees/issue-N/`) need this step explicitly.
 The C++ backend gives a 10-100x speedup for the A* loop, so a missing
 extension is the most likely cause of multi-minute-per-net routing.
 
+The test suite now **requires** the built backend (Issue #9705). A test case
+that needs the extension fails with `C++ router backend not built: run uv
+run kct build-native` — it no longer silently skips — via the
+`requires_router_cpp` marker or a `require_router_cpp()` call from
+`tests/conftest.py`. Do not add `skipif`/`importorskip` guards for this
+backend; `tests/test_router_cpp_no_skip_guards.py` fails the PR if one
+appears. (DRC and placement extensions keep their own skip guards — the
+ruling covers only the router backend.)
+
 ### Check the acceleration backend before timing routes
 
 The confirmed cause of slow routing under `--all-extras` (#8609 reported

@@ -116,21 +116,27 @@ N2_BCUT = _seg("trk-n2b", (103, 103), (103, 105.37), net=2, layer="B.Cu")
 # A track ending at the fan-out via's centre: it must move with the via.
 ATTACHED = _seg("trk-v", (100, 103), (100, 100.9))
 
-# A same-net obround pad (the shape name ``physical_gap`` collects) with the
-# same fan-out geometry as PAD_VIA: pad edge y=105.5, via edge y=105.6.
-OBROUND_PAD = (
-    '  (footprint "test:R3" (layer "F.Cu") (at 110 105)\n'
-    '    (property "Reference" "R3" (at 0 -1.5 0) (layer "F.SilkS")\n'
-    "      (effects (font (size 1 1) (thickness 0.15))))\n"
-    '    (property "Value" "R" (at 0 1.5 0) (layer "F.Fab")\n'
-    "      (effects (font (size 1 1) (thickness 0.15))))\n"
-    '    (pad "1" smd obround (at 0 0) (size 2 1) (layers "F.Cu" "F.Paste" "F.Mask") '
-    '(net 1 "N1") (uuid "pad-r3-1"))\n'
-    "  )\n"
-    '  (via (at 110 105.9) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-o"))'
-)
+
+# A same-net obround pad (the shape name ``physical_gap`` collects) beside a
+# fan-out via 0.10 mm off the pad copper.  The placement is parameterised:
+# the pad's absolute ``at`` angle orients the copper in board coordinates
+# while the footprint angle places the pad's local offset (#9399).
+def _obround_pad(footprint_at: str, pad_at: str, via_xy: tuple[float, float]) -> str:
+    return (
+        f'  (footprint "test:R3" (layer "F.Cu") (at {footprint_at})\n'
+        '    (property "Reference" "R3" (at 0 -1.5 0) (layer "F.SilkS")\n'
+        "      (effects (font (size 1 1) (thickness 0.15))))\n"
+        '    (property "Value" "R" (at 0 1.5 0) (layer "F.Fab")\n'
+        "      (effects (font (size 1 1) (thickness 0.15))))\n"
+        f'    (pad "1" smd obround (at {pad_at}) (size 2 1) (layers "F.Cu" "F.Paste" "F.Mask") '
+        '(net 1 "N1") (uuid "pad-r3-1"))\n'
+        "  )\n"
+        f'  (via (at {via_xy[0]} {via_xy[1]}) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") '
+        '(net 1) (uuid "via-o"))'
+    )
+
+
 OBROUND = "pad-r3-1"
-VIA_OBROUND = "Via@110/105.9:F.Cu-B.Cu:d0.3/s0.6"
 
 
 def _board(tmp_path: Path, copper: str) -> Path:
@@ -195,19 +201,41 @@ def test_via_beside_own_pad_moves_clear_of_the_pad(tmp_path):
     assert y == pytest.approx(100.96, abs=0.005)
 
 
-def test_via_beside_own_obround_pad_is_repaired(tmp_path):
+@pytest.mark.parametrize(
+    ("footprint_at", "pad_at", "via_xy", "expected_xy"),
+    [
+        # Unrotated 2x1 stadium: pad edge y=105.5, via edge y=105.6.
+        ("110 105", "0 0", (110.0, 105.9), (110.0, 105.96)),
+        # An absolute pad angle of 90 turns the stadium end-on (copper
+        # spans x 109.5..110.5, y 104..106), so the slit opens along x.
+        ("110 105", "0 0 90", (110.9, 105.0), (110.96, 105.0)),
+        # The same board copper from a rotated footprint: the 90-degree
+        # footprint angle moves the (2, 0) local offset to (0, -2), putting
+        # the pad centre back at (110, 105); the pad angle stays absolute.
+        ("110 107 90", "2 0 90", (110.9, 105.0), (110.96, 105.0)),
+    ],
+)
+def test_via_beside_own_obround_pad_is_repaired(
+    tmp_path, footprint_at, pad_at, via_xy, expected_xy
+):
     # Regression (#9399): the hand-rolled pad model matched "oblong", a shape
     # name KiCad never writes, so obround pad sides were declined
     # ``side_not_found``.  The rule's own ``clearance._pad_polygon`` model is
-    # reused now, so the pad resolves and the via is pushed clear.
-    board = _board(tmp_path, OBROUND_PAD)
+    # reused now, so the pad resolves and the via is pushed clear -- also
+    # when the pad angle or a rotated footprint orients the copper, and the
+    # saved coordinates catch a wrong orientation or placement even when
+    # the repair reports success.
+    board = _board(tmp_path, _obround_pad(footprint_at, pad_at, via_xy))
     repairer = CopperGapRepairer(board)
-    result = repairer.repair_gaps([_finding([OBROUND, VIA_OBROUND])], max_displacement=1.0)
+    result = repairer.repair_gaps(
+        [_finding([OBROUND, f"Via@{via_xy[0]:g}/{via_xy[1]:g}:F.Cu-B.Cu:d0.3/s0.6"])],
+        max_displacement=1.0,
+    )
     assert result.repaired == 1 and result.opened == 1 and not result.unrepaired
     repairer.save(board)
     x, y = _via(board, "via-o")
-    assert x == 110.0
-    assert y == pytest.approx(105.96, abs=0.005)
+    assert x == pytest.approx(expected_xy[0], abs=0.005)
+    assert y == pytest.approx(expected_xy[1], abs=0.005)
 
 
 def test_via_snaps_to_pad_centre_when_a_process_is_declared(tmp_path):

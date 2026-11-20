@@ -3,6 +3,7 @@
 import pytest
 
 from kicad_tools.router.primitives import Layer, Via
+from tests.conftest import require_router_cpp
 
 # Issue #5660 (Epic #5509 Phase 3a): route halos are the clearance kernel's
 # exact disc, not the Chebyshev square they used to be.  Every probe below
@@ -17,7 +18,7 @@ HALO_RADIUS_CELLS = 7
 
 @pytest.fixture(params=["native", "python"])
 def context(request):
-    from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+    from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
     from kicad_tools.router.grid import RoutingGrid
     from kicad_tools.router.layers import LayerStack
     from kicad_tools.router.pathfinder import Router
@@ -39,8 +40,7 @@ def context(request):
     )
     x, y = grid.grid_to_world(60, 60)
     if request.param == "native":
-        if not is_cpp_available():
-            pytest.skip("native router required")
+        require_router_cpp()
         native = CppGrid.from_routing_grid(grid)
         native._impl.add_stored_via(x, y, 0.3, 0.6, 2)
         native._impl.mark_via(60, 60, 2, HALO_RADIUS_CELLS)

@@ -132,8 +132,9 @@ hold, otherwise the measurement keeps its verdict (these are the conditions
 the `within_own_pad_failed_condition` field names):
 
 1. the opening has one owner, a plain `rect`, `roundrect`, `circle` or `oval`
-   pad with a mask margin of 0 or more (custom, padstack, chamfered and
-   solder-mask-defined pads keep their verdict);
+   pad, or a bare custom pad (such as the stock `SOT-89-3` tab, measured
+   through its real copper outline; #9750), with a mask margin of 0 or more
+   (padstack, chamfered and solder-mask-defined pads keep their verdict);
 2. direct connection: the copper overlaps the pad's copper by more than the
    construction budget `u` (both shrunk by `u`);
 3. **nothing beyond the pad is exposed**. `u` is tolerated once at the pad
@@ -142,10 +143,14 @@ the `within_own_pad_failed_condition` field names):
 4. **nothing beside the pad beyond one clean entry**. The copper under mask
    within the policy clearance (0.09 mm) of the opening may not exceed what
    one straight crossing at 45° or steeper puts there (1.45 × track width ×
-   clearance). Only a straight segment with an authored end inside the pad
-   gets that allowance (the other end may exit, sit on the edge or be inside
-   too). A segment with no end inside — lying wholly on it, straddling or
-   passing through — gets none;
+   clearance). A bar wider than the pad (wider than the pad plus two
+   clearances) whose copper covers the whole perimeter band instead gets that
+   band itself as the allowance: it leaves the pad's own perimeter under mask,
+   not a second trace, so round and square pads agree (#9750). Only a straight
+   segment with an authored end inside the pad gets either allowance (the
+   other end may exit, sit on the edge or be inside too). A segment with no
+   end inside — lying wholly on it, straddling or passing through — gets
+   none;
 5. for a via, its authored drill lies wholly outside the opening (a via ring
    touching the pad leaves copper beside the opening).
 

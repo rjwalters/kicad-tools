@@ -146,7 +146,7 @@ def run_routing_benchmark(
 class TestCppPerformance:
     """Tests for C++ backend performance improvements."""
 
-    @pytest.mark.skipif(not is_cpp_available(), reason="C++ backend not available")
+    @pytest.mark.requires_router_cpp
     def test_cpp_backend_available(self):
         """Verify C++ backend is properly built and available."""
         info = get_backend_info()
@@ -166,7 +166,7 @@ class TestCppPerformance:
         assert result.nets_routed > 0
         assert result.time_seconds < 10.0
 
-    @pytest.mark.skipif(not is_cpp_available(), reason="C++ backend not available")
+    @pytest.mark.requires_router_cpp
     def test_cpp_matches_python_results(self):
         """Verify C++ backend produces valid routes matching Python behavior."""
         # Run with Python backend
@@ -195,7 +195,7 @@ class TestCppPerformance:
         assert python_result.nets_routed > 0
         assert cpp_result.nets_routed > 0
 
-    @pytest.mark.skipif(not is_cpp_available(), reason="C++ backend not available")
+    @pytest.mark.requires_router_cpp
     @pytest.mark.slow
     def test_large_board_issue_947(self):
         """Test routing on large board scenario from issue #947.

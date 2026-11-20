@@ -15,6 +15,7 @@ import pytest
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.diffpair import DifferentialPairConfig
 from kicad_tools.router.rules import DesignRules, NetClassRouting
+from tests.conftest import require_router_cpp
 
 pytestmark = pytest.mark.timeout(300)
 
@@ -90,7 +91,7 @@ def _router(strategy: str) -> Autorouter:
 def test_lattice_pair_nets_carry_only_lattice_copper(capsys, engine: str) -> None:
     """One engine owns pair copper under lattice AND mesh (#6535, #6551)."""
     if engine == "mesh":
-        pytest.importorskip("kicad_tools.router.router_cpp")
+        require_router_cpp()
     router = _router(engine)
     # The CLI's phase-2 strategy: route_all over every net.
     router.route_all_with_diffpairs(
@@ -148,7 +149,7 @@ def test_mesh_foreign_net_does_not_cross_pair_copper(capsys) -> None:
     """Issue #6551 (B): on the ``--strategy basic`` path the mesh negotiated a
     foreign net without seeing the grid pre-pass trunk, so the net crossed
     it.  With the pre-pass skipped there is one copper owner and no short."""
-    pytest.importorskip("kicad_tools.router.router_cpp")
+    require_router_cpp()
     router = _router("mesh")
     # XSIG runs top-to-bottom straight through the pair corridor (y 5.5-6.5).
     router.add_component(

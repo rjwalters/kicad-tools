@@ -3034,7 +3034,20 @@ def _add_pcb_parser(subparsers) -> None:
         "loops (including loops closed through vias) by removing each loop's "
         "narrowest segment below --wide, so 'pcb reinforce' can anchor the run. "
         "Loops whose segments are all >= --wide are reported, not cut, as is any "
-        "loop the current-path audit still sees afterwards (with its witness).",
+        "loop the current-path audit still sees afterwards (with its witness). "
+        "Without this flag a current_paths.json sidecar next to the board is "
+        "auto-discovered, exactly as 'kct check' auto-loads it (Issue #9747); "
+        "use --no-current-paths to suppress that.",
+    )
+    pcb_prune.add_argument(
+        "--no-current-paths",
+        dest="no_current_paths",
+        action="store_true",
+        help="Suppress current-paths sidecar auto-discovery for 'pcb prune': "
+        "no sidecar is loaded (only an explicit --current-paths names one), "
+        "so declared nets get no declared-current width test in planning "
+        "and the post-plan current-path audit gate (Issue #8687) is "
+        "disabled. Cannot be combined with --current-paths.",
     )
     pcb_prune.add_argument(
         "--wide",
@@ -4849,6 +4862,20 @@ def _add_route_auto_parser(subparsers) -> None:
             "Via pad diameter in mm. Overrides the board-derived via diameter "
             "(Issue #4247). When omitted, route-auto derives the diameter from "
             "the board's net-class via constraints."
+        ),
+    )
+    route_auto_parser.add_argument(
+        "--grid",
+        default="auto",
+        metavar="AUTO|MM",
+        help=(
+            "Routing grid pitch in mm, or 'auto' (default; Issue #9620). "
+            "'auto' reuses the 'kct route --grid auto' selector: a "
+            "pad-aligned pitch under the memory cap (500k cells), chosen from "
+            "the board's pads and declared clearance, instead of the legacy "
+            "fixed clearance/2 lattice that could time out long nets on big "
+            "boards. An explicit value (e.g. --grid 0.2) is honoured as given; "
+            "pass the board's clearance/2 to restore the legacy pitch."
         ),
     )
     route_auto_parser.add_argument("-o", "--output", help="Output PCB file path")

@@ -67,15 +67,13 @@ from __future__ import annotations
 
 import pytest
 
-from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available, router_cpp
+from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, router_cpp
 from kicad_tools.router.grid import RoutingGrid, _sync_pad_via_policies
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
 
-native = pytest.mark.skipif(
-    not is_cpp_available(), reason="native backend unavailable; run kct build-native"
-)
+native = pytest.mark.requires_router_cpp
 
 # Geometry constants -- see the module docstring for the arithmetic.
 PAD_X = 5.0

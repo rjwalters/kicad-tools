@@ -22,11 +22,10 @@ import math
 import pytest
 
 from kicad_tools.router import diffpair_pose
-from kicad_tools.router.cpp_backend import is_cpp_available
 
 from .test_diffpair_pose_centerline_5786 import _setup
 
-pytestmark = pytest.mark.skipif(not is_cpp_available(), reason="C++ router extension not built")
+pytestmark = pytest.mark.requires_router_cpp
 
 
 def _accept_all(*_args) -> bool:

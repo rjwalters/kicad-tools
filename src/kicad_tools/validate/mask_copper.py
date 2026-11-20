@@ -56,17 +56,21 @@ opening covers that part -- but it is the pad's own exposed land, and the one
 track width it puts under mask where it leaves the pad is unavoidable. Such a
 measurement's disposition is ``within_own_pad`` and its finding is ``info``.
 The class is granted for what the copper *does*, never merely for touching
-the pad (``_within_own_pad`` states the conditions): a plain pad shape with a
+the pad (``_within_own_pad`` states the conditions): a plain pad shape, or a
+custom pad through its real copper outline (issue #9750), with a
 non-negative margin; the same identified net; a proven direct overlap; nothing
 exposed beyond the pad (the construction budget ``u`` tolerated once); and no
 copper under mask within the danger clearance beside the opening beyond what
 one straight entry at 45 degrees or steeper puts there. Only a straight
 segment with at least one authored end strictly inside the pad gets that
-allowance (issue #9261). So a track that straddles, runs along or passes
-through the pad, a shallower entry, an arc, a via or pour touching the pad
-(ring copper beside the opening), a positive expansion ring wider than
-``u``, solder-mask-defined, custom and padstack pads, pads with no net, and
-any different-net copper all keep their measured verdict.
+allowance (issue #9261) -- or, when its copper already covers the whole
+perimeter band, the allowance is that band itself: a bar wider than the pad
+leaves the pad's own perimeter under mask, not a second trace, so round and
+square pads agree (issue #9750). So a track that straddles, runs along or
+passes through the pad, a shallower entry, an arc, a via or pour touching the
+pad (ring copper beside the opening), a positive expansion ring wider than
+``u``, solder-mask-defined, padstack and chamfered pads, pads with no net,
+and any different-net copper all keep their measured verdict.
 ``exposed_beyond_owner_mm2`` and ``beside_owner_excess_mm2`` record the two
 measured quantities, and ``within_own_pad_failed_condition`` names the
 ``_within_own_pad`` docstring condition (1-5) that kept a same-net,
@@ -544,9 +548,17 @@ def _conductor_endpoints(copper):
 
 
 #: Owner pad shapes whose plotted opening the within-own-pad class has been
-#: checked against (issue #8858). Custom, padstack and chamfered pads, and any
-#: shape not listed, keep their measured verdict.
+#: checked against (issue #8858); also the pour-thermal class's gate
+#: (``_own_pour_thermal``, which #9750 leaves on this plain tuple). Custom,
+#: padstack and chamfered pads, and any shape not listed, keep their measured
+#: verdict on this tuple.
 _WITHIN_OWN_PAD_OWNER_KINDS = ("pad:rect", "pad:roundrect", "pad:circle", "pad:oval")
+
+#: Owner kinds the within-own-pad entry class additionally admits (issue
+#: #9750): stock custom pads such as the SOT-89 tab, whose conditions 2-4 run
+#: against the pad's real copper outline. Suffixed kinds (padstack, chamfer)
+#: stay out, so a bare ``pad:custom`` never widens the pour tuple above.
+_WITHIN_OWN_PAD_ENTRY_OWNER_KINDS = _WITHIN_OWN_PAD_OWNER_KINDS + ("pad:custom",)
 
 #: One straight track crossing the pad edge at 45 degrees or steeper puts at
 #: most sqrt(2) x width x clearance of copper under mask in the band beside the
@@ -564,8 +576,11 @@ def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearanc
     A same-net conductor qualifies only when **what it does** is a clean entry
     into its own pad. Every condition is required:
 
-    1. The owner is a plain pad shape (``_WITHIN_OWN_PAD_OWNER_KINDS``) with a
-       non-negative mask margin. Solder-mask-defined openings fail closed.
+    1. The owner is a plain pad shape or a custom pad
+       (``_WITHIN_OWN_PAD_ENTRY_OWNER_KINDS``) with a non-negative mask
+       margin. Solder-mask-defined, padstack and chamfered openings fail
+       closed; a custom pad's remaining conditions run against its real
+       copper outline (issue #9750).
     2. Direct connection: the conductor's copper and the pad's copper overlap
        beyond the construction budget ``u`` (both shrunk by ``u``).
     3. Nothing exposed beyond the pad: ``opening ∩ copper − pad.buffer(u)`` is
@@ -577,7 +592,12 @@ def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearanc
        opening. Its allowance ``A`` is zero, except for a straight segment
        with at least one authored endpoint strictly inside the pad: one entry
        crossing, ``A = 1.45 × width × clearance`` (the other end may exit, sit
-       on the edge or be inside too).
+       on the edge or be inside too), or, when that copper covers the whole
+       perimeter band (a bar wider than the pad), the band itself,
+       ``A = area(opening.buffer(clearance + u) − opening.buffer(u))`` -- the
+       copper left under mask beside the opening is then the pad's own
+       perimeter, not a second trace, so round and square pads agree by
+       construction (issue #9750).
        The finding qualifies only if ``B − A`` (returned as the excess) is
        numerically zero. So a track that straddles, runs along or passes
        through the pad, an entry shallower than about 45 degrees, a via or
@@ -592,7 +612,7 @@ def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearanc
     e.g. a spoke-connected own pour fails condition 4 yet reads
     ``own_pour_thermal`` at info.
     """
-    if owner["kind"] not in _WITHIN_OWN_PAD_OWNER_KINDS or margin < 0:
+    if owner["kind"] not in _WITHIN_OWN_PAD_ENTRY_OWNER_KINDS or margin < 0:
         return False, None, 1
     if owner_copper.buffer(-uncertainty).intersection(copper.buffer(-uncertainty)).area <= 0:
         return False, None, 2
@@ -624,6 +644,14 @@ def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearanc
         # scores worse than a full exit (issue #9261). B is still measured
         # from the real copper, so the excess check keeps gating.
         allowance = _ENTRY_CROSSING_FACTOR * width * clearance
+        ring = opening.buffer(clearance + uncertainty).difference(opening.buffer(uncertainty))
+        if ring.difference(copper).area <= _AREA_EPSILON_MM2:
+            # A bar wider than the pad covers the whole perimeter band, so
+            # the copper it leaves under mask beside the opening is the pad's
+            # own perimeter band, not a second trace: allow the band itself
+            # (issue #9750). Round and square pads then agree by construction,
+            # and a narrower track keeps the one-crossing budget above.
+            allowance = ring.area
     excess = max(0.0, band - allowance)
     if excess > _AREA_EPSILON_MM2:
         return False, excess, 4

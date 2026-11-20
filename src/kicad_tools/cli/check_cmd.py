@@ -1172,7 +1172,7 @@ def run_meta_checks(
         schematic_missing=schematic_missing,
         coverage_incomplete=coverage_incomplete,
         incomplete_categories=incomplete_categories,
-        schematic_path=str(resolved_sch) if resolved_sch is not None else None,
+        schematic_path=portable_report_path(resolved_sch) if resolved_sch is not None else None,
         schematic_source=schematic_source,
     )
     result.compute_overall()

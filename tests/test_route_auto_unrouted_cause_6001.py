@@ -28,7 +28,6 @@ import pytest
 
 from kicad_tools.cli import main as kct_main
 from kicad_tools.mcp.tools.routing import route_net_auto
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.route_auto_diagnosis import (
     diagnose_route_auto_net,
     island_bridges,
@@ -47,7 +46,7 @@ BACKENDS = [
     pytest.param(
         False,
         id="cpp",
-        marks=pytest.mark.skipif(not is_cpp_available(), reason="C++ router backend not built"),
+        marks=pytest.mark.requires_router_cpp,
     ),
 ]
 

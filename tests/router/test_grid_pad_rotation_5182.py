@@ -10,10 +10,9 @@ from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.io import _resolve_pad_dims_and_rotation
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad, Segment, Via
+from tests.conftest import require_router_cpp
 
-native = pytest.mark.skipif(
-    not is_cpp_available(), reason="native backend unavailable; run kct build-native"
-)
+native = pytest.mark.requires_router_cpp
 
 ANGLES = [-45, -30, 0, 30, 45, 89.5, 90, 90.5, 180, 269.5, 270]
 
@@ -53,7 +52,7 @@ def test_python_backstops(angle, v, valid):
 @native
 def test_compiled_acceptance(angle, v, valid, kind, late):
     from kicad_tools.router import router_cpp
-    from kicad_tools.router.cpp_backend import CppGrid, is_cpp_available
+    from kicad_tools.router.cpp_backend import CppGrid
 
     assert is_cpp_available(), "Build native backend to run these regression controls"
     grid, pad = setup(angle)
@@ -87,8 +86,8 @@ def test_actual_finalization(kind, force_python, v, demoted):
     from kicad_tools.router.primitives import Route
 
     rules = DesignRules(trace_width=0.1, trace_clearance=0.127, grid_resolution=0.05)
-    if not force_python and not is_cpp_available():
-        pytest.skip("native backend unavailable")
+    if not force_python:
+        require_router_cpp()
     router = Autorouter(20, 20, rules=rules, force_python=force_python)
     _, pad = setup(45)
     router.add_component(

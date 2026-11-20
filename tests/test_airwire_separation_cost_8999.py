@@ -38,9 +38,7 @@ from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad, Route, Segment
 from kicad_tools.router.rules import DesignRules
 
-needs_cpp = pytest.mark.skipif(
-    not cpp_backend.is_cpp_available(), reason="C++ router backend not built"
-)
+needs_cpp = pytest.mark.requires_router_cpp
 
 DETOUR = Path(__file__).parent / "fixtures" / "route_6103" / "detour.kicad_pcb"
 

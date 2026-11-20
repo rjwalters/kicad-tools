@@ -21,7 +21,9 @@ logger = logging.getLogger(__name__)
 from kicad_tools.sexp import SExp
 
 from ..core.board_outline import (
+    OutlineSegments,
     board_outline_bounds,
+    circle_sagitta,
     footprint_outline_closed_shapes,
     footprint_outline_graphics,
     is_degenerate_closed_curve,
@@ -29,7 +31,7 @@ from ..core.board_outline import (
     outline_graphics,
     outline_node_points,
 )
-from ..core.outline_tessellation import tessellate_cubic
+from ..core.outline_tessellation import DegenerateArcError, tessellate_arc, tessellate_cubic
 from ..core.schematic_uuids import UuidMinter
 from ..core.sexp_file import load_footprint, load_pcb, save_pcb
 from ..core.version import KICAD_BOARD_FORMAT_VERSION, KICAD_GENERATOR_VERSION
@@ -66,6 +68,14 @@ def _is_footprint_tag(tag: str | None) -> bool:
     editable (position sync, rename, remove, translate) and not just readable.
     """
     return tag in FOOTPRINT_TAGS
+
+
+# Hausdorff bound for the tessellated Edge.Cuts chains emitted by
+# ``PCB.get_board_outline_segments`` (Issue #9689).  Below the helper's own
+# 0.0001 mm default and below the router's 100 nm slack, so the certified
+# chain error carried on ``OutlineSegments.max_error_mm`` stays an order of
+# magnitude under every consumer's floating-point comparison tolerance.
+_EDGE_OUTLINE_TESSELLATION_MAX_ERROR_MM = 1e-5
 
 
 def _find_all_footprints(doc: SExp) -> list[SExp]:
@@ -523,6 +533,182 @@ def _mirror_local_y(node: SExp) -> None:
             _mirror_local_y(child)
 
 
+def iter_pad_primitives(node: SExp) -> Iterator[SExp]:
+    """Yield every ``(primitives ...)`` block under *node*, nested included."""
+    for child in node.iter_children():
+        if child.tag == "primitives":
+            yield child
+        else:
+            yield from iter_pad_primitives(child)
+
+
+def _pad_options_anchor(options: SExp | None) -> SExp | None:
+    """The ``(anchor ...)`` child of a pad ``(options ...)`` node, if any."""
+    return options.find_child("anchor") if options is not None else None
+
+
+def _insert_pad_child_before(pad_node: SExp, child: SExp, tags: tuple[str, ...]) -> None:
+    """Insert *child* before the pad's first child named in *tags* (append)."""
+    for i, existing in enumerate(pad_node.children):
+        if existing.name in tags:
+            pad_node.children.insert(i, child)
+            return
+    pad_node.children.append(child)
+
+
+def _insert_layer_child_after(layer_node: SExp, child: SExp, tags: tuple[str, ...]) -> None:
+    """Insert *child* after the layer node's last child named in *tags*."""
+    index = 1  # after the layer-name atom
+    for i, existing in enumerate(layer_node.children):
+        if existing.name in tags:
+            index = max(index, i + 1)
+    layer_node.children.insert(index, child)
+
+
+def _exchange_pad_field(front: SExp, back: SExp, tag: str) -> None:
+    front_field, back_field = front.find_child(tag), back.find_child(tag)
+    if front_field is not None and back_field is not None:
+        front_field.children, back_field.children = back_field.children, front_field.children
+        return
+    if front_field is not None:
+        front.remove(front_field)
+    if back_field is not None:
+        back.remove(back_field)
+        _insert_pad_child_before(front, back_field, ("options", "primitives", "uuid", "padstack"))
+    if front_field is not None:
+        _insert_pad_child_before(back, front_field, ("options", "primitives", "zone_connect"))
+
+
+def _mirror_pad_shape_fields(holder: SExp) -> None:
+    for tag in ("offset", "rect_delta"):
+        point = holder.find_child(tag)
+        if point is not None:
+            _negate_node_y(point)
+    chamfer = holder.find_child("chamfer")
+    if chamfer is not None:
+        chamfer.children = [
+            SExp.atom(_CHAMFER_CORNER_SWAP[c.value])
+            if c.is_atom and c.value in _CHAMFER_CORNER_SWAP
+            else c
+            for c in chamfer.children
+        ]
+
+
+def _exchange_front_back_primitives(pad_node: SExp, custom_clearance: SExp | None) -> None:
+    """Swap the pad's front and back padstack shape definitions.
+
+    A ``front_inner_back`` padstack serializes the front layer's definition at
+    the pad's top level (the shape atom, ``(size ...)``, ``(options ...)`` and
+    ``(primitives ...)``) and the back layer's inside ``(padstack (layer
+    "B.Cu" ...))``.  KiCad's ``Flip`` exchanges the two definitions, not only
+    two existing primitives blocks: when one outer side is not a custom shape
+    (and so has no primitives block at all), the shape, size, options and
+    primitives move together and the unused side ends up with the other
+    side's plain shape (measured black-box on the CI-pinned ``pcbnew`` 10.0.6
+    image, Issues #9752 and #9773).  The pad-level ``(clearance ...)`` option
+    serializes only beside a custom top-level shape -- its default
+    ``outline`` when the pad's front was plain before the flip.
+    """
+    padstack = pad_node.find_child("padstack")
+    _mirror_pad_shape_fields(pad_node)
+    drill = pad_node.find_child("drill")
+    if drill is not None:
+        _mirror_local_y(drill)
+    back = None
+    if padstack is not None:
+        for layer in padstack.find_children("layer"):
+            _mirror_pad_shape_fields(layer)
+            if layer.get_string(0) == "B.Cu":
+                back = layer
+    if back is None:
+        return
+    back_shape_node = back.find_child("shape")
+    if back_shape_node is None or len(pad_node.children) < 3 or pad_node.children[2].is_list:
+        return
+
+    front_shape = str(pad_node.children[2].value)
+    back_shape = back_shape_node.get_string(0)
+    if back_shape is None:
+        return
+
+    # -- shape atom ----------------------------------------------------------
+    pad_node.children[2] = SExp.atom(back_shape)
+    back_shape_node.set_atom(0, front_shape)
+
+    for tag in ("size", "rect_delta", "roundrect_rratio", "chamfer_ratio", "chamfer"):
+        _exchange_pad_field(pad_node, back, tag)
+    # KiCad stores the front copper offset under drill, and the back offset
+    # directly under its layer. The hole dimensions stay with the pad.
+    if drill is None and back.find_child("offset") is not None:
+        drill = SExp.list("drill", 0)
+        _insert_pad_child_before(pad_node, drill, ("layers",))
+    if drill is not None:
+        _exchange_pad_field(drill, back, "offset")
+
+    # -- options: the anchor moves with the shape; clearance is pad-level ------
+    top_options = pad_node.find_child("options")
+    back_options = back.find_child("options")
+    front_anchor = _pad_options_anchor(top_options)
+    back_anchor = _pad_options_anchor(back_options)
+    clearance = top_options.find_child("clearance") if top_options is not None else None
+    if back_shape == "custom":
+        entries = [clearance or custom_clearance or SExp.list("clearance", "outline")]
+        if back_anchor is not None:
+            entries.append(back_anchor)
+        if top_options is None:
+            top_options = SExp.list("options")
+            _insert_pad_child_before(pad_node, top_options, ("primitives", "uuid", "padstack"))
+        top_options.children = entries
+    elif top_options is not None:
+        pad_node.remove(top_options)
+    if front_shape == "custom":
+        entries = [front_anchor] if front_anchor is not None else []
+        if back_options is None:
+            back_options = SExp.list("options")
+            _insert_layer_child_after(back, back_options, ("shape", "size"))
+        back_options.children = entries
+    elif back_options is not None:
+        back.remove(back_options)
+
+    # -- primitives: the block follows its side's (new) shape -----------------
+    top_prims = pad_node.find_child("primitives")
+    back_prims = back.find_child("primitives")
+    if top_prims is not None:
+        pad_node.remove(top_prims)
+    if back_prims is not None:
+        back.remove(back_prims)
+    if back_shape == "custom":
+        # The top level takes the old back block's contents.
+        block = back_prims if back_prims is not None else SExp.list("primitives")
+        _insert_pad_child_before(pad_node, block, ("uuid", "padstack"))
+    if front_shape == "custom":
+        block = top_prims if top_prims is not None else SExp.list("primitives")
+        _insert_layer_child_after(back, block, ("shape", "size", "options"))
+
+
+def mirror_pad_primitives(pad_node: SExp, custom_clearance: SExp | None = None) -> None:
+    """Mirror a custom pad's primitives the way KiCad's ``Flip`` does.
+
+    Every ``(primitives ...)`` block under the pad -- the top-level block and
+    each nested ``(padstack (layer ...) ...)`` block of a per-layer padstack --
+    is y-mirrored with three-point ``gr_arc`` endpoints swapping, and the
+    whole front/back shape definition (shape, size, options, primitives)
+    exchanges between the pad's top level and the padstack's ``B.Cu`` layer.
+    Measured black-box against ``pcbnew`` 10.0.6 ``Flip`` on layer-asymmetric
+    padstacks (the golden fixture's pads 7-11, Issues #9752/#9773).
+    Standalone pad shapes also mirror their offset, trapezoid delta and corners.
+    """
+    for primitives in iter_pad_primitives(pad_node):
+        _mirror_local_y(primitives)
+        # A three-point arc's endpoint order reverses (start <-> end after
+        # the y negation); the mid point keeps its mirrored position.
+        for arc in primitives.find_children("gr_arc"):
+            start, end = arc.find_child("start"), arc.find_child("end")
+            if start is not None and end is not None and arc.find_child("mid") is not None:
+                start.children, end.children = end.children, start.children
+    _exchange_front_back_primitives(pad_node, custom_clearance)
+
+
 def flip_footprint_children_to_back(footprint_node: SExp, rotation: float = 0.0) -> None:
     """Re-express a front-authored raw ``(footprint ...)`` for a back placement.
 
@@ -544,20 +730,8 @@ def flip_footprint_children_to_back(footprint_node: SExp, rotation: float = 0.0)
                 angle = at_node.get_float(2)
                 if angle:
                     at_node.children[2] = _mm_atom(-angle)
-            drill = child.find_child("drill")
-            if drill is not None:
-                _mirror_local_y(drill)
-            chamfer = child.find_child("chamfer")
-            if chamfer is not None:
-                chamfer.children = [
-                    SExp.atom(_CHAMFER_CORNER_SWAP[c.value])
-                    if c.is_atom and c.value in _CHAMFER_CORNER_SWAP
-                    else c
-                    for c in chamfer.children
-                ]
-            primitives = child.find_child("primitives")
-            if primitives is not None:
-                _mirror_local_y(primitives)
+            # Walks nested padstack blocks and exchanges front/back (Issue #9752).
+            mirror_pad_primitives(child)
         elif tag in _FP_TEXT_TAGS:
             _flip_layer_children(child)
             at_node = child.find_child("at")
@@ -997,6 +1171,24 @@ class Pad:
     # ``power_out`` switch-node pin from a regulator output (issue #5998).
     pinfunction: str = ""
 
+    # A plain front shape cannot serialize the pad-wide custom zone mode.
+    _custom_clearance: SExp | None = field(default=None, init=False, repr=False, compare=False)
+
+    def mirror_shape_geometry(self) -> None:
+        node = self._sexp_node
+        if node is None:
+            return
+        if options := node.find_child("options"):
+            if clearance := options.find_child("clearance"):
+                self._custom_clearance = clearance
+        mirror_pad_primitives(node, self._custom_clearance)
+        # The tree already holds the mirrored geometry. Refresh the public
+        # fields without invoking setters that serialize absent defaults.
+        parsed = Pad.from_sexp(node)
+        if parsed is not None:
+            for name in ("shape", "size", "roundrect_rratio", "drill_offset"):
+                object.__setattr__(self, name, getattr(parsed, name))
+
     def __setattr__(self, name: str, value: object) -> None:
         # An oval hole has no single diameter: refuse *before* storing so the
         # Python value and the tree cannot diverge (issue #7479).
@@ -1107,13 +1299,13 @@ class Pad:
             pad.rotation = at.get_float(2) or 0.0
 
         # Size
-        if size := sexp.find("size"):
+        if size := sexp.find_child("size"):
             w = size.get_float(0) or 0.0
             h = size.get_float(1) or w
             pad.size = (w, h)
 
         # Corner radius ratio for roundrect pads (default 0.25 when absent)
-        if rratio := sexp.find("roundrect_rratio"):
+        if rratio := sexp.find_child("roundrect_rratio"):
             value = rratio.get_float(0)
             if value is not None:
                 pad.roundrect_rratio = value
@@ -5524,10 +5716,23 @@ class PCB:
         """Get board outline as a list of line segments.
 
         Returns all Edge.Cuts graphic elements as line segments: lines,
-        two-chord arcs, rects, polygon boundaries (with their authored
-        closing edge), tessellated cubics (no implicit closing edge -- see
-        :meth:`_edge_cuts_curve_chains_sexp`) and certified circle rings.
-        More useful for distance calculations than the polygon.
+        certified bounded-error arc tessellations, rects, polygon
+        boundaries (with their authored closing edge), tessellated cubics
+        (no implicit closing edge -- see :meth:`_edge_cuts_curve_chains_sexp`)
+        and certified circle rings.  More useful for distance calculations
+        than the polygon.
+
+        Arcs (board-level ``gr_arc`` and footprint ``fp_arc`` alike) are
+        tessellated by the certified helper with a Hausdorff bound of
+        ``_EDGE_OUTLINE_TESSELLATION_MAX_ERROR_MM`` (Issue #9689): the old
+        two-chord approximation ignored the arc's sagitta -- about
+        ``0.29 * r`` for a 180-degree arc, far beyond any edge clearance --
+        which made ``EdgeClearanceRule`` both miss copper near an arc's
+        bulge and flag copper that clears the true arc.  The returned
+        value is an :class:`~kicad_tools.core.board_outline.OutlineSegments`
+        (a plain ``list`` subclass) carrying the bound on
+        ``max_error_mm``; distance-measuring consumers must widen their
+        comparisons by it in the conservative direction.
 
         Footprint-local Edge.Cuts graphics (``fp_*``, which KiCad treats
         as board outline) participate with the same treatment as their
@@ -5537,12 +5742,27 @@ class PCB:
         footprint graphics raise ``ValueError`` (fail-loud, like
         :attr:`board_size`); malformed board-level poly/curve/circle
         graphics are skipped, matching the tolerant in-memory parsing of
-        the board-level line/arc collections.
+        the board-level line/arc collections. Board arcs with collinear or
+        coincident points retain their two authored chords. Other arc
+        certification failures raise ValueError.
 
         Returns:
             List of ((x1, y1), (x2, y2)) tuples representing line segments.
         """
-        segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
+        segments = OutlineSegments()
+
+        def _tessellated_arc_edges(
+            start: tuple[float, float],
+            mid: tuple[float, float],
+            end: tuple[float, float],
+        ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+            chain = tessellate_arc(
+                start, mid, end, max_error=_EDGE_OUTLINE_TESSELLATION_MAX_ERROR_MM
+            )
+            segments.max_error_mm = max(
+                segments.max_error_mm, _EDGE_OUTLINE_TESSELLATION_MAX_ERROR_MM
+            )
+            return list(zip(chain[:-1], chain[1:], strict=True))
 
         for line in self._graphic_lines:
             if line.layer == "Edge.Cuts":
@@ -5550,9 +5770,10 @@ class PCB:
 
         for arc in self._graphic_arcs:
             if arc.layer == "Edge.Cuts":
-                # Approximate arc with two segments through midpoint
-                segments.append((arc.start, arc.mid))
-                segments.append((arc.mid, arc.end))
+                try:
+                    segments.extend(_tessellated_arc_edges(arc.start, arc.mid, arc.end))
+                except DegenerateArcError:
+                    segments.extend(((arc.start, arc.mid), (arc.mid, arc.end)))
 
         for graphic in self._graphics:
             if graphic.layer == "Edge.Cuts" and graphic.graphic_type == "rect":
@@ -5589,6 +5810,7 @@ class PCB:
                     "Malformed Edge.Cuts gr_circle: zero-radius circle has no boundary"
                 )
             ring = circle_tessellation_points(center, radius)
+            segments.max_error_mm = max(segments.max_error_mm, circle_sagitta(radius, len(ring)))
             return list(zip(ring, ring[1:] + ring[:1], strict=True))
 
         def _outline_segments_of(
@@ -5605,7 +5827,15 @@ class PCB:
                     )
                 if is_degenerate_closed_curve(chain):
                     return []
-                return _curve_edges(tessellate_cubic(chain))
+                # Same explicit bound as the arc/circle branches, so the
+                # whole chain's certified error stays an order below every
+                # consumer's comparison epsilon (the helper's 0.0001 mm
+                # default would collide with ``_CLEARANCE_EPSILON_MM``).
+                curve = tessellate_cubic(chain, max_error=_EDGE_OUTLINE_TESSELLATION_MAX_ERROR_MM)
+                segments.max_error_mm = max(
+                    segments.max_error_mm, _EDGE_OUTLINE_TESSELLATION_MAX_ERROR_MM
+                )
+                return _curve_edges(curve)
             if tag == "gr_circle":
                 center, end = outline_node_points(node)
                 return _circle_edges(center, end)
@@ -5617,8 +5847,9 @@ class PCB:
             if tag == "gr_line":
                 segments.append((points[0], points[1]))
             elif tag == "gr_arc":
-                segments.append((points[0], points[1]))
-                segments.append((points[1], points[2]))
+                # Footprint arcs share the certified board-arc path, fed
+                # with their transformed start/mid/end (Issue #9689).
+                segments.extend(_tessellated_arc_edges(points[0], points[1], points[2]))
             elif tag in ("gr_poly", "gr_curve", "gr_circle"):
                 segments.extend(_outline_segments_of(node))
 
@@ -5639,10 +5870,15 @@ class PCB:
 
         # Transform from sheet-absolute to board-relative coordinates
         # so that outline segments match footprint positions (which are
-        # converted to board-relative in _detect_board_origin).
+        # converted to board-relative in _detect_board_origin).  The
+        # certified ``max_error_mm`` bound survives the translation (a
+        # pure translation cannot change a Hausdorff distance).
         ox, oy = self._board_origin
         if ox != 0.0 or oy != 0.0:
-            segments = [((x1 - ox, y1 - oy), (x2 - ox, y2 - oy)) for (x1, y1), (x2, y2) in segments]
+            segments = OutlineSegments(
+                [((x1 - ox, y1 - oy), (x2 - ox, y2 - oy)) for (x1, y1), (x2, y2) in segments],
+                max_error_mm=segments.max_error_mm,
+            )
 
         return segments
 

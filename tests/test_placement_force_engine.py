@@ -162,10 +162,7 @@ class TestFallbackBehavior:
 # Cross-check tests (require C++ backend)
 # ---------------------------------------------------------------------------
 
-cpp_required = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ force engine backend not available",
-)
+cpp_required = pytest.mark.requires_router_cpp
 
 
 @cpp_required

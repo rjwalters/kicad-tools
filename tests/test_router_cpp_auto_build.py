@@ -15,6 +15,7 @@ from unittest import mock
 import pytest
 
 from kicad_tools.router import cpp_backend
+from tests.conftest import require_router_cpp
 
 
 class _FakeBuildResult:
@@ -496,8 +497,7 @@ class TestGetBackendInfoBuildVersion:
         assert info["required_build_version"] == cpp_backend._REQUIRED_CPP_BUILD_VERSION
 
     def test_build_version_matches_requirement_when_available(self):
-        if not cpp_backend.is_cpp_available():
-            pytest.skip("C++ backend not available on this environment")
+        require_router_cpp()
         info = cpp_backend.get_backend_info()
         assert info["build_version"] == info["required_build_version"]
         assert info["extension_path"] is not None
@@ -683,10 +683,7 @@ class TestReloadCppBackend:
         without requiring a build invocation.  The test is skipped on
         environments that genuinely have no .so on disk.
         """
-        if not cpp_backend.is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available on this environment")
+        require_router_cpp()
 
         # Stash the live state so we can restore it.
         live_router_cpp = cpp_backend.router_cpp

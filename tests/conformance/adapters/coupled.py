@@ -82,6 +82,7 @@ class CoupledRailAdapter:
 
     name = "coupled_rail"
     group = 7
+    native_backend = "router_cpp"  # Issue #9705: rows fail, never skip
     pair_kinds = ROUTED_COPPER_KINDS
 
     def available(self) -> bool:

@@ -41,6 +41,7 @@ from kicad_tools.router.core import Autorouter, _run_monte_carlo_trial
 from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.rules import DesignRules
+from tests.conftest import require_router_cpp
 
 # Obstacle centred at (5, 2) spanning the full 10 mm board width -- a "wall"
 # across the bottom of the board, the same shape the board-07 DDR repro
@@ -81,8 +82,8 @@ class TestResetForNewTrialPreservesObstacles:
 
     @pytest.mark.parametrize("force_python", [True, False])
     def test_obstacle_cells_are_still_blocked_after_a_reset(self, force_python):
-        if not force_python and not is_cpp_available():
-            pytest.skip("Native routing backend not built in this worktree (kct build-native)")
+        if not force_python:
+            require_router_cpp()
 
         router = _build_router(force_python=force_python)
         router.add_obstacle(*WALL, Layer.F_CU)
@@ -283,10 +284,7 @@ class TestBackendAgreement:
     def test_native_backend_availability_is_recorded(self):
         assert isinstance(is_cpp_available(), bool)
 
-    @pytest.mark.skipif(
-        not is_cpp_available(),
-        reason="Native routing backend not built in this worktree (uv run kct build-native)",
-    )
+    @pytest.mark.requires_router_cpp
     def test_native_backed_grid_state_is_unchanged_across_a_reset(self):
         """A native-backed router must come out of the reset in exactly the
         state it went in, on both sides of the C++ boundary.

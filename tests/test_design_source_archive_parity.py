@@ -32,25 +32,7 @@ BOARDS_DIR = Path(__file__).resolve().parent.parent / "boards"
 # "<board-dir>/<archive filename>" relative to the boards directory.  Each
 # entry cites the issue that owns the refresh; remove the entry when that
 # lands (strict xfail turns an unexpected pass into a failure).
-EXPECTED_STALE: dict[str, str] = {
-    # Board 04's live recipe moved in #9097 (PR #9131) ahead of its archived
-    # copy; the regen + re-pin that refreshes the archive is owned by #9455
-    # (same staleness as the EXPECTED_STALE entry in
-    # test_board_readiness_committed_hashes.py).  Remove when #9455 lands.
-    "04-stm32-devboard/generate_design.py": (
-        "Issue #9455: board 04's recipe moved in #9097 (PR #9131) ahead of the "
-        "archived design-source copy; the regen + re-pin is owned by #9455."
-    ),
-    # Same board, same #9455 regen: PR #9317's owner-slug rewrite touched the
-    # live recipe, but the archived copy is hash-bound into manifest.json /
-    # readiness.json and must keep the pre-transfer slug until the regen
-    # re-emits it (the output/ tree is excluded from the slug guard).
-    # Remove when #9455 lands.
-    "04-stm32-devboard/check_manufacturing.py": (
-        "Issue #9455: PR #9317 rewrote the live recipe's repository URLs to "
-        "2AMLogic; the archived copy is hash-bound and regenerates via #9455."
-    ),
-}
+EXPECTED_STALE: dict[str, str] = {}
 
 # Live recipes deliberately left out of the archive, keyed by
 # "<board-dir>/<live filename>" relative to the boards directory.  Each entry

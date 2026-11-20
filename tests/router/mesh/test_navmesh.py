@@ -11,11 +11,17 @@ import math
 
 import pytest
 
+from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.mesh.funnel import string_pull
 from kicad_tools.router.mesh.geometry import dist
 from kicad_tools.router.mesh.navmesh import NavMesh
 
-router_cpp = pytest.importorskip("kicad_tools.router.router_cpp")
+if is_cpp_available():
+    from kicad_tools.router import router_cpp
+else:  # extension absent: collection still succeeds; marked tests fail with the build hint
+    router_cpp = None
+
+pytestmark = pytest.mark.requires_router_cpp
 
 
 def _point_strictly_in_rect(p, xmin, ymin, xmax, ymax, eps=1e-6):

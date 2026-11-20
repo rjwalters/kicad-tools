@@ -43,7 +43,6 @@ from kicad_tools.cli.route_cmd import (
 from kicad_tools.router.cpp_backend import (
     CppGrid,
     CppPathfinder,
-    is_cpp_available,
     router_cpp,
 )
 from kicad_tools.router.grid import RoutingGrid
@@ -52,10 +51,7 @@ from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
 from tests.route_cli import kct_route
 
-requires_cpp = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ router backend not available",
-)
+requires_cpp = pytest.mark.requires_router_cpp
 
 CPP_BACKEND_LOGGER = "kicad_tools.router.cpp_backend"
 

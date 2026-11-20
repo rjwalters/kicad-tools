@@ -287,6 +287,9 @@ def _route_auto_one(
                 # Issue #4247: explicit via-geometry overrides (None => board-derived).
                 via_drill=via_drill,
                 via_diameter=via_diameter,
+                # Issue #9620: routing grid -- "auto" (the pad-aware,
+                # memory-capped kct route selector) or an explicit mm pitch.
+                grid=getattr(args, "grid", "auto"),
                 # Issue #6001: classify what a partial / failed net left
                 # unrouted -- JSON only, like ``kct route`` (#5944).
                 diagnose_unrouted_budget=(

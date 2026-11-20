@@ -31,6 +31,7 @@ from kicad_tools.router.lattice.pathfinder import LatticePathfinder
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import Pad, Route, Segment
 from kicad_tools.router.rules import DesignRules, NetClassRouting
+from tests.conftest import require_router_cpp
 
 BASE = 0.15  # board-global trace clearance (and the signal's own class)
 POWER = 0.2  # the pour net's router class
@@ -113,10 +114,8 @@ def test_lattice_track_keeps_the_pad_class_clearance(neutral: bool) -> None:
 
 def test_cpp_grid_track_keeps_the_pad_class_clearance() -> None:
     """The grid/C++ engine holds the same pair (#6315 board-wide pad floor)."""
-    from kicad_tools.router.cpp_backend import is_cpp_available
 
-    if not is_cpp_available():
-        pytest.skip("C++ router backend not built (`kct build-native`)")
+    require_router_cpp()
     router = _board("cpp")
     routes = router.route_net(1)
     assert routes

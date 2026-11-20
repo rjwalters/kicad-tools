@@ -31,14 +31,10 @@ import math
 
 import pytest
 
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.rules import DesignRules
 
-requires_cpp = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ router backend not available; run `kct build-native`",
-)
+requires_cpp = pytest.mark.requires_router_cpp
 
 # Board 04 U2 (LQFP-48): 0.3 x 1.475 mm roundrect pads at 0.5 mm pitch, 0.2 mm
 # traces, 0.15 mm clearance, 0.05 mm grid; the pad row sits 0.0125 mm off grid.

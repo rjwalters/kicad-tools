@@ -52,7 +52,6 @@ from pathlib import Path
 
 import pytest
 
-from kicad_tools.router.cpp_backend import is_cpp_available
 from tests.test_coupled_search_replay_board07 import (
     OPEN,
     _bare,
@@ -64,10 +63,7 @@ from tests.test_coupled_search_replay_board07 import (
     _with_route_args,
 )
 
-pytestmark = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ router backend not built -- run `uv run kct build-native`",
-)
+pytestmark = pytest.mark.requires_router_cpp
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

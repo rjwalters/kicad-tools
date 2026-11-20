@@ -9,6 +9,7 @@ from kicad_tools.router.layers import LayerStack
 from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
+from tests.conftest import require_router_cpp
 
 
 @pytest.mark.parametrize("backend", ["python", "cpp"])
@@ -30,10 +31,9 @@ def test_grid_via_process(manufacturer, through_hole, x, allowed, sharing, backe
         Pad(x=10, y=10, width=1, height=1, net=1, net_name="SIG", through_hole=through_hole)
     )
     if backend == "cpp":
-        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
 
-        if not is_cpp_available():
-            pytest.skip("native backend not built")
+        require_router_cpp()
         router = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
     else:
         router = Router(grid, rules)
@@ -62,10 +62,9 @@ def test_grid_via_process_rotated_pad(backend, angle, sharing, u, v, allowed):
     c, s = math.cos(math.radians(angle)), math.sin(math.radians(angle))
     gx, gy = grid.world_to_grid(10 + c * u + s * v, 10 - s * u + c * v)
     if backend == "cpp":
-        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
 
-        if not is_cpp_available():
-            pytest.skip("native backend not built")
+        require_router_cpp()
         router = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
         for _ in range(2):
             assert (not router._impl.is_via_blocked(gx, gy, 1, sharing)) == allowed

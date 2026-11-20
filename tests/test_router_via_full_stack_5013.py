@@ -26,6 +26,7 @@ from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.primitives import Obstacle, Pad, Route, Segment
 from kicad_tools.router.rules import DesignRules
+from tests.conftest import require_router_cpp
 
 
 def _route_forced_inner_crossing(backend: str):
@@ -37,10 +38,10 @@ def _route_forced_inner_crossing(backend: str):
     across the wall is an inner-layer via, which is exactly the ordinary
     multilayer transition this issue is about.
     """
-    from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+    from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
 
-    if backend == "cpp" and not is_cpp_available():
-        pytest.skip("C++ router backend not available")
+    if backend == "cpp":
+        require_router_cpp()
 
     rules = DesignRules(
         trace_width=0.25,
@@ -125,10 +126,8 @@ class TestRouterViaFullPhysicalStack:
 
     def test_both_backends_agree_on_full_stack_span(self):
         """Parity: C++ and Python backends must report the same physical span."""
-        from kicad_tools.router.cpp_backend import is_cpp_available
 
-        if not is_cpp_available():
-            pytest.skip("C++ router backend not available")
+        require_router_cpp()
 
         cpp_route = _route_forced_inner_crossing("cpp")
         py_route = _route_forced_inner_crossing("python")

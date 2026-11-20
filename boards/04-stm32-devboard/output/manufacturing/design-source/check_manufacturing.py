@@ -66,7 +66,7 @@ def check(pcb_path, report_path):
         **OPTIONS,
         "suppressed_findings": 0,
         "waived_findings": sum(v.waived for v in results.violations),
-        "tracking_issue": "https://github.com/rjwalters/kicad-tools/issues/5009",
+        "tracking_issue": "https://github.com/2AMLogic/kicad-tools/issues/5009",
     }
     report_path.write_text(json.dumps(data, indent=2) + "\n")
     return data

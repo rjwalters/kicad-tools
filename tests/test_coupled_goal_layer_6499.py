@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import pytest
 
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.diffpair_routing import CoupledPathfinder
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
@@ -20,8 +19,7 @@ from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
 
 BACKENDS = [
-    pytest.param("cpp", id="cpp", marks=pytest.mark.skipif(
-        not is_cpp_available(), reason="C++ backend not available")),
+    pytest.param("cpp", id="cpp", marks=pytest.mark.requires_router_cpp),
     pytest.param("python", id="python"),
 ]  # fmt: skip
 
@@ -84,7 +82,7 @@ def test_smd_goal_never_returns_an_open_pair(monkeypatch, backend, four_layer):
 
 
 @pytest.mark.parametrize("four_layer", [False, True], ids=["two-layer", "four-layer"])
-@pytest.mark.skipif(not is_cpp_available(), reason="C++ backend not available")
+@pytest.mark.requires_router_cpp
 def test_backends_agree_on_smd_goal(monkeypatch, four_layer):
     cpp_pf, cpp_result, _ = _run(monkeypatch, "cpp", four_layer=four_layer)
     py_pf, py_result, _ = _run(monkeypatch, "python", four_layer=four_layer)

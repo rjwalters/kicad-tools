@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import math
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
 from heapq import heappop, heappush
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, Iterator, NamedTuple
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
@@ -188,12 +189,24 @@ class NetPathMeasurement:
         pad_count: Number of pads of this net found in the contact graph.
         path_via_indices: Indices into ``board.vias`` of the vias the
             measured path runs through (for via-travel accounting).
+        defect_track_mm: Track copper classified as defect -- dead-end
+            branches, lollipops rooted at one pad/via terminal -- and
+            exceeding ``defect_epsilon_mm`` per connected structure
+            (Issue #9304).  Rejoined cycle copper (length-matching bumps
+            and other parallel detours) and the sub-epsilon pad/via
+            escape residual are never counted here.  ``None`` unless the
+            measurement was requested with ``defect_epsilon_mm`` (or the
+            classifier could not run); ``0.0`` on defect-free copper.
+        defect_structures: Number of distinct off-path structures whose
+            copper exceeded the epsilon and was classified as defect.
     """
 
     path_length_mm: float | None = None
     off_path_length_mm: float | None = None
     pad_count: int = 0
     path_via_indices: tuple[int, ...] = ()
+    defect_track_mm: float | None = None
+    defect_structures: int = 0
 
 
 # Point-coincidence radius (mm) for path-graph nodes; mirrors the contact
@@ -209,6 +222,12 @@ class _PadToPadGraph(NamedTuple):
     pad_nodes: dict[int, int]
     via_nodes: dict[int, int]
     total_track_length_mm: float
+    #: Per-track centrelines split at their graph stops, as
+    #: ``{track index: [(node_a, node_b, piece_length_mm), ...]}``
+    #: (Issue #9304: the defect-copper classifier sheds track copper at
+    #: piece granularity, so the builder records which adjacency edges
+    #: belong to which track's centreline and how long each piece is).
+    track_pieces: dict[int, list[tuple[int, int, float]]]
 
 
 def _build_pad_to_pad_graph(
@@ -353,6 +372,7 @@ def _build_pad_to_pad_graph(
             if joint_a is not None and joint_b is not None:
                 link(joint_a, joint_b, 0.0)
 
+    track_pieces: dict[int, list[tuple[int, int, float]]] = {}
     for track_index in track_length:
         first, last = end_nodes[track_index]
         stops = [(0.0, first), (line_length[track_index], last)]
@@ -363,7 +383,10 @@ def _build_pad_to_pad_graph(
         for position in range(len(stops) - 1):
             d0, n0 = stops[position]
             d1, n1 = stops[position + 1]
-            link(n0, n1, (d1 - d0) * scale)
+            piece_length = (d1 - d0) * scale
+            link(n0, n1, piece_length)
+            if n0 != n1:
+                track_pieces.setdefault(track_index, []).append((n0, n1, piece_length))
 
     return _PadToPadGraph(
         points=points,
@@ -371,6 +394,7 @@ def _build_pad_to_pad_graph(
         pad_nodes=pad_nodes,
         via_nodes=via_nodes,
         total_track_length_mm=sum(track_length.values()),
+        track_pieces=track_pieces,
     )
 
 
@@ -392,6 +416,295 @@ def _shortest_path_from(
                 prev[neighbour] = node
                 heappush(heap, (candidate, neighbour))
     return dist, prev
+
+
+def _edge_pair(a: int, b: int) -> tuple[int, int]:
+    """Canonical undirected node-pair key for a graph edge."""
+    return (a, b) if a < b else (b, a)
+
+
+def _simple_graph_bridges(
+    pairs_adjacency: dict[int, set[int]],
+) -> set[tuple[int, int]]:
+    """Bridges of the simple graph obtained by collapsing parallel edges.
+
+    Iterative Tarjan low-link DFS.  Two vertices joined by more than one
+    edge never form a bridge, which collapsing to a simple graph encodes
+    exactly; the defect-copper classifier (Issue #9304) reasons about
+    node pairs, so simple-graph bridges are the granularity it needs.
+    """
+    disc: dict[int, int] = {}
+    low: dict[int, int] = {}
+    bridges: set[tuple[int, int]] = set()
+    timer = 0
+    for root in pairs_adjacency:
+        if root in disc:
+            continue
+        disc[root] = low[root] = timer
+        timer += 1
+        stack: list[tuple[int, int, Iterator[int]]] = [
+            (root, -1, iter(sorted(pairs_adjacency[root])))
+        ]
+        while stack:
+            node, parent, neighbours = stack[-1]
+            pushed = False
+            for neighbour in neighbours:
+                if neighbour not in disc:
+                    disc[neighbour] = low[neighbour] = timer
+                    timer += 1
+                    stack.append((neighbour, node, iter(sorted(pairs_adjacency[neighbour]))))
+                    pushed = True
+                    break
+                if neighbour != parent and disc[neighbour] < low[node]:
+                    low[node] = disc[neighbour]
+            if pushed:
+                continue
+            stack.pop()
+            if stack:
+                parent_node = stack[-1][0]
+                if low[node] < low[parent_node]:
+                    low[parent_node] = low[node]
+                if low[node] > disc[parent_node]:
+                    bridges.add(_edge_pair(parent_node, node))
+    return bridges
+
+
+def _two_edge_connected_labels(
+    pairs_adjacency: dict[int, set[int]],
+    bridges: set[tuple[int, int]],
+) -> dict[tuple[int, int], int]:
+    """Label each non-bridge edge with a 2-edge-connected-component id."""
+    parent: dict[int, int] = {}
+
+    def find(x: int) -> int:
+        root = x
+        while parent.get(root, root) != root:
+            root = parent[root]
+        while parent.get(x, x) != x:
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(a: int, b: int) -> None:
+        root_a, root_b = find(a), find(b)
+        if root_a != root_b:
+            parent[root_a] = root_b
+
+    for a, neighbours in pairs_adjacency.items():
+        for b in neighbours:
+            if _edge_pair(a, b) not in bridges:
+                union(a, b)
+    labels: dict[tuple[int, int], int] = {}
+    for a, neighbours in pairs_adjacency.items():
+        for b in neighbours:
+            pair = _edge_pair(a, b)
+            if pair not in bridges and pair not in labels:
+                labels[pair] = find(a)
+    return labels
+
+
+def _classify_defect_track_copper(
+    path_graph: _PadToPadGraph,
+    dijkstra_runs: dict[int, tuple[dict[int, float], dict[int, int]]],
+    defect_epsilon_mm: float,
+) -> tuple[float, int]:
+    """Measure one net's defect track copper (Issue #9304).
+
+    One uniform rule, applied to every member of a match group alike:
+    copper is defect when it is neither on a pad-to-pad path, nor part of
+    a cycle that rejoins one, nor sub-epsilon escape residual at a
+    pad/via terminal.  Concretely, per track piece:
+
+    * pieces on any pairwise pad-to-pad shortest path are signal copper;
+    * pieces of a 2-edge-connected component that some shortest path
+      enters are rejoined cycle copper (the tuner's length-matching
+      bumps, parallel detours, duplicate overlaps) -- kept;
+    * every other piece is a defect *candidate*: dead-end branches
+      (bridges off every path), lollipops rooted at a single pad/via
+      joint cluster, and detached cycles.  Within a rejoined component,
+      off-path copper whose only boundary to signal copper lies inside
+      ONE zero-cost joint cluster (one physical pad/via terminal) is a
+      cluster-rooted appendage and also a candidate.
+
+    Candidates form connected structures; a structure is shed only when
+    its track copper exceeds ``defect_epsilon_mm``.  The epsilon is the
+    caller's (the match-group producer passes
+    ``OFF_PATH_REPORT_EPSILON_MM``), so the figure changes only where
+    the off-path warning already fires: measured on this repo's boards,
+    benign pad/via escape residual stays below ~0.4 mm per terminal and
+    the genuine same-net loops sit at 6.2-10.2 mm, leaving 4.0 mm wide
+    clearance on both sides.
+
+    Returns ``(defect_track_mm, shed_structures)``.
+    """
+    adjacency = path_graph.adjacency
+    pad_nodes = path_graph.pad_nodes
+
+    def pair(a: int, b: int) -> tuple[int, int]:
+        return _edge_pair(a, b)
+
+    # Union of the edges of EVERY pairwise pad-to-pad shortest path
+    # (2-pad nets: exactly the selected path; multi-pad nets keep every
+    # branch that serves another pad, so a third-pad branch is never
+    # misclassified as a dead end).
+    path_pairs: set[tuple[int, int]] = set()
+    pads = sorted(pad_nodes)
+    for src in pads:
+        _dist, prev = dijkstra_runs[src]
+        for dst in pads:
+            if dst <= src:
+                continue
+            node = pad_nodes[dst]
+            if node not in _dist:
+                continue
+            while node != pad_nodes[src] and node in prev:
+                path_pairs.add(pair(node, prev[node]))
+                node = prev[node]
+    if not path_pairs:
+        return 0.0, 0
+
+    pairs_adjacency: dict[int, set[int]] = defaultdict(set)
+    zero_edge_nodes: set[int] = set()
+    for a, neighbours in adjacency.items():
+        for b, weight in neighbours:
+            pairs_adjacency[a].add(b)
+            if weight <= 0.0:
+                zero_edge_nodes.add(a)
+                zero_edge_nodes.add(b)
+    bridges = _simple_graph_bridges(pairs_adjacency)
+    labels = _two_edge_connected_labels(pairs_adjacency, bridges)
+    rejoined = {labels[p] for p in path_pairs if p in labels}
+
+    # Zero-cost clusters: nodes joined by weight-0 edges are one physical
+    # pad/via/fill terminal.
+    zparent: dict[int, int] = {}
+
+    def zfind(x: int) -> int:
+        while zparent.get(x, x) != x:
+            zparent[x] = zparent.get(zparent[x], zparent[x])
+            x = zparent[x]
+        return x
+
+    def zunion(a: int, b: int) -> None:
+        root_a, root_b = zfind(a), zfind(b)
+        if root_a != root_b:
+            zparent[root_a] = root_b
+
+    for a, neighbours in adjacency.items():
+        for b, weight in neighbours:
+            if weight <= 0.0:
+                zunion(a, b)
+    cluster_roots = {zfind(n) for n in zero_edge_nodes}
+
+    # Piece keys ``(track_index, n0, n1)``: node-pair granularity cannot
+    # tell a coincident duplicate overlay apart from the copy that stays
+    # counted, so candidates carry piece identity.
+    candidates: set[tuple[int, int, int]] = set()
+    offpath_pieces: set[tuple[int, int, int]] = set()
+    by_pair: dict[tuple[int, int], list[tuple[float, tuple[int, int, int]]]] = defaultdict(list)
+    for track_index, pieces in path_graph.track_pieces.items():
+        for n0, n1, weight in pieces:
+            key = (track_index, n0, n1)
+            by_pair[pair(n0, n1)].append((weight, key))
+            p = pair(n0, n1)
+            if p in path_pairs:
+                continue
+            label = labels.get(p)
+            if label is None or label not in rejoined:
+                candidates.add(key)
+            else:
+                offpath_pieces.add(key)
+    # Coincident duplicates: parallel track pieces spanning the same node
+    # pair with the same length are overlays of one physical connection
+    # (the #9138 review's collinear stubs, an identical re-draw of a run);
+    # each extra copy is a defect candidate while one copy stays counted.
+    # A parallel piece with a DIFFERENT length is a detour, not an
+    # overlay, and stays kept.  The scan covers on-path node pairs too --
+    # an overlay copies a span the path also uses.
+    for copies in by_pair.values():
+        if len(copies) < 2:
+            continue
+        copies.sort()
+        for weight, key in copies[1:]:
+            if weight == copies[0][0]:
+                candidates.add(key)
+
+    # Cluster-rooted appendages inside rejoined components: groups are
+    # connected through positive piece edges only -- a zero-cost cluster
+    # is a separator, so copper hanging off one terminal forms its own
+    # group even when other off-path copper touches the same terminal.
+    if offpath_pieces:
+        appendage_adjacency: dict[int, set[int]] = defaultdict(set)
+        for _track, n0, n1 in offpath_pieces:
+            appendage_adjacency[n0].add(n1)
+            appendage_adjacency[n1].add(n0)
+        visited: set[int] = set()
+        for start in list(appendage_adjacency):
+            if start in visited:
+                continue
+            group: set[int] = set()
+            stack = [start]
+            while stack:
+                node = stack.pop()
+                if node in group:
+                    continue
+                group.add(node)
+                if zfind(node) in cluster_roots:
+                    continue
+                for neighbour in appendage_adjacency[node]:
+                    if neighbour not in group:
+                        stack.append(neighbour)
+            visited |= group
+            boundary = {
+                node
+                for node in group
+                if zfind(node) in cluster_roots
+                or any(
+                    pair(node, neighbour) in path_pairs
+                    for neighbour, _weight in adjacency.get(node, ())
+                )
+            }
+            if boundary and len({zfind(node) for node in boundary}) == 1:
+                for key in offpath_pieces:
+                    if key[1] in group or key[2] in group:
+                        candidates.add(key)
+
+    # Group candidates into connected structures (zero-cost clusters
+    # chain defects that share a terminal) and shed per-epsilon.
+    cparent: dict[int, int] = {}
+
+    def cfind(x: int) -> int:
+        while cparent.get(x, x) != x:
+            cparent[x] = cparent.get(cparent[x], cparent[x])
+            x = cparent[x]
+        return x
+
+    def cunion(a: int, b: int) -> None:
+        root_a, root_b = cfind(a), cfind(b)
+        if root_a != root_b:
+            cparent[root_a] = root_b
+
+    for _track, n0, n1 in candidates:
+        cunion(n0, n1)
+    by_cluster: dict[int, list[int]] = defaultdict(list)
+    for node in {x for _track, n0, n1 in candidates for x in (n0, n1)}:
+        by_cluster[zfind(node)].append(node)
+    for nodes in by_cluster.values():
+        for node in nodes[1:]:
+            cunion(nodes[0], node)
+
+    structure_length: dict[int, float] = defaultdict(float)
+    for track_index, pieces in path_graph.track_pieces.items():
+        for n0, n1, weight in pieces:
+            if (track_index, n0, n1) in candidates:
+                structure_length[cfind(n0)] += weight
+
+    defect_mm = 0.0
+    shed = 0
+    for total in structure_length.values():
+        if total > defect_epsilon_mm:
+            defect_mm += total
+            shed += 1
+    return defect_mm, shed
 
 
 @dataclass
@@ -529,7 +842,12 @@ class TraceLengthAnalyzer:
             report.off_path_length_mm = measurement.off_path_length_mm
         return report
 
-    def measure_net_path(self, board: PCB, net_name: str) -> NetPathMeasurement:
+    def measure_net_path(
+        self,
+        board: PCB,
+        net_name: str,
+        defect_epsilon_mm: float | None = None,
+    ) -> NetPathMeasurement:
         """Measure the physical pad-to-pad copper path of one net.
 
         The path runs through the shared copper-contact graph
@@ -545,6 +863,14 @@ class TraceLengthAnalyzer:
         Args:
             board: PCB object to analyze.
             net_name: Name of the net to analyze.
+            defect_epsilon_mm: When given (Issue #9304), additionally
+                classify defect track copper -- dead-end branches and
+                lollipops rooted at one pad/via terminal whose connected
+                structure exceeds this epsilon -- into
+                :attr:`NetPathMeasurement.defect_track_mm`.  Rejoined
+                cycle copper (length-matching bumps, parallel detours)
+                and sub-epsilon escape residual are never classified as
+                defect; ``None`` (the default) skips the classification.
 
         Returns:
             NetPathMeasurement; ``path_length_mm`` is ``None`` when the net
@@ -580,9 +906,11 @@ class TraceLengthAnalyzer:
         # Longest pairwise shortest path between pads (two-pin: the single
         # pair).  Documented multi-pin behaviour: other branches count as
         # off-path copper, never silently into the measured length.
+        dijkstra_runs: dict[int, tuple[dict[int, float], dict[int, int]]] = {}
         best: tuple[float, int, int, dict[int, int]] | None = None
         for src in pads:
             dist, prev = _shortest_path_from(adjacency, pad_nodes[src])
+            dijkstra_runs[src] = (dist, prev)
             for dst in pads:
                 if dst <= src:
                     continue
@@ -605,11 +933,19 @@ class TraceLengthAnalyzer:
                 path_via_indices.add(via_index)
             node = prev.get(node)
         off_path = max(total - path_length, 0.0)
+        defect_mm: float | None = None
+        defect_structures = 0
+        if defect_epsilon_mm is not None:
+            defect_mm, defect_structures = _classify_defect_track_copper(
+                path_graph, dijkstra_runs, defect_epsilon_mm
+            )
         return NetPathMeasurement(
             path_length_mm=path_length,
             off_path_length_mm=off_path,
             pad_count=len(pad_nodes),
             path_via_indices=tuple(sorted(path_via_indices)),
+            defect_track_mm=defect_mm,
+            defect_structures=defect_structures,
         )
 
     def analyze_diff_pair(

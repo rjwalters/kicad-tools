@@ -18,6 +18,15 @@ that already exist there:
 * ``../lvs.json``    -> Layout-vs-Schematic verification (#3748, #3749);
                         sourced from ``output/lvs.json`` (NOT under
                         ``manufacturing/``).
+* the board's routed PCB -> the ``layout_quality`` block (#9594):
+                        track/ground via split, per-net corner counts,
+                        total track length, outline area and diff-pair
+                        skew, bound to the measured PCB's ``sha256``
+                        (routed artifact preferred, else the declared
+                        ``pcb``, else the single ``output/*.kicad_pcb``).
+                        Boards whose PCB is not selectable (or
+                        unparseable) omit the block like any other
+                        optional field.
 
 For a board with no ``output/manufacturing/`` directory (issue #5055), static
 identity/geometry metadata is instead read directly from a selected
@@ -584,6 +593,137 @@ def _development_metrics(board_dir: Path, readiness: dict) -> dict:
     return result
 
 
+_ROUTED_ARTIFACT_KEYS = ("pcb_routed", "routed")
+
+
+def _select_quality_pcb(board_dir: Path) -> Path | None:
+    """Select the PCB the ``layout_quality`` block measures.
+
+    Preference order: the project's routed artifact (``artifacts.pcb_routed``
+    or ``artifacts.routed``) — that is the copper a reviewer judges — then
+    the declared ``artifacts.pcb``, then exactly one ``.kicad_pcb`` directly
+    under ``output/`` (held to the same board-directory containment and
+    file checks as a declared artifact, so an escaping symlink selects
+    nothing). A declared-but-invalid path selects nothing rather
+    than falling through to another revision, mirroring the development
+    source-selection rules; an invalid project specification also prevents
+    fallback. Returns ``None`` when nothing is selectable.
+    """
+    from kicad_tools.exceptions import KiCadToolsError
+    from kicad_tools.spec.parser import load_spec
+
+    project_path = board_dir / "project.kct"
+    if project_path.exists():
+        try:
+            project = load_spec(project_path).project.model_dump(exclude_unset=True)
+            artifacts = project.get("artifacts") or {}
+        except (OSError, ValueError, KiCadToolsError):
+            return None
+        for key in (*_ROUTED_ARTIFACT_KEYS, "pcb"):
+            value = artifacts.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str) and value:
+                path = board_dir / value
+                if path.resolve().is_relative_to(board_dir.resolve()) and path.is_file():
+                    return path
+            return None
+    candidates = [
+        path
+        for path in (board_dir / "output").glob("*.kicad_pcb")
+        # Same containment check as a declared artifact: a symlink to a
+        # shared PCB outside the board directory is not this board's
+        # copper, and selecting it would only blow up at the
+        # board-relative path computed later.
+        if path.resolve().is_relative_to(board_dir.resolve()) and path.is_file()
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _load_net_class_map(board_dir: Path, pcb_text: str) -> dict | None:
+    """Load the declared ``artifacts.net_class_map_sidecar``, if any.
+
+    Match-group skew needs the router's net-class map; when the project
+    declares one it is loaded the canonical way, with stack resolution
+    fed the already-measured PCB snapshot (``pcb_text``) so the sidecar
+    never reopens the file the block's SHA is bound to. Any problem
+    merely omits the skew -- the rest of the block does not depend on
+    it.
+    """
+    from kicad_tools.exceptions import KiCadToolsError
+    from kicad_tools.spec.parser import load_spec
+
+    project_path = board_dir / "project.kct"
+    if not project_path.exists():
+        return None
+    try:
+        project = load_spec(project_path).project.model_dump(exclude_unset=True)
+        declared = (project.get("artifacts") or {}).get("net_class_map_sidecar")
+    except (OSError, ValueError, KiCadToolsError):
+        return None
+    if not (isinstance(declared, str) and declared):
+        return None
+    path = board_dir / declared
+    if not (path.resolve().is_relative_to(board_dir.resolve()) and path.is_file()):
+        return None
+    try:
+        from kicad_tools.router.rules import net_class_map_from_path
+
+        return net_class_map_from_path(path, pcb_text=pcb_text)
+    except Exception:  # noqa: BLE001 — optional enrichment, never fatal
+        return None
+
+
+def _attach_layout_quality(metrics: dict, board_dir: Path, slug: str) -> None:
+    """Attach the ``layout_quality`` block (issue #9594) when a PCB is usable.
+
+    The metrics are computed from the PCB :func:`_select_quality_pcb`
+    selects and bound to its SHA-256, so a re-routed board cannot be
+    mistaken for the measured one: the hash and the parse read **one**
+    byte snapshot, so an atomic reroute between two reads cannot publish
+    one file's numbers under another file's provenance. Anything
+    unusable merely omits the block — like every other optional field,
+    it never blocks extraction nor changes ``status``.
+    """
+    import hashlib
+
+    selected = _select_quality_pcb(board_dir)
+    if selected is None:
+        return
+    try:
+        raw = selected.read_bytes()
+        sha = hashlib.sha256(raw).hexdigest()
+    except OSError as exc:
+        logger.warning("board %s: could not read %s (%s)", slug, selected.name, exc)
+        return
+    rel = selected.resolve().relative_to(board_dir.resolve()).as_posix()
+    try:
+        from kicad_tools.analysis.layout_quality import analyze_layout_quality
+        from kicad_tools.exceptions import FileFormatError
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.sexp import parse_string
+
+        # One decode feeds the parse and the sidecar's stack resolution:
+        # reopening via pcb_path would make match-group skew depend on a
+        # second read the SHA is not bound to (the PCB can vanish in
+        # between).
+        pcb_text = raw.decode("utf-8")
+        sexp = parse_string(pcb_text)
+        if sexp.tag != "kicad_pcb":
+            raise FileFormatError(
+                "Not a KiCad PCB file", context={"file": str(selected), "got": sexp.tag}
+            )
+        pcb = PCB(sexp, selected)
+        net_class_map = _load_net_class_map(board_dir, pcb_text)
+        block = analyze_layout_quality(pcb, net_class_map).to_dict()
+    except Exception as exc:  # noqa: BLE001 — optional metadata, never fatal
+        logger.warning("board %s: layout_quality unavailable (%s)", slug, exc)
+        return
+    block["pcb_path"] = rel
+    block["pcb_sha256"] = sha
+    metrics["layout_quality"] = block
+
+
 def extract_board_metrics(board_dir: Path) -> dict:
     """Read existing artifacts under ``board_dir`` and return a board.json dict.
 
@@ -618,6 +758,7 @@ def extract_board_metrics(board_dir: Path) -> dict:
         logger.info("board %s: extracting development artifacts", slug)
         metrics.update(_development_metrics(board_dir, metrics["readiness"]))
         _attach_render_paths(metrics, output_dir)
+        _attach_layout_quality(metrics, board_dir, slug)
         return metrics
 
     current = (
@@ -662,6 +803,9 @@ def extract_board_metrics(board_dir: Path) -> dict:
         metrics["manufacturing_package"] = "manufacturing/kicad_project.zip"
 
     _attach_render_paths(metrics, output_dir)
+
+    # Layout-quality metrics (issue #9594), bound to the selected PCB.
+    _attach_layout_quality(metrics, board_dir, slug)
 
     # Fresh readiness may carry newer measurements than the saved export report.
     if metrics["readiness"]["status"] in {"ready", "blocked"}:

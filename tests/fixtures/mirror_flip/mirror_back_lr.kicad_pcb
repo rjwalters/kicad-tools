@@ -89,12 +89,12 @@
 	)
 	(footprint ""
 		(layer "B.Cu")
-		(uuid "e67d0893-09a5-4d60-a955-02b8a4847e18")
+		(uuid "0a512167-28ac-414e-8eae-01d316916593")
 		(at 100 100 150)
 		(property "Reference" "U1"
 			(at 0 0 150)
 			(layer "B.SilkS")
-			(uuid "1d481b9d-e8cf-47e7-a934-98e97dac575b")
+			(uuid "4c5c65b2-0529-4c45-ac5c-d556e4bf8fd1")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -105,7 +105,7 @@
 		(property "Value" "MIRROR_GOLDEN"
 			(at 0 0 150)
 			(layer "B.Fab")
-			(uuid "409b9246-7e14-466a-94bc-2c5f8beb9f26")
+			(uuid "4c06801b-b81e-4dcc-b5c4-727feacbda3f")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -117,7 +117,7 @@
 			(at 0 0 150)
 			(layer "B.Fab")
 			(hide yes)
-			(uuid "d0089647-6fd3-468f-a30e-c5e8b8e3ef30")
+			(uuid "dcfa8820-872b-4b58-8abc-5ba034b0b29a")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -129,7 +129,7 @@
 			(at 0 0 150)
 			(layer "B.Fab")
 			(hide yes)
-			(uuid "a90790ed-cfc1-4466-ae6f-87360e1dee6a")
+			(uuid "9ef01978-afdd-411d-ba6c-0624dfe7861a")
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -146,7 +146,7 @@
 				(type default)
 			)
 			(layer "B.SilkS")
-			(uuid "449e1909-4688-4919-a94d-0fcdefa51716")
+			(uuid "ca99c8c4-7e38-4c33-8594-fb917399c1bc")
 		)
 		(pad "1" smd roundrect
 			(at -1.600001 1 150)
@@ -154,7 +154,7 @@
 			(layers "B.Cu" "B.Mask" "B.Paste")
 			(roundrect_rratio 0.25)
 			(thermal_bridge_angle 45)
-			(uuid "9610e48f-2cb3-4f23-a18b-2c2f8dfc6d48")
+			(uuid "fd96a86d-c3ef-4893-8899-de61c957475f")
 		)
 		(pad "2" smd roundrect
 			(at -1.6 -0.999999 105)
@@ -162,14 +162,14 @@
 			(layers "B.Cu" "B.Mask" "B.Paste")
 			(roundrect_rratio 0.25)
 			(thermal_bridge_angle 45)
-			(uuid "2a4136b6-7e3b-480a-af60-2cceabd8c3d0")
+			(uuid "68f8b54b-6d09-41ed-aacb-c9c4de042dc7")
 		)
 		(pad "3" smd rect
 			(at 0.4 0 130)
 			(size 1 0.5)
 			(layers "B.Cu" "B.Mask" "B.Paste")
 			(thermal_bridge_angle 45)
-			(uuid "98599d95-6b82-40e9-82ad-652675a400fd")
+			(uuid "b86f6f89-4d10-48b0-af7d-b9f4824a0658")
 		)
 		(pad "4" thru_hole circle
 			(at 2 0.8 150)
@@ -177,7 +177,505 @@
 			(drill 0.6)
 			(layers "*.Cu" "*.Mask")
 			(remove_unused_layers no)
-			(uuid "94607851-a98f-4e18-9df0-8d06fb4afa8b")
+			(uuid "90fdafa8-e45a-4b86-a830-6319151aefeb")
+		)
+		(pad "5" smd custom
+			(at 0.4 -1.6 150)
+			(size 0.4 0.4)
+			(layers "B.Cu" "B.Mask" "B.Paste")
+			(options
+				(clearance outline)
+				(anchor circle)
+			)
+			(primitives
+				(gr_poly
+					(pts
+						(xy -0.3 0.2) (xy 0.9 0.2) (xy 0.9 -0.3) (xy 0.2 -0.3) (xy 0.2 -1.1) (xy -0.3 -1.1)
+					)
+					(width 0)
+					(fill yes)
+				)
+			)
+			(uuid "c83c485f-f06a-4b8f-8598-46254c27dede")
+		)
+		(pad "6" thru_hole custom
+			(at -0.3 2.8 150)
+			(size 0.6 0.6)
+			(drill 0.3)
+			(layers "*.Cu" "*.Mask")
+			(remove_unused_layers no)
+			(options
+				(clearance outline)
+				(anchor circle)
+			)
+			(primitives
+				(gr_poly
+					(pts
+						(xy -0.3 0.2) (xy 0.9 0.2) (xy 0.9 -0.3) (xy 0.2 -0.3) (xy 0.2 -1.1) (xy -0.3 -1.1)
+					)
+					(width 0)
+					(fill yes)
+				)
+				(gr_arc
+					(start -0.1 -0.6)
+					(mid 0.2 -0.5)
+					(end 0.3 -0.2)
+					(width 0.1)
+				)
+			)
+			(uuid "d58958ed-f73b-4e38-b1a8-2b9aeb9762c0")
+			(padstack
+				(mode front_inner_back)
+				(layer "Inner"
+					(shape custom)
+					(size 0.6 0.6)
+					(options
+						(anchor circle)
+					)
+					(primitives
+						(gr_poly
+							(pts
+								(xy -0.3 0.2) (xy 0.9 0.2) (xy 0.9 -0.3) (xy 0.2 -0.3) (xy 0.2 -1.1) (xy -0.3 -1.1)
+							)
+							(width 0)
+							(fill yes)
+						)
+						(gr_arc
+							(start -0.1 -0.6)
+							(mid 0.2 -0.5)
+							(end 0.3 -0.2)
+							(width 0.1)
+						)
+					)
+				)
+				(layer "B.Cu"
+					(shape custom)
+					(size 0.6 0.6)
+					(options
+						(anchor circle)
+					)
+					(primitives
+						(gr_poly
+							(pts
+								(xy -0.3 0.2) (xy 0.9 0.2) (xy 0.9 -0.3) (xy 0.2 -0.3) (xy 0.2 -1.1) (xy -0.3 -1.1)
+							)
+							(width 0)
+							(fill yes)
+						)
+						(gr_arc
+							(start -0.1 -0.6)
+							(mid 0.2 -0.5)
+							(end 0.3 -0.2)
+							(width 0.1)
+						)
+					)
+					(zone_connect -1)
+				)
+			)
+		)
+		(pad "7" thru_hole custom
+			(at 2 -2.6 150)
+			(size 0.6 0.6)
+			(drill 0.3)
+			(layers "*.Cu" "*.Mask")
+			(remove_unused_layers no)
+			(options
+				(clearance outline)
+				(anchor circle)
+			)
+			(primitives
+				(gr_poly
+					(pts
+						(xy -0.4 0.3) (xy 0.7 0.3) (xy 0.7 -0.2) (xy 0 -0.2) (xy 0 -0.9) (xy -0.4 -0.9)
+					)
+					(width 0)
+					(fill yes)
+				)
+				(gr_arc
+					(start 0.403108 -0.024999)
+					(mid 0.1 0.149999)
+					(end -0.203108 -0.024999)
+					(width 0.1)
+				)
+			)
+			(uuid "26a9ff38-52fe-4895-9b92-0a5732146e5e")
+			(padstack
+				(mode front_inner_back)
+				(layer "Inner"
+					(shape custom)
+					(size 0.6 0.6)
+					(options
+						(anchor circle)
+					)
+					(primitives
+						(gr_poly
+							(pts
+								(xy -0.9 0.1) (xy -0.1 0.1) (xy -0.3 -0.8) (xy -0.8 -0.6)
+							)
+							(width 0)
+							(fill yes)
+						)
+						(gr_arc
+							(start -0.359807 -0.149999)
+							(mid -0.1 -0.3)
+							(end 0.159807 -0.149999)
+							(width 0.1)
+						)
+					)
+				)
+				(layer "B.Cu"
+					(shape custom)
+					(size 0.6 0.6)
+					(options
+						(anchor circle)
+					)
+					(primitives
+						(gr_poly
+							(pts
+								(xy -0.2 0.2) (xy 0.8 -0.1) (xy 0.1 -0.7)
+							)
+							(width 0)
+							(fill yes)
+						)
+						(gr_arc
+							(start -0.199999 -0.44641)
+							(mid 0.200001 -0.44641)
+							(end 0.4 -0.1)
+							(width 0.1)
+						)
+					)
+					(zone_connect -1)
+				)
+			)
+		)
+		(pad "8" thru_hole custom
+			(at -2 -4.6 150)
+			(size 0.6 0.6)
+			(drill 0.3)
+			(layers "*.Cu" "*.Mask")
+			(remove_unused_layers no)
+			(options
+				(clearance outline)
+				(anchor circle)
+			)
+			(primitives)
+			(uuid "db7fa7bc-99c0-4486-851c-0bb857a89e9d")
+			(padstack
+				(mode front_inner_back)
+				(layer "Inner"
+					(shape custom)
+					(size 0.6 0.6)
+					(options
+						(anchor circle)
+					)
+					(primitives
+						(gr_poly
+							(pts
+								(xy -0.9 0.1) (xy -0.1 0.1) (xy -0.3 -0.8)
+							)
+							(width 0)
+							(fill yes)
+						)
+					)
+				)
+				(layer "B.Cu"
+					(shape custom)
+					(size 0.6 0.6)
+					(options
+						(anchor circle)
+					)
+					(primitives
+						(gr_poly
+							(pts
+								(xy -0.2 0.2) (xy 0.8 -0.1) (xy 0.1 -0.7)
+							)
+							(width 0)
+							(fill yes)
+						)
+					)
+					(zone_connect -1)
+				)
+			)
+		)
+		(pad "9" thru_hole custom
+			(at -0.5 -4.6 150)
+			(size 0.6 0.6)
+			(drill 0.3)
+			(layers "*.Cu" "*.Mask")
+			(remove_unused_layers no)
+			(options
+				(clearance outline)
+				(anchor circle)
+			)
+			(primitives
+				(gr_poly
+					(pts
+						(xy -0.4 0.3) (xy 0.7 -0.1) (xy 0 -0.9)
+					)
+					(width 0)
+					(fill yes)
+				)
+			)
+			(uuid "dc9224c4-c57c-4590-95b8-653866f81772")
+			(padstack
+				(mode front_inner_back)
+				(layer "Inner"
+					(shape custom)
+					(size 0.6 0.6)
+					(options
+						(anchor circle)
+					)
+					(primitives
+						(gr_poly
+							(pts
+								(xy -0.9 0.1) (xy -0.1 0.1) (xy -0.3 -0.8)
+							)
+							(width 0)
+							(fill yes)
+						)
+					)
+				)
+				(layer "B.Cu"
+					(shape custom)
+					(size 0.6 0.6)
+					(options
+						(anchor circle)
+					)
+					(primitives)
+					(zone_connect -1)
+				)
+			)
+		)
+		(pad "10" thru_hole circle
+			(at 1 -4.6 150)
+			(size 0.55 0.55)
+			(drill 0.3)
+			(layers "*.Cu" "*.Mask")
+			(remove_unused_layers no)
+			(uuid "158f2117-8f53-4d87-b2c2-04a1ae0bf453")
+			(padstack
+				(mode front_inner_back)
+				(layer "Inner"
+					(shape custom)
+					(size 0.6 0.6)
+					(options
+						(anchor circle)
+					)
+					(primitives
+						(gr_poly
+							(pts
+								(xy -0.9 0.1) (xy -0.1 0.1) (xy -0.3 -0.8)
+							)
+							(width 0)
+							(fill yes)
+						)
+					)
+				)
+				(layer "B.Cu"
+					(shape custom)
+					(size 0.6 0.6)
+					(options
+						(anchor circle)
+					)
+					(primitives
+						(gr_poly
+							(pts
+								(xy -0.2 0.2) (xy 0.8 -0.1) (xy 0.1 -0.7)
+							)
+							(width 0)
+							(fill yes)
+						)
+					)
+					(zone_connect -1)
+				)
+			)
+		)
+		(pad "11" thru_hole custom
+			(at 2.5 -4.6 150)
+			(size 0.6 0.6)
+			(drill 0.3)
+			(layers "*.Cu" "*.Mask")
+			(remove_unused_layers no)
+			(options
+				(clearance outline)
+				(anchor circle)
+			)
+			(primitives
+				(gr_poly
+					(pts
+						(xy -0.4 0.3) (xy 0.7 -0.1) (xy 0 -0.9)
+					)
+					(width 0)
+					(fill yes)
+				)
+			)
+			(uuid "92524dfe-4188-44d0-8128-838b4b882364")
+			(padstack
+				(mode front_inner_back)
+				(layer "Inner"
+					(shape custom)
+					(size 0.6 0.6)
+					(options
+						(anchor circle)
+					)
+					(primitives
+						(gr_poly
+							(pts
+								(xy -0.9 0.1) (xy -0.1 0.1) (xy -0.3 -0.8)
+							)
+							(width 0)
+							(fill yes)
+						)
+					)
+				)
+				(layer "B.Cu"
+					(shape circle)
+					(size 0.55 0.55)
+					(zone_connect -1)
+				)
+			)
+		)
+		(embedded_fonts no)
+		(pad "12" thru_hole roundrect
+			(at -3 -7 150)
+			(size 1 0.9)
+			(drill 0.3
+				(offset 0.1 -0.05)
+			)
+			(layers "*.Cu" "*.Mask")
+			(remove_unused_layers no)
+			(roundrect_rratio 0.4)
+			(uuid "7f2630f7-dc47-44eb-999d-559b68375f8f")
+			(padstack
+				(mode front_inner_back)
+				(layer "Inner"
+					(shape custom)
+					(size 0.6 0.6)
+					(options
+						(anchor circle)
+					)
+					(primitives
+						(gr_poly
+							(pts
+								(xy -0.9 0.1) (xy -0.1 0.1) (xy -0.3 -0.8)
+							)
+							(width 0)
+							(fill yes)
+						)
+					)
+				)
+				(layer "B.Cu"
+					(shape custom)
+					(size 0.6 0.6)
+					(options
+						(anchor circle)
+					)
+					(primitives
+						(gr_poly
+							(pts
+								(xy -0.2 0.2) (xy 0.8 -0.1) (xy 0.1 -0.7)
+							)
+							(width 0)
+							(fill yes)
+						)
+					)
+					(zone_connect -1)
+				)
+			)
+		)
+		(pad "13" thru_hole roundrect
+			(at 0 -7 150)
+			(size 0.55 0.55)
+			(drill 0.3)
+			(layers "*.Cu" "*.Mask")
+			(remove_unused_layers no)
+			(roundrect_rratio 0)
+			(chamfer_ratio 0.2)
+			(chamfer bottom_left)
+			(uuid "9f6a452c-459f-4155-9ad2-39a49d35ecc1")
+			(padstack
+				(mode front_inner_back)
+				(layer "Inner"
+					(shape custom)
+					(size 0.6 0.6)
+					(options
+						(anchor circle)
+					)
+					(primitives
+						(gr_poly
+							(pts
+								(xy -0.9 0.1) (xy -0.1 0.1) (xy -0.3 -0.8)
+							)
+							(width 0)
+							(fill yes)
+						)
+					)
+				)
+				(layer "B.Cu"
+					(shape custom)
+					(size 0.6 0.6)
+					(options
+						(anchor circle)
+					)
+					(primitives
+						(gr_poly
+							(pts
+								(xy -0.2 0.2) (xy 0.8 -0.1) (xy 0.1 -0.7)
+							)
+							(width 0)
+							(fill yes)
+						)
+					)
+					(zone_connect -1)
+				)
+			)
+		)
+		(pad "14" thru_hole custom
+			(at 3 -7 150)
+			(size 0.6 0.6)
+			(drill 0.3)
+			(layers "*.Cu" "*.Mask")
+			(remove_unused_layers no)
+			(options
+				(clearance outline)
+				(anchor circle)
+			)
+			(primitives
+				(gr_poly
+					(pts
+						(xy -0.4 0.3) (xy 0.7 -0.1) (xy 0 -0.9)
+					)
+					(width 0)
+					(fill yes)
+				)
+			)
+			(uuid "2810998f-7f93-47ec-a52e-1b7ec9445ef3")
+			(padstack
+				(mode front_inner_back)
+				(layer "Inner"
+					(shape custom)
+					(size 0.6 0.6)
+					(options
+						(anchor circle)
+					)
+					(primitives
+						(gr_poly
+							(pts
+								(xy -0.9 0.1) (xy -0.1 0.1) (xy -0.3 -0.8)
+							)
+							(width 0)
+							(fill yes)
+						)
+					)
+				)
+				(layer "B.Cu"
+					(shape trapezoid)
+					(size 0.9 0.8)
+					(rect_delta 0.08 -0.03)
+					(thermal_bridge_angle 45)
+					(zone_connect -1)
+				)
+			)
 		)
 		(embedded_fonts no)
 	)
@@ -190,7 +688,7 @@
 		)
 		(fill no)
 		(layer "Edge.Cuts")
-		(uuid "152e74ae-3391-4d38-a205-c02c7b674de8")
+		(uuid "3b8f7406-0f7a-4006-b165-46bb12ff5b6f")
 	)
 	(embedded_fonts no)
 )

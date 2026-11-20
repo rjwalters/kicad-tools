@@ -2244,6 +2244,215 @@ def test_copper_cleanup_step_failure_is_recorded(tmp_path, monkeypatch):
     assert rec["removed"] == {"segments": 0, "vias": 0}  # 0 is a valid result
 
 
+# --- issue #9747: cleanup prune uses the sidecar the check gate loads ------
+
+
+def _doubled_bar_fixture(directory: Path, *, sidecar: float | None = 13.4) -> Path:
+    from tests.test_prune_current_paths_sidecar_9747 import _doubled_bar_board
+
+    return _doubled_bar_board(directory, sidecar=sidecar)
+
+
+def _prune_step_options(board_dir: Path, **kw) -> readiness_cmd.ReadinessOptions:
+    return readiness_cmd.ReadinessOptions(
+        board_dir=board_dir,
+        pcb=board_dir / "b.kicad_pcb",
+        schematic=None,
+        project=None,
+        manufacturer="jlcpcb",
+        mode="pcb_only",
+        output_dir=board_dir / "out",
+        evidence_dir=board_dir / "ev",
+        operation="generate",
+        **kw,
+    )
+
+
+def test_cleanup_prune_step_feeds_prune_the_check_gates_sidecar(tmp_path, monkeypatch):
+    """The prune step keeps a doubled power bar: same declarations as Gate 1."""
+    import kicad_tools.pcb_prune as pp
+
+    pcb = _doubled_bar_fixture(tmp_path / "board")
+    captured: dict = {}
+    real = pp.prune_board
+
+    def spy(pcb_path, **kwargs):
+        captured.update(kwargs)
+        return real(pcb_path, **kwargs)
+
+    monkeypatch.setattr(pp, "prune_board", spy)
+
+    record = readiness_cmd._cleanup_prune_step(_prune_step_options(pcb.parent))
+
+    assert record == {"status": "applied", "segments_removed": 0, "ends_snapped": 0}
+    assert captured["declared_nets"] == {"PWR"}
+    assert captured["required_widths"]["PWR"]["F.Cu"] == pytest.approx(10.7719, rel=1e-3)
+    assert captured["current_paths"] and captured["current_paths"][0].net_name == "PWR"
+    assert captured["wide"] is None  # net-relative, like a plain `pcb prune`
+
+
+def test_cleanup_prune_step_honours_check_args_resolution(tmp_path, monkeypatch):
+    """An explicit --current-paths in check_args wins; --no-current-paths wins too."""
+    import kicad_tools.pcb_prune as pp
+
+    pcb = _doubled_bar_fixture(tmp_path / "board")
+    low = tmp_path / "low.json"
+    from tests.test_prune_current_paths_sidecar_9747 import _write_sidecar
+
+    _write_sidecar(low, 1.0)
+    captured: dict = {}
+    real = pp.prune_board
+
+    def spy(pcb_path, **kwargs):
+        captured.update(kwargs)
+        board, result = real(pcb_path, verify_drc=False, **kwargs)
+        return board, readiness_cmd.replace(result, drc_verified=True, accepted=[])
+
+    monkeypatch.setattr(pp, "prune_board", spy)
+
+    readiness_cmd._cleanup_prune_step(
+        _prune_step_options(pcb.parent, check_args=("--current-paths", str(low)))
+    )
+    assert captured["declared_nets"] == {"PWR"}
+    assert captured["required_widths"]["PWR"]["F.Cu"] < 5.5  # the 1 A explicit file won
+
+    readiness_cmd._cleanup_prune_step(
+        _prune_step_options(pcb.parent, check_args=("--no-current-paths",))
+    )
+    assert captured["declared_nets"] is None  # suppressed: prune without declarations
+    assert captured["current_paths"] == []
+
+
+def test_cleanup_prune_step_records_malformed_sidecar_as_failure(tmp_path):
+    """`kct check` only warns on a malformed sidecar; the cleanup step must
+    record a prune failure instead of pruning blind and failing the gate."""
+    pcb = _doubled_bar_fixture(tmp_path / "board")
+    (pcb.parent / "current_paths.json").write_text("{not json")
+
+    record = readiness_cmd._copper_cleanup(_prune_step_options(pcb.parent))
+
+    assert record["steps"]["prune"]["status"] == "failed"
+    assert "current_paths.json" in record["steps"]["prune"]["detail"]
+
+
+# --- issue #9747: Gate 1 blames its own cleanup, not the board --------------
+
+
+_AMP_ERROR = {
+    "rule_id": "path_ampacity",
+    "severity": "error",
+    "location": [10.5, 3.2],
+    "message": "trace on B.Cu too narrow: width 5.5mm, requires 10.8mm",
+}
+
+
+class _AttributionEngines(Engines):
+    """``kct check`` stand-in dispatching on which board is being checked."""
+
+    def __init__(self, *, gate=(), pre=(), post=(), snapshot_ok=True):
+        self.reports = {"gate": list(gate), "pre": list(pre), "post": list(post)}
+        self.snapshot_ok = snapshot_ok
+        self.snapshot_extras: list[list[str]] = []
+
+    def kct_check(self, pcb, mfr, report_path, extra):
+        name = Path(pcb).name
+        if name.startswith(".kct-pre-cleanup-"):
+            which, errors = "pre", self.reports["pre"]
+        elif name.startswith(".kct-post-cleanup-"):
+            which, errors = "post", self.reports["post"]
+            self.snapshot_extras.append(list(extra))
+        else:
+            which, errors = "gate", self.reports["gate"]
+        if which != "gate" and not self.snapshot_ok:
+            return EngineRun(ok=False, detail="snapshot check exploded")
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(
+            json.dumps(
+                {
+                    "file": str(pcb),
+                    "summary": {"errors": len(errors)},
+                    "violations": [dict(v) for v in errors],
+                    "meta_checks": {},
+                }
+            )
+        )
+        return EngineRun(ok=True, detail="kct check <pcb>", returncode=1 if errors else 0)
+
+
+def _attribution_setup(tmp_path: Path, *, check_args: tuple[str, ...] = ()):
+    board = tmp_path / "board"
+    board.mkdir()
+    pcb = board / "b.kicad_pcb"
+    pcb.write_text("(kicad_pcb staged)\n")
+    (board / "current_paths.json").write_text('{"paths": []}')
+    pre = board.parent / ".kct-pre-cleanup-b.kicad_pcb"
+    post = board.parent / ".kct-post-cleanup-b.kicad_pcb"
+    pre.write_text(pcb.read_text())
+    post.write_text(pcb.read_text())
+    options = _prune_step_options(board, check_args=check_args)
+    options = readiness_cmd.replace(options, operation="generate")
+    return options, pre, post
+
+
+def test_gate_kct_check_blames_cleanup_for_candidate_only_findings(tmp_path):
+    options, pre, post = _attribution_setup(tmp_path)
+    engines = _AttributionEngines(gate=[_AMP_ERROR], pre=[], post=[_AMP_ERROR])
+
+    outcome, _ = readiness_cmd._gate_kct_check(options, engines, pre_cleanup=pre, post_cleanup=post)
+
+    assert outcome.status == readiness_cmd.FAILED
+    assert outcome.blockers
+    assert any("copper_cleanup" in b and "--skip-cleanup" in b for b in outcome.blockers)
+    assert any("path_ampacity at 10.50/3.20" in b for b in outcome.blockers)
+    # The snapshot checks ran with the same sidecar resolution as Gate 1.
+    assert engines.snapshot_extras == [
+        ["--current-paths", str(options.board_dir / "current_paths.json")]
+    ]
+
+
+def test_gate_kct_check_leaves_pre_existing_findings_on_the_board(tmp_path):
+    options, pre, post = _attribution_setup(tmp_path)
+    engines = _AttributionEngines(gate=[_AMP_ERROR], pre=[_AMP_ERROR], post=[_AMP_ERROR])
+
+    outcome, _ = readiness_cmd._gate_kct_check(options, engines, pre_cleanup=pre, post_cleanup=post)
+
+    assert outcome.status == readiness_cmd.FAILED
+    assert all("copper_cleanup" not in b for b in outcome.blockers)
+
+
+def test_gate_kct_check_does_not_blame_cleanup_for_later_step_findings(tmp_path):
+    """A finding that appears only after the cleanup steps (assembly prep,
+    refill) belongs to those steps, not to copper_cleanup."""
+    options, pre, post = _attribution_setup(tmp_path)
+    engines = _AttributionEngines(gate=[_AMP_ERROR], pre=[], post=[])
+
+    outcome, _ = readiness_cmd._gate_kct_check(options, engines, pre_cleanup=pre, post_cleanup=post)
+
+    assert outcome.status == readiness_cmd.FAILED
+    assert all("copper_cleanup" not in b for b in outcome.blockers)
+
+
+def test_gate_kct_check_skips_attribution_when_comparison_cannot_run(tmp_path):
+    options, pre, post = _attribution_setup(tmp_path)
+    engines = _AttributionEngines(gate=[_AMP_ERROR], pre=[], post=[_AMP_ERROR])
+    engines.snapshot_ok = False
+
+    outcome, _ = readiness_cmd._gate_kct_check(options, engines, pre_cleanup=pre, post_cleanup=post)
+
+    assert outcome.status == readiness_cmd.FAILED
+    assert all("copper_cleanup" not in b for b in outcome.blockers)
+
+
+def test_gate_kct_check_skips_attribution_without_snapshots(tmp_path):
+    options, _, _ = _attribution_setup(tmp_path)
+    engines = _AttributionEngines(gate=[_AMP_ERROR], pre=[], post=[_AMP_ERROR])
+
+    outcome, _ = readiness_cmd._gate_kct_check(options, engines)
+
+    assert outcome.status == readiness_cmd.FAILED
+    assert all("copper_cleanup" not in b for b in outcome.blockers)
+
+
 def test_trace_quality_rule_classifier():
     f = readiness_cmd.is_trace_quality_rule
     assert f("redundant_copper_detour") and f("via_dangling")

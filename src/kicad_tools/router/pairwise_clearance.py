@@ -49,7 +49,6 @@ table -- with no separate implementation to keep in sync.
 
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -363,13 +362,9 @@ def load_signed_voltage_map(path: str | Path) -> dict[str, float]:
         ValueError: If the file is not a JSON object, or any net voltage
             endpoint is not a finite real number.
     """
-    from kicad_tools.creepage.engine import voltage_map_from_dict
+    from kicad_tools.creepage.engine import load_voltage_sidecar, voltage_map_from_dict
 
-    raw = json.loads(Path(path).read_text())
-    if not isinstance(raw, dict):
-        # ``voltage_map_from_dict`` raises ``TypeError`` for a non-dict; keep the
-        # ``ValueError`` contract the CLI loaders already catch.
-        raise ValueError(f"voltage map must be a JSON object, got {type(raw).__name__}")
+    raw = load_voltage_sidecar(path)
     intervals = voltage_map_from_dict(raw)[0]
     return {name: _signed_endpoint(iv) for name, iv in intervals.items()}
 
@@ -391,13 +386,9 @@ def load_voltage_intervals(path: str | Path) -> dict[str, tuple[float, float]]:
         ValueError: If the file is not a JSON object, or any net voltage
             endpoint is not a finite real number.
     """
-    from kicad_tools.creepage.engine import voltage_map_from_dict
+    from kicad_tools.creepage.engine import load_voltage_sidecar, voltage_map_from_dict
 
-    raw = json.loads(Path(path).read_text())
-    if not isinstance(raw, dict):
-        # ``voltage_map_from_dict`` raises ``TypeError`` for a non-dict; keep the
-        # ``ValueError`` contract the CLI loaders already catch.
-        raise ValueError(f"voltage map must be a JSON object, got {type(raw).__name__}")
+    raw = load_voltage_sidecar(path)
     intervals = voltage_map_from_dict(raw)[0]
     return {name: (iv.lo, iv.hi) for name, iv in intervals.items()}
 
@@ -415,13 +406,9 @@ def load_edge_voltage(path: str | Path) -> float:
         ValueError: If the file is not a JSON object or ``_edge_voltage`` is not
             a finite real scalar.
     """
-    from kicad_tools.creepage.engine import voltage_map_from_dict
+    from kicad_tools.creepage.engine import load_voltage_sidecar, voltage_map_from_dict
 
-    raw = json.loads(Path(path).read_text())
-    if not isinstance(raw, dict):
-        # ``voltage_map_from_dict`` raises ``TypeError`` for a non-dict; keep the
-        # ``ValueError`` contract the CLI loaders already catch.
-        raise ValueError(f"voltage map must be a JSON object, got {type(raw).__name__}")
+    raw = load_voltage_sidecar(path)
     return voltage_map_from_dict(raw)[1]
 
 
@@ -434,11 +421,9 @@ def load_pair_bounds(path: str | Path) -> dict[frozenset[str], tuple[float, str]
     Raises:
         ValueError: If the file is not a JSON object or a bound is malformed.
     """
-    from kicad_tools.creepage.engine import pair_bounds_from_dict
+    from kicad_tools.creepage.engine import load_voltage_sidecar, pair_bounds_from_dict
 
-    raw = json.loads(Path(path).read_text())
-    if not isinstance(raw, dict):
-        raise ValueError(f"voltage map must be a JSON object, got {type(raw).__name__}")
+    raw = load_voltage_sidecar(path)
     return pair_bounds_from_dict(raw)
 
 

@@ -10,13 +10,13 @@ on a non-micro via must be stored and validated as a through barrel.
 
 import pytest
 
-from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerDefinition, LayerStack, LayerType
 from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
 
-pytestmark = pytest.mark.skipif(not is_cpp_available(), reason="native router required")
+pytestmark = pytest.mark.requires_router_cpp
 
 
 def _context(layers):

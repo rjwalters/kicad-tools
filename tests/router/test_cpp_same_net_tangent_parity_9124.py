@@ -20,17 +20,13 @@ from __future__ import annotations
 
 import pytest
 
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.via_clearance import (
     same_net_pad_gap_acceptable,
     same_net_pad_gap_band_ring,
     same_net_segment_pad_gap_acceptable,
 )
 
-requires_cpp = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ router backend not available",
-)
+requires_cpp = pytest.mark.requires_router_cpp
 
 RES = 0.05
 COLS = ROWS = 400

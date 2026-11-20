@@ -23,7 +23,6 @@ import math
 
 import pytest
 
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.diffpair_routing import (
     CoupledPathfinder,
     build_corridor_mask,
@@ -33,10 +32,7 @@ from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad, Route, Segment
 from kicad_tools.router.rules import DesignRules
 
-pytestmark = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ coupled parity requires the router_cpp backend (kct build-native)",
-)
+pytestmark = pytest.mark.requires_router_cpp
 
 
 def _make_grid(width: float = 12.7, height: float = 12.7) -> RoutingGrid:

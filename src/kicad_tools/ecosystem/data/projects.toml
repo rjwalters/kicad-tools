@@ -1431,6 +1431,43 @@ editor; there is no offline file-reading path, so it cannot participate in \
 headless/CI workflows.\
 """
 
+[projects.pcbjam]
+name = "PCBJam"
+slug = "PCBJam/pcbjam"
+repo_url = "https://github.com/PCBJam/pcbjam"
+vcs = "github"
+category = "bindings"
+relation = "reference"
+verdict = "watch"
+# The LICENSE file is the verbatim GPLv3 text (29 June 2007) with no
+# "or later" notice next to it; the forge's detector reports GPL-3.0,
+# agreeing with `license`.
+license = "GPL-3.0"
+license_compat = "copyleft-ideas-only"
+language = "C++ (KiCad, Emscripten) + TypeScript"
+stars = 52
+last_push = "2026-11-19"
+last_verified = "2026-11-19"
+research_docs = ["docs/research/pcbjam-blind-pcb-study.md"]
+summary = """
+KiCad's pcbnew compiled to WebAssembly so a board can be opened and edited \
+in a browser: a KiCad source mirror plus a wxWidgets WASM fork, Embind \
+bindings, runtime shims and Playwright tests, published as pcbjam.com. A \
+GPL-3.0 KiCad derivative, so it is subject to the clean-room policy \
+(`docs/clean-room.md`, issue #9589): ideas only, nothing copied in \
+either direction. What we actually \
+learned from the PCBJam team comes from its MIT-licensed sibling study \
+repo: `kct ecosystem show pcbjam-blind-pcb-runs`. The licence split's \
+third row, their `bt` agent CLI, is unpublished -- ideas only as well; \
+what we know of it is recorded in the linked study note.\
+"""
+reeval_trigger = """
+If the WASM build exposes a stable JavaScript API for reading or checking a \
+board, it could matter to browser-facing or MCP flows -- but the clean-room \
+policy (`docs/clean-room.md`, #9589) keeps code reuse off the table \
+either way.\
+"""
+
 # ----------------------------------------------------------------- benchmark
 
 [projects.pcbworld]
@@ -1584,6 +1621,46 @@ code in either direction.\
 reeval_trigger = """
 If upstream ships a headless solve command with a stable output schema, or \
 if we decide a DC IR-drop check belongs in `kct check`.\
+"""
+
+[projects.pcbjam-blind-pcb-runs]
+name = "PCBJam blind PCB runs"
+slug = "PCBJam/blind-pcb-runs"
+repo_url = "https://github.com/PCBJam/blind-pcb-runs"
+vcs = "github"
+category = "benchmark"
+relation = "reference"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "JavaScript + shell"
+stars = 0
+last_push = "2026-11-18"
+last_verified = "2026-11-19"
+# HEAD when we read the study for issue #9596 (2026-11-19): 21 runs over
+# 9 boards, November 2026.
+pinned_commit = "b5a047f3d8e7963bca46da485b05c6a7041d9cfb"
+research_docs = ["docs/research/pcbjam-blind-pcb-study.md", "docs/research/pcbjam-blind-pcb-results.md"]
+summary = """
+briefs, sandbox, scoring scripts and raw runs from PCBJam's blind PCB \
+study: Claude Code running Fable 5.2 places and routes real KiCad 10 \
+boards blind (copper stripped, parts moved off-board) in a network-isolated \
+sandbox -- 21 runs over 9 human-routed boards, November 2026. The repo is \
+MIT and reusable with attribution, and per-board licences still apply: \
+each board under `boards/` keeps its own (CERN-OHL, 0BSD, WTFPL, MIT, \
+Apache-2.0, one undetermined), so fetch by recipe, never vendor. `kct` \
+has been scored under their protocol once (issue #9595, closed): the \
+zero-touch harness routed their Antmicro M.2-to-PCIe adapter to 68.4 % \
+completion (67 of 98 connections) in 29.2 min, reported partial -- see \
+`pcbjam-blind-pcb-results.md`; our read of the study's findings and what \
+the agents asked their tool for is in the study note.\
+"""
+reeval_trigger = """
+Issue #9595 scored the first of the nine boards (`kct` zero-touch on the \
+M.2 adapter, reported partial -- `pcbjam-blind-pcb-results.md`); move to \
+`benchmarked` once more than that one board is scored under their briefs \
+and scoring -- their one-run-per-setup anecdotes then meet our own \
+numbers on the same referee.\
 """
 
 # ----------------------------------------------------------------- 3d models

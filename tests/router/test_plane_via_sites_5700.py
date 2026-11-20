@@ -22,7 +22,7 @@ import math
 
 import pytest
 
-from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import LayerStack
 from kicad_tools.router.pathfinder import Router
@@ -33,7 +33,7 @@ from kicad_tools.router.plane_via_sites import (
 from kicad_tools.router.primitives import Layer, Pad, Route, Segment
 from kicad_tools.router.rules import DesignRules
 
-requires_cpp = pytest.mark.skipif(not is_cpp_available(), reason="C++ router backend not built")
+requires_cpp = pytest.mark.requires_router_cpp
 
 PLANE = "VBUS_USB"
 SIGNAL_NET = 1

@@ -28,7 +28,6 @@ from __future__ import annotations
 import pytest
 
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.layers import LayerStack
 from kicad_tools.router.rules import NetClassRouting
 
@@ -117,6 +116,7 @@ class TestDDRByteCertificateClassification:
 class TestDDRByteReach:
     """Measured reach on the isolated 11-net bundle (flag OFF vs ON)."""
 
+    @pytest.mark.requires_router_cpp
     def test_certificate_reach_no_worse_than_identity_baseline(self) -> None:
         router_off, ids_off = _build_isolated_ddr_router(enable_certificate=False)
         baseline = _reach(router_off.route_all_negotiated(seed=42), ids_off)
@@ -128,14 +128,13 @@ class TestDDRByteReach:
         # identity baseline on the isolated bundle.  This relative guard holds
         # on every backend, including the pure-Python A* fallback.
         assert with_cert >= baseline
-        # The absolute reach numbers are backend-dependent: full 11/11 with the
-        # C++ router_cpp extension, but only 7/11 on the pure-Python fallback
-        # (a backend artifact, not a router regression — see repo CLAUDE.md,
-        # `uv sync` does not build the native extension).  Gate them on native
-        # availability so a fresh checkout / Loom worktree that hasn't run
-        # `kct build-native` sees a clean pass, not a confusing AssertionError.
-        if is_cpp_available():
-            # Both reach full on the empty board (the #3438 2/11 loss is a
-            # full-board congestion effect, not intrinsic to the bundle).
-            assert baseline == len(ids_off)
-            assert with_cert == len(ids_on)
+        # The absolute reach numbers are pinned to the C++ router_cpp
+        # extension (11/11; the pure-Python fallback reaches 7/11 -- a
+        # backend artifact, not a router regression).  Issue #9705: this test
+        # is marked ``requires_router_cpp`` and asserts them unconditionally,
+        # so a worktree that hasn't run ``kct build-native`` fails with the
+        # build hint instead of silently dropping the native expectations.
+        # Both reach full on the empty board (the #3438 2/11 loss is a
+        # full-board congestion effect, not intrinsic to the bundle).
+        assert baseline == len(ids_off)
+        assert with_cert == len(ids_on)

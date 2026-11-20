@@ -5,9 +5,17 @@ authored ``(arc ...)`` copper was invisible to the pairwise rules, so a
 foreign-net segment crossing an applied arc's apex read clean while the same
 geometry with straight segments reported the short.  These tests pin the
 fix -- arcs are collected as one copper element per arc (the arc, never a
-tessellation chord, is the reporting unit), measured through the covering
-chord tessellation shared with ``kct probe``
-(:data:`kicad_tools.validate.rules.clearance.ARC_COPPER_SAGITTA_MM`).
+tessellation chord, is the reporting unit).
+
+Issue #9702 tightened the *measurement*: the covering chord tessellation
+(width inflated by twice ``ARC_COPPER_SAGITTA_MM``) treats arc copper as
+1-2 um wider than it is, so gaps at or above the requirement were flagged
+while pinned kicad-cli accepted them, and the reported ``actual``
+understated the true gap by the same amount.  The verdict now measures the
+authored arc exactly (a capsule of the authored width swept along the
+finite centreline, round end caps included), compared with the probed
+kicad-cli arc acceptance band
+(:data:`kicad_tools.validate.rules.clearance.ARC_CLEARANCE_BAND_MM`).
 
 Controls come from the issue's measured reproduction (board 02 geometry):
 GND arc on ``B.Cu`` ``start (128,135) mid (130,137) end (132,135)``, width
@@ -19,6 +27,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import random
 from pathlib import Path
 
 import pytest
@@ -350,7 +360,8 @@ class TestSeparateBatchProbeApply:
         assert rc == 1 and doc["ok"] is False
         shorts = [p for p in doc["problems"] if p["rule_id"] == "clearance_arc_segment"]
         assert len(shorts) == 1
-        assert shorts[0]["proposed_item"] == 1
+        # Both members of the pair are proposed (arc item 1, track item 2).
+        assert shorts[0]["proposed_item"] in (1, 2)
         assert set(shorts[0]["nets"]) == {"GND", "VCC"}
 
         # Checked apply refuses the batch and preserves the board bytes.
@@ -623,7 +634,8 @@ class TestCheckedApplyArcExemptions:
         assert rc == 1 and doc["ok"] is False
         shorts = [p for p in doc["problems"] if p["rule_id"] == "clearance_arc_via"]
         assert len(shorts) == 1
-        assert shorts[0]["proposed_item"] == 1
+        # Both members of the pair are proposed (arc item 1, track item 2).
+        assert shorts[0]["proposed_item"] in (1, 2)
         assert set(shorts[0]["nets"]) == {"GND", "VCC"}
 
         rc, doc = _run(
@@ -659,7 +671,8 @@ class TestCheckedApplyArcExemptions:
         assert rc == 1 and doc["ok"] is False
         shorts = [p for p in doc["problems"] if p["rule_id"] == "clearance_arc_segment"]
         assert len(shorts) == 1
-        assert shorts[0]["proposed_item"] == 1
+        # Both members of the pair are proposed (arc item 1, track item 2).
+        assert shorts[0]["proposed_item"] in (1, 2)
         assert set(shorts[0]["nets"]) == {"USB_D+", "USB_D-"}
 
         rc, doc = _run(
@@ -705,6 +718,675 @@ class TestCheckedApplyArcExemptions:
         assert rc == 0 and doc["written"] is not None
         reloaded = _load(board)
         assert len(reloaded.arcs) == 1 and len(reloaded.vias) == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue #9702: the verdict measures the TRUE arc, and the acceptance band
+# matches pinned kicad-cli.  Reproduction frame: F.Cu semicircle
+# (40,40) -> (50,50) -> (60,40), width 0.2, net N1 -- centre (50,40),
+# radius 10, apex (50,50) -- with a radial 0.2 mm N2 track; the rule's
+# minimum is 0.2 mm.
+# ---------------------------------------------------------------------------
+
+_REQ = 0.2
+_ARCW = 0.2
+_ARC_C = (50.0, 40.0)
+_ARC_R = 10.0
+
+_HEADER2L = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "N1")
+  (net 2 "N2")
+"""
+
+_BIG_ARC = (
+    f"  (arc (start 40 40) (mid 50 50) (end 60 40) (width {_ARCW}) "
+    '(layer "F.Cu") (uuid "arc-n1") (net 1))\n'
+)
+
+
+def _check_at(tmp_path: Path, extra: str, minimum: float = _REQ):
+    """``ClearanceRule._check_layer`` findings for the semicircle board."""
+    from kicad_tools.validate.rules.clearance import ClearanceRule
+
+    p = tmp_path / "b.kicad_pcb"
+    p.write_text(_HEADER2L + _BIG_ARC + extra + "\n)\n")
+    return ClearanceRule()._check_layer(PCB.load(str(p)), "F.Cu", minimum)
+
+
+def _radial_track(orient: str, shortfall: float) -> tuple[str, float]:
+    """A radial N2 track at ``shortfall`` mm below the 0.2 mm requirement.
+
+    Returns ``(segment sexp, expected true copper gap)`` computed from the
+    SERIALIZED coordinates (the issue's test plan: expected gaps come from
+    the board coordinates, particularly for the rotated case).
+    """
+
+    def f(v: float) -> str:
+        return f"{v:.6f}"
+
+    gap = _REQ - shortfall
+    if orient == "convex_apex":
+        ey = 50.4 - shortfall
+        p1, p2 = (50.0, ey), (50.0, ey + 2.0)
+        expected = round(ey, 6) - 50.2
+    elif orient == "concave_apex":
+        ey = 49.6 + shortfall
+        p1, p2 = (50.0, ey), (50.0, ey - 2.0)
+        expected = 49.8 - round(ey, 6)
+    else:
+        ang = math.radians(60.0)
+        ux, uy = math.cos(ang), math.sin(ang)
+        re = (_ARC_R + _ARCW + gap) if orient == "convex_30" else (_ARC_R - _ARCW - gap)
+        ex, ey = round(_ARC_C[0] + ux * re, 6), round(_ARC_C[1] + uy * re, 6)
+        sign = 1.0 if orient == "convex_30" else -1.0
+        p1, p2 = (ex, ey), (ex + sign * ux * 2.0, ey + sign * uy * 2.0)
+        r_e = math.hypot(ex - _ARC_C[0], ey - _ARC_C[1])
+        expected = (
+            (r_e - _ARCW / 2) - (_ARC_R + _ARCW / 2)
+            if orient == "convex_30"
+            else (_ARC_R - _ARCW / 2) - (r_e + _ARCW / 2)
+        )
+    seg = (
+        f"  (segment (start {f(p1[0])} {f(p1[1])}) (end {f(p2[0])} {f(p2[1])}) "
+        f'(width {_ARCW}) (layer "F.Cu") (net 2))\n'
+    )
+    return seg, expected
+
+
+class TestExactArcGap:
+    """AC1: at/above the minimum every arc pair kind passes; failing
+    fixtures report the true edge-to-edge gap; a real overlap stays a
+    SHORT and one finding per authored pair."""
+
+    @pytest.mark.parametrize("orient", ["convex_apex", "concave_apex", "convex_30", "concave_30"])
+    def test_at_minimum_passes(self, tmp_path, orient):
+        seg, _ = _radial_track(orient, 0.0)
+        assert _check_at(tmp_path, seg) == []
+
+    @pytest.mark.parametrize("orient", ["convex_apex", "concave_apex", "convex_30", "concave_30"])
+    def test_above_minimum_passes(self, tmp_path, orient):
+        seg, _ = _radial_track(orient, -0.001)  # 1 um clear of the minimum
+        assert _check_at(tmp_path, seg) == []
+
+    @pytest.mark.parametrize("shortfall", [0.0006, 0.001, 0.010])
+    @pytest.mark.parametrize("orient", ["convex_apex", "concave_apex", "convex_30", "concave_30"])
+    def test_below_minimum_reports_true_gap(self, tmp_path, orient, shortfall):
+        seg, expected = _radial_track(orient, shortfall)
+        findings = _check_at(tmp_path, seg)
+        assert [v.rule_id for v in findings] == ["clearance_arc_segment"]
+        assert findings[0].actual_value == pytest.approx(expected, abs=1e-6)
+        assert findings[0].actual_value < _REQ
+
+    def test_arc_via_at_minimum_passes_and_reports_true_gap(self, tmp_path):
+        # Via copper radius 0.3 (size 0.6); arc outer copper edge 50.1:
+        # centre 50.6 is exactly the 0.2 mm requirement, 50.55 is 50 um short.
+        at_min = '  (via (at 50 50.6) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2))\n'
+        assert _check_at(tmp_path, at_min) == []
+        short = '  (via (at 50 50.55) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2))\n'
+        findings = _check_at(tmp_path, short)
+        assert [v.rule_id for v in findings] == ["clearance_arc_via"]
+        assert findings[0].actual_value == pytest.approx(0.15, abs=1e-6)
+
+    def test_arc_pad_at_minimum_passes_and_reports_true_gap(self, tmp_path):
+        def pad(y: float) -> str:
+            return (
+                f'  (footprint "t:p" (layer "F.Cu") (at 50 {y})\n'
+                '    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 2)))\n'
+            )
+
+        # The circle curves toward the pad's outer corners, so the closest
+        # copper sits over a corner, not the face midpoint: the at-minimum
+        # centre solves |corner - (50,40)| = 10 - 0.3 (gap exactly 0.2).
+        assert _check_at(tmp_path, pad(49.395360)) == []
+        findings = _check_at(tmp_path, pad(49.45))
+        assert [v.rule_id for v in findings] == ["clearance_arc_pad"]
+        # 10 - hypot(0.3, 9.75) - 0.1, from the serialized pad centre.
+        assert findings[0].actual_value == pytest.approx(0.145386, abs=5e-5)  # 0.1454 at 4 dp
+
+    def test_arc_roundrect_pad_measures_true_outline(self, tmp_path):
+        # A roundrect pad is core-rect + corner radius (0.25 x 0.6 => 0.15).
+        # Facing the concave apex the closest copper is the corner arc the
+        # circle curves toward, not the face midpoint -- the at-minimum
+        # centre (bisected against the shapely outline oracle) lands 1.6 um
+        # above the rect pad's, and the checker must place it exactly.
+        pad = (
+            '  (footprint "t:p" (layer "F.Cu") (at 50 49.398845)\n'
+            '    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6) (roundrect_rratio 0.25) '
+            '(layers "F.Cu") (net 2)))\n'
+        )
+        assert _check_at(tmp_path, pad) == []
+        at_corner = (
+            '  (footprint "t:p" (layer "F.Cu") (at 42.460740 47.539260)\n'
+            '    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6) (roundrect_rratio 0.25) '
+            '(layers "F.Cu") (net 2)))\n'
+        )
+        assert _check_at(tmp_path, at_corner) == []  # exactly 0.2 on the diagonal
+        corner = (
+            '  (footprint "t:p" (layer "F.Cu") (at 42.496096 47.503904)\n'
+            '    (pad "1" smd roundrect (at 0 0) (size 0.6 0.6) (roundrect_rratio 0.25) '
+            '(layers "F.Cu") (net 2)))\n'
+        )
+        findings = _check_at(tmp_path, corner)
+        assert [v.rule_id for v in findings] == ["clearance_arc_pad"]
+        # Expected from the serialized centre by the independent sampler:
+        # the corner arc the circle curves toward is the closest copper.
+        expected = _sampled_pad_gap(tmp_path, corner)
+        assert findings[0].actual_value == pytest.approx(expected, abs=5e-4)
+
+    def test_arc_arc_at_minimum_passes_and_reports_true_gap(self, tmp_path):
+        # Facing semicircles, apex to apex (interior-interior): the second
+        # arc's copper bottom edge at y2-0.1 vs the first arc's top 50.1.
+        def mirror(y2: float) -> str:
+            return (
+                f"  (arc (start 40 {y2 + 10}) (mid 50 {y2}) (end 60 {y2 + 10}) "
+                f'(width {_ARCW}) (layer "F.Cu") (net 2))\n'
+            )
+
+        assert _check_at(tmp_path, mirror(50.4)) == []  # exactly 0.2
+        findings = _check_at(tmp_path, mirror(50.3))
+        assert [v.rule_id for v in findings] == ["clearance_arc_arc"]
+        assert findings[0].actual_value == pytest.approx(0.1, abs=1e-6)
+
+    def test_real_overlap_stays_short_single_finding(self, tmp_path):
+        seg, _ = _radial_track("convex_apex", 0.5)  # track pierces the arc
+        findings = _check_at(tmp_path, seg)
+        assert [v.rule_id for v in findings] == ["clearance_arc_segment"]
+        v = findings[0]
+        assert v.actual_value < 0
+        assert v.message.startswith("SHORT:")
+        assert set(v.nets) == {"N1", "N2"}
+        assert "Arc@F.Cu:w0.2:40/40~50/50~60/40" in v.items
+
+
+def _sampled_pad_gap(tmp_path: Path, pad_sexp: str) -> float:
+    """Independent numeric oracle: dense on-arc samples vs the pad polygon."""
+    from shapely.geometry import Point  # type: ignore[import-untyped]
+
+    from kicad_tools.validate.rules.clearance import ClearanceRule, _pad_polygon
+
+    p = tmp_path / "b.kicad_pcb"
+    p.write_text(_HEADER2L + _BIG_ARC + pad_sexp + "\n)\n")
+    pcb = PCB.load(str(p))
+    (arc_elem,) = (
+        e for e in ClearanceRule()._collect_elements(pcb, "F.Cu") if e.element_type == "arc"
+    )
+    (pad_elem,) = (
+        e for e in ClearanceRule()._collect_elements(pcb, "F.Cu") if e.element_type == "pad"
+    )
+    polygon = _pad_polygon(pad_elem.source_pad, pad_elem.source_footprint)
+    points = arc_elem.source_arc.centerline_points(max_error_mm=1e-6)
+    best = min(polygon.exterior.distance(Point(q)) for q in points)
+    return best - _ARCW / 2
+
+
+class TestArcClosestPointFamilies:
+    """Interior, arc-endpoint, track-endpoint and intersection minima, a
+    noncircular pad and a second finite arc (issue test plan)."""
+
+    def test_interior_closest_point_both_sides(self, tmp_path):
+        # Apex (radial foot) and 30 deg off apex: interior-interior minima.
+        for orient in ("convex_apex", "concave_apex", "convex_30", "concave_30"):
+            seg, expected = _radial_track(orient, 0.0008)
+            findings = _check_at(tmp_path, seg)
+            assert [v.rule_id for v in findings] == ["clearance_arc_segment"], orient
+            assert findings[0].actual_value == pytest.approx(expected, abs=1e-6), orient
+
+    def test_arc_endpoint_closest(self, tmp_path):
+        # A horizontal track beyond the arc's START endpoint (40,40): the
+        # closest skeleton point is the authored endpoint, not any interior
+        # radial foot.
+        def track(x: float) -> str:
+            return (
+                f'  (segment (start {x} 39.9) (end {x} 40.1) (width 0.2) (layer "F.Cu") (net 2))\n'
+            )
+
+        assert _check_at(tmp_path, track(39.6)) == []  # gap exactly 0.2
+        findings = _check_at(tmp_path, track(39.65))
+        assert [v.rule_id for v in findings] == ["clearance_arc_segment"]
+        # Endpoint (40,40) is the arc's leftmost skeleton point; the track
+        # spans y 39.9..40.1, so the skeleton distance is 0.35 horizontal.
+        assert findings[0].actual_value == pytest.approx(0.35 - _ARCW, abs=1e-6)
+
+    def test_track_endpoint_closest(self, tmp_path):
+        # A track END cap is the nearest feature: its closest arc point is
+        # interior, at 30 deg off the apex, on the concave side.
+        seg, expected = _radial_track("concave_30", 0.0007)
+        findings = _check_at(tmp_path, seg)
+        assert [v.rule_id for v in findings] == ["clearance_arc_segment"]
+        assert findings[0].actual_value == pytest.approx(expected, abs=1e-6)
+
+    def test_intersection_reports_short(self, tmp_path):
+        seg = '  (segment (start 50 45) (end 50 55) (width 0.2) (layer "F.Cu") (net 2))\n'
+        findings = _check_at(tmp_path, seg)
+        assert [v.rule_id for v in findings] == ["clearance_arc_segment"]
+        assert findings[0].actual_value < 0
+        assert findings[0].message.startswith("SHORT:")
+
+    def test_second_finite_arc_endpoint_governed(self, tmp_path):
+        # Two disjoint facing arcs whose minimum is governed by ENDPOINTS
+        # (not the apex-to-apex interior): expected from an independent
+        # dense sampling of both skeletons.
+        arc2 = (
+            "  (arc (start 39.85 39.7) (mid 40 39.55) (end 40.15 39.7) "
+            '(width 0.2) (layer "F.Cu") (net 2))\n'
+        )
+        findings = _check_at(tmp_path, arc2)
+        assert [v.rule_id for v in findings] == ["clearance_arc_arc"]
+        expected = _sampled_arc_arc_gap(tmp_path, arc2)
+        assert findings[0].actual_value == pytest.approx(expected, abs=1e-4)
+
+
+def _sampled_arc_arc_gap(tmp_path: Path, arc2_sexp: str) -> float:
+    """Independent numeric oracle: dense on-arc samples of both centrelines."""
+    from kicad_tools.core.geometry import point_to_segment_distance  # noqa: F401
+
+    p = tmp_path / "b.kicad_pcb"
+    p.write_text(_HEADER2L + _BIG_ARC + arc2_sexp + "\n)\n")
+    pcb = PCB.load(str(p))
+    arcs = list(pcb.arcs)
+    assert len(arcs) == 2
+    pts1 = arcs[0].centerline_points(max_error_mm=1e-6)
+    pts2 = arcs[1].centerline_points(max_error_mm=1e-6)
+    best = min(math.dist(p, q) for p in pts1 for q in pts2)
+    return best - arcs[0].width / 2 - arcs[1].width / 2
+
+
+class TestArcAcceptanceBand:
+    """The checker band agrees with the probed kicad-cli arc transition:
+    a 490 nm-short gap passes, a 500 nm-short one is flagged, on all four
+    measured orientations (Issue #9702's black-box probe on the pinned
+    image; the native parity test below re-proves it live)."""
+
+    @pytest.mark.parametrize("orient", ["convex_apex", "concave_apex", "convex_30", "concave_30"])
+    def test_490_passes_500_flags(self, tmp_path, orient):
+        seg, _ = _radial_track(orient, 0.00049)
+        assert _check_at(tmp_path, seg) == []
+        seg, _ = _radial_track(orient, 0.0005)
+        findings = _check_at(tmp_path, seg)
+        assert [v.rule_id for v in findings] == ["clearance_arc_segment"]
+        assert findings[0].actual_value == pytest.approx(0.1995, abs=1e-6)
+
+    def test_band_is_separate_from_measurement(self):
+        from kicad_tools.validate.rules.base import KICAD_CLEARANCE_BAND_MM
+        from kicad_tools.validate.rules.clearance import (
+            ARC_CLEARANCE_BAND_MM,
+            CopperElement,
+            pair_clearance_tolerance_mm,
+        )
+
+        assert (
+            pair_clearance_tolerance_mm(
+                CopperElement(
+                    element_type="segment",
+                    layer="F.Cu",
+                    net_number=1,
+                    geometry=(0, 0, 1, 0, 0.2),
+                    reference="s",
+                ),
+                CopperElement(
+                    element_type="segment",
+                    layer="F.Cu",
+                    net_number=2,
+                    geometry=(0, 1, 1, 1, 0.2),
+                    reference="t",
+                ),
+            )
+            == KICAD_CLEARANCE_BAND_MM
+        )
+        arc = CopperElement(
+            element_type="arc",
+            layer="F.Cu",
+            net_number=1,
+            geometry=(0, 0, 1, 0, 0.2),
+            reference="a",
+        )
+        assert pair_clearance_tolerance_mm(arc, arc) == ARC_CLEARANCE_BAND_MM
+
+
+# ---------------------------------------------------------------------------
+# AC2: pinned native DRC and the checker agree across the arc-track
+# transition, probed at 10 nm steps (Issue #9702's test plan).  There is
+# deliberately NO skip: an unresolvable pinned toolchain fails the test
+# loudly (operator ruling on added skips), same as
+# tests/test_edge_cuts_filled_native_parity.py.
+# ---------------------------------------------------------------------------
+
+_PARITY_SHORTS = [round(0.00046 + i * 1e-5, 8) for i in range(9)]  # 460..540 nm
+_PARITY_ORIENTS = ("convex_apex", "concave_apex", "convex_30", "concave_30")
+_PARITY_SPACING = 30.0
+
+
+def _parity_board(orient: str, tmp_path: Path) -> tuple[Path, dict[int, str]]:
+    """One board per orientation: sample i at arc centre x = 40 + i*30."""
+    import uuid
+
+    parts = [_HEADER2L]
+    centres: dict[int, str] = {}
+    for i, shortfall in enumerate(_PARITY_SHORTS):
+        cx = 40.0 + i * _PARITY_SPACING
+        seg, _ = _radial_track_at(orient, shortfall, cx)
+        parts.append(
+            f"  (arc (start {cx - _ARC_R} 40) (mid {cx} 50) (end {cx + _ARC_R} 40) "
+            f'(width {_ARCW}) (layer "F.Cu") (uuid "{uuid.uuid4()}") (net 1))\n'
+        )
+        parts.append(seg)
+        centres[i] = f"{cx:.6f}"
+    parts.append(
+        "  (gr_rect (start 0 0) (end 340 120) (stroke (width 0.05) "
+        '(type default)) (fill none) (layer "Edge.Cuts"))\n'
+    )
+    parts.append(")\n")
+    board = tmp_path / f"parity_{orient}.kicad_pcb"
+    board.write_text("".join(parts))
+    board.with_suffix(".kicad_dru").write_text(
+        '(version 1)\n(rule "probe clearance" (constraint clearance (min 0.2mm)))\n'
+    )
+    return board, centres
+
+
+def _radial_track_at(orient: str, shortfall: float, cx: float) -> tuple[str, float]:
+    """``_radial_track`` translated to arc centre ``(cx, 40)`` (same math)."""
+
+    def f(v: float) -> str:
+        return f"{v:.6f}"
+
+    gap = _REQ - shortfall
+    if orient == "convex_apex":
+        ey = 50.4 - shortfall
+        p1, p2 = (cx, ey), (cx, ey + 2.0)
+    elif orient == "concave_apex":
+        ey = 49.6 + shortfall
+        p1, p2 = (cx, ey), (cx, ey - 2.0)
+    else:
+        ang = math.radians(60.0)
+        ux, uy = math.cos(ang), math.sin(ang)
+        re = (_ARC_R + _ARCW + gap) if orient == "convex_30" else (_ARC_R - _ARCW - gap)
+        ex, ey = round(cx + ux * re, 6), round(40 + uy * re, 6)
+        sign = 1.0 if orient == "convex_30" else -1.0
+        p1, p2 = (ex, ey), (ex + sign * ux * 2.0, ey + sign * uy * 2.0)
+    seg = (
+        f"  (segment (start {f(p1[0])} {f(p1[1])}) (end {f(p2[0])} {f(p2[1])}) "
+        f'(width {_ARCW}) (layer "F.Cu") (net 2))\n'
+    )
+    return seg, gap
+
+
+def _kct_flagged(board: Path, centres: dict[int, str]) -> set[int]:
+    """Sample indices ``ClearanceRule`` flags at the 0.2 mm minimum."""
+    from kicad_tools.validate.rules.clearance import ClearanceRule
+
+    pcb = PCB.load(str(board))
+    flagged: set[int] = set()
+    for v in ClearanceRule()._check_layer(pcb, "F.Cu", _REQ):
+        for i, cx in centres.items():
+            if abs(v.location[0] - float(cx)) < _PARITY_SPACING / 2:
+                flagged.add(i)
+                break
+    return flagged
+
+
+def _kicad_flagged(board: Path, tmp_path: Path, centres: dict[int, str]) -> set[int]:
+    """Sample indices pinned kicad-cli flags (type ``clearance``)."""
+    from kicad_tools.cli.kicad_toolchain import KiCadEnvironmentError, evidence_toolchain
+    from kicad_tools.cli.runner import run_drc
+
+    try:
+        with evidence_toolchain(mounts=[tmp_path]):
+            result = run_drc(board, schematic_parity=False)
+    except KiCadEnvironmentError as exc:
+        pytest.fail(f"pinned kicad-cli unavailable for arc band parity: {exc}")
+    if not result.success:
+        pytest.fail(f"kicad-cli DRC failed: {result.stderr[:200]}")
+    report = json.loads(Path(result.output_path).read_text())
+    flagged: set[int] = set()
+    for violation in report.get("violations", []):
+        if violation.get("type") != "clearance":
+            continue
+        for item in violation.get("items", []):
+            if "[N2]" not in item.get("description", ""):
+                continue
+            x = float(item["pos"]["x"])
+            for i, cx in centres.items():
+                if abs(x - float(cx)) < _PARITY_SPACING / 2:
+                    flagged.add(i)
+                    break
+            break
+    return flagged
+
+
+class TestNativeArcBandParity:
+    @pytest.mark.parametrize("orient", _PARITY_ORIENTS)
+    def test_checker_agrees_with_pinned_kicad_cli_across_the_transition(self, tmp_path, orient):
+        board, centres = _parity_board(orient, tmp_path)
+        kct = _kct_flagged(board, centres)
+        native = _kicad_flagged(board, tmp_path, centres)
+        assert kct == native, f"kct flagged {sorted(kct)} but kicad-cli flagged {sorted(native)}"
+        # The measured transition: the 490 nm-short sample passes and the
+        # 500 nm-short one is flagged, on both engines (the issue's coarse
+        # 400/500 bracket resolves to these adjacent 10 nm samples).
+        idx_490 = _PARITY_SHORTS.index(0.00049)
+        idx_500 = _PARITY_SHORTS.index(0.0005)
+        assert idx_490 not in kct and idx_500 in kct
+        assert idx_490 not in native and idx_500 in native
+
+
+# ---------------------------------------------------------------------------
+# AC3: probe, checked apply and the saved board's own check agree at the
+# minimum; a below-band control produces a finding and refuses the write.
+# The probe floor is the default manufacturer's (jlcpcb, 0.127 mm).
+# ---------------------------------------------------------------------------
+
+_MIN_GAP = 0.127
+
+_ARC_ITEM_BIG = {
+    "type": "arc",
+    "net": "N1",
+    "layer": "F.Cu",
+    "width": 0.2,
+    "start": [40, 40],
+    "mid": [50, 50],
+    "end": [60, 40],
+}
+
+
+def _radial_item(y: float) -> dict:
+    return {
+        "type": "segment",
+        "net": "N2",
+        "layer": "F.Cu",
+        "width": 0.2,
+        "start": [50, y],
+        "end": [50, y + 2],
+    }
+
+
+class TestProbeApplyCheckAgreement:
+    def _board(self, tmp_path: Path) -> Path:
+        board = tmp_path / "pac.kicad_pcb"
+        board.write_text(
+            _HEADER2L + "  (gr_rect (start 0 0) (end 100 100) (stroke (width 0.05) "
+            '(type default)) (fill none) (layer "Edge.Cuts"))\n' + ")\n"
+        )
+        return board
+
+    def test_at_minimum_probe_apply_and_saved_board_check_agree(self, tmp_path, capsys):
+        board = self._board(tmp_path)
+        # Track copper edge at y-0.1; arc outer copper at 50.1: the gap is
+        # y - 50.2, so y = 50.327 is exactly the 0.127 mm floor.
+        items = _items_file(tmp_path, _ARC_ITEM_BIG, _radial_item(50.327))
+        rc, doc = _run(capsys, "probe", str(board), str(items), "--format", "json")
+        assert rc == 0 and doc["ok"] is True
+
+        rc, doc = _run(capsys, "apply", str(board), str(items), "--checked", "--format", "json")
+        assert rc == 0 and doc["written"] is not None
+
+        saved = _clearance_findings(_load(board))
+        assert [v.rule_id for v in saved if v.rule_id.startswith("clearance_arc")] == []
+
+    def test_below_band_control_refuses_and_preserves_bytes(self, tmp_path, capsys):
+        board = self._board(tmp_path)
+        before = hashlib.md5(board.read_bytes()).hexdigest()
+        # 600 nm below the floor: y - 50.2 = 0.1264.
+        items = _items_file(tmp_path, _ARC_ITEM_BIG, _radial_item(50.3264))
+        rc, doc = _run(capsys, "probe", str(board), str(items), "--format", "json")
+        assert rc == 1 and doc["ok"] is False
+        shorts = [p for p in doc["problems"] if p["rule_id"] == "clearance_arc_segment"]
+        assert len(shorts) == 1
+        # Both members of the pair are proposed (arc item 1, track item 2).
+        assert shorts[0]["proposed_item"] in (1, 2)
+
+        rc, doc = _run(capsys, "apply", str(board), str(items), "--checked", "--format", "json")
+        assert rc == 1 and doc["written"] is None
+        assert hashlib.md5(board.read_bytes()).hexdigest() == before
+
+
+class TestNetclassArcBand:
+    """The netclass copper rule consumes the same measured band (its
+    comparison site asks ``pair_clearance_tolerance_mm``), so a named
+    class stricter than the fab floor sees the same arc verdict."""
+
+    def test_arc_pair_at_class_minimum_passes_and_below_flags(self, tmp_path):
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.validate.rules.netclass_clearance_copper import (
+            check_netclass_clearance_copper,
+        )
+
+        cls = 0.3  # stricter than the 0.2 fab floor used for the geometry
+        project = {
+            "meta": {"filename": "netclass.kicad_pro", "version": 3},
+            "net_settings": {
+                "meta": {"version": 4},
+                "classes": [
+                    {
+                        "name": "Default",
+                        "clearance": 0.127,
+                        "track_width": 0.2,
+                        "via_diameter": 0.6,
+                        "via_drill": 0.3,
+                        "priority": 2147483647,
+                    },
+                    {
+                        "name": "HV",
+                        "clearance": cls,
+                        "track_width": 0.2,
+                        "via_diameter": 0.6,
+                        "via_drill": 0.3,
+                        "priority": 0,
+                    },
+                ],
+                "netclass_assignments": None,
+                "netclass_patterns": [{"netclass": "HV", "pattern": "N2"}],
+            },
+        }
+        rules = get_profile("jlcpcb").get_design_rules(layers=2)
+
+        def results_for(shortfall: float):
+            p = tmp_path / "netclass.kicad_pcb"
+            seg, _ = _radial_track("convex_apex", shortfall)
+            # Shift the segment to N2 so the class governs the pair.
+            p.write_text(_HEADER2L + _BIG_ARC + seg + "\n)\n")
+            p.with_suffix(".kicad_pro").write_text(json.dumps(project))
+            pcb = PCB.load(str(p))
+            return check_netclass_clearance_copper(p, pcb, rules).violations
+
+        at_min = results_for(_REQ - cls)  # gap exactly 0.3 = the class minimum
+        assert [v.rule_id for v in at_min] == []
+        below = results_for(_REQ - cls + 0.0006)  # 600 nm short of the class
+        assert [v.rule_id for v in below] == ["netclass_clearance_copper"]
+        assert below[0].actual_value == pytest.approx(0.2994, abs=1e-5)
+
+
+class TestAnalyticArcDistances:
+    """Differential oracle for the exact skeleton distances (Issue #9702).
+
+    The analytic helpers are compared against an independent method: dense
+    on-circle samples (the sample points are exact -- only the spacing is
+    discrete) and, for zero answers, a shapely intersection of the sampled
+    polylines.  Seeded, so every run is the same cases.
+    """
+
+    def test_point_segment_arc_match_dense_sampling(self):
+        from kicad_tools.core.geometry import point_to_segment_distance
+        from kicad_tools.validate.rules.clearance import _segment_arc_distance
+
+        rng = random.Random(9702)
+
+        def arc_pts(geom, n):
+            cx, cy, r, a0, sw = geom
+            return [
+                (cx + r * math.cos(a0 + sw * i / (n - 1)), cy + r * math.sin(a0 + sw * i / (n - 1)))
+                for i in range(n)
+            ]
+
+        pts_n = 6000
+        for _ in range(60):
+            geom = (
+                rng.uniform(-5, 5),
+                rng.uniform(-5, 5),
+                rng.uniform(0.3, 12),
+                rng.uniform(-math.pi, math.pi),
+                rng.choice([1, -1]) * rng.uniform(0.05, math.tau - 1e-6),
+            )
+            cx, cy, r = geom[0], geom[1], geom[2]
+            x1, y1 = rng.uniform(cx - r - 2, cx + r + 2), rng.uniform(cy - r - 2, cy + r + 2)
+            x2, y2 = rng.uniform(cx - r - 2, cx + r + 2), rng.uniform(cy - r - 2, cy + r + 2)
+            got = _segment_arc_distance(x1, y1, x2, y2, geom)[0]
+            if got == 0.0:
+                from shapely.geometry import LineString  # type: ignore[import-untyped]
+
+                inter = LineString(arc_pts(geom, 40000)).intersection(
+                    LineString([(x1, y1), (x2, y2)])
+                )
+                assert not inter.is_empty, (geom, (x1, y1, x2, y2))
+            else:
+                want = min(
+                    point_to_segment_distance(q[0], q[1], x1, y1, x2, y2)
+                    for q in arc_pts(geom, pts_n)
+                )
+                assert got == pytest.approx(want, abs=3e-3), (geom, (x1, y1, x2, y2))
+
+    def test_arc_arc_match_dense_sampling(self):
+        from shapely.geometry import LineString  # type: ignore[import-untyped]
+
+        from kicad_tools.validate.rules.clearance import _arc_arc_distance
+
+        rng = random.Random(9703)
+
+        def arc_pts(geom, n):
+            cx, cy, r, a0, sw = geom
+            return [
+                (cx + r * math.cos(a0 + sw * i / (n - 1)), cy + r * math.sin(a0 + sw * i / (n - 1)))
+                for i in range(n)
+            ]
+
+        for _ in range(25):
+
+            def rnd():
+                return (
+                    rng.uniform(-3, 3),
+                    rng.uniform(-3, 3),
+                    rng.uniform(0.3, 8),
+                    rng.uniform(-math.pi, math.pi),
+                    rng.choice([1, -1]) * rng.uniform(0.1, math.tau - 0.01),
+                )
+
+            g1, g2 = rnd(), rnd()
+            got = _arc_arc_distance(g1, g2)[0]
+            if got == 0.0:
+                inter = LineString(arc_pts(g1, 30000)).intersection(LineString(arc_pts(g2, 30000)))
+                assert not inter.is_empty, (g1, g2)
+            else:
+                p1, p2 = arc_pts(g1, 400), arc_pts(g2, 400)
+                want = min(math.dist(a, b) for a in p1 for b in p2)
+                assert got == pytest.approx(want, abs=5e-2), (g1, g2)
 
 
 # ---------------------------------------------------------------------------
@@ -771,8 +1453,11 @@ def _exhaustive_reference(elem1, elem2) -> tuple[float, tuple[float, float]]:
 
 
 class TestArcPairChordPruning:
+    # Since Issue #9702 authored arcs take the exact path in
+    # ``_arc_pair_clearance``; the covering-chord search these tests pin
+    # (Issue #9714) is the fallback, so they call it directly.
     def test_pruned_search_matches_exhaustive_reference(self):
-        from kicad_tools.validate.rules.clearance import _arc_pair_clearance
+        from kicad_tools.validate.rules.clearance import _arc_chord_pair_clearance
 
         clear = _arc_element((2, 0), (_S2, _S2), (0, 2))
         wide = _arc_element((5, 0), (5 / _S2, 5 / _S2), (0, 5), net=2)
@@ -803,7 +1488,7 @@ class TestArcPairChordPruning:
             ("arc_vs_segment_near_threshold", clear, seg),
         ]
         for name, e1, e2 in cases:
-            gap, loc_x, loc_y = _arc_pair_clearance(e1, e2)
+            gap, loc_x, loc_y = _arc_chord_pair_clearance(e1, e2)
             ref_gap, ref_loc = _exhaustive_reference(e1, e2)
             assert gap == ref_gap, f"{name}: gap {gap!r} != exhaustive {ref_gap!r}"
             assert (loc_x, loc_y) == ref_loc, (
@@ -816,7 +1501,7 @@ class TestArcPairChordPruning:
         # strictly fewer and still answer the exhaustive gap.
         from kicad_tools.validate.rules import clearance as clearance_mod
         from kicad_tools.validate.rules.clearance import (
-            _arc_pair_clearance,
+            _arc_chord_pair_clearance,
             _element_chord_shapes,
         )
 
@@ -834,7 +1519,7 @@ class TestArcPairChordPruning:
             return real(a, b)
 
         monkeypatch.setattr(clearance_mod, "_kernel_copper_gap", counting)
-        gap, _, _ = _arc_pair_clearance(e1, e2)
+        gap, _, _ = _arc_chord_pair_clearance(e1, e2)
         ref_gap, _ = _exhaustive_reference(e1, e2)
         assert gap == ref_gap
         assert calls[0] < n1 * n2  # pruning skips exact evaluations

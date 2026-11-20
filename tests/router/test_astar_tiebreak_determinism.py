@@ -24,10 +24,9 @@ from __future__ import annotations
 import heapq
 import itertools
 
-import pytest
-
 from kicad_tools.router.diffpair_routing import CoupledNode, CoupledState, GridPos
 from kicad_tools.router.pathfinder import AStarNode
+from tests.conftest import require_router_cpp
 
 
 class TestCoupledNodeTiebreak:
@@ -234,10 +233,8 @@ class TestCppAStarTiebreak:
         stale ``.so`` without either field would report a lower
         version, which we surface with an actionable rebuild hint.
         """
-        try:
-            from kicad_tools.router import router_cpp
-        except ImportError:
-            pytest.skip("C++ extension not built")
+        require_router_cpp()
+        from kicad_tools.router import router_cpp
 
         assert router_cpp.BUILD_VERSION >= 8, (
             "C++ router .so predates the Issue #3199 A* tie-break fix.  "

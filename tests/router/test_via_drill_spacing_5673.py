@@ -38,14 +38,13 @@ import math
 
 import pytest
 
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.grid import RoutingGrid, halo_offsets
 from kicad_tools.router.layers import LayerStack
 from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.primitives import Layer, Route, Via
 from kicad_tools.router.rules import DesignRules
 
-requires_cpp = pytest.mark.skipif(not is_cpp_available(), reason="C++ router backend not built")
+requires_cpp = pytest.mark.requires_router_cpp
 
 #: Board 02's verbatim regression geometry: two same-net 0.6/0.3 vias 0.2 mm
 #: apart in x and 0.7 mm in y -- 0.728 mm centre-to-centre, 0.428 mm

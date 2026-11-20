@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from kicad_tools.core.board_outline import OutlineSegments
 from kicad_tools.validate.rules.edge import _CLEARANCE_EPSILON_MM, EdgeClearanceRule
 
 # ---------------------------------------------------------------------------
@@ -94,8 +95,8 @@ class TestCheckSegmentsEpsilon:
             net_number=1,
         )
 
-    def test_segment_at_exact_clearance_passes(self):
-        """Distance == min_clearance must NOT be a violation."""
+    @pytest.mark.parametrize("geometry_error", [0.0, 0.02])
+    def test_segment_at_exact_clearance(self, geometry_error):
         min_clearance = 0.3
         # Place segment centerline at distance = min_clearance + half_width
         # from the left edge (x=0).  So actual_clearance == min_clearance.
@@ -109,11 +110,13 @@ class TestCheckSegmentsEpsilon:
         results = DRCResults()
         rule._check_segments(
             _make_pcb(segments=[seg]),
-            _outline_segments(),
+            OutlineSegments(_outline_segments(), max_error_mm=geometry_error),
             _design_rules(copper_edge=min_clearance),
             results,
         )
-        assert len(results.errors) == 0
+        assert len(results.errors) == (1 if geometry_error else 0)
+        for error in results.errors:
+            assert error.actual_value == pytest.approx(min_clearance - geometry_error)
 
     def test_segment_slightly_below_epsilon_passes(self):
         """Distance just under min_clearance by less than epsilon must pass."""
@@ -228,7 +231,8 @@ class TestCheckViasEpsilon:
             net_number=1,
         )
 
-    def test_via_at_exact_clearance_passes(self):
+    @pytest.mark.parametrize("geometry_error", [0.0, 0.02])
+    def test_via_at_exact_clearance(self, geometry_error):
         min_clearance = 0.5
         half_size = 0.3
         x = min_clearance + half_size
@@ -240,11 +244,13 @@ class TestCheckViasEpsilon:
         results = DRCResults()
         rule._check_vias(
             _make_pcb(vias=[via]),
-            _outline_segments(),
+            OutlineSegments(_outline_segments(), max_error_mm=geometry_error),
             _design_rules(hole_edge=min_clearance),
             results,
         )
-        assert len(results.errors) == 0
+        assert len(results.errors) == (1 if geometry_error else 0)
+        for error in results.errors:
+            assert error.actual_value == pytest.approx(min_clearance - geometry_error)
 
     def test_via_below_clearance_by_2x_epsilon_fails(self):
         min_clearance = 0.5
@@ -289,7 +295,8 @@ class TestCheckPadsEpsilon:
         )
         return fp
 
-    def test_pad_at_exact_clearance_passes(self):
+    @pytest.mark.parametrize("geometry_error", [0.0, 0.02])
+    def test_pad_at_exact_clearance(self, geometry_error):
         min_clearance = 0.3
         half_size = 0.4
         # Pad center at x = min_clearance + half_size from left edge
@@ -301,11 +308,13 @@ class TestCheckPadsEpsilon:
         results = DRCResults()
         rule._check_pads(
             _make_pcb(footprints=[fp]),
-            _outline_segments(),
+            OutlineSegments(_outline_segments(), max_error_mm=geometry_error),
             _design_rules(copper_edge=min_clearance),
             results,
         )
-        assert len(results.errors) == 0
+        assert len(results.errors) == (1 if geometry_error else 0)
+        for error in results.errors:
+            assert error.actual_value == pytest.approx(min_clearance - geometry_error)
 
     def test_pad_well_below_clearance_fails(self):
         min_clearance = 0.3
@@ -343,8 +352,8 @@ class TestCheckZonesEpsilon:
             net_name="GND",
         )
 
-    def test_zone_at_exact_clearance_passes(self):
-        """Zone vertex at exactly min_clearance from edge must pass."""
+    @pytest.mark.parametrize("geometry_error", [0.0, 0.02])
+    def test_zone_at_exact_clearance(self, geometry_error):
         min_clearance = 0.3
         # Inset rectangle: each vertex is exactly 0.3mm from board edge
         inset = min_clearance
@@ -362,11 +371,13 @@ class TestCheckZonesEpsilon:
         results = DRCResults()
         rule._check_zones(
             _make_pcb(zones=[zone]),
-            _outline_segments(),
+            OutlineSegments(_outline_segments(), max_error_mm=geometry_error),
             _design_rules(copper_edge=min_clearance),
             results,
         )
-        assert len(results.errors) == 0
+        assert len(results.errors) == (4 if geometry_error else 0)
+        for error in results.errors:
+            assert error.actual_value == pytest.approx(min_clearance - geometry_error)
 
     def test_zone_slightly_inside_epsilon_passes(self):
         """Zone vertex at min_clearance - epsilon/2 must still pass."""
@@ -617,36 +628,197 @@ class TestCheckPadsRotationSignConvention:
 
 
 # ---------------------------------------------------------------------------
-# Tests: all four methods use epsilon (code-level verification)
+# Tests: verdict checks for the applicable minimum on each branch (#9724)
 # ---------------------------------------------------------------------------
 
 
-class TestAllMethodsUseEpsilon:
-    """Verify that the source code of all four check methods references epsilon."""
+class TestApplicableMinimumVerdicts:
+    """Verdict checks for the applicable minimum on each copper/hole branch.
 
-    def test_check_segments_uses_epsilon(self):
-        import inspect
+    Issue #9724: the copper-to-edge comparisons (traces, SMD pads, zones)
+    ride KiCad's probed 500 nm acceptance band via ``drc_clear``, so a
+    shortfall inside that band passes; the hole-minimum branches (vias,
+    through-hole pads) keep the plain 1e-4 epsilon, so the same 400 nm
+    shortfall still flags.  These replace the old source-text assertions
+    (``"_CLEARANCE_EPSILON_MM" in inspect.getsource(...)``), which could
+    not see which *minimum* a branch applies -- the property that actually
+    changed.  Distinct copper (0.3 mm) and hole (0.5 mm) minima make the
+    branch selection observable.
+    """
 
-        src = inspect.getsource(EdgeClearanceRule._check_segments)
-        assert "_CLEARANCE_EPSILON_MM" in src
+    #: Inside KiCad's probed band (accepted by pinned kicad-cli), beyond
+    #: the plain epsilon: separates a band verdict from an epsilon verdict.
+    SHORTFALL_INSIDE_BAND_NM = 0.0004
+    #: Beyond the 500 nm band: must flag on every branch.
+    SHORTFALL_BEYOND_BAND_NM = 0.0006
 
-    def test_check_vias_uses_epsilon(self):
-        import inspect
+    def _check_segment(self, results, shortfall):
 
-        src = inspect.getsource(EdgeClearanceRule._check_vias)
-        assert "_CLEARANCE_EPSILON_MM" in src
+        x = 0.3 + 0.1 - shortfall
+        seg = SimpleNamespace(
+            start=(x, 15.0),
+            end=(x, 16.0),
+            width=0.2,
+            layer="F.Cu",
+            net_number=1,
+        )
+        rule = EdgeClearanceRule()
+        rule._check_segments(
+            _make_pcb(segments=[seg]),
+            _outline_segments(),
+            _design_rules(copper_edge=0.3, hole_edge=0.5),
+            results,
+        )
 
-    def test_check_pads_uses_epsilon(self):
-        import inspect
+    def _check_via(self, results, shortfall):
+        x = 0.5 + 0.3 - shortfall  # hole minimum 0.5, via size 0.6
+        via = SimpleNamespace(
+            position=(x, 15.0),
+            size=0.6,
+            drill=0.3,
+            layers=["F.Cu", "B.Cu"],
+            net_number=1,
+        )
+        rule = EdgeClearanceRule()
+        rule._check_vias(
+            _make_pcb(vias=[via]),
+            _outline_segments(),
+            _design_rules(copper_edge=0.3, hole_edge=0.5),
+            results,
+        )
 
-        src = inspect.getsource(EdgeClearanceRule._check_pads)
-        assert "_CLEARANCE_EPSILON_MM" in src
+    def _check_pad(self, results, shortfall, pad_type):
 
-    def test_check_zones_uses_epsilon(self):
-        import inspect
+        pad = SimpleNamespace(
+            position=(0.0, 0.0),
+            size=(0.8, 0.8),
+            type=pad_type,
+            number="1",
+        )
+        fp = SimpleNamespace(
+            position=(0.3 + 0.4 - shortfall, 15.0),
+            rotation=0.0,
+            layer="F.Cu",
+            reference="U1",
+            pads=[pad],
+        )
+        rule = EdgeClearanceRule()
+        rule._check_pads(
+            _make_pcb(footprints=[fp]),
+            _outline_segments(),
+            _design_rules(copper_edge=0.3, hole_edge=0.5),
+            results,
+        )
 
-        src = inspect.getsource(EdgeClearanceRule._check_zones)
-        assert "_CLEARANCE_EPSILON_MM" in src
+    def _check_zone(self, results, shortfall):
+        inset = 0.3 - shortfall
+        polygon = [
+            (inset, inset),
+            (50.0 - inset, inset),
+            (50.0 - inset, 30.0 - inset),
+            (inset, 30.0 - inset),
+        ]
+        zone = SimpleNamespace(
+            polygon=polygon,
+            filled_polygons=[polygon],
+            layer="F.Cu",
+            net_number=1,
+            net_name="GND",
+        )
+        rule = EdgeClearanceRule()
+        rule._check_zones(
+            _make_pcb(zones=[zone]),
+            _outline_segments(),
+            _design_rules(copper_edge=0.3, hole_edge=0.5),
+            results,
+        )
+
+    @staticmethod
+    def _rule_ids(results) -> set[str]:
+        return {v.rule_id for v in results.errors}
+
+    # -- traces: copper minimum, band verdict --------------------------------
+
+    def test_trace_400nm_shortfall_inside_band_passes(self):
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        self._check_segment(results, self.SHORTFALL_INSIDE_BAND_NM)
+        assert results.errors == []
+
+    def test_trace_600nm_shortfall_beyond_band_flags(self):
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        self._check_segment(results, self.SHORTFALL_BEYOND_BAND_NM)
+        assert self._rule_ids(results) == {"edge_clearance_trace"}
+
+    # -- vias: hole minimum, plain epsilon verdict ---------------------------
+
+    def test_via_400nm_shortfall_against_hole_minimum_still_flags(self):
+        """A 400 nm shortfall sits inside the copper band but outside the
+        hole branch's 1e-4 epsilon, so it must flag (no probe evidence
+        extends the band to the separate hole minimum)."""
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        self._check_via(results, self.SHORTFALL_INSIDE_BAND_NM)
+        assert self._rule_ids(results) == {"edge_clearance_via"}
+
+    def test_via_600nm_shortfall_flags(self):
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        self._check_via(results, self.SHORTFALL_BEYOND_BAND_NM)
+        assert self._rule_ids(results) == {"edge_clearance_via"}
+
+    # -- SMD pads: copper minimum, band verdict ------------------------------
+
+    def test_smd_pad_400nm_shortfall_inside_band_passes(self):
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        self._check_pad(results, self.SHORTFALL_INSIDE_BAND_NM, "smd")
+        assert results.errors == []
+
+    def test_smd_pad_600nm_shortfall_beyond_band_flags(self):
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        self._check_pad(results, self.SHORTFALL_BEYOND_BAND_NM, "smd")
+        assert self._rule_ids(results) == {"edge_clearance_pad"}
+
+    # -- through-hole pads: hole minimum, plain epsilon verdict --------------
+
+    def test_thru_hole_pad_400nm_shortfall_against_hole_minimum_still_flags(self):
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        self._check_pad(results, self.SHORTFALL_INSIDE_BAND_NM, "thru_hole")
+        assert self._rule_ids(results) == {"edge_clearance_pad_hole"}
+
+    def test_thru_hole_pad_600nm_shortfall_flags(self):
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        self._check_pad(results, self.SHORTFALL_BEYOND_BAND_NM, "thru_hole")
+        assert self._rule_ids(results) == {"edge_clearance_pad_hole"}
+
+    # -- zones: copper minimum, band verdict ---------------------------------
+
+    def test_zone_400nm_shortfall_inside_band_passes(self):
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        self._check_zone(results, self.SHORTFALL_INSIDE_BAND_NM)
+        assert results.errors == []
+
+    def test_zone_600nm_shortfall_beyond_band_flags(self):
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        self._check_zone(results, self.SHORTFALL_BEYOND_BAND_NM)
+        assert self._rule_ids(results) == {"edge_clearance_zone"}
 
 
 @pytest.mark.parametrize("net_number", [0, 2])

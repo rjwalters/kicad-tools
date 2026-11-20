@@ -26,7 +26,6 @@ import math
 import pytest
 
 from kicad_tools.core.geometry import point_to_segment_distance
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.escape import EscapeRouter
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.lattice.pathfinder import LatticePathfinder
@@ -250,7 +249,7 @@ def test_python_helper_matches_exact_gap_region_over_a_fan(angle_deg):
     assert in_band > 20, "the fan must exercise the band"
 
 
-@pytest.mark.skipif(not is_cpp_available(), reason="C++ router backend not available")
+@pytest.mark.requires_router_cpp
 @pytest.mark.parametrize("dy", [0.0, 0.25, 0.375, 0.5, 0.6, 0.7, 1.0])
 def test_python_gates_agree_with_the_cpp_guard(dy):
     """Same fixture, same verdict: C++ ``is_via_blocked`` vs both Python gates.

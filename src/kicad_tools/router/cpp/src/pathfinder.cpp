@@ -336,6 +336,121 @@ bool Pathfinder::own_pad_step_clear(int x1, int y1, int x2, int y2, int layer, i
                                     search_gate_clamp_refs_);
 }
 
+// Issue #9019: own-net pad slit-band step gate.  Exact segment-vs-box gap, a
+// line-for-line port of ``via_clearance._segment_box_gap_mm`` so the native and
+// Python searches decide a step identically.
+namespace {
+
+constexpr double kOwnNetBandTolMm = 5e-5;  // == OWN_NET_BAND_STEP_TOL_MM
+
+double band_point_box_distance(double x, double y, double min_x, double min_y,
+                               double max_x, double max_y) {
+    const double dx = std::max({min_x - x, 0.0, x - max_x});
+    const double dy = std::max({min_y - y, 0.0, y - max_y});
+    return std::hypot(dx, dy);
+}
+
+double band_point_segment_distance(double px, double py, double ax, double ay,
+                                   double bx, double by) {
+    const double dx = bx - ax, dy = by - ay;
+    const double len2 = dx * dx + dy * dy;
+    if (len2 == 0.0) return std::hypot(px - ax, py - ay);
+    double t = ((px - ax) * dx + (py - ay) * dy) / len2;
+    t = std::max(0.0, std::min(1.0, t));
+    return std::hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
+double band_segment_box_gap(double ax, double ay, double bx, double by, double half,
+                            double min_x, double min_y, double max_x, double max_y) {
+    // Slab clip (Liang-Barsky): does the centreline reach the rectangle?
+    double t0 = 0.0, t1 = 1.0;
+    bool parallel_outside = false;
+    const double deltas[2] = {bx - ax, by - ay};
+    const double origins[2] = {ax, ay};
+    const double los[2] = {min_x, min_y};
+    const double his[2] = {max_x, max_y};
+    for (int i = 0; i < 2; ++i) {
+        const double delta = deltas[i], origin = origins[i];
+        if (std::fabs(delta) < 1e-12) {
+            if (origin < los[i] || origin > his[i]) parallel_outside = true;
+        } else {
+            double ta = (los[i] - origin) / delta;
+            double tb = (his[i] - origin) / delta;
+            if (ta > tb) std::swap(ta, tb);
+            t0 = std::max(t0, ta);
+            t1 = std::min(t1, tb);
+            if (t0 > t1) {
+                parallel_outside = true;
+                break;
+            }
+        }
+    }
+    if (!parallel_outside) return 0.0;
+    double best = std::min(band_point_box_distance(ax, ay, min_x, min_y, max_x, max_y),
+                           band_point_box_distance(bx, by, min_x, min_y, max_x, max_y));
+    const double cxs[4] = {min_x, max_x, max_x, min_x};
+    const double cys[4] = {min_y, min_y, max_y, max_y};
+    for (int i = 0; i < 4; ++i) {
+        best = std::min(best, band_point_segment_distance(cxs[i], cys[i], ax, ay, bx, by));
+    }
+    return std::max(0.0, best - half);
+}
+
+}  // namespace
+
+bool Pathfinder::own_net_band_step_ok(int x1, int y1, int x2, int y2, int layer, int net,
+                                      float width,
+                                      double exclude_sx, double exclude_sy,
+                                      double exclude_ex, double exclude_ey) const {
+    const double edge = static_cast<double>(search_band_edge_mm_);
+    if (edge <= 0.0) return true;
+    const auto& pads = grid_.pads();
+    if (band_pads_net_ != net || band_pads_count_ != pads.size()) {
+        band_pads_.clear();
+        for (const auto& p : pads) {
+            // SMD pads only (layer_idx -1 = through-hole), as the #9012 predicate.
+            if (p.net != net || p.layer_idx < 0) continue;
+            band_pads_.push_back({static_cast<double>(p.x) - p.width / 2.0,
+                                  static_cast<double>(p.y) - p.height / 2.0,
+                                  static_cast<double>(p.x) + p.width / 2.0,
+                                  static_cast<double>(p.y) + p.height / 2.0,
+                                  p.layer_idx});
+        }
+        band_pads_net_ = net;
+        band_pads_count_ = pads.size();
+    }
+    if (band_pads_.empty()) return true;
+    const auto [ax_f, ay_f] = grid_.grid_to_world(x1, y1);
+    const auto [bx_f, by_f] = grid_.grid_to_world(x2, y2);
+    const double ax = ax_f, ay = ay_f, bx = bx_f, by = by_f;
+    const double half = static_cast<double>(width) / 2.0;
+    const double reach = half + edge;
+    const double lo_x = std::min(ax, bx) - reach, hi_x = std::max(ax, bx) + reach;
+    const double lo_y = std::min(ay, by) - reach, hi_y = std::max(ay, by) + reach;
+    for (const auto& bb : band_pads_) {
+        if (bb.layer != layer) continue;
+        if (bb.x1 < lo_x || bb.x0 > hi_x || bb.y1 < lo_y || bb.y0 > hi_y) continue;
+        // A pad the leg is UNIONED with (its own start/end: the exclusion
+        // points sit in its metal) is skipped -- measuring the step against
+        // it in isolation invents a slit that does not exist and refused
+        // every planar exit (9019 review).  The -1e30 sentinels never land
+        // in a real pad box, so unset exclusions skip nothing.
+        if ((bb.x0 <= exclude_sx && exclude_sx <= bb.x1 && bb.y0 <= exclude_sy &&
+             exclude_sy <= bb.y1) ||
+            (bb.x0 <= exclude_ex && exclude_ex <= bb.x1 && bb.y0 <= exclude_ey &&
+             exclude_ey <= bb.y1)) {
+            continue;
+        }
+        const double gap = band_segment_box_gap(ax, ay, bx, by, half,
+                                                bb.x0, bb.y0, bb.x1, bb.y1);
+        if (kOwnNetBandTolMm < gap && gap < edge - kOwnNetBandTolMm) {
+            ++band_gate_rejects_;
+            return false;
+        }
+    }
+    return true;
+}
+
 // Issue #7887: the own-pad step gate measures the validator's verdict, which
 // widens a foreign-domain pad's requirement to the pairwise (HV) floor
 // (``Grid3D::segment_pad_clear``).  On a TO-220-style HV pad ringed by LV pads
@@ -2054,6 +2169,27 @@ RouteResult Pathfinder::route(
                 continue;
             }
 
+            // Issue #9019: own-net pad slit-band gate (see
+            // ``set_search_own_net_band``), twin of the Python A* gate.  The
+            // exclusion points are the search's own start/end (the pads this
+            // leg is unioned with).
+            if (search_band_edge_mm_ > 0.0f && nlayer == current.layer &&
+                !own_net_band_step_ok(current.x, current.y, nx, ny, nlayer, net,
+                                      emit_trace_width > 0.0f ? emit_trace_width
+                                                              : rules_.trace_width,
+                                      static_cast<double>(start_x),
+                                      static_cast<double>(start_y),
+                                      static_cast<double>(end_x),
+                                      static_cast<double>(end_y))) {
+                if (astar_trace_enabled()) {
+                    std::fprintf(stderr,
+                        "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                        "REJECT reason=own_net_pad_slit_band\n",
+                        current.x, current.y, current.layer, nx, ny, nlayer);
+                }
+                continue;
+            }
+
             if (astar_trace_enabled()) {
                 std::fprintf(stderr,
                     "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) ACCEPT "
@@ -2818,6 +2954,28 @@ RouteResult Pathfinder::run_astar_loop() {
                     std::fprintf(stderr,
                         "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
                         "reason=own_pad_step_foreign_pad_too_close net=%d\n",
+                        current.x, current.y, current.layer, nx, ny, nlayer,
+                        search_net_);
+                }
+                continue;
+            }
+
+            // Issue #9019: own-net pad slit-band gate, as in the one-shot loop.
+            // The exclusion points are the search's own start/end (the pads
+            // this leg is unioned with).
+            if (search_band_edge_mm_ > 0.0f && nlayer == current.layer &&
+                !own_net_band_step_ok(current.x, current.y, nx, ny, nlayer, search_net_,
+                                      search_emit_trace_width_ > 0.0f
+                                          ? search_emit_trace_width_
+                                          : rules_.trace_width,
+                                      static_cast<double>(search_start_x_),
+                                      static_cast<double>(search_start_y_),
+                                      static_cast<double>(search_end_x_),
+                                      static_cast<double>(search_end_y_))) {
+                if (astar_trace_enabled()) {
+                    std::fprintf(stderr,
+                        "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                        "reason=own_net_pad_slit_band net=%d\n",
                         current.x, current.y, current.layer, nx, ny, nlayer,
                         search_net_);
                 }

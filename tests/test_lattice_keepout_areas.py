@@ -37,9 +37,15 @@ from kicad_tools.cli.route_cmd import main as route_main
 
 HV_VOLTS = 300.0
 
-# Corridor bands (sheet coordinates).  Board rect: (100, 100) .. (130, 116).
+# Corridor bands (sheet coordinates).  Board rect: (96, 96) .. (134, 120).
 # Bank A routes in y < 105.8, bank B in y > 110.2 -- a 4.4 mm declared gap,
 # beyond the 3.2 mm requirement 300 V derives under IEC 60664-1 / PD2 / IIIa.
+# The same 3.2 mm applies from every HV copper feature to Edge.Cuts: the
+# post-route pairwise gate audits the board edge at the mapped voltage
+# (#9685), so the outline must keep >= 3.2 mm + trace half-width (0.1 mm,
+# i.e. 3.3 mm from trace centreline) / pad half-size (0.2 mm) around all
+# HV pads and corridors -- hence the 4 mm margin the (96, 96) .. (134, 120)
+# rect gives the y = 103 / 113 pads.
 A_LIMIT = 105.8
 B_LIMIT = 110.2
 
@@ -111,7 +117,7 @@ def _board(extra: str = "") -> str:
   (net 0 "")
   (net 1 "/HV_A")
   (net 2 "/HV_B")
-  (gr_rect (start 100 100) (end 130 116)
+  (gr_rect (start 96 96) (end 134 120)
     (stroke (width 0.1) (type default))
     (fill none)
     (layer "Edge.Cuts")
@@ -125,12 +131,12 @@ def _two_domain_guards() -> str:
     ``A_LIMIT``, bank B from everything south of ``B_LIMIT``."""
     guard_a = _keepout_zone(
         "hv-a-corridor-guard",
-        [(100, A_LIMIT), (130, A_LIMIT), (130, 116), (100, 116)],
+        [(96, A_LIMIT), (134, A_LIMIT), (134, 120), (96, 120)],
         uid="cccccccc-0000-0000-0000-000000000001",
     )
     guard_b = _keepout_zone(
         "hv-b-corridor-guard",
-        [(100, 100), (130, 100), (130, B_LIMIT), (100, B_LIMIT)],
+        [(96, 96), (134, 96), (134, B_LIMIT), (96, B_LIMIT)],
         uid="cccccccc-0000-0000-0000-000000000002",
     )
     return guard_a + guard_b
@@ -236,13 +242,9 @@ def test_two_domain_keepout_segregation_routes_100pct_and_passes_gate(
     # south (A) / north (B) of the declared corridor limit, with the 0.1 mm
     # half-width margin.
     for x1, y1, x2, y2 in by_net[1]:
-        assert max(y1, y2) <= A_LIMIT - 0.05, (
-            f"bank A segment crosses its guard: {(x1, y1, x2, y2)}"
-        )
+        assert max(y1, y2) <= A_LIMIT - 0.1, f"bank A segment crosses its guard: {(x1, y1, x2, y2)}"
     for x1, y1, x2, y2 in by_net[2]:
-        assert min(y1, y2) >= B_LIMIT + 0.05, (
-            f"bank B segment crosses its guard: {(x1, y1, x2, y2)}"
-        )
+        assert min(y1, y2) >= B_LIMIT + 0.1, f"bank B segment crosses its guard: {(x1, y1, x2, y2)}"
 
 
 def test_pour_void_only_rule_area_leaves_copper_byte_identical(tmp_path: Path, capsys) -> None:

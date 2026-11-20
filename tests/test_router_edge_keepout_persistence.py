@@ -46,6 +46,7 @@ from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
+from tests.conftest import require_router_cpp
 
 try:  # pragma: no cover - only needed for shapely-backed fixed fills
     from shapely.geometry import Polygon
@@ -115,8 +116,8 @@ class TestResetForNewTrialPreservesEdgeKeepout:
     def test_reset_restores_the_exact_reproduction_from_the_issue(self, force_python):
         """Reproduces the issue body's exact repro: 432 blocked cells must
         survive ``_reset_for_new_trial()`` byte-for-byte (not just nonzero)."""
-        if not force_python and not is_cpp_available():
-            pytest.skip("Native routing backend not built in this worktree (kct build-native)")
+        if not force_python:
+            require_router_cpp()
 
         router = Autorouter(
             10, 10, rules=DesignRules(grid_resolution=0.5), force_python=force_python
@@ -631,10 +632,7 @@ class TestBackendAgreement:
         available = is_cpp_available()
         assert isinstance(available, bool)
 
-    @pytest.mark.skipif(
-        not is_cpp_available(),
-        reason="Native routing backend not built in this worktree (uv run kct build-native)",
-    )
+    @pytest.mark.requires_router_cpp
     def test_native_grid_mirrors_reinstalled_keepout_after_reset(self):
         router = Autorouter(10, 10, rules=DesignRules(grid_resolution=0.5), force_python=False)
         router._edge_segments = RECT_EDGE_SEGMENTS
@@ -697,8 +695,8 @@ class TestNoClearanceFloorPersists:
     @pytest.mark.parametrize("edge_clearance", [None, 0.0])
     @pytest.mark.parametrize("force_python", [True, False])
     def test_reset_reinstalls_the_floor(self, edge_clearance, force_python):
-        if not force_python and not is_cpp_available():
-            pytest.skip("Native routing backend not built in this worktree (kct build-native)")
+        if not force_python:
+            require_router_cpp()
         router = self._router(edge_clearance, force_python=force_python)
         reference = RoutingGrid(10, 10, DesignRules(grid_resolution=0.5))
         reference.add_edge_keepout(RECT_EDGE_SEGMENTS, self.FLOOR)

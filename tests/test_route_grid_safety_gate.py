@@ -31,7 +31,6 @@ from unittest.mock import patch
 import pytest
 
 from kicad_tools.cli import route_cmd
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.io import (
     DesignRules,
     GridAutoSelection,
@@ -559,7 +558,7 @@ def _route_cli(tmp_path, extra_args, board: str = _OFF_GRID_ROUTABLE_PCB) -> tup
     return code, [str(w.message) for w in caught]
 
 
-@pytest.mark.skipif(not is_cpp_available(), reason="C++ router backend not built")
+@pytest.mark.requires_router_cpp
 def test_fine_pitch_advisories_fire_for_grid_engine_cpp(tmp_path, capsys):
     """The default grid engine keeps every advisory (#2254 behavior intact).
 

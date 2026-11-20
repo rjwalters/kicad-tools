@@ -108,10 +108,14 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "partial",
         True,
         # Non-pad copper spacing: the pair-type clearance ids with no pad on
-        # either side (segment/via gaps -- the fab's trace_spacing
-        # population), plus the trace-band-graded fab-view findings
-        # (``#trace`` qualified key, issue #8972).
+        # either side (segment/arc/via gaps -- the fab's trace_spacing
+        # population; the arc pairs since issue #9713), plus the
+        # trace-band-graded fab-view findings (``#trace`` qualified key,
+        # issue #8972).
         (
+            "clearance_arc_arc",
+            "clearance_arc_segment",
+            "clearance_arc_via",
             "clearance_segment_segment",
             "clearance_segment_via",
             "clearance_via_via",
@@ -135,12 +139,13 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         ("clearance", "physical_copper_gap"),
         "partial",
         True,
-        # Pad-involving clearance ids plus the pad populations of the
-        # physical pass: pad-band-graded and mask-bridge findings via the
+        # Pad-involving clearance ids (``clearance_arc_pad`` since #9713)
+        # plus the pad populations of the physical pass: pad-band-graded and mask-bridge findings via the
         # ``#pad`` qualified key, and the bare id for the bandless emit
         # sites (the legacy opt-in pass, zone-fill `info` findings) so the
         # partition stays total (issue #8972).
         (
+            "clearance_arc_pad",
             "clearance_pad_pad",
             "clearance_pad_segment",
             "clearance_pad_via",
@@ -188,7 +193,8 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "source. Observed 5 danger, all same-net: a track running beside, along, or "
         "leaving and jogging beside its own pad at 0-0.08 mm (#8914); those shapes "
         "stay errors at the 0.09 mm band. Since #8858 one shape is `within_own_pad` "
-        "at info: a straight track entering its own plain pad once, at 45 degrees or "
+        "at info: a straight track entering its own pad (plain, or custom since "
+        "#9750) once, at 45 degrees or "
         "steeper, exposing nothing beyond the pad and leaving no more copper under "
         "mask beside the opening than that one crossing (or a track lying wholly on "
         "the pad). The fab did not flag plain entries (#8914; 655 entries on the "
@@ -221,6 +227,11 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "pour on that board agrees with the fab: R2.1 at "
         "0.1275 mm is a kct warning (fab: warning, 0.13 mm); R1.1 and R1.2 at "
         "0.2 mm get no finding (fab: good). "
+        "Since #9750 `within_own_pad` also covers a bar wider than its own pad "
+        "whose copper covers the whole perimeter band (the pad's own perimeter "
+        "is the allowance, so round and square pads agree) and a track entering "
+        "a bare custom pad measured through its real copper outline; padstack "
+        "and chamfered pads, and the own-pour class, keep their verdict. "
         "Since #8914 an assessment that could not complete reports "
         "`mask_to_copper_incomplete` at info, so zero findings no longer read as a "
         "clean board.",

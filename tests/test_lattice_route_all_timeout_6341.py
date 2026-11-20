@@ -23,7 +23,7 @@ from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad
 
 # Both whole-netset engines route through the compiled C++ backend.
-pytest.importorskip("kicad_tools.router.router_cpp")
+pytestmark = pytest.mark.requires_router_cpp
 
 # Three independent two-pad nets, well separated so each routes trivially.
 _NETS = {

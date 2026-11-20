@@ -55,15 +55,19 @@ DRC_TOLERANCE: float = 1e-4
 # constructibility of diagonal coordinates.
 #
 # Scope (#9619 review): this band is *clearance-only* evidence.  Applied
-# solely by :func:`drc_clear`, whose call sites are the probed
-# copper-clearance verdicts (``clearance.py``,
-# ``diffpair_clearance_intra.py``, ``netclass_clearance_copper.py``).
-# Every other rule keeps :data:`DRC_TOLERANCE`: pinned kicad-cli flags a
-# 100 nm track-width or drill shortfall outright (no band), so widening
-# those checks to 500 nm would let ``kct check`` pass boards kicad-cli
-# rejects.  A rule may join this band only with its own probe evidence
-# (copper-to-edge is a known candidate: the #9619 review's probe showed
-# kicad-cli applies the same 500 nm band there).
+# by :func:`drc_clear`, whose call sites are the probed copper-clearance
+# verdicts (``clearance.py``, ``diffpair_clearance_intra.py``,
+# ``netclass_clearance_copper.py``) plus -- since #9724 ran its own probe
+# (same 500 nm cut-off on a straight edge, pinned in
+# ``tests/test_clearance_slack_kicad_band_9619.py``) -- the copper-to-edge
+# verdicts in ``edge.py`` (traces, SMD pads, zones).  Every other rule
+# keeps :data:`DRC_TOLERANCE`: pinned kicad-cli flags a 100 nm track-width
+# or drill shortfall outright (no band), so widening those checks to
+# 500 nm would let ``kct check`` pass boards kicad-cli rejects.
+# ``edge.py``'s hole-minimum branches (vias, through-hole pads) keep their
+# own epsilon: the copper-edge probe cannot establish a tolerance for a
+# separate hole minimum.  A rule may join this band only with its own
+# probe evidence.
 #
 # Deliberately wider than the router's slack (the router package's own
 # ``CLEARANCE_EPSILON_MM``, still 1e-4): the checker matches KiCad
@@ -103,15 +107,17 @@ WRITER_CLEARANCE_MARGIN_MM: float = 1e-4
 DRC_FLOAT_GUARD_MM: float = 1e-9
 
 
-def drc_clear(measured_mm: float, required_mm: float) -> bool:
+def drc_clear(
+    measured_mm: float, required_mm: float, *, band_mm: float = KICAD_CLEARANCE_BAND_MM
+) -> bool:
     """True unless the measured gap falls short of ``required_mm`` by more
-    than :data:`KICAD_CLEARANCE_BAND_MM` (KiCad's probed copper-clearance
-    band, widened by the :data:`DRC_FLOAT_GUARD_MM` float-safety term so a
+    than the supplied clearance band (default :data:`KICAD_CLEARANCE_BAND_MM`),
+    widened by the :data:`DRC_FLOAT_GUARD_MM` float-safety term so a
     gap KiCad's integer-nm math accepts at exactly the band edge is not
-    flagged here on float dust alone).  Clearance verdict sites only --
+    flagged here on float dust alone.  Clearance verdict sites only --
     dimension, annular, floor, hole and silk checks keep
     :data:`DRC_TOLERANCE`."""
-    return measured_mm + KICAD_CLEARANCE_BAND_MM >= required_mm - DRC_FLOAT_GUARD_MM
+    return measured_mm + band_mm >= required_mm - DRC_FLOAT_GUARD_MM
 
 
 class DRCRule(ABC):

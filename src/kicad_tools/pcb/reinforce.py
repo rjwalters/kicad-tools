@@ -2490,22 +2490,24 @@ def _opening_blocker(
     y: float,
     exposed_width: float,
     required: float,
-) -> tuple[float, tuple[float, float] | None] | None:
+) -> tuple[float, tuple[float, float] | None, Any] | None:
     """The worst single blocking obstacle of ``kind`` at sample ``(x, y)``.
 
-    Returns that obstacle's measured gap and a point on that **same**
-    obstacle (#9657): the gap and the reported coordinates must identify
-    the same copper, never a nearer neighbour that clears the opening.
-    Among several blockers the one with the smallest gap wins.
+    Returns that obstacle's measured gap, a point on that **same**
+    obstacle (#9657) and the obstacle itself (#9731, so the caller can
+    re-measure the gap to that one feature over the whole run): the gap
+    and the reported coordinates must identify the same copper, never a
+    nearer neighbour that clears the opening. Among several blockers the
+    one with the smallest gap wins.
     """
-    worst: tuple[float, tuple[float, float] | None] | None = None
+    worst: tuple[float, tuple[float, float] | None, Any] | None = None
     for item in items:
         single = _NetCopper(**{field_name: [item]})
         if _group_clear(x, y, exposed_width, required, single):
             continue
         gap = _actual_gap(x, y, exposed_width, required, single)
         if worst is None or gap < worst[0]:
-            worst = (gap, _obstacle_point(kind, item, x, y))
+            worst = (gap, _obstacle_point(kind, item, x, y), item)
     return worst
 
 
@@ -2647,12 +2649,22 @@ def _opening_violation(
                         kind, field_name, items, x, y, exposed_width, required
                     )
                     if blocker is not None:
+                        # The first failing sample is rarely where the run
+                        # passes closest (#9731): report the minimum gap to
+                        # the chosen blocker over the run's samples, so a
+                        # crossing obstacle reads as the 0.000 mm it is
+                        # instead of a "nearly passing" near-miss.
+                        chosen = _NetCopper(**{field_name: [blocker[2]]})
+                        actual = min(
+                            _actual_gap(sx, sy, exposed_width, required, chosen)
+                            for sx, sy in source_samples
+                        )
                         tag = (
                             RULE_MASK_OPENING_PAIRWISE
                             if rule == RULE_VOLTAGE_MAP_PAIRWISE
                             else RULE_MASK_OPENING_CLEARANCE
                         )
-                        return _Violation(tag, required, blocker[0], net, source, kind, blocker[1])
+                        return _Violation(tag, required, actual, net, source, kind, blocker[1])
     return None
 
 

@@ -31,6 +31,7 @@ from kicad_tools.cli.route_cmd import (
     _validate_route_engine_strategy,
 )
 from kicad_tools.cli.route_cmd import main as route_main
+from tests.conftest import require_router_cpp
 
 BOARD = """(kicad_pcb
   (version 20240108)
@@ -339,7 +340,7 @@ class TestWorkingCombosEndToEnd:
         assert "Escape routing: auto-detect disabled" in out
 
     def test_mesh_basic_routes(self, pcb: Path, capsys):
-        pytest.importorskip("kicad_tools.router.router_cpp")
+        require_router_cpp()
         self._route(pcb, "mesh")
         out = capsys.readouterr().out
         assert "Escape routing: auto-detect disabled" in out

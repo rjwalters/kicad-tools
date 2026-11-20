@@ -32,6 +32,7 @@ import pytest
 from kicad_tools.cli.net_status_cmd import main as net_status_main
 from kicad_tools.cli.route_cmd import main as route_main
 from kicad_tools.router.stuck_classifier import DEFAULT_CONGESTION_RADIUS_MM
+from tests.conftest import require_router_cpp
 
 HV_VOLTS = 300.0
 #: THT pad diameter used for every pad on the board.
@@ -236,11 +237,9 @@ def test_why_agrees_with_grid_decline(board: Path, vmap: Path, tmp_path: Path, c
     attributes a refusal the pairwise floor alone decided, so the sidecar says
     ``pairwise_blocked`` and ``--why`` quotes the HV clearance.
     """
-    from kicad_tools.router.cpp_backend import is_cpp_available
     from kicad_tools.router.stuck_classifier import is_pairwise_search_failure
 
-    if not is_cpp_available():
-        pytest.skip("grid search-failure codes need the C++ backend (kct build-native)")
+    require_router_cpp()
     out = tmp_path / "to220_grid.kicad_pcb"
     route_main(_route_args(board, out, vmap, engine="grid"))
     capsys.readouterr()
