@@ -16,7 +16,10 @@ This module provides the producer side -- a thin shim that:
    detector the router uses (``diffpair_detection.detect_diff_pairs``).
 2. Sums per-net length from PCB-side segments + vias (via
    :meth:`DiffPairLengthTracker.measure_net_from_pcb`) for each detected
-   pair's two halves.
+   pair's two halves, shedding each leg's classified defect copper --
+   the #9304 ruler shared with the match-group producer (Issue #9767).
+   The raw KiCad length contract of
+   :func:`kicad_tools.router.kicad_length.measure_pcb_net` is untouched.
 3. Builds the ``skew_data`` and per-pair ``threshold_map`` from each
    pair's net class :meth:`NetClassRouting.effective_skew_tolerance`.
 
@@ -51,6 +54,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from kicad_tools.analysis.trace_length import NetPathMeasurement
     from kicad_tools.router.rules import NetClassRouting
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate.diffpair_engagement import PairSkewLimits, PairThresholds
@@ -130,6 +134,11 @@ def derive_skew_limits(
         :meth:`DiffPairLengthTracker.get_all_skews` for routes recorded
         via :meth:`DiffPairLengthTracker.record_routes`.  This is the
         property tested in ``tests/test_validate_diffpair_skew.py``.
+        Issue #9767: each leg additionally sheds the defect copper the
+        #9304 classifier isolates (same rule and epsilon as the
+        match-group producer), so on copper carrying a dead-end branch
+        or terminal-rooted loop the validate-side figure is the smaller,
+        corrected one; defect-free copper measures byte-for-byte.
     """
     if not net_class_map:
         return {}, {}
@@ -212,6 +221,21 @@ def derive_skew_limits(
         l_n = DiffPairLengthTracker.measure_net_from_pcb(
             pcb, n_id, board_thickness_mm, num_copper_layers
         )
+        # Issue #9767: each leg sheds its classified defect copper before
+        # the difference is taken (the #9304 ruler, shared with match
+        # groups); defect-free legs keep the summed figure byte-for-byte.
+        m_p = _leg_defect_copper(pcb, p_name)
+        m_n = _leg_defect_copper(pcb, n_name)
+        for net_name, measurement in ((p_name, m_p), (n_name, m_n)):
+            if measurement is not None and measurement.defect_track_mm:
+                logger.warning(
+                    "[diffpair-skew] %s: %.3f mm classified as defect copper is "
+                    "excluded from the leg's measured length",
+                    net_name,
+                    measurement.defect_track_mm,
+                )
+        l_p = _defect_corrected_mm(l_p, m_p)
+        l_n = _defect_corrected_mm(l_n, m_n)
         skew_mm = abs(l_p - l_n)
         skew_data[(p_name, n_name)] = skew_mm
 
@@ -236,12 +260,14 @@ def derive_skew_limits(
 class PairSkewMeasurement:
     """One routed pair measured in length and in time (Issue #7892).
 
-    ``skew_mm`` is the kicad-cli length difference (as before #7892).
+    ``skew_mm`` is the kicad-cli length difference with each leg's
+    classified defect copper shed (Issue #9767; defect-free copper
+    measures the raw difference, as before #7892).
     ``skew_ps`` is the difference of the two legs' propagation delays: each
     trimmed track run at its layer's delay plus each via barrel at the via
     delay (:class:`~kicad_tools.physics.skew_budget.LayerDelays`); ``None``
     without per-layer delays.  ``layers`` maps each net to its track length
-    per copper layer (mm).
+    per copper layer (mm), consistent with the correction.
     """
 
     p_id: int
@@ -267,9 +293,12 @@ def derive_pair_skews(
     """Measure every routed, detected pair in mm and ps (Issue #7892).
 
     Detection and the routed-both-halves gate are those of
-    :func:`derive_skew_limits`; lengths are the same kicad-cli measurement
-    (:func:`kicad_tools.router.kicad_length.measure_pcb_net_parts`, whose
-    total is :meth:`DiffPairLengthTracker.measure_net_from_pcb`).  The limits
+    :func:`derive_skew_limits`; lengths start from the same kicad-cli
+    measurement (:func:`kicad_tools.router.kicad_length.measure_pcb_net_parts`,
+    whose total is :meth:`DiffPairLengthTracker.measure_net_from_pcb`) and
+    each leg then sheds its classified defect copper -- total, per-layer
+    split and ps delay alike, the #9304 ruler shared with match groups
+    (Issue #9767).  The limits
     come from :func:`~kicad_tools.validate.diffpair_engagement.resolve_pair_skew_limits`.
     ``stackup`` defaults to :meth:`Stackup.from_pcb`.
     """
@@ -287,10 +316,27 @@ def derive_pair_skews(
         parts_p = measure_pcb_net_parts(pcb, p_id, kstack)
         parts_n = measure_pcb_net_parts(pcb, n_id, kstack)
         limits = resolve_pair_skew_limits(net_class_map, p_name, n_name, stackup)
+        # Issue #9767: correct each leg before taking the difference --
+        # the total, the per-layer split (so ps charges the correction at
+        # the layer the defect copper occupies) and the reported layer
+        # lengths all shed the same classified copper.  Via accounting is
+        # untouched; an unavailable classification keeps the raw figures.
+        m_p = _leg_defect_copper(pcb, p_name)
+        m_n = _leg_defect_copper(pcb, n_name)
+        for net_name, measurement in ((p_name, m_p), (n_name, m_n)):
+            if measurement is not None and measurement.defect_track_mm:
+                logger.warning(
+                    "[diffpair-skew] %s: %.3f mm classified as defect copper is "
+                    "excluded from the leg's measured length",
+                    net_name,
+                    measurement.defect_track_mm,
+                )
+        layers_p = _defect_corrected_by_layer(parts_p.by_layer, m_p)
+        layers_n = _defect_corrected_by_layer(parts_n.by_layer, m_n)
         skew_ps = None
         if limits.delays is not None:
-            t_p = limits.delays.delay_ps(parts_p.by_layer, parts_p.via_mm)
-            t_n = limits.delays.delay_ps(parts_n.by_layer, parts_n.via_mm)
+            t_p = limits.delays.delay_ps(layers_p, parts_p.via_mm)
+            t_n = limits.delays.delay_ps(layers_n, parts_n.via_mm)
             skew_ps = abs(t_p - t_n)
         out.append(
             PairSkewMeasurement(
@@ -298,10 +344,13 @@ def derive_pair_skews(
                 n_id=n_id,
                 p_name=p_name,
                 n_name=n_name,
-                skew_mm=abs(parts_p.total - parts_n.total),
+                skew_mm=abs(
+                    _defect_corrected_mm(parts_p.total, m_p)
+                    - _defect_corrected_mm(parts_n.total, m_n)
+                ),
                 skew_ps=skew_ps,
                 limits=limits,
-                layers={p_name: parts_p.by_layer, n_name: parts_n.by_layer},
+                layers={p_name: layers_p, n_name: layers_n},
             )
         )
     return out
@@ -387,6 +436,68 @@ def _net_has_geometry(pcb: PCB, net_id: int) -> bool:
     return False
 
 
+def _leg_defect_copper(pcb: PCB, net_name: str) -> NetPathMeasurement | None:
+    """One pair leg's defect-copper classification (Issue #9767).
+
+    The same ruler the match-group producer uses
+    (:func:`~kicad_tools.validate.match_group_skew._measure_member_copper`):
+    one ``measure_net_path`` call with the shared
+    ``OFF_PATH_REPORT_EPSILON_MM`` epsilon.  Returns ``None`` when the
+    path model cannot run on this board (stub PCB without
+    ``get_net_by_name``); the caller then keeps the summed kicad-cli
+    figure byte-for-byte.
+    """
+    if not callable(getattr(pcb, "get_net_by_name", None)):
+        return None
+
+    from kicad_tools.analysis.trace_length import TraceLengthAnalyzer
+    from kicad_tools.validate.match_group_skew import OFF_PATH_REPORT_EPSILON_MM
+
+    return TraceLengthAnalyzer().measure_net_path(
+        pcb,
+        net_name,
+        defect_epsilon_mm=OFF_PATH_REPORT_EPSILON_MM,
+    )
+
+
+def _defect_corrected_mm(
+    summed_mm: float, measurement: NetPathMeasurement | None
+) -> float:
+    """Apply the #9767 defect-copper correction to one leg's summed figure.
+
+    The ruler is the summed kicad-cli length minus the leg's *defect*
+    copper -- dead-end branches and terminal-rooted loops whose
+    structure exceeds ``OFF_PATH_REPORT_EPSILON_MM``, classified by the
+    same single rule for both legs of every pair (and for match groups,
+    Issue #9304).  Rejoined cycle copper (the tuner's length-matching
+    bumps) and the sub-epsilon pad/via escape residual stay counted, so
+    on defect-free copper the figure is the summed length
+    byte-for-byte, and an unavailable classification keeps the raw
+    figure.
+    """
+    if measurement is None or not measurement.defect_track_mm:
+        return summed_mm
+    return summed_mm - measurement.defect_track_mm
+
+
+def _defect_corrected_by_layer(
+    by_layer: dict[str, float],
+    measurement: NetPathMeasurement | None,
+) -> dict[str, float]:
+    """:func:`_defect_corrected_mm` at per-layer granularity (Issue #9767).
+
+    Each layer sheds only the defect copper the classifier isolated on
+    that layer, so a ps figure charges the correction at the delay of
+    the layer the copper physically occupies.
+    """
+    out = dict(by_layer)
+    if measurement is None or not measurement.defect_track_by_layer:
+        return out
+    for layer, length in measurement.defect_track_by_layer.items():
+        out[layer] = out.get(layer, 0.0) - length
+    return out
+
+
 @dataclass(frozen=True)
 class ChainSkew:
     """Skew across a chain of diff-pair segments joined by series elements.
@@ -394,7 +505,8 @@ class ChainSkew:
     ``segments`` lists each pair segment as ``(p_net, n_net)``;
     ``side_a_mm`` / ``side_b_mm`` are the summed routed lengths of the two
     conductors end to end (polarity-aligned through the series elements, so
-    a swap across a part is followed rather than counted as skew).
+    a swap across a part is followed rather than counted as skew), each
+    member's classified defect copper shed (Issue #9767).
     ``limit_mm`` is ``None`` when no class declares a chain limit.
     """
 
@@ -420,7 +532,9 @@ def derive_chain_skew(
     capacitor or ferrite) joins one net of each pair and a second two-pad
     part joins the remaining nets.  Pairs linked this way form a chain; the
     chain's two sides are the polarity-aligned sums of the member nets'
-    routed lengths.  The part's own body length is not counted.  A pair with
+    routed lengths, each member's classified defect copper shed (Issue
+    #9767, the #9304 ruler shared with the other skew producers).  The
+    part's own body length is not counted.  A pair with
     no chain partner is not reported -- the per-pair rule covers it.
 
     ``kct check`` measures per net segment; this adds the end-to-end figure.
@@ -477,9 +591,18 @@ def derive_chain_skew(
     name_to_id = {v: k for k, v in net_names.items()}
 
     def length(name: str) -> float:
-        return DiffPairLengthTracker.measure_net_from_pcb(
+        """One member net's routed length, defect copper shed (#9767).
+
+        The raw figure is the same
+        :meth:`DiffPairLengthTracker.measure_net_from_pcb` sum as before;
+        the #9304 classifier's shed copper (same rule and epsilon as the
+        match-group and per-pair producers) is subtracted so a dead-end
+        branch on one conductor does not read as chain skew.
+        """
+        summed = DiffPairLengthTracker.measure_net_from_pcb(
             pcb, name_to_id[name], board_thickness_mm, num_copper_layers
         )
+        return _defect_corrected_mm(summed, _leg_defect_copper(pcb, name))
 
     chains: list[ChainSkew] = []
     seen: set[int] = set()

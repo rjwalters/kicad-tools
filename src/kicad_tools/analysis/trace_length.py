@@ -199,6 +199,14 @@ class NetPathMeasurement:
             classifier could not run); ``0.0`` on defect-free copper.
         defect_structures: Number of distinct off-path structures whose
             copper exceeded the epsilon and was classified as defect.
+        defect_track_by_layer: The shed defect copper of
+            :attr:`defect_track_mm` split by the copper layer each track
+            piece runs on (Issue #9767: a consumer charging per-layer
+            delay subtracts the structure at the layer it physically
+            occupies).  The epsilon is applied once to the whole
+            connected structure before its length is allocated to
+            layers, so a structure spanning layers is shed or kept as a
+            unit.  ``None`` exactly when :attr:`defect_track_mm`` is.
     """
 
     path_length_mm: float | None = None
@@ -207,6 +215,7 @@ class NetPathMeasurement:
     path_via_indices: tuple[int, ...] = ()
     defect_track_mm: float | None = None
     defect_structures: int = 0
+    defect_track_by_layer: dict[str, float] | None = None
 
 
 # Point-coincidence radius (mm) for path-graph nodes; mirrors the contact
@@ -228,6 +237,10 @@ class _PadToPadGraph(NamedTuple):
     #: piece granularity, so the builder records which adjacency edges
     #: belong to which track's centreline and how long each piece is).
     track_pieces: dict[int, list[tuple[int, int, float]]]
+    #: Copper layer each track runs on, as ``{track index: layer name}``
+    #: (Issue #9767: shed structures are reported per layer so a
+    #: per-layer-delay consumer charges the copper where it sits).
+    track_layers: dict[int, str]
 
 
 def _build_pad_to_pad_graph(
@@ -292,6 +305,7 @@ def _build_pad_to_pad_graph(
     line_length: dict[int, float] = {}
     end_nodes: dict[int, tuple[int, int]] = {}
     attachments: dict[int, list[tuple[float, int]]] = {}
+    track_layers: dict[int, str] = {}
 
     for index, item in enumerate(items):
         if item.kind == PAD and item.center is not None:
@@ -308,6 +322,7 @@ def _build_pad_to_pad_graph(
             )
             line_length[index] = max(float(item.line.length), 1e-9)
             end_nodes[index] = (node_for(start), node_for(end))
+            track_layers[index] = next(iter(item.layers))
 
     def attach(track_index: int, point: Any) -> int:
         """Node at ``point``'s contact position on a track's centreline."""
@@ -395,6 +410,7 @@ def _build_pad_to_pad_graph(
         via_nodes=via_nodes,
         total_track_length_mm=sum(track_length.values()),
         track_pieces=track_pieces,
+        track_layers=track_layers,
     )
 
 
@@ -506,7 +522,7 @@ def _classify_defect_track_copper(
     path_graph: _PadToPadGraph,
     dijkstra_runs: dict[int, tuple[dict[int, float], dict[int, int]]],
     defect_epsilon_mm: float,
-) -> tuple[float, int]:
+) -> tuple[float, int, dict[str, float]]:
     """Measure one net's defect track copper (Issue #9304).
 
     One uniform rule, applied to every member of a match group alike:
@@ -534,7 +550,12 @@ def _classify_defect_track_copper(
     the genuine same-net loops sit at 6.2-10.2 mm, leaving 4.0 mm wide
     clearance on both sides.
 
-    Returns ``(defect_track_mm, shed_structures)``.
+    Returns ``(defect_track_mm, shed_structures, defect_track_by_layer)``
+    -- the shed copper total, how many structures it came from, and the
+    same copper split by the layer each track piece runs on (Issue
+    #9767).  The epsilon is applied once to the whole connected
+    structure before its length is allocated to layers, so a structure
+    spanning layers is shed or kept as a unit.
     """
     adjacency = path_graph.adjacency
     pad_nodes = path_graph.pad_nodes
@@ -560,7 +581,7 @@ def _classify_defect_track_copper(
                 path_pairs.add(pair(node, prev[node]))
                 node = prev[node]
     if not path_pairs:
-        return 0.0, 0
+        return 0.0, 0, {}
 
     pairs_adjacency: dict[int, set[int]] = defaultdict(set)
     zero_edge_nodes: set[int] = set()
@@ -693,18 +714,25 @@ def _classify_defect_track_copper(
             cunion(nodes[0], node)
 
     structure_length: dict[int, float] = defaultdict(float)
+    structure_by_layer: dict[int, dict[str, float]] = defaultdict(lambda: defaultdict(float))
     for track_index, pieces in path_graph.track_pieces.items():
+        layer = path_graph.track_layers[track_index]
         for n0, n1, weight in pieces:
             if (track_index, n0, n1) in candidates:
-                structure_length[cfind(n0)] += weight
+                root = cfind(n0)
+                structure_length[root] += weight
+                structure_by_layer[root][layer] += weight
 
     defect_mm = 0.0
+    defect_by_layer: dict[str, float] = defaultdict(float)
     shed = 0
-    for total in structure_length.values():
+    for root, total in structure_length.items():
         if total > defect_epsilon_mm:
             defect_mm += total
             shed += 1
-    return defect_mm, shed
+            for layer, length in structure_by_layer[root].items():
+                defect_by_layer[layer] += length
+    return defect_mm, shed, dict(defect_by_layer)
 
 
 @dataclass
@@ -867,7 +895,10 @@ class TraceLengthAnalyzer:
                 classify defect track copper -- dead-end branches and
                 lollipops rooted at one pad/via terminal whose connected
                 structure exceeds this epsilon -- into
-                :attr:`NetPathMeasurement.defect_track_mm`.  Rejoined
+                :attr:`NetPathMeasurement.defect_track_mm` (split by
+                copper layer in
+                :attr:`NetPathMeasurement.defect_track_by_layer`,
+                Issue #9767).  Rejoined
                 cycle copper (length-matching bumps, parallel detours)
                 and sub-epsilon escape residual are never classified as
                 defect; ``None`` (the default) skips the classification.
@@ -935,8 +966,9 @@ class TraceLengthAnalyzer:
         off_path = max(total - path_length, 0.0)
         defect_mm: float | None = None
         defect_structures = 0
+        defect_by_layer: dict[str, float] | None = None
         if defect_epsilon_mm is not None:
-            defect_mm, defect_structures = _classify_defect_track_copper(
+            defect_mm, defect_structures, defect_by_layer = _classify_defect_track_copper(
                 path_graph, dijkstra_runs, defect_epsilon_mm
             )
         return NetPathMeasurement(
@@ -946,6 +978,7 @@ class TraceLengthAnalyzer:
             path_via_indices=tuple(sorted(path_via_indices)),
             defect_track_mm=defect_mm,
             defect_structures=defect_structures,
+            defect_track_by_layer=defect_by_layer,
         )
 
     def analyze_diff_pair(
