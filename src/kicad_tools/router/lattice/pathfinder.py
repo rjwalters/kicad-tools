@@ -84,6 +84,7 @@ from .obstacles import (
     LatticeObstacleModel,
     seg_body_crosses_pt,
 )
+from .own_copper import KeptAnchor, pad_key
 from .quadtree import EdgeKey, NodeKey, OctilinearLattice, RefineRegion
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -114,6 +115,8 @@ _ViaChain = tuple[Pt, Any] | None
 # path also avoids).  A search-tuning knob, not a geometric constant -- it only
 # widens the candidate set, never the copper.
 _OVERSIZE_STUB_KMAX = 4096
+# Issue #9636: landing stubs kept per layer from the sibling-relaxed escape.
+_SIBLING_STUBS_PER_LAYER = 16
 
 # Issue #9708: state budget for :meth:`LatticePathfinder._pad_band_sealed`, the
 # bounded walk that decides whether a pad's stub landings are sealed inside the
@@ -1028,6 +1031,10 @@ class LatticePathfinder:
         # composition silently spaced new copper at the DRU floor from an HV
         # net the net-class map put at 2.0-3.2 mm.
         self._fixed_runs: list[tuple[int, Pt, Pt, int, float, float]] = []
+        # Issue #9636: per-pad start points on the net's OWN kept copper
+        # (``--complete``), keyed ``(ref, pin)``.  Set by the caller; empty
+        # (the default) leaves every escape exactly as before.
+        self.kept_anchors: dict[tuple[str, str], list[KeptAnchor]] = {}
         self._fixed_vias: list[tuple[Pt, int, float, float, tuple[int, ...]]] = []
         # Issue #4602: optional net-id-space HV pairwise projection
         # (:class:`.pairwise.LatticePairwise`), resolved by the CALLER from
@@ -1061,6 +1068,9 @@ class LatticePathfinder:
         self.pair_exempt_added: dict[str, frozenset[int]] = {}
         # Issue #6935: why the last ``_pair_attach`` found no dogleg.
         self._attach_blocker = ""
+        # Issue #9708: landings the last ``_escape_stubs`` call added past the
+        # near scan; declared here so every read/write site shares one type.
+        self._last_far_landings: frozenset[tuple[NodeKey, int]] = frozenset()
         from ..fixed_copper import FixedFillObstacles
 
         self.fixed_fills = FixedFillObstacles()
@@ -1202,6 +1212,7 @@ class LatticePathfinder:
             self._agent_radius,
             pad_extra=self._authored_pad_extra(),
             pad_class_extra=self._class_outline_extra(),
+            base_clearance=self.rules.trace_clearance,
         )
         # Issue #7880: under an HV projection a pad's grown keep-out (authored
         # floor, #6489 class growth) composes with the pair requirement by
@@ -1668,6 +1679,7 @@ class LatticePathfinder:
         layers: tuple[int, ...] | None = None,
         exempt_pads: frozenset[int] | None = None,
         net_class: object | None = None,
+        relax_siblings: bool = False,
     ) -> list[tuple[NodeKey, int, list[Pt], float]]:
         """Legal dogleg stubs ``(node_key, layer, polyline pad->node, length)``.
 
@@ -1706,6 +1718,7 @@ class LatticePathfinder:
             partner_net=partner_net,
             layers=layers,
             exempt_pads=exempt_pads,
+            relax_siblings=relax_siblings,
         )
 
     def _scan_stubs(
@@ -1723,6 +1736,7 @@ class LatticePathfinder:
         layers: tuple[int, ...] | None = None,
         exempt_pads: frozenset[int] | None = None,
         min_landing_gap_mm: float | None = None,
+        relax_siblings: bool = False,
     ) -> list[tuple[NodeKey, int, list[Pt], float]]:
         """Candidate scan for :meth:`pad_stubs` at an EXPLICIT ``(half, clr)``.
 
@@ -1774,6 +1788,15 @@ class LatticePathfinder:
         # emitted offset legs are re-verified against it in
         # ``_route_pair_impl``'s finish gate, so nothing under-masked ships.
         ko = None if fat else self._keepouts
+        # Issue #9636: the gap to the OTHER pads of this pad's footprint is
+        # fixed by the part, so an authored class clearance grown around such
+        # a sibling pad must not wall this pad in.  Copper leaving the pad is
+        # held to the gap the part itself leaves instead (``relax``).
+        relax = (
+            obstacles.footprint_sibling_floors(pad, net, half, extra)
+            if relax_siblings and not fat
+            else {}
+        ) or None
 
         candidates: list[tuple[float, NodeKey, Pt]] = []
         pad_pt = (pad.x, pad.y)
@@ -1804,9 +1827,11 @@ class LatticePathfinder:
                     ):
                         continue
                 else:
-                    if obstacles.node_blocked(key, layer, net):
+                    if obstacles.node_blocked(key, layer, net, relax, point):
                         continue
-                    if extra > 0.0 and obstacles.segment_blocked(point, point, layer, net, extra):
+                    if extra > 0.0 and obstacles.segment_blocked(
+                        point, point, layer, net, extra, relax
+                    ):
                         continue
                     if pw is not None and obstacles.pairwise_pad_blocked(
                         point, point, layer, net, half, extra, pw
@@ -1842,7 +1867,7 @@ class LatticePathfinder:
                                 ok = False
                                 break
                         else:
-                            if obstacles.segment_blocked(a, b, layer, net, extra):
+                            if obstacles.segment_blocked(a, b, layer, net, extra, relax):
                                 ok = False
                                 break
                             if pw is not None and obstacles.pairwise_pad_blocked(
@@ -1906,7 +1931,228 @@ class LatticePathfinder:
         allow_vias: bool = True,
         via_in_pad_override: bool | None = None,
     ) -> tuple[list[tuple[NodeKey, int, list[Pt], float]], float]:
+        """Escape stubs for one pad; a pad already carrying kept copper starts
+        from that copper instead (issue #9636).
+
+        A **verified** kept-copper start is preferred whenever the net has
+        copper attached to this pad (``kept_anchors``, ``--complete``):
+        :meth:`_anchor_stubs` scans stubs from the copper's far points, at the
+        width the copper already has there, and accepts only a landing node
+        the class-width body can leave.  This wins even when the pad's own
+        escape has egress -- the pin keeps the (narrower) copper it already
+        carries instead of being re-escaped at class width.  Without a
+        verified anchor start the pad's own escape
+        (:meth:`_escape_stubs_at_pad`) is returned exactly as before,
+        including its sibling-relaxed retry.
+        """
+        kwargs: dict[str, Any] = {
+            "kmax": kmax,
+            "extra_clearance": extra_clearance,
+            "partner_net": partner_net,
+            "layers": layers,
+            "exempt_pads": exempt_pads,
+            "net_class": net_class,
+            "allow_vias": allow_vias,
+            "via_in_pad_override": via_in_pad_override,
+        }
+        stubs, width = self._escape_stubs_at_pad(pad, net, committed, **kwargs)
+        # Issue #9708 contract: ``_last_far_landings`` must describe the stub
+        # set RETURNED from here (the caller reads it right after).  The
+        # pad-escape call above set it for ``stubs``; every other return path
+        # below re-assigns it explicitly rather than inheriting a stale set.
+        pad_far = self._last_far_landings
+        anchors = self.kept_anchors.get(pad_key(pad)) if self.kept_anchors else None
+        fat = extra_clearance > 0.0 or partner_net is not None
+        if fat:
+            return stubs, width
+        half, clr = self._conn_geometry(net_class, net)
+
+        def has_egress(found: list) -> bool:
+            return any(
+                self._stub_has_egress(
+                    stub,
+                    net,
+                    committed,
+                    half,
+                    clr,
+                    net_class=net_class,
+                    allow_vias=allow_vias,
+                    via_in_pad_override=via_in_pad_override,
+                )
+                for stub in found
+            )
+
+        # Issue #9636 (review): the kept-copper start is tried FIRST and wins
+        # whenever it verifies, so a pad that can also escape on its own does
+        # not get its existing (narrower) copper overlaid at class width.
+        if anchors:
+            anchored = self._anchor_stubs(
+                pad,
+                anchors,
+                net,
+                committed,
+                kmax=kmax,
+                layers=layers,
+                exempt_pads=exempt_pads,
+                net_class=net_class,
+                allow_vias=allow_vias,
+                via_in_pad_override=via_in_pad_override,
+            )
+            if anchored is not None:
+                # Anchored stubs start on kept copper and carry no band-sealed
+                # far landings; do not inherit the pad-escape call's set.
+                self._last_far_landings = frozenset()
+                return anchored
+        if (not stubs or not has_egress(stubs)) and self.obstacles.footprint_sibling_floors(
+            pad, net, half, max(0.0, half + clr - self._agent_radius)
+        ):
+            # Issue #9636: the pad cannot leave because a sibling pad's class
+            # keep-out covers it -- retry holding the copper to the part's own
+            # pad gap.  Dead-end landings are dropped: only a node the body
+            # can actually leave is worth handing the search.
+            relaxed, rwidth = self._escape_stubs_at_pad(
+                pad, net, committed, **kwargs, relax_siblings=True
+            )
+            usable = [
+                stub
+                for stub in relaxed
+                if self._stub_has_egress(
+                    stub,
+                    net,
+                    committed,
+                    half,
+                    clr,
+                    net_class=net_class,
+                    allow_vias=allow_vias,
+                    via_in_pad_override=via_in_pad_override,
+                )
+            ]
+            if usable:
+                # Nearest-first (the scan order); a handful per layer is
+                # plenty of starting states for the search.
+                per_layer: dict[int, int] = {}
+                capped = []
+                for stub in usable:
+                    per_layer[stub[1]] = per_layer.get(stub[1], 0) + 1
+                    if per_layer[stub[1]] <= _SIBLING_STUBS_PER_LAYER:
+                        capped.append(stub)
+                # The relaxed call reset ``_last_far_landings`` for ITS stub
+                # set; keep only far landings that survived the usable/cap
+                # filtering.  (Its band-sealed far scan keeps the caller's
+                # ``kmax`` on purpose: far landings are a separate mechanism
+                # from the widened sibling fan.)
+                kept_states = {(stub[0], stub[1]) for stub in capped}
+                self._last_far_landings = frozenset(
+                    st for st in self._last_far_landings if st in kept_states
+                )
+                return capped, rwidth
+        # Falling back to the pad-escape set: restore ITS far landings, which
+        # the relaxed retry (if it ran) has since reset.
+        self._last_far_landings = pad_far
+        return stubs, width
+
+    def _sibling_search_radius(self, pad: Pad) -> float:
+        """Stub fan radius for the sibling-relaxed escape (issue #9636).
+
+        The default radius reaches about 2 mm.  A sibling pad's class keep-out
+        can push the first usable landing node out by its own reach, so the
+        radius grows by the widest such reach on the footprint.
+        """
+        base = max(3.0 * self.build().fine + max(pad.width, pad.height), 2.0)
+        reach = max(
+            (
+                self.obstacles._pad_reach[idx]
+                for idx, other in enumerate(self.obstacles.pads)
+                if other.ref == pad.ref and other is not pad
+            ),
+            default=0.0,
+        )
+        return float(base + reach)
+
+    def _anchor_stubs(
+        self,
+        pad: Pad,
+        anchors: list[KeptAnchor],
+        net: int,
+        committed: CommittedCopper | None,
+        *,
+        kmax: int,
+        layers: tuple[int, ...] | None,
+        exempt_pads: frozenset[int] | None,
+        net_class: object | None,
+        allow_vias: bool,
+        via_in_pad_override: bool | None,
+    ) -> tuple[list[tuple[NodeKey, int, list[Pt], float]], float] | None:
+        """Stubs that start on the net's kept copper (issue #9636), or ``None``.
+
+        Each anchor is scanned like a pad centre (the identical clearance-
+        checked dogleg search) but at the copper's own width -- floored at the
+        fab minimum -- on the anchor's layer; the widest width with a stub
+        that has egress wins, and its stubs are returned with that width.  The
+        route then simply begins on the existing copper: nothing is emitted
+        over the pad, so the pin keeps the narrow escape it already has.
+        """
+        if committed is None:
+            committed = self._fresh_committed()
+        dru_min = self.rules.min_trace_width or 0.0
+        body_half, clr = self._conn_geometry(net_class, net)
+        by_width: dict[float, list[tuple[NodeKey, int, list[Pt], float]]] = {}
+        for anchor in anchors:
+            if layers is not None and anchor.layer not in layers:
+                continue
+            width = round(max(anchor.width, dru_min), 6)
+            origin = replace(pad, x=anchor.point[0], y=anchor.point[1])
+            found = self._scan_stubs(
+                origin,
+                net,
+                committed,
+                width / 2.0,
+                clr,
+                kmax=kmax,
+                layers=(anchor.layer,),
+                exempt_pads=exempt_pads,
+                relax_siblings=False,
+            )
+            for stub in found:
+                # The body leaves the stub's landing node at the CLASS width.
+                if self._stub_has_egress(
+                    stub,
+                    net,
+                    committed,
+                    body_half,
+                    clr,
+                    net_class=net_class,
+                    allow_vias=allow_vias,
+                    via_in_pad_override=via_in_pad_override,
+                ):
+                    by_width.setdefault(width, []).append(stub)
+        if not by_width:
+            return None
+        best = max(by_width)
+        return by_width[best], best
+
+    def _escape_stubs_at_pad(
+        self,
+        pad: Pad,
+        net: int,
+        committed: CommittedCopper | None,
+        *,
+        kmax: int,
+        extra_clearance: float,
+        partner_net: int | None,
+        layers: tuple[int, ...] | None,
+        exempt_pads: frozenset[int] | None,
+        net_class: object | None,
+        allow_vias: bool = True,
+        via_in_pad_override: bool | None = None,
+        relax_siblings: bool = False,
+    ) -> tuple[list[tuple[NodeKey, int, list[Pt], float]], float]:
         """Escape stubs for one pad, with an oversize neck-down fallback.
+
+        ``relax_siblings`` (issue #9636) holds copper leaving the pad to the
+        gap its footprint already leaves to the part's OTHER pads instead of
+        their full class keep-out, with a wide stub fan (the useful landing
+        node is the first one outside that keep-out, not the nearest).
 
         Returns ``(stubs, emitted_width)`` -- the width the returned legs are
         emitted (and spaced) at.  The FULL-width escape is tried first and,
@@ -1949,18 +2195,20 @@ class LatticePathfinder:
         fat = extra_clearance > 0.0 or partner_net is not None
         # Issue #9708: the landings this call added past the near scan, read
         # back by :meth:`_route_search` to vet their emitted join.
-        self._last_far_landings: frozenset[tuple[NodeKey, int]] = frozenset()
+        self._last_far_landings = frozenset()
 
         stubs = self.pad_stubs(
             pad,
             net,
             committed,
-            kmax=kmax,
+            kmax=_OVERSIZE_STUB_KMAX if relax_siblings else kmax,
+            search_radius=self._sibling_search_radius(pad) if relax_siblings else None,
             extra_clearance=extra_clearance,
             partner_net=partner_net,
             layers=layers,
             exempt_pads=exempt_pads,
             net_class=net_class,
+            relax_siblings=relax_siblings,
         )
         # A successful full-width escape, or a fat coupled agent (whose grown
         # envelope has its own escape discipline), is returned as-is.  A
@@ -2054,6 +2302,7 @@ class LatticePathfinder:
             search_radius=grown_sr,
             layers=layers,
             exempt_pads=exempt_pads,
+            relax_siblings=relax_siblings,
         )
         if (
             not neck_stubs
@@ -2091,6 +2340,7 @@ class LatticePathfinder:
                             search_radius=grown_sr,
                             layers=layers,
                             exempt_pads=exempt_pads,
+                            relax_siblings=relax_siblings,
                         )
                         if neck_stubs:
                             break
@@ -2118,6 +2368,7 @@ class LatticePathfinder:
                             search_radius=grown_sr,
                             layers=layers,
                             exempt_pads=exempt_pads,
+                            relax_siblings=relax_siblings,
                         )
                         neck_stubs = [
                             stub

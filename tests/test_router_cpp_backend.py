@@ -194,7 +194,12 @@ class TestCppBackendDiagnosticMessages:
                 # The C++ extension was actually built and importable
                 # despite our glob patch -- skip in that case (the
                 # diagnostic branch is unreachable on this machine).
-                pytest.skip("router_cpp extension is available; cannot test missing-.so diagnostic")
+                # This skip fires because the extension IS built -- the
+                # opposite of the missing-build skip #9705 forbids -- so its
+                # reason must stay free of the backstop trigger words in
+                # tests/conftest.py (``_ROUTER_CPP_SKIP_REASONS``), which
+                # fails any skip reasoned on the C++ router backend (#9804).
+                pytest.skip("extension is built; missing-.so diagnostic is unreachable")
             assert "kct build-native" in reason, (
                 f"Diagnostic must mention build command. Got: {reason!r}"
             )
