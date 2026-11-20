@@ -829,7 +829,12 @@ to its own via has the via snapped onto the track's centreline so the copper
 fully merges. Different-net gaps, zone fills and pad-pad / track-track pairs
 are never touched and are listed as unrepaired with a reason; a move that
 would crowd foreign copper or drill too close to another hole is declined,
-and same-net track ends anchored at the via move with it. Detection and the
+and same-net track ends anchored at the via move with it. A via move
+therefore changes the length of the tracks attached to it, so a net under a
+length or skew constraint (a differential pair or match group sitting at its
+limit) can flip a timing check even though the slit itself is repaired — the
+per-move validation checks clearance and hole-to-hole spacing only and cannot
+see a pair-level property such as skew. Detection and the
 post-repair re-check use `kct check`'s rules with the stackup's fab-view gap
 bands resolved (kicad-cli has no such rule), and the pass also runs in the
 default set when the report carries such findings.
