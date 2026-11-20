@@ -34,14 +34,24 @@ def _sheet_reporters(
         for key in ("start", "end", "position"):
             if key in out:
                 out[key] = sheet(out[key])
-        if out.get("blocking_branches"):
-            out["blocking_branches"] = [
-                {**b, "start": sheet(b["start"]), "end": sheet(b["end"])}
-                for b in out["blocking_branches"]
-            ]
+        for key in ("blocking_branches", "loop_branches"):
+            if out.get(key):
+                out[key] = [
+                    {**b, "start": sheet(b["start"]), "end": sheet(b["end"])} for b in out[key]
+                ]
         return out
 
     return origin_x, origin_y, sheet, sheet_witness
+
+
+def _unresolved_anchor_clause(u: Any) -> str:
+    """What reinforce did with an unusable declared path (#8742, #9725)."""
+    if u.anchored_segments:
+        return (
+            f"only its {u.anchored_segments} loop-free segment(s) between the endpoints "
+            "are offered for anchors; the looped part is unhandled"
+        )
+    return "it gets no anchors"
 
 
 def _carry_sidecars(src: Path, dst: Path) -> None:
@@ -1754,7 +1764,13 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             for leg in outcome.legs
         ],
         "unresolved_paths": [
-            {"path": u.path, "status": u.status, "reason": why}
+            {
+                "path": u.path,
+                "status": u.status,
+                "reason": why,
+                # Issue #9725: loop-free segments still offered for anchors.
+                "anchored_segments": u.anchored_segments,
+            }
             for u, why in zip(outcome.unresolved_paths, unresolved_reasons, strict=True)
         ],
         # Issue #8743: solder-mask openings (additive).
@@ -1849,7 +1865,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
     for u, why in zip(outcome.unresolved_paths, unresolved_reasons, strict=True):
         print(
             f"Warning: declared current path {u.path!r} on net {outcome.net_name!r} is "
-            f"{u.status}: {why} -- it gets no anchors",
+            f"{u.status}: {why} -- {_unresolved_anchor_clause(u)}",
             file=sys.stderr,
         )
 
@@ -1895,9 +1911,9 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             )
         if outcome.unresolved_paths:
             print()
-            print("  Unresolved current paths (no anchors):")
+            print("  Unresolved current paths (looped copper gets no anchors):")
             for u, why in zip(outcome.unresolved_paths, unresolved_reasons, strict=True):
-                print(f"    {u.path}: {u.status} -- {why}")
+                print(f"    {u.path}: {u.status} -- {why} -- {_unresolved_anchor_clause(u)}")
         if outcome.anchor_mode == "ends":
             _print_reinforce_legs(outcome, origin_x, origin_y)
         else:

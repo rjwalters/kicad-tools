@@ -77,7 +77,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from kicad_tools.core.geometry import point_in_polygon, rotate_pad_offset
@@ -476,6 +476,10 @@ class UnresolvedPath:
     #: coordinates; reporters append ``describe_witness(witness, origin)`` in
     #: their own frame (#8928).
     witness: dict[str, object] = field(default_factory=dict)
+    #: Loop-free segments of this loop-ambiguous path that were still offered
+    #: for anchoring (Issue #9725): the straight run every route between the
+    #: endpoints crosses. ``0`` when the whole path gets no anchors.
+    anchored_segments: int = 0
 
 
 @dataclass
@@ -1781,9 +1785,14 @@ def reinforce_net(
     net_path_specs = [spec for spec in (current_paths or ()) if spec.net_name == net_name]
     partition = reinforcement_path_resolutions(pcb, net_path_specs) if net_path_specs else None
     if partition is not None:
+        partial_ids = {id(res) for res in partition.partial}
         result.unresolved_paths = [
             UnresolvedPath(
-                path=res.spec.name, status=res.status, reason=res.reason, witness=res.witness
+                path=res.spec.name,
+                status=res.status,
+                reason=res.reason,
+                witness=res.witness,
+                anchored_segments=(len(res.loop_free_segments) if id(res) in partial_ids else 0),
             )
             for res in partition.unresolved
         ]
@@ -1796,7 +1805,16 @@ def reinforce_net(
             result,
             net_segments=net_segments,
             target_net_number=target_net_number,
-            eligible_resolutions=(partition.eligible if partition is not None else None),
+            # A loop-ambiguous eligible path lends only its loop-free
+            # segments (Issue #9725); the looped part stays unhandled.
+            eligible_resolutions=(
+                [
+                    *partition.eligible,
+                    *(replace(res, segments=res.loop_free_segments) for res in partition.partial),
+                ]
+                if partition is not None
+                else None
+            ),
             layer=layer,
             all_runs=all_runs,
             min_wire_length_mm=resolve_min_wire_length_mm(
