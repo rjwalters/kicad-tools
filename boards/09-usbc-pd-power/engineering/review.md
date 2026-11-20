@@ -103,21 +103,21 @@ inputs and all four Kelvin/filter nets are connected in native KiCad's report,
 without force-pad shorts. Routing is not symmetric; input pickup, final force
 copper proximity and filter placement still need a noise/layout review.
 
-- [#4980](https://github.com/rjwalters/kicad-tools/issues/4980): added concrete
+- [#4980](https://github.com/2AMLogic/kicad-tools/issues/4980): added concrete
   force-current, feedback, LED and Kelvin branch requirements for this board.
-- [#4991](https://github.com/rjwalters/kicad-tools/issues/4991): added native
+- [#4991](https://github.com/2AMLogic/kicad-tools/issues/4991): added native
   shunt/monitor escape shorts observed with strict pad-clearance mode.
-- [#5032](https://github.com/rjwalters/kicad-tools/issues/5032): filed loss of
+- [#5032](https://github.com/2AMLogic/kicad-tools/issues/5032): filed loss of
   the source project's preservation flag and native rule floors when routing
   to a new output basename/directory.
-- [#5049](https://github.com/rjwalters/kicad-tools/issues/5049): filed and locally
+- [#5049](https://github.com/2AMLogic/kicad-tools/issues/5049): filed and locally
   fixed lost pad geometry edits on newly added footprints, with round-trip
   tests covering rotations, positions, layers and repeated/blank pad numbers.
-- [#5055](https://github.com/rjwalters/kicad-tools/issues/5055): requested gallery
+- [#5055](https://github.com/2AMLogic/kicad-tools/issues/5055): requested gallery
   metrics for development PCBs before manufacturing export. The current
   producer attaches renders/readiness but omits PCB dimensions and counts
   when no manufacturing directory exists.
-- [#5057](https://github.com/rjwalters/kicad-tools/issues/5057): filed and fixed
+- [#5057](https://github.com/2AMLogic/kicad-tools/issues/5057): filed and fixed
   missing/shared pad UUIDs in newly placed footprints. Fresh instance IDs now
   survive save/reload and make native findings traceable to the saved PCB.
 
@@ -126,23 +126,23 @@ router at either 0.1 mm or 0.05 mm grid resolution. A manual route completes
 all four on the same placement with zero native violations/opens. The
 [host-bus investigation](routing-investigation/host-bus/README.md) preserves
 the commands and logs. Native-filled, name-only nets also reproduce the
-false-success parsing bug [#4983](https://github.com/rjwalters/kicad-tools/issues/4983).
+false-success parsing bug [#4983](https://github.com/2AMLogic/kicad-tools/issues/4983).
 
 Physical copper LVS initially reported five false opens at mid-track branches
 and SOIC source pads. Splitting those tracks at the existing junctions changed
 no copper area and made LVS pass with 153 bound pads. The
 [connectivity investigation](connectivity-investigation/README.md) records
-[#5060](https://github.com/rjwalters/kicad-tools/issues/5060). Explicit capacitor
+[#5060](https://github.com/2AMLogic/kicad-tools/issues/5060). Explicit capacitor
 pad-center stubs reduce strict GND's false-disconnected count from six pads to
 four, but USB ground contacts still disagree with native KiCad; tracked in
-[#5061](https://github.com/rjwalters/kicad-tools/issues/5061). Copper LVS suppresses
+[#5061](https://github.com/2AMLogic/kicad-tools/issues/5061). Copper LVS suppresses
 plane opens, so its pass is not independent evidence for those GND contacts.
 
 The manufacturer check reports 51 ampacity errors, 147 warnings (141 silk
 line-width and six silk overlap), and two connector-edge informational findings.
 Net-wide current limits are also applied to narrow feedback, LED and sense
 taps. Branch-current support remains requested in
-[#4980](https://github.com/rjwalters/kicad-tools/issues/4980); no ampacity findings
+[#4980](https://github.com/2AMLogic/kicad-tools/issues/4980); no ampacity findings
 are waived. Short power necks, parallel vias and plane return paths require
 actual current and thermal review before selecting any exception or rating.
 
@@ -163,10 +163,10 @@ and clean native DRC do not close those release gates.
 The finer-grid experiment was stopped after more than four minutes despite a
 90 s requested total budget. Its initial 23-net count reduced to 16 after
 validation, and only an unvalidated partial snapshot was saved. Filed
-[#5035](https://github.com/rjwalters/kicad-tools/issues/5035) for deadline
+[#5035](https://github.com/2AMLogic/kicad-tools/issues/5035) for deadline
 propagation through post-pass work. Those old snapshots retain their original
 violations; the current generator/checker results described above supersede
 the earlier placement checkpoint. Zero geometry violations with opens is not
 a complete native DRC pass.
 
-Host-bus benchmark request: [#5072](https://github.com/rjwalters/kicad-tools/issues/5072).
+Host-bus benchmark request: [#5072](https://github.com/2AMLogic/kicad-tools/issues/5072).

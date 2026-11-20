@@ -12,7 +12,7 @@ circuit or a manufacturing release. Do not select it for gallery or export.
 real circuit, native DRC and manufacturing tests use the revision-B files in
 `output/` and `tests/test_board_03_real_hardware.py`.
 
-Tracked in [#5042](https://github.com/rjwalters/kicad-tools/issues/5042).
+Tracked in [#5042](https://github.com/2AMLogic/kicad-tools/issues/5042).
 
 Historical silkscreen witness `usb_joystick_routed.kicad_pcb` from `06fb5e30` preserves known defects for detector parity and historical fix-drc tests. It is not manufacturing data. SHA-256: `f4ee2d9b1cf82f10aa86d5ac8277118518d0d9a9ba9de2c3abdafe69eee14397`.
 

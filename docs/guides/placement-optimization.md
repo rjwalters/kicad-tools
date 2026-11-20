@@ -406,4 +406,4 @@ kct placement optimize board.kicad_pcb --routing-aware
 
 - [Routing Guide](routing.md)
 - [DRC & Validation Guide](drc-and-validation.md)
-- [Example: Intelligent Placement](https://github.com/rjwalters/kicad-tools/tree/main/examples/06-intelligent-placement)
+- [Example: Intelligent Placement](https://github.com/2AMLogic/kicad-tools/tree/main/examples/06-intelligent-placement)

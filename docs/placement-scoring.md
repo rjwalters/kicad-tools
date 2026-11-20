@@ -6,7 +6,7 @@ disagreed on the *same* layout, which made it impossible for a user to tell
 whether a placement was actually good. This document explains what each
 surface measures, why they differ, and which one to trust for which purpose.
 
-> Context: [issue #3940](https://github.com/rjwalters/kicad-tools/issues/3940).
+> Context: [issue #3940](https://github.com/2AMLogic/kicad-tools/issues/3940).
 > The most severe defect — `optimize-placement --dry-run` scoring a freshly
 > generated force-directed *seed* instead of the actual on-disk placement —
 > is fixed. The remaining differences below are **intentional** and are

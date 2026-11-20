@@ -24,5 +24,5 @@ Local reproductions and full reports remain in
 scripts; run them with the pinned source and retained local inputs, not a later
 installed package. Their output files bind the exact board and voltage-map bytes.
 
-Public provenance: [stage origins](https://github.com/rjwalters/kicad-tools/issues/4507#issuecomment-5691290962)
-and [independent policy attribution](https://github.com/rjwalters/kicad-tools/issues/4507#issuecomment-5691294807).
+Public provenance: [stage origins](https://github.com/2AMLogic/kicad-tools/issues/4507#issuecomment-5691290962)
+and [independent policy attribution](https://github.com/2AMLogic/kicad-tools/issues/4507#issuecomment-5691294807).

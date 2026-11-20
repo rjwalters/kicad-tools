@@ -430,7 +430,7 @@ so a caller never has to special-case "the report could not be read".
 not a readable census report — `emit_advisory` (and therefore `kct route`)
 catches it.
 
-[#3438]: https://github.com/rjwalters/kicad-tools/issues/3438
-[#4580]: https://github.com/rjwalters/kicad-tools/issues/4580
-[#4635]: https://github.com/rjwalters/kicad-tools/issues/4635
-[#4799]: https://github.com/rjwalters/kicad-tools/issues/4799
+[#3438]: https://github.com/2AMLogic/kicad-tools/issues/3438
+[#4580]: https://github.com/2AMLogic/kicad-tools/issues/4580
+[#4635]: https://github.com/2AMLogic/kicad-tools/issues/4635
+[#4799]: https://github.com/2AMLogic/kicad-tools/issues/4799

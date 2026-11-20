@@ -476,4 +476,4 @@ for part in result.unavailable:
 - [Architecture Overview](../architecture.md) - How modules fit together
 - [CLI Reference](cli.md) - Command-line interface
 - [MCP Documentation](../mcp/README.md) - MCP server setup and usage
-- [Examples](https://github.com/rjwalters/kicad-tools/tree/main/examples)
+- [Examples](https://github.com/2AMLogic/kicad-tools/tree/main/examples)
