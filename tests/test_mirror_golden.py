@@ -520,3 +520,214 @@ class TestMirrorAsymmetricPadstackExchange:
             list(self._blocks(pcb).items()),
             list(self._blocks(PCB.load(str(_BACK))).items()),
         )
+
+
+def _side_definitions(pad) -> dict[str, dict]:
+    """Per-side padstack shape definitions of *pad*, shape metadata included.
+
+    The top level IS the front (``F.Cu``) definition: its shape atom, direct
+    ``(size ...)``/``(options ...)``/``(primitives ...)`` children.  Each
+    ``(padstack (layer ...))`` node contributes its own.  ``primitives`` is
+    ``None`` when the side carries no block at all and ``[]`` for a literal
+    empty one -- the distinction Issue #9773 turns on.  A non-custom side has
+    no ``options``/``primitives``; ``zone_connect`` and friends are ignored.
+    """
+    node = pad._sexp_node
+
+    def read(holder, shape: str | None) -> dict:
+        size = holder.find_child("size")
+        options = holder.find_child("options")
+        clearance = anchor = None
+        if options is not None:
+            c, a = options.find_child("clearance"), options.find_child("anchor")
+            clearance = c.get_string(0) if c is not None else None
+            anchor = a.get_string(0) if a is not None else None
+        block = holder.find_child("primitives")
+        prims = None
+        if block is not None:
+            prims = list(block.iter_children())
+        offset_holder = holder.find_child("drill") if holder is node else holder
+        offset = offset_holder.find_child("offset") if offset_holder is not None else None
+        fields = {
+            tag: field.values
+            for tag in ("rect_delta", "roundrect_rratio", "chamfer_ratio", "chamfer")
+            if (field := holder.find_child(tag)) is not None
+        }
+        return {
+            "shape": shape,
+            "fields": fields,
+            "offset": offset.values if offset is not None else [0, 0],
+            "size": (size.get_float(0), size.get_float(1)) if size is not None else None,
+            "options": None if options is None else {"clearance": clearance, "anchor": anchor},
+            "primitives": prims,
+        }
+
+    defs: dict[str, dict] = {}
+    shape_atom = node.children[2] if len(node.children) > 2 and node.children[2].is_atom else None
+    defs["F.Cu"] = read(node, str(shape_atom.value) if shape_atom is not None else None)
+    padstack = node.find_child("padstack")
+    if padstack is not None:
+        for layer in padstack.find_children("layer"):
+            name = layer.get_string(0)
+            if name:
+                shape_node = layer.find_child("shape")
+                defs[name] = read(
+                    layer, shape_node.get_string(0) if shape_node is not None else None
+                )
+    return defs
+
+
+def _primitive_coords(prims) -> list[tuple[str, list[float]]]:
+    """``[(tag, flat coords), ...]`` of a side's primitives, file order kept."""
+    out: list[tuple[str, list[float]]] = []
+    for prim in prims or []:
+        coords: list[float] = []
+
+        def collect(n) -> None:
+            for c in n.iter_children():
+                if c.tag in ("start", "mid", "end", "center", "xy"):
+                    coords.extend((c.get_float(0), c.get_float(1)))
+                else:
+                    collect(c)
+
+        collect(prim)
+        out.append((prim.tag, coords))
+    return out
+
+
+def _assert_defs_equal(mine: dict[str, dict], theirs: dict[str, dict]) -> None:
+    """Compare two :func:`_side_definitions` maps, coordinates approximately."""
+    assert list(mine) == list(theirs), f"owners differ: {list(mine)} vs {list(theirs)}"
+    for owner in mine:
+        m, t = mine[owner], theirs[owner]
+        assert m["fields"] == t["fields"], owner
+        assert m["offset"] == pytest.approx(t["offset"]), owner
+        assert m["shape"] == t["shape"], f"{owner}: shape {m['shape']} != {t['shape']}"
+        assert (m["size"] is None) == (t["size"] is None), f"{owner}: size presence"
+        if m["size"] is not None:
+            assert m["size"] == pytest.approx(t["size"], abs=_TOL), f"{owner}: size"
+        assert m["options"] == t["options"], f"{owner}: options {m['options']} != {t['options']}"
+        assert (m["primitives"] is None) == (t["primitives"] is None), (
+            f"{owner}: primitives block presence"
+        )
+        mp, tp = _primitive_coords(m["primitives"]), _primitive_coords(t["primitives"])
+        assert [tag for tag, _ in mp] == [tag for tag, _ in tp], f"{owner}: primitive tags"
+        for (_, mc), (_, tc) in zip(mp, tp, strict=True):
+            assert mc == pytest.approx(tc, abs=_TOL), f"{owner}: primitive coords"
+
+
+class TestMirrorOneSidedPadstackExchange:
+    """Issue #9773: pads 8-11 are ``front_inner_back`` padstacks where only
+    ONE outer side carries a primitives block (pads 8/9: the other side is an
+    empty custom block; pads 10/11: a plain circle, so no block at all).
+    KiCad 10.0.6's ``Flip`` exchanges the whole front/back shape definition
+    (shape, size, custom options, primitives) -- not only two existing
+    primitives blocks -- so an exchange that skips one-sided pads leaves the
+    copper on the wrong layer with stale shape metadata."""
+
+    @staticmethod
+    def _defs(board, number: str) -> dict[str, dict]:
+        return _side_definitions(_custom_pad(_u1(board), number))
+
+    def test_fixture_pins_the_four_one_sided_cases(self):
+        board = PCB.load(str(_FRONT))
+        cases = {
+            "8": ("custom", "custom", 1, 0),
+            "9": ("custom", "custom", 0, 1),
+            "10": ("custom", "circle", 1, None),
+            "11": ("circle", "custom", None, 1),
+        }
+        for number, (fshape, bshape, fcount, bcount) in cases.items():
+            defs = self._defs(board, number)
+            assert list(defs) == ["F.Cu", "Inner", "B.Cu"]
+            for owner, shape, count in (("F.Cu", fshape, fcount), ("B.Cu", bshape, bcount)):
+                assert defs[owner]["shape"] == shape, number
+                primitives = defs[owner]["primitives"]
+                assert (None if primitives is None else len(primitives)) == count, number
+            # Every case carries the distinct Inner triangle.
+            assert len(_primitive_coords(defs["Inner"]["primitives"])[0][1]) == 6, number
+
+    def test_onesided_definitions_equal_kicad_flip(self):
+        for number in ("8", "9", "10", "11", "12", "13", "14"):
+            _assert_defs_equal(
+                self._defs(_flip_front(), number),
+                self._defs(PCB.load(str(_BACK)), number),
+            )
+
+    def test_live_geometry_matches_native_flip(self):
+        mine = _u1(_flip_front())
+        for expected in _u1(PCB.load(str(_BACK))).pads:
+            pad = _custom_pad(mine, expected.number)
+            for name in ("shape", "size", "roundrect_rratio", "drill_offset"):
+                assert getattr(pad, name) == getattr(expected, name), (pad.number, name)
+
+    def test_circle_outer_loses_custom_metadata(self):
+        """The measured core of #9773: flipping pad 10 must move the custom
+        definition OFF the top level (shape atom, size, options and block all
+        go), not just leave the mirrored primitives in place."""
+        mine = self._defs(_flip_front(), "10")
+        assert mine["F.Cu"]["shape"] == "circle"
+        assert mine["F.Cu"]["size"] == pytest.approx((0.55, 0.55), abs=_TOL)
+        assert mine["F.Cu"]["options"] is None
+        assert mine["F.Cu"]["primitives"] is None
+        assert mine["B.Cu"]["shape"] == "custom"
+        assert mine["B.Cu"]["primitives"] is not None
+
+        back_circle = self._defs(_flip_front(), "11")
+        assert back_circle["F.Cu"]["shape"] == "custom"
+        assert back_circle["F.Cu"]["primitives"] is not None
+        assert back_circle["B.Cu"]["shape"] == "circle"
+        assert back_circle["B.Cu"]["options"] is None
+        assert back_circle["B.Cu"]["primitives"] is None
+
+    def test_onesided_exchange_survives_save_and_reparse(self, tmp_path: Path):
+        out = tmp_path / "flipped.kicad_pcb"
+        _flip_front().save(str(out))
+        for number in ("8", "9", "10", "11", "12", "13", "14"):
+            _assert_defs_equal(
+                self._defs(PCB.load(str(out)), number),
+                self._defs(PCB.load(str(_BACK)), number),
+            )
+
+    def test_double_mirror_restores_onesided_definitions(self):
+        for number in ("8", "9", "10", "11", "12", "13", "14"):
+            original = self._defs(PCB.load(str(_FRONT)), number)
+            pcb = PCB.load(str(_FRONT))
+            applicator = StrategyApplicator()
+            applicator.apply_strategy(pcb, _mirror_strategy())
+            applicator.apply_strategy(pcb, _mirror_strategy())
+            _assert_defs_equal(self._defs(pcb, number), original)
+
+    @pytest.mark.skipif(find_kicad_cli() is None, reason="requires native KiCad reload")
+    def test_shape_geometry_after_native_reload(self, tmp_path: Path):
+        board = _flip_front()
+        for name, golden in (("single", _BACK), ("double", _FRONT)):
+            out = tmp_path / f"{name}.kicad_pcb"
+            board.save(str(out))
+            subprocess.run(
+                [str(find_kicad_cli()), "pcb", "upgrade", "--force", str(out)],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=60,
+            )
+            reloaded = PCB.load(str(out))
+            expected = PCB.load(str(golden))
+            for number in ("12", "13", "14"):
+                _assert_defs_equal(self._defs(reloaded, number), self._defs(expected, number))
+            if name == "single":
+                StrategyApplicator().apply_strategy(board, _mirror_strategy())
+
+    def test_back_placement_entry_point_matches_kicad_flip(self):
+        """``flip_footprint_children_to_back`` (#8581) shares the transform:
+        its pad branch must exchange the whole one-sided definitions too."""
+        from kicad_tools.schema.pcb import flip_footprint_children_to_back
+
+        pcb = PCB.load(str(_FRONT))
+        fp = _u1(pcb)
+        flip_footprint_children_to_back(fp._sexp_node, fp.rotation)
+        for number in ("8", "9", "10", "11", "12", "13", "14"):
+            _assert_defs_equal(
+                self._defs(pcb, number),
+                self._defs(PCB.load(str(_BACK)), number),
+            )

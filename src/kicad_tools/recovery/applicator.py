@@ -532,23 +532,9 @@ class StrategyApplicator:
 
     @staticmethod
     def _mirror_pad_primitives(pad) -> None:
-        """Y-mirror a custom pad's ``(primitives ...)`` in the S-expression (#9530).
-
-        Custom-pad copper lives only in the pad's source node (``Pad`` has no
-        Python-side primitives field), so ``Pad.__setattr__`` write-through
-        cannot reach it.  The shared ``mirror_pad_primitives`` transform (also
-        used by ``flip_footprint_children_to_back``, #8581/#9752) mirrors every
-        nested per-layer padstack block, swaps three-point arc endpoints and
-        exchanges the front and back padstack blocks the way KiCad's ``Flip``
-        does.  No-ops for pads without primitives and for test doubles without
-        ``_sexp_node``.
-        """
-        from kicad_tools.schema.pcb import mirror_pad_primitives
-
-        pad_node = getattr(pad, "_sexp_node", None)
-        if pad_node is None:
-            return
-        mirror_pad_primitives(pad_node)
+        """Mirror the padstack and refresh the live pad's front geometry."""
+        if getattr(pad, "_sexp_node", None) is not None:
+            pad.mirror_shape_geometry()
 
     @staticmethod
     def _mirror_cosmetic_node(node) -> None:

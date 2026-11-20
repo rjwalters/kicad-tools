@@ -24,7 +24,8 @@ Versions/Current/bin/python3 tests/fixtures/mirror_flip/generate_golden.py
 
 Originally generated with KiCad 10.0.5; the custom pads 5 and 6 (Issue #9530)
 were added and the pair regenerated with KiCad 10.0.6 (the CI-pinned image),
-as was the layer-asymmetric padstack pad 7 (Issue #9752).
+as was the layer-asymmetric padstack pad 7 (Issue #9752) and the one-sided
+outer pads 8-11 (Issue #9773).
 """
 
 from __future__ import annotations
@@ -247,6 +248,65 @@ def add_asymmetric_padstack_custom_pad(
     fp.Add(pad)
 
 
+_ONE_SIDED_TRI_F = [(-0.2, -0.2), (0.8, 0.1), (0.1, 0.7)]  # triangle, front
+_ONE_SIDED_TRI_B = [(-0.4, -0.3), (0.7, 0.1), (0.0, 0.9)]  # distinct triangle, back
+_ONE_SIDED_TRI_I = [(-0.9, -0.1), (-0.1, -0.1), (-0.3, 0.8)]  # distinct triangle, inner
+
+
+def add_one_sided_padstack_custom_pad(
+    fp: pcbnew.FOOTPRINT,
+    number: str,
+    x_mm: float,
+    y_mm: float,
+    front: str,
+    back: str,
+) -> pcbnew.PAD:
+    """Add a through-hole ``front_inner_back`` custom pad with a ONE-SIDED outer.
+
+    ``front``/``back`` pick each outer layer's definition: ``"poly"`` (custom
+    shape carrying an asymmetric triangle), ``"empty"`` (custom shape with no
+    primitive -- KiCad serializes a literal empty ``(primitives)`` block) or
+    ``"circle"`` (a plain shape, so no primitives block exists at all, at a
+    deliberately different size -- large enough that the 0.3 mm drill keeps
+    the DRC cross-gate's minimum annular width once the circle lands on F.Cu
+    after the flip).  Inner always carries a third distinct
+    triangle.  Pads 8-11 cover the four one-sided combinations, pinning what
+    KiCad 10.0.6's ``Flip`` does when only one side has a primitives block:
+    the whole front/back shape definition (shape, size, custom options,
+    primitives) exchanges, not just two existing blocks (Issue #9773).
+    """
+    pad = pcbnew.PAD(fp)
+    pad.SetNumber(number)
+    pad.SetAttribute(PAD_ATTRIB_PTH)
+    pad.SetSize(VECTOR2I(mm(0.6), mm(0.6)))
+    pad.SetDrillSize(VECTOR2I(mm(0.3), mm(0.3)))
+    pad.SetLayerSet(pad.PTHMask())
+    pad.Padstack().SetMode(pcbnew.PADSTACK.MODE_FRONT_INNER_BACK)
+    spec = {
+        pcbnew.F_Cu: front,
+        pcbnew.In1_Cu: "poly",
+        pcbnew.B_Cu: back,
+    }
+    tris = {
+        pcbnew.F_Cu: _ONE_SIDED_TRI_F,
+        pcbnew.In1_Cu: _ONE_SIDED_TRI_I,
+        pcbnew.B_Cu: _ONE_SIDED_TRI_B,
+    }
+    for layer, kind in spec.items():
+        if kind == "circle":
+            pad.SetShape(layer, pcbnew.PAD_SHAPE_CIRCLE)
+            pad.SetSize(layer, VECTOR2I(mm(0.55), mm(0.55)))
+        else:
+            pad.SetShape(layer, pcbnew.PAD_SHAPE_CUSTOM)
+            pad.SetSize(layer, VECTOR2I(mm(0.6), mm(0.6)))
+            pad.SetAnchorPadShape(layer, PAD_SHAPE_CIRCLE)
+            if kind == "poly":
+                pad.AddPrimitivePoly(layer, _poly_set(tris[layer]), 0, True)
+    pad.SetFPRelativePosition(VECTOR2I(mm(x_mm), mm(y_mm)))
+    fp.Add(pad)
+    return pad
+
+
 def add_silk_line(fp: pcbnew.FOOTPRINT, x1: float, y1: float, x2: float, y2: float) -> None:
     line = pcbnew.PCB_SHAPE(fp)
     line.SetShape(pcbnew.SHAPE_T_SEGMENT)
@@ -259,6 +319,7 @@ def add_silk_line(fp: pcbnew.FOOTPRINT, x1: float, y1: float, x2: float, y2: flo
 
 
 def main() -> int:
+    print("pcbnew build:", pcbnew.GetBuildVersion())
     board = pcbnew.NewBoard(str(OUT_DIR / "_scratch.kicad_pcb"))
 
     # Board outline so kicad-cli DRC has an edge to work with.
@@ -306,6 +367,28 @@ def main() -> int:
     # Layer-ASYMMETRIC padstack custom pad: F.Cu/In/B.Cu primitives differ, so
     # the golden pins the front/back block exchange of KiCad's Flip (#9752).
     add_asymmetric_padstack_custom_pad(fp, "7", 2.0, 2.6)
+
+    # One-sided outer padstack pads: only one outer carries primitives (or a
+    # custom shape at all), pinning the whole-definition exchange (#9773).
+    add_one_sided_padstack_custom_pad(fp, "8", -2.0, 4.6, "poly", "empty")
+    add_one_sided_padstack_custom_pad(fp, "9", -0.5, 4.6, "empty", "poly")
+    add_one_sided_padstack_custom_pad(fp, "10", 1.0, 4.6, "poly", "circle")
+    add_one_sided_padstack_custom_pad(fp, "11", 2.5, 4.6, "circle", "poly")
+
+    rounded = add_one_sided_padstack_custom_pad(fp, "12", -3, 7, "poly", "circle")
+    rounded.SetShape(pcbnew.B_Cu, PAD_SHAPE_ROUNDRECT)
+    rounded.SetSize(pcbnew.B_Cu, VECTOR2I(mm(1.0), mm(0.9)))
+    rounded.SetRoundRectRadiusRatio(pcbnew.B_Cu, 0.4)
+    rounded.SetOffset(pcbnew.B_Cu, VECTOR2I(mm(0.10), mm(0.05)))
+    rounded.SetCustomShapeInZoneOpt(pcbnew.CUSTOM_SHAPE_ZONE_MODE_CONVEXHULL)
+    chamfered = add_one_sided_padstack_custom_pad(fp, "13", 0, 7, "poly", "circle")
+    chamfered.SetShape(pcbnew.B_Cu, pcbnew.PAD_SHAPE_CHAMFERED_RECT)
+    chamfered.SetChamferRectRatio(pcbnew.B_Cu, 0.2)
+    chamfered.SetChamferPositions(pcbnew.B_Cu, 1)  # top left
+    trapezoid = add_one_sided_padstack_custom_pad(fp, "14", 3, 7, "circle", "poly")
+    trapezoid.SetShape(pcbnew.F_Cu, pcbnew.PAD_SHAPE_TRAPEZOID)
+    trapezoid.SetSize(pcbnew.F_Cu, VECTOR2I(mm(0.9), mm(0.8)))
+    trapezoid.SetDelta(pcbnew.F_Cu, VECTOR2I(mm(0.08), mm(0.03)))
 
     # An asymmetric silk mark (pin-1 tick) so the cosmetic side-flip is
     # observable in the golden too.
