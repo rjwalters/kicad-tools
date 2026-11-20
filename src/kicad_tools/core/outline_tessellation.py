@@ -17,6 +17,10 @@ MAX_SEGMENTS = 20_000
 MAX_DEPTH = 32
 
 
+class DegenerateArcError(ValueError):
+    """The three authored points do not define a circle."""
+
+
 def _budget(points: list[Point], max_error: float, max_segments: int) -> float:
     if not math.isfinite(max_error) or max_error <= 0:
         raise ValueError("Outline max_error must be finite and positive")
@@ -119,7 +123,7 @@ def _arc_center(start: Point, mid: Point, end: Point) -> tuple[RationalPoint, in
     cx, cy = Fraction(end[0]) - x0, Fraction(end[1]) - y0
     det = 2 * (bx * cy - by * cx)
     if not det:
-        raise ValueError("Malformed Edge.Cuts gr_arc: collinear/coincident arc points")
+        raise DegenerateArcError("Malformed Edge.Cuts gr_arc: collinear/coincident arc points")
     b2, c2 = bx * bx + by * by, cx * cx + cy * cy
     center = x0 + (cy * b2 - by * c2) / det, y0 + (bx * c2 - cx * b2) / det
     return center, 1 if det > 0 else -1

@@ -18,13 +18,13 @@ import math
 
 import pytest
 
-from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
 
-pytestmark = pytest.mark.skipif(not is_cpp_available(), reason="C++ router backend not built")
+pytestmark = pytest.mark.requires_router_cpp
 
 _SOURCE_NET = 1
 _FOREIGN_NET = 7

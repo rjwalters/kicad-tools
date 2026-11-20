@@ -11,6 +11,7 @@ from kicad_tools.router.layers import Layer
 from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
+from tests.conftest import require_router_cpp
 
 
 @pytest.fixture(params=["python", "cpp"], autouse=True)
@@ -18,10 +19,9 @@ def routing_backend(request, monkeypatch):
     if request.param == "cpp":
         import sys
 
-        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+        from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
 
-        if not is_cpp_available():
-            pytest.skip("C++ backend unavailable")
+        require_router_cpp()
         monkeypatch.setattr(
             sys.modules[__name__],
             "Router",

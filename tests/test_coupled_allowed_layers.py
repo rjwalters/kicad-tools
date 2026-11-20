@@ -18,7 +18,6 @@ from __future__ import annotations
 import pytest
 
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.diffpair_routing import CoupledPathfinder, DiffPairRouter
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
@@ -29,7 +28,7 @@ BACKENDS = [
     pytest.param(
         True,
         id="cpp",
-        marks=pytest.mark.skipif(not is_cpp_available(), reason="router_cpp not built"),
+        marks=pytest.mark.requires_router_cpp,
     ),
     pytest.param(False, id="python"),
 ]
@@ -393,7 +392,7 @@ def test_declined_pair_takes_the_fallback_without_f_cu_copper(
     assert "[coupled-declined]" in out and "F.Cu" in out, out
 
 
-_CPP_ONLY = pytest.mark.skipif(not is_cpp_available(), reason="router_cpp not built")
+_CPP_ONLY = pytest.mark.requires_router_cpp
 
 
 @_CPP_ONLY

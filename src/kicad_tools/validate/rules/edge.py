@@ -35,6 +35,13 @@ if TYPE_CHECKING:
 _CLEARANCE_EPSILON_MM = 1e-4
 
 
+def _outline_geometry_error(
+    outline_segments: Sequence[tuple[tuple[float, float], tuple[float, float]]],
+) -> float:
+    """Certified chord-chain error to subtract from measured copper clearances."""
+    return float(getattr(outline_segments, "max_error_mm", 0.0) or 0.0)
+
+
 def _pad_kernel_shape(pad: Pad, footprint: Footprint):
     """This pad's exact kernel shape, for the board-edge gap.
 
@@ -171,10 +178,11 @@ class EdgeClearanceRule(DRCRule):
         min_clearance = design_rules.min_copper_to_edge_mm
         del origin  # board-relative invariant: no per-call translation needed
 
+        geometry_error = _outline_geometry_error(outline_segments)
         edges = outline_shapes(outline_segments)
 
         for segment in pcb.segments:
-            gap = min_gap_to_outline(_kernel_segment_shape(segment), edges)
+            gap = min_gap_to_outline(_kernel_segment_shape(segment), edges) - geometry_error
 
             # Reference points for the filled cut-out interior test: the
             # endpoints plus the midpoint, so a track that passes clean
@@ -261,10 +269,11 @@ class EdgeClearanceRule(DRCRule):
         min_clearance = design_rules.min_hole_to_edge_mm
         del origin  # board-relative invariant: no per-call translation needed
 
+        geometry_error = _outline_geometry_error(outline_segments)
         edges = outline_shapes(outline_segments)
 
         for via in pcb.vias:
-            gap = min_gap_to_outline(_kernel_via_shape(via), edges)
+            gap = min_gap_to_outline(_kernel_via_shape(via), edges) - geometry_error
             hit = _first_point_inside_region(filled_regions, (via.position,))
 
             if hit is not None:
@@ -324,6 +333,7 @@ class EdgeClearanceRule(DRCRule):
         min_copper_clearance = design_rules.min_copper_to_edge_mm
         min_hole_clearance = design_rules.min_hole_to_edge_mm
 
+        geometry_error = _outline_geometry_error(outline_segments)
         edges = outline_shapes(outline_segments)
 
         for footprint in pcb.footprints:
@@ -345,7 +355,7 @@ class EdgeClearanceRule(DRCRule):
                 pad_y = fp_y + (pad_local_x * sin_rot + pad_local_y * cos_rot)
                 pad_pos = (pad_x, pad_y)
 
-                gap = min_gap_to_outline(_pad_kernel_shape(pad, footprint), edges)
+                gap = min_gap_to_outline(_pad_kernel_shape(pad, footprint), edges) - geometry_error
                 hit = _first_point_inside_region(filled_regions, (pad_pos,))
 
                 if hit is not None:
@@ -407,6 +417,8 @@ class EdgeClearanceRule(DRCRule):
         min_clearance = design_rules.min_copper_to_edge_mm
         del origin  # board-relative invariant: no per-call translation needed
 
+        geometry_error = _outline_geometry_error(outline_segments)
+
         for zone in pcb.zones:
             # Rule areas prohibit copper; their boundary is not copper, even
             # when it extends to (or beyond) the board edge.
@@ -419,7 +431,10 @@ class EdgeClearanceRule(DRCRule):
                 for point in polygon:
                     # Zone polygon vertices are already in board-relative space.
                     board_point = point
-                    distance = self._min_distance_to_outline(board_point, outline_segments)
+                    distance = (
+                        self._min_distance_to_outline(board_point, outline_segments)
+                        - geometry_error
+                    )
                     hit = _first_point_inside_region(filled_regions, (board_point,))
 
                     if hit is not None:
