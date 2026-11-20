@@ -109,9 +109,11 @@ from .base import DRC_TOLERANCE, drc_clear
 from .clearance import (
     ClearanceRule,
     CopperElement,
+    _arc_copper_geom,
     _calculate_clearance,
     _is_track_copper,
     _via_colocated_with_track,
+    pair_clearance_tolerance_mm,
 )
 
 if TYPE_CHECKING:
@@ -261,7 +263,7 @@ def check_netclass_clearance_copper(
             if _via_colocated_with_track(a, b):
                 continue
             clearance, x, y = _calculate_clearance(a, b)
-            if drc_clear(clearance, required_class):
+            if drc_clear(clearance, required_class, band_mm=pair_clearance_tolerance_mm(a, b)):
                 continue
             # Issue #8048: an attach zone lifts the router-class floor (never a
             # designer's: only router-class and unclassed nets are members).
@@ -332,16 +334,10 @@ def _zone_item(element: CopperElement, layer: str) -> ZoneItem:
 
     if element.element_type in ("segment", "arc"):
         if element.element_type == "arc":
-            # Issue #9673: the arc's covering chord polyline, the same copper
-            # ``_calculate_clearance`` measured for the pair.
-            points = list(
-                element.polyline
-                or (
-                    (element.geometry[0], element.geometry[1]),
-                    (element.geometry[2], element.geometry[3]),
-                )
-            )
-            shape = LineString(points).buffer(element.arc_chord_width / 2.0)
+            # Issue #9673/#9702: the arc's true swept copper (the exact
+            # capsule ``_calculate_clearance`` measures), never the
+            # conservative covering chords.
+            shape = _arc_copper_geom(element)
         else:
             x1, y1, x2, y2, width = element.geometry
             shape = LineString([(x1, y1), (x2, y2)]).buffer(width / 2.0)

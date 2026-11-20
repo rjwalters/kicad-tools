@@ -103,15 +103,17 @@ WRITER_CLEARANCE_MARGIN_MM: float = 1e-4
 DRC_FLOAT_GUARD_MM: float = 1e-9
 
 
-def drc_clear(measured_mm: float, required_mm: float) -> bool:
+def drc_clear(
+    measured_mm: float, required_mm: float, *, band_mm: float = KICAD_CLEARANCE_BAND_MM
+) -> bool:
     """True unless the measured gap falls short of ``required_mm`` by more
-    than :data:`KICAD_CLEARANCE_BAND_MM` (KiCad's probed copper-clearance
-    band, widened by the :data:`DRC_FLOAT_GUARD_MM` float-safety term so a
+    than the supplied clearance band (default :data:`KICAD_CLEARANCE_BAND_MM`),
+    widened by the :data:`DRC_FLOAT_GUARD_MM` float-safety term so a
     gap KiCad's integer-nm math accepts at exactly the band edge is not
-    flagged here on float dust alone).  Clearance verdict sites only --
+    flagged here on float dust alone.  Clearance verdict sites only --
     dimension, annular, floor, hole and silk checks keep
     :data:`DRC_TOLERANCE`."""
-    return measured_mm + KICAD_CLEARANCE_BAND_MM >= required_mm - DRC_FLOAT_GUARD_MM
+    return measured_mm + band_mm >= required_mm - DRC_FLOAT_GUARD_MM
 
 
 class DRCRule(ABC):

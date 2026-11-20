@@ -2,6 +2,8 @@
 
 import contextlib
 import errno
+import fnmatch
+import functools
 import json
 import os
 import signal
@@ -936,3 +938,70 @@ def test_worker_exits_without_writing_when_lock_was_replaced(tmp_path, monkeypat
         # Documented non-POSIX behaviour: no group co-ownership, no refusal.
         assert code == 0
         assert len(ran) == 1
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+IGNORE_PATTERN = ".*.kct-route.lock*"
+
+
+@functools.cache
+def _git(*args: str) -> list[str] | None:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), *args], capture_output=True, text=True, timeout=60
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return proc.stdout.splitlines() if proc.returncode == 0 else None
+
+
+def test_lock_guard_and_temp_names_match_the_gitignore_pattern(tmp_path):
+    """Lock, guard and staging-temp names all match the .gitignore rule (issue #9720)."""
+    rules = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert IGNORE_PATTERN in rules, f".gitignore lost the {IGNORE_PATTERN!r} rule"
+    lock = lock_path_for(tmp_path / "b.kicad_pcb")
+    names = [
+        lock.name,
+        f"{lock.name}.guard",
+        f"{lock.name}.{os.getpid()}.tmp",
+        f"{lock.name}.{os.getpid()}.owner.tmp",
+    ]
+    for name in names:
+        assert fnmatch.fnmatchcase(name, IGNORE_PATTERN), name
+
+
+def test_created_guard_file_is_gitignored(tmp_path):
+    """The flock guard a stale steal leaves behind is covered by the rule (issue #9720)."""
+    if lock_mod.fcntl is None:
+        pytest.skip("flock unavailable: no guard file is created")
+    out = tmp_path / "b.kicad_pcb"
+    _write_lock(out, pid=_dead_pid())
+    handle = acquire_route_lock(out)
+    release_route_lock(handle)
+    guards = [p.name for p in tmp_path.glob("*.guard")]
+    assert guards, "stealing a stale lock left no guard file"
+    for name in guards:
+        assert fnmatch.fnmatchcase(name, IGNORE_PATTERN), name
+
+
+def test_route_lock_paths_are_gitignored():
+    if _git("rev-parse", "--git-dir") is None:
+        pytest.skip("not a git checkout: cannot query .gitignore")
+    paths = [
+        "boards/00-simple-led/output/.out.kicad_pcb.kct-route.lock",
+        "boards/00-simple-led/output/.out.kicad_pcb.kct-route.lock.guard",
+        "boards/00-simple-led/output/.out.kicad_pcb.kct-route.lock.4242.tmp",
+        "scratch/.out.kicad_pcb.kct-route.lock.guard",
+    ]
+    assert _git("check-ignore", "--no-index", "--", *paths) == paths
+
+
+def test_refusal_names_guard_sibling(tmp_path):
+    """The refusal's delete-the-lock guidance names the .guard sibling (issue #9720)."""
+    out = tmp_path / "b.kicad_pcb"
+    _foreign_live_pid_lock(out)
+    with pytest.raises(RouteLockError) as excinfo:
+        acquire_route_lock(out)
+    message = str(excinfo.value)
+    assert f"{lock_path_for(out).name}.guard" in message
+    assert "safe to leave" in message

@@ -247,8 +247,9 @@ def _refusal(output: Path, lock: Path, holder: dict | None) -> str:
     return (
         f"another kct route run appears to be writing {str(output)!r}: lock {str(lock)!r} "
         f"is held by {_describe(holder)}. Wait for it to finish, or delete the lock file "
-        f"if you are sure no run is using this output. Set {LOCK_POLICY_ENV}=warn or "
-        f"{LOCK_POLICY_ENV}=ignore to bypass this check."
+        f"if you are sure no run is using this output; the {lock.name}.guard sibling that "
+        f"stays behind is an empty flock guard and is safe to leave. Set {LOCK_POLICY_ENV}"
+        f"=warn or {LOCK_POLICY_ENV}=ignore to bypass this check."
     )
 
 
