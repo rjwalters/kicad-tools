@@ -7335,12 +7335,13 @@ class PCB:
                 return None
             net_number = resolved_net.number
         else:
-            net_number = next(
+            matched_number = next(
                 (number for number, board_net in self.nets.items() if board_net.name == net),
                 None,
             )
-            if net_number is None:
+            if matched_number is None:
                 return None
+            net_number = matched_number
         key = _via_dedup_key(net_number, x, y, resolved_layers)
         for via in self._vias:
             if _via_dedup_key(via.net_number, via.position[0], via.position[1], via.layers) == key:
