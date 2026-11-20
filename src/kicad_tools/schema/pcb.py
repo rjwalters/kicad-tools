@@ -532,6 +532,57 @@ def _mirror_local_y(node: SExp) -> None:
             _mirror_local_y(child)
 
 
+def iter_pad_primitives(node: SExp) -> Iterator[SExp]:
+    """Yield every ``(primitives ...)`` block under *node*, nested included."""
+    for child in node.iter_children():
+        if child.tag == "primitives":
+            yield child
+        else:
+            yield from iter_pad_primitives(child)
+
+
+def _exchange_front_back_primitives(pad_node: SExp) -> None:
+    """Swap the pad's top-level primitives with its padstack ``B.Cu`` block's.
+
+    A ``front_inner_back`` padstack serializes the front layer's primitives at
+    the pad's top level and the back layer's inside ``(padstack (layer
+    "B.Cu" ...))``; KiCad's ``Flip`` exchanges the two blocks' contents
+    (measured black-box on ``pcbnew`` 10.0.6, Issue #9752).
+    """
+    top = pad_node.find_child("primitives")
+    back = None
+    padstack = pad_node.find_child("padstack")
+    if padstack is not None:
+        for layer in padstack.find_children("layer"):
+            if layer.get_string(0) == "B.Cu":
+                back = layer.find_child("primitives")
+                break
+    if top is not None and back is not None:
+        top.children, back.children = back.children, top.children
+
+
+def mirror_pad_primitives(pad_node: SExp) -> None:
+    """Mirror a custom pad's primitives the way KiCad's ``Flip`` does.
+
+    Every ``(primitives ...)`` block under the pad -- the top-level block and
+    each nested ``(padstack (layer ...) ...)`` block of a per-layer padstack --
+    is y-mirrored with three-point ``gr_arc`` endpoints swapping, and the
+    top-level (front) block exchanges contents with the padstack's ``B.Cu``
+    block.  Measured black-box against ``pcbnew`` 10.0.6 ``Flip`` on a
+    layer-asymmetric padstack (the golden fixture's pad 7, Issue #9752).
+    No-ops for pads without primitives.
+    """
+    for primitives in iter_pad_primitives(pad_node):
+        _mirror_local_y(primitives)
+        # A three-point arc's endpoint order reverses (start <-> end after
+        # the y negation); the mid point keeps its mirrored position.
+        for arc in primitives.find_children("gr_arc"):
+            start, end = arc.find_child("start"), arc.find_child("end")
+            if start is not None and end is not None and arc.find_child("mid") is not None:
+                start.children, end.children = end.children, start.children
+    _exchange_front_back_primitives(pad_node)
+
+
 def flip_footprint_children_to_back(footprint_node: SExp, rotation: float = 0.0) -> None:
     """Re-express a front-authored raw ``(footprint ...)`` for a back placement.
 
@@ -564,9 +615,8 @@ def flip_footprint_children_to_back(footprint_node: SExp, rotation: float = 0.0)
                     else c
                     for c in chamfer.children
                 ]
-            primitives = child.find_child("primitives")
-            if primitives is not None:
-                _mirror_local_y(primitives)
+            # Walks nested padstack blocks and exchanges front/back (Issue #9752).
+            mirror_pad_primitives(child)
         elif tag in _FP_TEXT_TAGS:
             _flip_layer_children(child)
             at_node = child.find_child("at")

@@ -397,19 +397,20 @@ def _primitive_blocks(pad) -> list[tuple[str, list[tuple[str, list[float]]]]]:
     return blocks
 
 
+def _assert_blocks_equal(mine, theirs) -> None:
+    assert [(o, [t for t, _ in prims]) for o, prims in mine] == [
+        (o, [t for t, _ in prims]) for o, prims in theirs
+    ]
+    for (_, mp), (_, tp) in zip(mine, theirs, strict=True):
+        for (_, mc), (_, tc) in zip(mp, tp, strict=True):
+            assert mc == pytest.approx(tc, abs=_TOL)
+
+
 class TestMirrorPadstackPrimitivesAndArcs:
     """Issue #9530 review: pad 6 is a through-hole ``front_inner_back`` custom
     pad with the same asymmetric polygon on F.Cu/In/B.Cu plus a three-point
     ``gr_arc``.  Every layer's nested block must match KiCad 10.0.6's Flip,
     including the arc's reversed endpoint order."""
-
-    def _assert_blocks_equal(self, mine, theirs) -> None:
-        assert [(o, [t for t, _ in prims]) for o, prims in mine] == [
-            (o, [t for t, _ in prims]) for o, prims in theirs
-        ]
-        for (_, mp), (_, tp) in zip(mine, theirs, strict=True):
-            for (_, mc), (_, tc) in zip(mp, tp, strict=True):
-                assert mc == pytest.approx(tc, abs=_TOL)
 
     def test_fixture_covers_every_layer_and_the_arc(self):
         blocks = _primitive_blocks(_custom_pad(_u1(PCB.load(str(_BACK))), "6"))
@@ -419,7 +420,7 @@ class TestMirrorPadstackPrimitivesAndArcs:
     def test_every_layer_block_equals_kicad_flip(self):
         mine = _primitive_blocks(_custom_pad(_u1(_flip_front()), "6"))
         theirs = _primitive_blocks(_custom_pad(_u1(PCB.load(str(_BACK))), "6"))
-        self._assert_blocks_equal(mine, theirs)
+        _assert_blocks_equal(mine, theirs)
 
     def test_three_point_arc_endpoints_follow_kicad_order(self):
         blocks = _primitive_blocks(_custom_pad(_u1(_flip_front()), "6"))
@@ -434,7 +435,7 @@ class TestMirrorPadstackPrimitivesAndArcs:
         _flip_front().save(str(out))
         reloaded = _primitive_blocks(_custom_pad(_u1(PCB.load(str(out))), "6"))
         theirs = _primitive_blocks(_custom_pad(_u1(PCB.load(str(_BACK))), "6"))
-        self._assert_blocks_equal(reloaded, theirs)
+        _assert_blocks_equal(reloaded, theirs)
 
     def test_double_mirror_restores_padstack_blocks(self):
         original = _primitive_blocks(_custom_pad(_u1(PCB.load(str(_FRONT))), "6"))
@@ -442,4 +443,80 @@ class TestMirrorPadstackPrimitivesAndArcs:
         applicator = StrategyApplicator()
         applicator.apply_strategy(pcb, _mirror_strategy())
         applicator.apply_strategy(pcb, _mirror_strategy())
-        self._assert_blocks_equal(_primitive_blocks(_custom_pad(_u1(pcb), "6")), original)
+        _assert_blocks_equal(_primitive_blocks(_custom_pad(_u1(pcb), "6")), original)
+
+
+class TestMirrorAsymmetricPadstackExchange:
+    """Issue #9752: pad 7's F.Cu/In/B.Cu padstack primitives DIFFER per layer,
+    so the golden distinguishes "each block mirrored in place" from what KiCad
+    10.0.6's ``Flip`` really does: mirror every block AND exchange the
+    top-level (front) block with the padstack's ``B.Cu`` block."""
+
+    @staticmethod
+    def _blocks(board, number: str = "7") -> dict[str, list[tuple[str, list[float]]]]:
+        return dict(_primitive_blocks(_custom_pad(_u1(board), number)))
+
+    def test_asymmetric_fixture_layers_differ(self):
+        blocks = self._blocks(PCB.load(str(_FRONT)))
+        assert list(blocks) == ["F.Cu", "Inner", "B.Cu"]
+        polys = [tuple(c) for prims in blocks.values() for t, c in prims if t == "gr_poly"]
+        # The three per-layer polygons are pairwise distinct -- otherwise the
+        # golden could not tell an exchange from a mirror-in-place.
+        assert len(set(polys)) == 3
+
+    def test_asymmetric_blocks_equal_kicad_flip(self):
+        _assert_blocks_equal(
+            list(self._blocks(_flip_front()).items()),
+            list(self._blocks(PCB.load(str(_BACK))).items()),
+        )
+
+    def test_front_and_back_blocks_exchanged(self):
+        front = self._blocks(PCB.load(str(_FRONT)))
+        mine = self._blocks(_flip_front())
+
+        def sorted_pts(prims):
+            # Sort each primitive's points so the arc endpoint swap does not
+            # mask WHICH original block a flipped block came from.
+            return [(t, sorted(zip(c[::2], c[1::2], strict=True))) for t, c in prims]
+
+        def mirrored(prims):
+            return [(t, sorted((x, -y) for x, y in pts)) for t, pts in sorted_pts(prims)]
+
+        assert sorted_pts(mine["F.Cu"]) == mirrored(front["B.Cu"]), (
+            "front slot holds the mirrored BACK block"
+        )
+        assert sorted_pts(mine["B.Cu"]) == mirrored(front["F.Cu"]), (
+            "back slot holds the mirrored FRONT block"
+        )
+        assert sorted_pts(mine["Inner"]) == mirrored(front["Inner"]), "inner block stays in place"
+
+    def test_asymmetric_exchange_survives_save_and_reparse(self, tmp_path: Path):
+        out = tmp_path / "flipped.kicad_pcb"
+        _flip_front().save(str(out))
+        _assert_blocks_equal(
+            list(self._blocks(PCB.load(str(out))).items()),
+            list(self._blocks(PCB.load(str(_BACK))).items()),
+        )
+
+    def test_double_mirror_restores_asymmetric_blocks(self):
+        original = _primitive_blocks(_custom_pad(_u1(PCB.load(str(_FRONT))), "7"))
+        pcb = PCB.load(str(_FRONT))
+        applicator = StrategyApplicator()
+        applicator.apply_strategy(pcb, _mirror_strategy())
+        applicator.apply_strategy(pcb, _mirror_strategy())
+        _assert_blocks_equal(_primitive_blocks(_custom_pad(_u1(pcb), "7")), original)
+
+    def test_back_placement_entry_point_matches_kicad_flip(self):
+        """``flip_footprint_children_to_back`` (library-footprint back
+        placement, #8581) shares the transform: its pad branch must walk the
+        nested padstack blocks and exchange front/back exactly like the
+        applicator (#9752 item 1)."""
+        from kicad_tools.schema.pcb import flip_footprint_children_to_back
+
+        pcb = PCB.load(str(_FRONT))
+        fp = _u1(pcb)
+        flip_footprint_children_to_back(fp._sexp_node, fp.rotation)
+        _assert_blocks_equal(
+            list(self._blocks(pcb).items()),
+            list(self._blocks(PCB.load(str(_BACK))).items()),
+        )
