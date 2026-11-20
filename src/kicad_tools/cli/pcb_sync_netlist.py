@@ -4,6 +4,8 @@ Compares schematic components against PCB footprints and:
 - Adds missing footprints (placed at board edge)
 - Updates net assignments for renamed references
 - Reports orphaned footprints (in PCB but not schematic)
+- Copies schematic values onto matched footprints and reports value or
+  footprint lib ID drift on matched references (issue #9563)
 
 Supports --dry-run to preview changes without modifying files.
 """
@@ -49,6 +51,41 @@ class PinMismatch:
 
 
 @dataclass
+class ValueUpdate:
+    """A value difference on a matched reference (issue #9563).
+
+    The schematic value is copied onto the PCB footprint (unless
+    ``--dry-run``); equivalence rules match ``kct validate --sync`` and
+    ``kct sync --apply``.
+    """
+
+    reference: str
+    old_value: str
+    new_value: str
+
+    @property
+    def detail(self) -> str:
+        return f'{self.reference}: "{self.old_value}" -> "{self.new_value}"'
+
+
+@dataclass
+class FootprintChange:
+    """A footprint lib ID difference on a matched reference (issue #9563).
+
+    Reported only -- this command never swaps footprints; ``kct sync
+    --apply`` owns that logic.
+    """
+
+    reference: str
+    old_footprint: str
+    new_footprint: str
+
+    @property
+    def detail(self) -> str:
+        return f"{self.reference}: {self.old_footprint} -> {self.new_footprint}"
+
+
+@dataclass
 class SyncResult:
     """Result of a netlist sync operation."""
 
@@ -58,6 +95,8 @@ class SyncResult:
     removed: list[SyncAction] = field(default_factory=list)
     pin_mismatches: list[PinMismatch] = field(default_factory=list)
     net_updated: list[SyncAction] = field(default_factory=list)
+    value_updated: list[ValueUpdate] = field(default_factory=list)
+    footprint_changed: list[FootprintChange] = field(default_factory=list)
     # Pads whose ``pinfunction``/``pintype`` were written from the schematic
     # pin data (issue #5985), mirroring KiCad's "Update PCB from Schematic".
     pintype_updated: int = 0
@@ -73,6 +112,8 @@ class SyncResult:
             or self.removed
             or self.pin_mismatches
             or self.net_updated
+            or self.value_updated
+            or self.footprint_changed
             or self.pintype_updated
         )
 
@@ -216,6 +257,54 @@ def sync_netlist(
                         severity=severity,
                     )
                 )
+
+    # --- Detect value and footprint drift on matched references ---
+    # Matched references are compared for value and footprint lib ID so a
+    # wrong part value or wrong package on the board is reported instead of
+    # silently passing (issue #9563).  The equivalence helpers are the same
+    # ones ``kct validate --sync`` uses, so the two tools flag the same refs.
+    if common_refs:
+        from kicad_tools.footprints.library_path import compare_footprint_lib_ids
+        from kicad_tools.sync.reconciler import _values_equivalent
+
+        for ref in sorted(common_refs):
+            item = sch_components[ref]
+            pcb_info = pcb_refs[ref]
+
+            # Values: ``~`` is KiCad's "no value" placeholder, treated as
+            # empty; a missing value on either side is skipped -- the same
+            # rules as validate --sync's _check_values.
+            sch_value = (item.value or "").strip()
+            pcb_value = (pcb_info["value"] or "").strip()
+            if sch_value == "~":
+                sch_value = ""
+            if pcb_value == "~":
+                pcb_value = ""
+            if sch_value and pcb_value and not _values_equivalent(sch_value, pcb_value, ref):
+                result.value_updated.append(
+                    ValueUpdate(reference=ref, old_value=pcb_value, new_value=sch_value)
+                )
+
+            # Footprint lib IDs: a package or nickname mismatch is reported
+            # (never swapped here -- `kct sync --apply` owns the swap); a
+            # nickname missing on one side is the same package, warning only.
+            # (Named *_fp_id to stay clear of the pin-count loop's pcb_fp,
+            # a Footprint object, in the same function scope.)
+            sch_fp_id = item.footprint or ""
+            pcb_fp_id = pcb_info["footprint"] or ""
+            if sch_fp_id and pcb_fp_id:
+                relation = compare_footprint_lib_ids(sch_fp_id, pcb_fp_id)
+                if relation == "mismatch":
+                    result.footprint_changed.append(
+                        FootprintChange(
+                            reference=ref, old_footprint=pcb_fp_id, new_footprint=sch_fp_id
+                        )
+                    )
+                elif relation == "nickname_missing":
+                    result.warnings.append(
+                        f"{ref} footprint library nickname missing: "
+                        f"schematic {sch_fp_id}, PCB {pcb_fp_id}"
+                    )
 
     # --- Detect renames via value+footprint matching ---
     missing_refs = sch_ref_set - pcb_ref_set
@@ -387,12 +476,21 @@ def sync_netlist(
                 if not pcb.remove_footprint(action.reference):
                     result.errors.append(f"Failed to remove footprint {action.reference}")
 
+        # Apply value updates for matched refs (issue #9563): copy the
+        # schematic value onto the board footprint.  Footprint lib ID
+        # changes are reported only -- the swap itself is owned by
+        # ``kct sync --apply``.
+        for update in result.value_updated:
+            if not pcb.update_footprint_value(update.reference, update.new_value):
+                result.errors.append(f"Failed to update value for {update.reference}")
+
         # Update net assignments from schematic netlist unconditionally.
         # This catches stale pad-net assignments even when no footprints are
         # added or renamed (e.g. when pad nets drifted from the schematic).
-        net_actions, net_errors = _assign_nets_from_schematic(pcb, schematic_path)
+        net_actions, net_errors, net_warnings = _assign_nets_from_schematic(pcb, schematic_path)
         result.net_updated.extend(net_actions)
         result.errors.extend(net_errors)
+        result.warnings.extend(net_warnings)
         _annotate_pintypes(pcb, schematic_path, result)
 
         # Optionally remove nets that have no pad references
@@ -411,9 +509,10 @@ def sync_netlist(
         # Compute net diff for dry-run reporting (no PCB changes applied).
         # Note: this mutates the in-memory PCB to compute the diff but
         # never saves, so the file on disk is unchanged.
-        net_actions, net_errors = _assign_nets_from_schematic(pcb, schematic_path)
+        net_actions, net_errors, net_warnings = _assign_nets_from_schematic(pcb, schematic_path)
         result.net_updated.extend(net_actions)
         result.errors.extend(net_errors)
+        result.warnings.extend(net_warnings)
         _annotate_pintypes(pcb, schematic_path, result)
 
     return result
@@ -433,43 +532,158 @@ def _get_pad_net_snapshot(pcb) -> dict[tuple[str, str], str]:
     return snapshot
 
 
-def _normalize_kicad_cli_net_names(netlist) -> None:
-    """Strip leading ``/`` from hierarchical-label net names in-place.
+def _resolve_net_names_for_board(netlist, pcb) -> None:
+    """Resolve ``/``-prefixed netlist net names against the board's net table.
 
-    The ``kicad-cli sch export netlist`` exporter prefixes hierarchical
-    local labels with the sheet path (e.g. ``/BST_A``, ``/DRV_CP1``)
-    while global power-symbol labels come through unprefixed
-    (e.g. ``+3V3``, ``GND``).  PCB net tables conventionally store bare
-    names, so adding the prefixed form creates ghost nets that get
-    dropped by orphan-net cleanup and prevents pads from being assigned
-    to the intended net.
+    ``kicad-cli sch export netlist`` writes root-sheet local label nets
+    with a leading ``/`` (``/NAME``) while global power-symbol labels
+    come through unprefixed (``+3V3``, ``GND``).  Boards in the wild
+    store those label nets under *both* conventions: KiCad-native boards
+    keep the ``/`` in the net table (and on their tracks, vias and
+    zones), while boards generated by ``kct`` store bare names.  The
+    pre-#9562 blanket strip renamed every pad of a KiCad-native board
+    away from the copper that still carried the ``/`` name, silently
+    disconnecting a routed board; a blanket keep would reintroduce
+    #3370 (ghost ``/``-prefixed nets on kct-generated boards).
 
-    This normalization mirrors what ``_extract_schematic_nets`` in
-    :mod:`kicad_tools.cli.fleet_cmd` does -- it consumes label-leaf
-    names that are already bare, so the drift detector and the sync
-    writer agree on the same naming convention.
+    Each ``/``-prefixed netlist name is therefore resolved against the
+    existing board net table, in order:
 
-    Only a single leading ``/`` is stripped, and only from names that
-    do not begin with another ``/`` after the strip (defensive against
-    deeper hierarchical paths such as ``/sheetA/SIGNAL`` -- those keep
-    a leading ``/`` only if the parser was confused; we still strip
-    one and leave the rest as a sub-path token, which then becomes a
-    valid bare net name).
+    1. the board already has the exact ``/NAME`` -> keep it;
+    2. else the board has the bare ``NAME`` -> use the bare form
+       (preserves the kct-generated convention of #3370);
+    3. else (a net new to the board) follow the board's own
+       convention: keep the ``/`` when the board's non-power nets are
+       predominantly ``/``-prefixed, otherwise strip it.
 
-    Power-rail aliases (``+3V3``, ``GND``, ``+5V``, ...) are left
-    unchanged because they don't carry the ``/`` prefix in the
-    exported netlist.
+    Only a single leading ``/`` is considered; deeper hierarchical
+    paths such as ``/sheetA/SIGNAL`` resolve against
+    ``sheetA/SIGNAL`` as the bare candidate, mirroring the historical
+    normalisation.  Power-rail aliases never carry the prefix and are
+    left unchanged.
+
+    The pure-Python netlist fallback already emits bare names, so this
+    is a no-op for that path.
 
     Args:
-        netlist: A :class:`Netlist` whose ``nets`` list will be
-            mutated in place.
+        netlist: A :class:`Netlist` whose ``nets`` list is mutated in
+            place.
+        pcb: The :class:`~kicad_tools.schema.pcb.PCB` being synced.
     """
+    board_net_names = {net.name for net in pcb.nets.values() if net.name}
+    keep_prefix = _board_label_nets_use_slash_prefix(pcb)
     for net in netlist.nets:
-        if net.name and net.name.startswith("/"):
-            net.name = net.name[1:]
+        if not net.name or not net.name.startswith("/"):
+            continue
+        if net.name in board_net_names:
+            continue
+        bare = net.name[1:]
+        if not bare:
+            continue
+        if bare in board_net_names or not keep_prefix:
+            net.name = bare
 
 
-def _assign_nets_from_schematic(pcb, schematic_path: Path) -> tuple[list[SyncAction], list[str]]:
+def _board_label_nets_use_slash_prefix(pcb) -> bool:
+    """Whether the board's non-power nets predominantly carry a leading ``/``.
+
+    Power rails and ground nets (``GND``, ``+3V3``, ...) and KiCad's
+    auto-generated nets (``unconnected-(...)``, ``Net-(R1-Pad2)``) are
+    excluded from the census: they never carry the ``/`` prefix, so
+    counting them would bias a KiCad-native board toward the bare
+    convention.  "More often than not" decides; a tie (or no label nets
+    at all) means bare, which matches the historical kct convention
+    (#3370).
+    """
+    from kicad_tools.router.net_class import (
+        is_auto_net_name,
+        is_ground_rail_name,
+        is_power_rail_name,
+    )
+
+    prefixed = 0
+    bare = 0
+    for net in pcb.nets.values():
+        name = net.name
+        if not name or net.number == 0:
+            continue
+        if is_auto_net_name(name) or is_ground_rail_name(name) or is_power_rail_name(name):
+            continue
+        if name.startswith("/"):
+            prefixed += 1
+        else:
+            bare += 1
+    return prefixed > bare
+
+
+def _copper_net_usage(pcb) -> dict[str, int]:
+    """Count copper items (tracks, arc tracks, vias, zones) per net name.
+
+    Used by the split-net warning to notice pads moving to a net name
+    that no copper on the board uses while the former name still does.
+    Items whose dialect carries only a net number are resolved through
+    the board's net table.
+    """
+    usage: dict[str, int] = {}
+
+    def bump(net_number: int, net_name: str) -> None:
+        name = net_name
+        if not name and net_number:
+            board_net = pcb.get_net(net_number)
+            name = board_net.name if board_net else ""
+        if name:
+            usage[name] = usage.get(name, 0) + 1
+
+    for seg in pcb.segments:
+        bump(seg.net_number, seg.net_name)
+    for arc in pcb.arcs:
+        bump(arc.net_number, arc.net_name)
+    for via in pcb.vias:
+        bump(via.net_number, via.net_name)
+    for zone in pcb.zones:
+        bump(zone.net_number, zone.net_name)
+    return usage
+
+
+def _detect_split_net_warnings(
+    before: dict[tuple[str, str], str],
+    after: dict[tuple[str, str], str],
+    copper_usage: dict[str, int],
+) -> list[str]:
+    """Warn when pads move to a net name that no copper uses (issue #9562).
+
+    A pad whose net changed from a name that still has copper
+    (tracks/vias/zones) to one that has none leaves the board split:
+    the copper keeps answering to the old net while the pads answer to
+    the new one, and DRC reports unconnected pads.  ``sync-netlist``
+    does not rename copper, so the condition is reported as a warning
+    naming both names and the stranded copper count, aggregated per
+    old->new pair.
+    """
+    moves: dict[tuple[str, str], int] = {}
+    for key, new_net in after.items():
+        old_net = before.get(key, "")
+        if not old_net or not new_net or old_net == new_net:
+            continue
+        if copper_usage.get(new_net, 0) > 0:
+            continue
+        if copper_usage.get(old_net, 0) > 0:
+            moves[(old_net, new_net)] = moves.get((old_net, new_net), 0) + 1
+
+    warnings: list[str] = []
+    for (old_net, new_net), pad_count in sorted(moves.items()):
+        warnings.append(
+            f'{pad_count} pad(s) moved "{old_net}" -> "{new_net}", but no track, '
+            f'via or zone uses "{new_net}" while "{old_net}" still has '
+            f"{copper_usage[old_net]} copper item(s); copper was not renamed, "
+            f"so the board may be split"
+        )
+    return warnings
+
+
+def _assign_nets_from_schematic(
+    pcb, schematic_path: Path
+) -> tuple[list[SyncAction], list[str], list[str]]:
     """Export netlist from schematic and assign nets to PCB pads.
 
     Always applies net assignments to the in-memory *pcb* object.  The
@@ -477,9 +691,10 @@ def _assign_nets_from_schematic(pcb, schematic_path: Path) -> tuple[list[SyncAct
     result.
 
     Returns:
-        A tuple of ``(net_actions, errors)`` where *net_actions* is a list
-        of :class:`SyncAction` items with ``action="net_updated"`` and
-        *errors* is a list of error strings.
+        A tuple of ``(net_actions, errors, warnings)`` where
+        *net_actions* is a list of :class:`SyncAction` items with
+        ``action="net_updated"``, *errors* is a list of error strings,
+        and *warnings* carries split-net diagnostics (issue #9562).
     """
     actions: list[SyncAction] = []
     errors: list[str] = []
@@ -505,13 +720,14 @@ def _assign_nets_from_schematic(pcb, schematic_path: Path) -> tuple[list[SyncAct
             )
     except Exception as exc:
         errors.append(f"Failed to export netlist for net assignment: {exc}")
-        return actions, errors
+        return actions, errors, []
 
-    # Normalize ``/``-prefixed hierarchical net names from kicad-cli.
-    # The Python fallback already emits bare names, so this is a no-op
-    # for that path; running it unconditionally keeps the downstream
-    # invariant simple (``net.name`` is always the bare PCB-side name).
-    _normalize_kicad_cli_net_names(netlist)
+    # Resolve ``/``-prefixed net names from kicad-cli against the board's
+    # own net table (issue #9562).  KiCad-native boards store label nets
+    # as ``/NAME`` while kct-generated boards store bare names; a blanket
+    # strip disconnected routed KiCad-native boards.  The Python fallback
+    # already emits bare names, so this is a no-op for that path.
+    _resolve_net_names_for_board(netlist, pcb)
 
     # Build pin-to-pad mapping for all netlist sources.
     #
@@ -544,7 +760,7 @@ def _assign_nets_from_schematic(pcb, schematic_path: Path) -> tuple[list[SyncAct
         pcb.assign_nets_from_netlist(netlist, pin_to_pad_map=pin_to_pad_map)
     except Exception as exc:
         errors.append(f"Failed to assign nets from netlist: {exc}")
-        return actions, errors
+        return actions, errors, []
 
     # Snapshot after assignment
     after = _get_pad_net_snapshot(pcb)
@@ -563,7 +779,11 @@ def _assign_nets_from_schematic(pcb, schematic_path: Path) -> tuple[list[SyncAct
                 )
             )
 
-    return actions, errors
+    # Split-net diagnostics (issue #9562): pads that moved to a net name
+    # no copper uses while the former name still has copper.
+    warnings = _detect_split_net_warnings(before, after, _copper_net_usage(pcb))
+
+    return actions, errors, warnings
 
 
 def _annotate_pintypes(pcb, schematic_path: Path, result: SyncResult) -> None:
@@ -775,6 +995,19 @@ def format_text(result: SyncResult, dry_run: bool, pcb_path: Path) -> str:
         lines.append(f"  Pad pin types updated: {result.pintype_updated}")
         lines.append("")
 
+    if result.value_updated:
+        lines.append(f"  Value updates ({len(result.value_updated)}):")
+        for update in result.value_updated:
+            lines.append(f"    {update.detail}")
+        lines.append("")
+
+    if result.footprint_changed:
+        lines.append(f"  Footprint changes ({len(result.footprint_changed)}):")
+        for change in result.footprint_changed:
+            lines.append(f"    {change.detail}")
+        lines.append("    Run `kct sync --apply` to swap these footprints on the board.")
+        lines.append("")
+
     if result.orphaned:
         lines.append(f"  Orphaned footprints ({len(result.orphaned)}):")
         for action in result.orphaned:
@@ -864,9 +1097,27 @@ def format_json(result: SyncResult, dry_run: bool, pcb_path: Path) -> str:
             for a in result.net_updated
         ],
         "pintype_updated": result.pintype_updated,
+        "value_updated": [
+            {
+                "reference": v.reference,
+                "old_value": v.old_value,
+                "new_value": v.new_value,
+            }
+            for v in result.value_updated
+        ],
+        "footprint_changed": [
+            {
+                "reference": c.reference,
+                "old_footprint": c.old_footprint,
+                "new_footprint": c.new_footprint,
+            }
+            for c in result.footprint_changed
+        ],
         "warnings": result.warnings,
         "errors": result.errors,
     }
+    if result.footprint_changed:
+        output["remediation"] = "Run `kct sync --apply` to swap these footprints on the board."
     return json.dumps(output, indent=2)
 
 
@@ -903,7 +1154,8 @@ def run_sync_netlist(
             ``<file>.failed-<timestamp>`` sidecar (issue #4541).
 
     Returns:
-        Exit code (0 for success, 1 for errors).
+        Exit code (0 for success, 1 for errors or unresolved footprint
+        changes -- the latter only report, pointing at ``kct sync --apply``).
     """
     # --transactional (issue #4541): the mutated file is the output path
     # when given, otherwise the input PCB (in-place overwrite).  Exceptions
@@ -980,5 +1232,10 @@ def _run_sync_netlist_impl(
         else:
             print("Renames skipped.")
 
-    # Return non-zero only on errors, not on orphaned footprints
-    return 1 if result.errors else 0
+    # Return non-zero on errors, and on unresolved footprint changes so a
+    # wrong-package board cannot pass a sync-netlist gate silently (issue
+    # #9563).  Value updates do not affect the exit code: they are applied
+    # (or previewed under --dry-run), leaving nothing unresolved.  The
+    # footprint exit is a distinct condition from result.errors, so in
+    # non-transactional runs the value/net updates above are still saved.
+    return 1 if (result.errors or result.footprint_changed) else 0

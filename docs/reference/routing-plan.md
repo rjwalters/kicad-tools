@@ -102,7 +102,7 @@ working".
 **Do not compare whole `.kicad_pcb` text**, even with UUIDs normalised — it
 does not measure "did the plan stage change copper", and getting this wrong
 is what produced the (retracted) report in
-[#5578](https://github.com/rjwalters/kicad-tools/issues/5578). Two things in
+[#5578](https://github.com/2AMLogic/kicad-tools/issues/5578). Two things in
 the file vary run-to-run on their own, with the plan stage **off in both
 runs**:
 
@@ -127,7 +127,7 @@ is enforced, not skipped.
 `scripts/ci/board_route_determinism_smoke.sh`'s `normalize_copper()` now
 applies the same instrument (it shells out to `scripts/ci/normalize_copper.py`,
 a paren-balanced whole-node normalizer). Until
-[#5580](https://github.com/rjwalters/kicad-tools/issues/5580) it did *not*:
+[#5580](https://github.com/2AMLogic/kicad-tools/issues/5580) it did *not*:
 this repo writes copper as multi-line s-expressions, so its
 `grep -E '^[[:space:]]*\((segment|via|arc)'` kept only the bare `(segment` /
 `(via` header lines and discarded every `(start …)` / `(layer …)` child. Its

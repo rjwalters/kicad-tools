@@ -35,7 +35,7 @@ land in ``tests/router/test_softstart_revb_fine_pitch_escape.py`` per
 P_FP5.  This file covers the integration *contracts* without invoking
 the full pathfinder.
 
-Issue: https://github.com/rjwalters/kicad-tools/issues/3371
+Issue: https://github.com/2AMLogic/kicad-tools/issues/3371
 """
 
 from __future__ import annotations

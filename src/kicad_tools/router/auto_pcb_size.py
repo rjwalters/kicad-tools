@@ -32,7 +32,7 @@ Coordinate / units convention:
   - DRC violation counts are integer net-routability blockers (clearance
     violations + shorts), NOT including warnings.
 
-Issue: https://github.com/rjwalters/kicad-tools/issues/3352
+Issue: https://github.com/2AMLogic/kicad-tools/issues/3352
 """
 
 from __future__ import annotations

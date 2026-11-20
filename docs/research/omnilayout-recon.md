@@ -1,6 +1,6 @@
 # OmniLayout / OmniRouting recon (2026-08-15)
 
-*Point-in-time working document — issue [#4830](https://github.com/rjwalters/kicad-tools/issues/4830),
+*Point-in-time working document — issue [#4830](https://github.com/2AMLogic/kicad-tools/issues/4830),
 slice 3 of 4. Describes omnieda.com as of 2026-08-15.*
 
 ## Verdict: **adapt the protocol, drop the data**

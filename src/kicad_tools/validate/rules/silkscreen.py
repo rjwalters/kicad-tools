@@ -205,6 +205,7 @@ def check_silkscreen_line_width(
     min_width = design_rules.min_silkscreen_width_mm
 
     # Check board-level graphics (never suppressed -- no footprint context)
+    to_board = _board_frame_shift(pcb)
     for graphic in pcb.graphics:
         if not is_silkscreen_layer(graphic.layer):
             continue
@@ -217,7 +218,7 @@ def check_silkscreen_line_width(
                         f"Silkscreen line width {graphic.stroke_width:.2f}mm "
                         f"< minimum {min_width:.2f}mm"
                     ),
-                    location=graphic.start,
+                    location=to_board(_graphic_anchor(graphic)),
                     layer=graphic.layer,
                     actual_value=graphic.stroke_width,
                     required_value=min_width,
@@ -817,6 +818,37 @@ def _arc_geometry(
     return LineString(points).buffer(width / 2.0)
 
 
+def _board_frame_shift(pcb: PCB) -> Callable[[tuple[float, float]], tuple[float, float]]:
+    """Return a function mapping board-level (``gr_*``) file coordinates to the board frame.
+
+    ``PCB.load`` shifts footprints (and so pads) into the board-relative
+    frame and records the shift in ``pcb._board_origin``; board-level
+    graphics keep the file's sheet-absolute coordinates (Issues #8561,
+    #9642).  Rules that compare board-level silk against pads, or report its
+    location, must apply this shift.  Identity on zero-origin boards.
+    """
+    ox, oy = getattr(pcb, "_board_origin", (0.0, 0.0))
+
+    def to_board(p: tuple[float, float]) -> tuple[float, float]:
+        return (p[0] - ox, p[1] - oy)
+
+    return to_board
+
+
+def _graphic_anchor(graphic: FootprintGraphic | BoardGraphic) -> tuple[float, float]:
+    """One representative file-frame point per silk shape, for reported locations.
+
+    A parsed ``gr_circle`` / ``fp_circle`` carries its centre in ``center``
+    and leaves ``start`` at the parse default ``(0, 0)``, so reporting
+    ``graphic.start`` sends users to the file origin instead of the shape
+    (Issue #9642).  Every other shape has a real ``start`` -- a poly's is
+    seeded from its first vertex at parse time.
+    """
+    if graphic.graphic_type == "circle" and graphic.center is not None:
+        return graphic.center
+    return graphic.start
+
+
 def _stroke_geometry(
     graphic: FootprintGraphic | BoardGraphic,
     transform: _Transform | None,
@@ -1121,7 +1153,7 @@ def _iter_silk_elements(
             side,
             geom,
             label,
-            to_board(board_graphic.start),
+            to_board(_graphic_anchor(board_graphic)),
             board_graphic.layer,
             board_graphic.uuid,
             _graphic_descriptor("gr", board_graphic),
@@ -1159,6 +1191,7 @@ def iter_unmodeled_silk_graphics(
                 graphic.uuid,
             )
 
+    to_board = _board_frame_shift(pcb)
     for board_graphic in pcb.graphics:
         if _silk_side(board_graphic.layer) is None:
             continue
@@ -1167,7 +1200,7 @@ def iter_unmodeled_silk_graphics(
         yield (
             f"gr_{board_graphic.graphic_type}",
             board_graphic.graphic_type,
-            board_graphic.start,
+            to_board(_graphic_anchor(board_graphic)),
             board_graphic.layer,
             board_graphic.uuid,
         )
@@ -1239,9 +1272,14 @@ def _iter_pad_apertures(
     default).  ``check_silk_over_copper`` chains both iterators into a single
     aperture index.
     """
+    from .clearance import _pad_has_no_copper, _pad_has_no_mask
+
     for footprint in pcb.footprints:
         transform = _fp_transform(footprint)
         for pad in footprint.pads:
+            if _pad_has_no_copper(pad) and _pad_has_no_mask(pad):
+                # Issue #9528: no copper and no mask opening: no aperture.
+                continue
             sides: tuple[str, ...]
             if pad.type == "smd":
                 pad_side = "F" if footprint.layer == "F.Cu" else "B"
@@ -1316,11 +1354,16 @@ def check_silk_over_copper(
     # would read as clean.
     from kicad_tools.geometry.copper import custom_pad_outline_detail
 
+    from .clearance import _pad_has_no_copper, _pad_has_no_mask
+
     for footprint in pcb.footprints:
         for pad in footprint.pads:
             if (pad.shape or "").lower() != "custom":
                 continue
             if pad.type not in {"smd", "thru_hole"}:
+                continue
+            if _pad_has_no_copper(pad) and _pad_has_no_mask(pad):
+                # Issue #9528: neither copper nor a mask opening to smear silk onto.
                 continue
             geometry, refusal = custom_pad_outline_detail(
                 pad, _fp_transform(footprint)(pad.position)

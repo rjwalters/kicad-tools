@@ -1574,6 +1574,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             build_pairwise_clearance_table,
             load_pair_bounds,
             load_signed_voltage_map,
+            load_voltage_intervals,
         )
 
         vm_path = Path(voltage_map_arg)
@@ -1589,6 +1590,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 material_group=getattr(args, "material_group", "IIIa"),
                 hv_threshold=getattr(args, "hv_threshold", 30.0),
                 pair_bounds=load_pair_bounds(vm_path) or None,
+                net_intervals=load_voltage_intervals(vm_path),
             )
         except (ValueError, OSError, StandardLookupError) as e:
             print(f"Error: invalid voltage-map: {e}", file=sys.stderr)
@@ -2077,12 +2079,13 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                         "from_layer": c.from_layer,
                         "to_layer": c.to_layer,
                         "via_count": c.count,
+                        "tie_via_count": len(c.tie_vias),
                         "drill_mm": c.drill,
                         "pad_diameter_mm": c.pad_diameter,
                         "capacity_a": round(c.current_capacity_a(), 4),
                         "vias": [
                             {"position": _sheet(v[0]), "drill_mm": v[1], "pad_diameter_mm": v[2]}
-                            for v in c.vias
+                            for v in (*c.vias, *c.tie_vias)
                         ],
                     }
                     for c in r.layer_changes
@@ -2142,9 +2145,14 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                 narrowest = r.min_width
                 if narrowest is not None:
                     nx, ny = _sheet(narrowest.position)
-                    # Say when the figure is a group's summed width, so
-                    # 2.0 mm is not misread as one trace's width (#8917).
-                    doubled = " (summed parallel group)" if narrowest.parallel_group else ""
+                    # Say when the figure is a group's effective width, so
+                    # 2.0 mm is not misread as one trace's width (#8917) --
+                    # naming the shape: merged same-layer copper, a sum
+                    # across layers, or both at once (#9557, #9560).
+                    if narrowest.parallel_group:
+                        doubled = f" ({narrowest.shape} parallel group)"
+                    else:
+                        doubled = ""
                     print(
                         f"      min width {narrowest.width_mm:.3f} mm on "
                         f"{narrowest.layer} at ({nx:.3f}, {ny:.3f}){doubled}"

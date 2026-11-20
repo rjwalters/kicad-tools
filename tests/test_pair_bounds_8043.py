@@ -31,7 +31,6 @@ def test_parse_valid_is_order_and_slash_insensitive():
     [
         {**GOOD, "nets": ["/A"]},
         {**GOOD, "nets": ["/A", "A"]},
-        {**GOOD, "max_dv": 0},
         {**GOOD, "max_dv": -5},
         {**GOOD, "max_dv": True},
         {**GOOD, "max_dv": float("inf")},
@@ -44,6 +43,21 @@ def test_parse_valid_is_order_and_slash_insensitive():
 def test_parse_malformed(entry):
     with pytest.raises(ValueError):
         pair_bounds_from_dict({"_pair_bounds": [entry]})
+
+
+def test_zero_max_dv_declares_same_potential():
+    """``max_dv: 0`` is valid since #9582: the pair is always at the same potential.
+
+    Every consumer treats the bound as a cap that only lowers, so 0 collapses
+    the pair's |ΔV| to 0 and the pair drops out of the widening matrix (no
+    creepage widening), exactly like a genuinely 0 V pair.
+    """
+    b = pair_bounds_from_dict({"_pair_bounds": [{**GOOD, "max_dv": 0}]})
+    assert b == {frozenset({"FUSED_LINE", "SRC_NEG"}): (0.0, "Q2B V_DS")}
+    base = build_pairwise_clearance_table(VMAP, dru=0.2)
+    capped = build_pairwise_clearance_table(VMAP, dru=0.2, pair_bounds=b)
+    assert ("FUSED_LINE", "SRC_NEG") in base.required_by_pair
+    assert ("FUSED_LINE", "SRC_NEG") not in capped.required_by_pair
 
 
 def test_parse_not_list_and_duplicate():

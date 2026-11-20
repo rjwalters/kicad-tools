@@ -184,7 +184,7 @@ everything stays capped at warning. That is unchanged and not regressed.
 
 The fab's item coordinates are not in the record, so I cannot match the five
 fab dangers to objects. The consumer's re-test of `c96d21e9a` on #8858
-([comment](https://github.com/rjwalters/kicad-tools/issues/8858#issuecomment-6960603314))
+([comment](https://github.com/2AMLogic/kicad-tools/issues/8858#issuecomment-6960603314))
 located them **by pad (opening owner)** and did show that all five survive: each
 of the five fab-danger pads still has at least one track or via finding at
 warning level (two through a pass-through segment plus the via, one through
@@ -250,7 +250,7 @@ KCT_KICAD_DOCKER=1 uv run kct check <board>/output/<name>_routed.kicad_pcb --mfr
 
 Board 01's committed Gerber package (sha256 `36c0905e…`, from main `95b8327ce`)
 went through JLCDFM's DFM analysis on 2026-11-17, recorded on #8858
-([comment](https://github.com/rjwalters/kicad-tools/issues/8858#issuecomment-6963569039)).
+([comment](https://github.com/2AMLogic/kicad-tools/issues/8858#issuecomment-6963569039)).
 "Solder mask opening exposing trace" (danger 0.08 mm, warning 0.15 mm) lists three
 items, all a pour against a **different-net** pad opening on the top mask: R2.1
 warning at 0.13 mm, R1.2 good at 0.2 mm, R1.1 good at 0.2 mm. The own-pour pads

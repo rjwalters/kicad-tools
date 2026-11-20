@@ -199,6 +199,27 @@ class _WirePlan:
     skipped: list[PathResolution] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class WiredLeg:
+    """One wire leg this rule judged fully wired (Issue #9648).
+
+    Emitted by :meth:`ReinforcementIncompleteRule.fully_wired_legs` for a leg
+    whose complete per-leg check emitted no finding: two end anchors, a
+    continuous mask opening between them and open anchor rings -- the same
+    verdict :meth:`ReinforcementIncompleteRule.check` reports, so a consumer
+    crediting the wire (``path_ampacity``) can never disagree with this rule
+    rejecting it. ``points`` (board-relative, the frame of routed segments)
+    is the leg's centreline polyline and ``width`` its widest copper -- the
+    basis of the anchor-on-leg tolerance, reused for segment matching.
+    """
+
+    net: str
+    layer: str
+    points: tuple[_Point, ...]
+    width: float
+    gauge: int
+
+
 class ReinforcementIncompleteRule(DRCRule):
     """DRC rule verifying that reinforced runs are buildable (Issue #8746).
 
@@ -249,8 +270,34 @@ class ReinforcementIncompleteRule(DRCRule):
 
     def check(self, pcb: PCB, design_rules: DesignRules) -> DRCResults:
         results = DRCResults()
-        if not self.specs:
-            return results
+        self._run(pcb, design_rules, results, collector=None)
+        return results
+
+    def fully_wired_legs(self, pcb: PCB, design_rules: DesignRules) -> list[WiredLeg]:
+        """Legs on this board this rule judges fully wired (Issue #9648).
+
+        Runs the same per-leg completeness check as :meth:`check` (its
+        findings go to a scratch ``DRCResults`` that is discarded) and
+        returns one :class:`WiredLeg` per leg that emitted no finding -- a
+        wire with two end anchors, a continuous mask opening between them
+        and open anchor rings. A leg reinforced by a parallel copy is not a
+        wire (Issue #8916) and never appears; nor is an inner-layer leg (no
+        solder mask, nothing to solder). Reuses the existing verdict instead
+        of re-deriving one, so this can never disagree with :meth:`check`.
+        """
+        collector: list[WiredLeg] = []
+        self._run(pcb, design_rules, DRCResults(), collector=collector)
+        return collector
+
+    def _run(
+        self,
+        pcb: PCB,
+        design_rules: DesignRules,
+        results: DRCResults,
+        collector: list[WiredLeg] | None,
+    ) -> None:
+        if not self.specs or not any(s.reinforcement_eligible for s in self.specs):
+            return
 
         from kicad_tools.pcb import reinforce as rf
         from kicad_tools.router.current_paths import reinforcement_path_resolutions
@@ -276,8 +323,8 @@ class ReinforcementIncompleteRule(DRCRule):
                 end_offset,
                 results,
                 located=plan.located.get(net),
+                collector=collector,
             )
-        return results
 
     # ------------------------------------------- wire location (Issue #8886)
 
@@ -644,6 +691,7 @@ class ReinforcementIncompleteRule(DRCRule):
         end_offset: float,
         results: DRCResults,
         located: dict[str, list[Segment]] | None = None,
+        collector: list[WiredLeg] | None = None,
     ) -> None:
         from kicad_tools.core.geometry import rotate_pad_offset
         from kicad_tools.physics.wire_gauge import anchor_drill_for_awg
@@ -710,18 +758,45 @@ class ReinforcementIncompleteRule(DRCRule):
                 continue
             drill = anchor_drill_for_awg(leg.gauge)
             drills_seen.add(round(drill, 4))
-            self._check_leg(
-                pcb,
-                rf,
-                leg,
-                drill,
-                holes_for,
-                is_change_via,
-                end_offset,
-                claimed,
-                results,
-                _via_is_tented,
-            )
+            if collector is None:
+                self._check_leg(
+                    pcb,
+                    rf,
+                    leg,
+                    drill,
+                    holes_for,
+                    is_change_via,
+                    end_offset,
+                    claimed,
+                    results,
+                    _via_is_tented,
+                )
+            else:
+                # Same verdict as check(), into a scratch that is discarded:
+                # the leg is fully wired iff it emitted nothing (Issue #9648).
+                scratch = DRCResults()
+                outcome = self._check_leg(
+                    pcb,
+                    rf,
+                    leg,
+                    drill,
+                    holes_for,
+                    is_change_via,
+                    end_offset,
+                    claimed,
+                    scratch,
+                    _via_is_tented,
+                )
+                if outcome and not scratch.violations:
+                    collector.append(
+                        WiredLeg(
+                            net=leg.net,
+                            layer=leg.layer,
+                            points=tuple(leg.points),
+                            width=leg.width,
+                            gauge=leg.gauge,
+                        )
+                    )
 
         # --- (d) layer change through a via smaller than the anchor drill ---
         for change in sorted(changes.values(), key=lambda c: c.position):
@@ -793,10 +868,18 @@ class ReinforcementIncompleteRule(DRCRule):
         claimed: set[int],
         results: DRCResults,
         via_is_tented: Any,
-    ) -> None:
+    ) -> bool | None:
+        """Check one leg's (a)-(c); ``None`` when it is not a wire leg.
+
+        Returns ``None`` for a leg no wire layout applies to (degenerate
+        geometry, a pad covering the whole leg, or an inner layer with no
+        solder mask), else ``True``. Callers judging completeness (Issue
+        #9648) additionally require that no finding was emitted into
+        ``results``.
+        """
         pts, cum, total = leg.points, leg.cum, leg.total
         if len(pts) < 2 or total <= 1e-9:
-            return
+            return None
         desc = f"leg {self._fmt(pts[0])} -> {self._fmt(pts[-1])}"
         tol = leg.width / 2.0 + ANCHOR_ON_LEG_SLACK_MM
 
@@ -809,7 +892,7 @@ class ReinforcementIncompleteRule(DRCRule):
         for ordered in (pts, list(reversed(pts))):
             copper = rf._end_copper(ordered, leg.layer, features, [], leg.width / 2.0)
             if copper is None:  # a pad/via covers the whole leg: nothing to wire
-                return
+                return None
             extents.append(rf._end_extent(ordered, copper))
 
         # --- anchors on this leg ---------------------------------------------
@@ -906,7 +989,7 @@ class ReinforcementIncompleteRule(DRCRule):
 
         mask_layer = rf.MASK_LAYER_FOR_COPPER.get(leg.layer)
         if mask_layer is None:  # inner copper has no solder mask: (b)/(c) do not apply
-            return
+            return None
 
         # (b) continuous mask opening between the anchors. "Between the anchors"
         # is undefined with exactly one (already an (a) finding); with none the
@@ -959,6 +1042,7 @@ class ReinforcementIncompleteRule(DRCRule):
                     + " and ".join("front" if s == "F" else "back" for s in tented)
                     + " side; both sides must be mask-open",
                 )
+        return True
 
     # ------------------------------------------------------------ geometry
 

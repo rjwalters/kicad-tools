@@ -74,9 +74,9 @@ const pendingRuns = EXPECTED_CASES.filter(c => !runs.some(r => r.report.board_id
 const reportedSlugs = new Set(reports.map((r) => r.board_id));
 const pendingBoards = DEEP_PCB_REFERENCE.filter((b) => !reportedSlugs.has(b.slug));
 
-const EPIC_URL = "https://github.com/rjwalters/kicad-tools/issues/4932";
-const RELABEL_EPIC_URL = "https://github.com/rjwalters/kicad-tools/issues/5278";
-const REPO = "https://github.com/rjwalters/kicad-tools";
+const EPIC_URL = "https://github.com/2AMLogic/kicad-tools/issues/4932";
+const RELABEL_EPIC_URL = "https://github.com/2AMLogic/kicad-tools/issues/5278";
+const REPO = "https://github.com/2AMLogic/kicad-tools";
 const RESULTS_README_URL = `${REPO}/blob/main/benchmarks/external/results/README.md`;
 
 /** Absolute link to the exact committed JSON this row renders. */
@@ -115,13 +115,13 @@ const buildDateLabel = fmtDateOnly(new Date().toISOString());
 const FAILURE_NOTES: Record<string, { issue: string; url: string; summary: string }> = {
   pocketbeagle: {
     issue: "#4945",
-    url: "https://github.com/rjwalters/kicad-tools/issues/4945",
+    url: "https://github.com/2AMLogic/kicad-tools/issues/4945",
     summary:
       "the auto-grid resolver's off-grid-escalation path blew its memory-cell budget on the board's two large low-density through-hole headers, and the router safely refused to route at all rather than producing an unsafe result.",
   },
   beagleconnect_freedom: {
     issue: "#4946",
-    url: "https://github.com/rjwalters/kicad-tools/issues/4946",
+    url: "https://github.com/2AMLogic/kicad-tools/issues/4946",
     summary:
       "one footprint (an RF shielding-can land pattern with real GND-net pads) sat outside Edge.Cuts in the pinned board, and the placement preflight gate aborted the entire route rather than routing the other ~455 connections and reporting just that footprint's nets as unresolved.",
   },

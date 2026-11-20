@@ -295,6 +295,12 @@ class MetaCheckResult:
     # name list, never the reason for ``overall`` -- ``compute_overall``
     # reads only ``coverage_incomplete``.
     incomplete_categories: tuple[str, ...] = ()
+    # Issue #9637: which schematic ERC/LVS/netlist sync ran against and how it
+    # was found (``--schematic``, ``project.kct``, ``sibling``,
+    # ``.kicad_pro pairing`` or ``sole schematic``).  Both ``None`` when no
+    # schematic was discovered (see ``schematic_missing``).
+    schematic_path: str | None = None
+    schematic_source: str | None = None
 
     def _subs(self) -> tuple[SubCheckResult, ...]:
         return (self.drc, self.erc, self.lvs, self.manifest)
@@ -340,6 +346,8 @@ class MetaCheckResult:
             # FAILED).  The ``coverage_incomplete`` flag itself stays
             # unserialized: machine consumers read ``overall``.
             "incomplete_categories": list(self.incomplete_categories),
+            # Issue #9637: additive -- the schematic ERC/LVS compared against.
+            "schematic": {"path": self.schematic_path, "source": self.schematic_source},
         }
 
 
@@ -1064,6 +1072,18 @@ def _manifest_subcheck(pcb_path: Path) -> SubCheckResult:
     )
 
 
+def _resolve_check_schematic_with_source(
+    schematic: str | None, pcb_path: Path
+) -> tuple[Path | None, str | None]:
+    """:func:`_resolve_check_schematic` plus how the schematic was found (issue #9637)."""
+    from kicad_tools.sync.discover import resolve_schematic_with_source
+
+    if schematic is not None:
+        candidate = Path(schematic).resolve()
+        return (candidate, "--schematic") if candidate.exists() else (None, None)
+    return resolve_schematic_with_source(pcb_path)
+
+
 def _resolve_check_schematic(schematic: str | None, pcb_path: Path) -> Path | None:
     """Resolve the schematic used by schematic-aware checks.
 
@@ -1073,14 +1093,10 @@ def _resolve_check_schematic(schematic: str | None, pcb_path: Path) -> Path | No
     override path resolves to ``None``), otherwise sibling discovery via
     :func:`kicad_tools.sync.discover.resolve_schematic_for_pcb` (which
     handles ``project.kct artifacts.schematic`` and the ``_routed``-style
-    stage-suffix strip).
+    stage-suffix strip).  ``project.kct artifacts.schematic`` is used only
+    when the PCB is the board that spec names (issue #9637).
     """
-    from kicad_tools.sync.discover import resolve_schematic_for_pcb
-
-    if schematic is not None:
-        candidate = Path(schematic).resolve()
-        return candidate if candidate.exists() else None
-    return resolve_schematic_for_pcb(pcb_path)
+    return _resolve_check_schematic_with_source(schematic, pcb_path)[0]
 
 
 def run_meta_checks(
@@ -1123,7 +1139,7 @@ def run_meta_checks(
             wider than ``coverage_incomplete`` (see
             :attr:`MetaCheckResult.incomplete_categories`).
     """
-    resolved_sch = _resolve_check_schematic(schematic, pcb_path)
+    resolved_sch, schematic_source = _resolve_check_schematic_with_source(schematic, pcb_path)
 
     erc = _erc_subcheck(resolved_sch, strict)
     lvs = _lvs_subcheck(resolved_sch, pcb_path)
@@ -1151,6 +1167,8 @@ def run_meta_checks(
         schematic_missing=schematic_missing,
         coverage_incomplete=coverage_incomplete,
         incomplete_categories=incomplete_categories,
+        schematic_path=str(resolved_sch) if resolved_sch is not None else None,
+        schematic_source=schematic_source,
     )
     result.compute_overall()
     return result
@@ -1229,6 +1247,10 @@ def print_meta_check_stanza(result: MetaCheckResult, verbose: bool = False) -> N
     if verbose:
         _print_lvs_verbose_expansion(result.lvs)
     print(_format_meta_status_line("Manifest", result.manifest))
+    if result.schematic_path is not None:
+        # Issue #9637: say which schematic ERC/LVS used and how it was found,
+        # so a wrong-revision comparison is never silent.
+        print(f"{'Schematic:':10} {result.schematic_path} (found via {result.schematic_source})")
     if result.overall == "INCOMPLETE" and result.incomplete_categories:
         print(f"{'Overall:':10} {result.overall} ({', '.join(result.incomplete_categories)})")
     else:
@@ -1446,25 +1468,38 @@ def _resolve_check_scope(args: argparse.Namespace, parser: argparse.ArgumentPars
     return scope
 
 
-def _inactive_input_driven_rules(checker: Any) -> frozenset[str]:
-    """Rules that could not produce findings this run for lack of input.
+def _inactive_rules_from_coverage(coverage: dict[str, Any]) -> frozenset[str]:
+    """Categories that could not produce findings this run, from the coverage map.
 
-    Mirrors :func:`kicad_tools.validate.coverage.precheck`: ``ampacity`` needs
-    a net-class-map carrying ``target_ampacity`` entries, ``path_ampacity``
-    needs ``--current-paths`` specs.  ``--migrate-waivers`` uses this so an
-    orphan whose rule never ran is reported as such instead of implying the
-    key changed (issue #9504).  ``--only``/``--skip`` cannot combine with
-    ``--migrate-waivers``, so input absence is the only way a rule goes
-    unevaluated there.
+    ``run_selected_checks`` records one
+    :class:`~kicad_tools.validate.coverage.Coverage` per category, and a
+    ``skipped`` state there means the category's inputs were absent (or the
+    category is opt-in and was not opted in), so its rule could not produce
+    findings.  Deriving the inactive set from those recorded states -- instead
+    of re-deriving :func:`kicad_tools.validate.coverage.precheck`'s conditions
+    by hand -- covers every skip reason (issue #9529): the two the previous
+    hand-mirrored helper knew (``ampacity``, ``path_ampacity``) and the nine
+    more ``precheck`` carries, with no drift when ``precheck`` grows another.
+
+    An ``unknown`` state counts as inactive exactly when its reason is
+    ``needs_input:<X>`` (:func:`kicad_tools.validate.coverage.rule_never_ran`,
+    issue #9552): the absent input is a prerequisite for any finding of that
+    category, so the rule was a no-op -- ``ampacity`` with declared-but-
+    unmapped currents is the reported case, and the rule's empty specs map
+    makes the pre-#9534 ``[rule not evaluated in this run]`` wording the
+    accurate one.  The other ``unknown`` reasons (``zone_fills_absent``,
+    ``no_courtyard_geometry``, ...) evaluated the board partially and may
+    still have found something, so an orphan naming one keeps the generic
+    wording.
+
+    ``--migrate-waivers`` uses this so an orphan whose rule never ran is
+    reported as such instead of implying the key changed (issue #9504).
+    ``--only``/``--skip`` cannot combine with ``--migrate-waivers``, so the
+    ``deselected:*`` skip reasons never reach this path.
     """
-    from kicad_tools.validate.coverage import _declares_ampacity
+    from kicad_tools.validate.coverage import rule_never_ran
 
-    inactive: set[str] = set()
-    if not _declares_ampacity(getattr(checker, "net_class_map", None)):
-        inactive.add("ampacity")
-    if not getattr(checker, "current_path_specs", None):
-        inactive.add("path_ampacity")
-    return frozenset(inactive)
+    return frozenset(name for name, cov in coverage.items() if rule_never_ran(cov))
 
 
 def _run_waiver_migration(
@@ -2863,7 +2898,7 @@ def main(argv: list[str] | None = None) -> int:
             pcb,
             gw_path,
             write=args.migrate_write,
-            inactive_rules=_inactive_input_driven_rules(checker),
+            inactive_rules=_inactive_rules_from_coverage(coverage),
         )
 
     # Issue #5946: ``--waive KEY`` records reviewed, evidence-bound waivers for
@@ -3760,6 +3795,20 @@ def build_check_rule_set(
     )
 
     copper_outer, copper_inner = stackup_copper_oz(pcb)
+    # Issue #9590: resolve the fab-view passes (net-agnostic copper gap,
+    # tht_smd_spacing, pad mask bridge) exactly like the CLI's flag-free
+    # default path, so a rule set built here agrees with ``kct check``
+    # instead of silently skipping them.
+    fab_view_gap_policy = None
+    if effective_mfr == "jlcpcb":
+        fab_view_gap_policy = _resolve_fab_gap_policy(
+            effective_mfr,
+            layers,
+            copper_outer,
+            copper_inner,
+            copper_outer if copper_outer is not None else 1.0,
+            len(pcb.copper_layers),
+        )
     checker = DRCChecker(
         pcb,
         manufacturer=effective_mfr,
@@ -3767,6 +3816,9 @@ def build_check_rule_set(
         copper_oz=copper_outer if copper_outer is not None else 1.0,
         copper_oz_outer=copper_outer,
         copper_oz_inner=copper_inner,
+        fab_view=effective_mfr == "jlcpcb",
+        fab_view_copper_oz=copper_outer,
+        fab_view_gap_policy=fab_view_gap_policy,
         net_class_map=net_class_map,
         authored_min_clearance_mm=_authored_min_clearance_mm(project_pcb_path),
         declared_reference_height_mm=resolve_declared_reference_height_for_pcb(project_pcb_path),
@@ -4145,6 +4197,7 @@ def run_selected_checks(
         "copper_sliver": checker.check_copper_slivers,
         "courtyard_overlap": checker.check_courtyard_overlap,
         "dangling_copper": checker.check_dangling_copper,
+        "plane_split": checker.check_plane_split,
         "pour_slot": _pour_slot_check,
         "redundant_copper": checker.check_redundant_copper,
         "diffpair_clearance_intra": checker.check_diffpair_clearance_intra,
