@@ -57,8 +57,8 @@ at the pinned commit. "Clean" = 0 DRC errors and 0 open items on the saved board
 
 By the raw INDEX scores, 11 of 21 runs came back literally clean (0 DRC, 0
 open): all five macropad runs, both H4E2 keypad runs,
-the M.2 PCIe adapter (0:22, $6.93 — the cheapest run), and all three ESP32-P4
-RedBoard runs (0 DRC, 0 open, including place+route in 4:44). That raw count
+the M.2 PCIe adapter ($6.93 — the cheapest run), and all three ESP32-P4
+RedBoard runs. That raw count
 mixes tooling conditions — none of it was "unaided" in a strong sense: five of
 the eleven ran with `bt` (a macropad, the M.2 adapter, all three RedBoards),
 one with the KiCad MCP server, and five with no tools given, where the agents
@@ -66,9 +66,10 @@ wrote their own scripts (on H4E2, their own A* router). Our raw bar is also
 stricter than the study's own: the write-up defines "finished" as 0 DRC errors
 that weren't already in the input and nothing unconnected, and by that
 definition **16 of 21 runs finished** — the raw-clean eleven plus both Arduino
-Mega runs, the Glasgow route-only run, and both CM4 NAS runs. None of the
-finished runs needed exotic planning — the agents fanned out, routed short
-nets first, poured, and finished inside 1–3 hours of wall time.
+Mega runs, the Glasgow route-only run, and both CM4 NAS runs. For those 16 finished runs,
+the pinned [run index](https://github.com/PCBJam/blind-pcb-runs/blob/b5a047f3d8e7963bca46da485b05c6a7041d9cfb/runs/INDEX.md)
+records wall times from 22 minutes for the M.2 adapter to 4 hours 44 minutes
+for RedBoard placement and routing.
 
 The CM4 NVMe NAS is what kills the "only small boards finish" reading, and it
 was the study's real test: a 298-footprint, 4-layer Raspberry Pi CM4 carrier —
