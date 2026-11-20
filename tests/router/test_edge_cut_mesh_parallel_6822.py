@@ -78,13 +78,22 @@ def _window_edges(router, window: str):
 
 
 def _assert_window_clearance(routes: list[Route], edges, required_centreline) -> None:
-    """Every trace centreline keeps ``required_centreline(seg)`` from the window."""
+    """Every trace centreline keeps ``required_centreline(seg)`` from the window.
+
+    The tolerance is the kernel's shared clearance slack -- the router's
+    own writer margin (100 nm, deliberately narrower than the checker's
+    #9619 clearance band), not a private 1e-4 literal: the commit gates
+    legitimately accept a route that spends that margin against the floor,
+    so the assertion must not be tighter than the system it checks.
+    """
+    from kicad_tools.router.clearance_kernel import CLEARANCE_EPSILON_MM
+
     for route in routes:
         for seg in route.segments:
             need = required_centreline(seg.width / 2)
             for c, d in edges:
                 dist = _seg_seg((seg.x1, seg.y1), (seg.x2, seg.y2), c, d)
-                assert dist >= need - 1e-4, (
+                assert dist >= need - CLEARANCE_EPSILON_MM, (
                     f"trace ({seg.x1:.3f},{seg.y1:.3f})->({seg.x2:.3f},{seg.y2:.3f}) "
                     f"centreline {dist:.4f} mm from the window, needs {need:.4f}"
                 )
@@ -92,7 +101,7 @@ def _assert_window_clearance(routes: list[Route], edges, required_centreline) ->
             need = required_centreline(via.diameter / 2)
             for (cx, cy), (dx, dy) in edges:
                 dist = _pt_seg(via.x, via.y, cx, cy, dx, dy)
-                assert dist >= need - 1e-4
+                assert dist >= need - CLEARANCE_EPSILON_MM
 
 
 # --- mesh engine ------------------------------------------------------------

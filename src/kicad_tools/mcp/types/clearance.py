@@ -15,7 +15,7 @@ class ClearanceMeasurement:
 
     Attributes:
         from_item: Reference of the first item (e.g., "U1-1", "Track-abc123")
-        from_type: Type of the first item ("pad", "track", "via")
+        from_type: Type of the first item ("pad", "track", "arc", "via")
         to_item: Reference of the second item
         to_type: Type of the second item
         clearance_mm: Edge-to-edge clearance in millimeters

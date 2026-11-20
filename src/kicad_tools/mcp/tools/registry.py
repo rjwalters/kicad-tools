@@ -1589,9 +1589,13 @@ register_tool(
     name="probe_items",
     description=(
         "Check a batch of proposed tracks, arcs and vias against the board "
-        "(clearances, shorts, board edge, trace/via dimensions) without "
-        "writing anything. Reports only findings the batch adds; pre-existing "
-        "board problems never fail a probe. Same rules as kct check."
+        "without writing anything: pairwise clearances and shorts, the "
+        "net-agnostic copper-gap and thin-copper-sliver fab passes, zone "
+        "fills, board edge, trace/via dimensions, net-class clearances, via "
+        "placement, THT-to-SMD pad spacing. The copper-gap pass is "
+        "net-agnostic: a same-net parallel track can fail it. Reports only "
+        "findings the batch adds; pre-existing board problems never fail a "
+        "probe. Same rules as kct check."
     ),
     parameters=_make_params(
         properties={
@@ -1633,7 +1637,15 @@ register_tool(
         "then write them to the board only when every item passes. The write "
         "is atomic, the previous bytes are backed up (default <pcb>.kicad_pcb.bak), "
         "and a board that changed on disk since it was read is refused with "
-        "nothing written."
+        "nothing written. Items whose dedupe key is already on the board "
+        "(segments: net, layer, unordered endpoints and width; vias: net, "
+        "position and layers -- size and drill are outside the key) are "
+        "skipped by dedupe and reported under items_skipped_as_duplicate, "
+        "not items_written. A skipped via counts as a duplicate if any via "
+        "sharing its key has the requested size and drill. Otherwise it "
+        "is reported under items_skipped_conflicting (conflicting_via_details "
+        "names the existing and requested size/drill). Arcs have no dedupe "
+        "path and are appended on every successful apply."
     ),
     parameters=_make_params(
         properties={

@@ -223,3 +223,99 @@ def test_noncardinal_physical_overlap_and_mirrored_clearance(tmp_path, angle, ot
         assert (result.min_clearance_mm < 0) is physical
         if not physical:
             assert result.min_clearance_mm > 0.2
+
+
+# ---------------------------------------------------------------------------
+# Authored copper arcs (Issue #9684): measure_clearance must see the same arc
+# copper the CLI clearance rule collects (#9673), through the same shared
+# validator element, so the two surfaces cannot disagree at an arc.
+# ---------------------------------------------------------------------------
+
+
+def arc_board(tmp_path, elements):
+    path = tmp_path / "arc_clearance.kicad_pcb"
+    path.write_text(f"""(kicad_pcb (version 20240108) (generator test)
+        (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+        (net 0 "") (net 1 "GND") (net 2 "VCC")
+        {elements})""")
+    return path
+
+
+#: GND half-circle centred (130,135), radius 2 mm, apex (130,137) -- the
+#: reproduction geometry from tests/test_validate_clearance_arcs.py.
+GND_ARC = (
+    "(arc (start 128 135) (mid 130 137) (end 132 135) (width 0.3) "
+    '(layer "B.Cu") (uuid "arc-gnd") (net 1 "GND"))'
+)
+
+#: Distant same-net GND segment: a second GND copper element whose only
+#: effect is making an arc-blind MCP answer look plausible (+9.7 mm).
+GND_FAR_SEGMENT = (
+    "(segment (start 140 136.8) (end 140 137.2) (width 0.3) "
+    '(layer "B.Cu") (net 1 "GND") (uuid "seg-gnd-far"))'
+)
+
+
+def vcc_segment(y1, y2):
+    return (
+        f"(segment (start 130 {y1}) (end 130 {y2}) (width 0.3) "
+        f'(layer "B.Cu") (net 2 "VCC") (uuid "seg-vcc"))'
+    )
+
+
+def _cli_clearance_findings(path):
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate import DRCChecker
+
+    pcb = PCB.load(str(path))
+    checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2, copper_oz=1.0)
+    return checker.check_clearances().violations
+
+
+def test_apex_crossing_arc_short_matches_cli(tmp_path):
+    path = arc_board(tmp_path, GND_ARC + vcc_segment(136.8, 137.2))
+    findings = _cli_clearance_findings(path)
+    assert [v.rule_id for v in findings] == ["clearance_arc_segment"]
+    assert findings[0].actual_value < 0
+
+    result = measure_clearance(str(path), "GND", "VCC", layer="B.Cu")
+    assert result.layer == "B.Cu"
+    assert len(result.clearances) == 1
+    measurement = result.clearances[0]
+    assert {measurement.from_type, measurement.to_type} == {"arc", "track"}
+    assert {measurement.from_item, measurement.to_item} == {"Arc-arc-gnd", "Track-seg-vcc"}
+    assert result.min_clearance_mm == pytest.approx(findings[0].actual_value, abs=5e-5)
+    assert result.min_clearance_mm < 0
+
+
+def test_distant_gnd_segment_keeps_arc_crossing_as_minimum(tmp_path):
+    path = arc_board(tmp_path, GND_ARC + GND_FAR_SEGMENT + vcc_segment(136.8, 137.2))
+    findings = _cli_clearance_findings(path)
+    assert [v.rule_id for v in findings] == ["clearance_arc_segment"]
+
+    result = measure_clearance(str(path), "GND", "VCC", layer="B.Cu")
+    arc_measurements = [m for m in result.clearances if "arc" in (m.from_type, m.to_type)]
+    assert len(arc_measurements) == 1
+    far = [m for m in result.clearances if "arc" not in (m.from_type, m.to_type)]
+    assert len(far) == 1 and far[0].clearance_mm > 0
+    assert arc_measurements[0].clearance_mm == result.min_clearance_mm
+    assert result.min_clearance_mm == pytest.approx(findings[0].actual_value, abs=5e-5)
+    assert result.min_clearance_mm < 0
+
+
+def test_chord_only_crossing_yields_positive_gap(tmp_path):
+    path = arc_board(tmp_path, GND_ARC + vcc_segment(134.8, 135.2))
+    assert _cli_clearance_findings(path) == []
+
+    result = measure_clearance(str(path), "GND", "VCC", layer="B.Cu")
+    assert len(result.clearances) == 1
+    assert {result.clearances[0].from_type, result.clearances[0].to_type} == {"arc", "track"}
+    assert result.min_clearance_mm > 0
+
+
+def test_nearest_neighbor_finds_arc(tmp_path):
+    path = arc_board(tmp_path, GND_ARC + vcc_segment(136.8, 137.2))
+    result = measure_clearance(str(path), "VCC", layer="B.Cu")
+    assert len(result.clearances) == 1
+    assert {result.clearances[0].from_type, result.clearances[0].to_type} == {"track", "arc"}
+    assert result.min_clearance_mm < 0

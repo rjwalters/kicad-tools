@@ -8,7 +8,7 @@ rounding) do not produce false-positive violations.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -154,6 +154,61 @@ class TestCheckSegmentsEpsilon:
             results,
         )
         assert len(results.errors) > 0
+
+    def test_non_violating_segment_skips_witness_computation(self):
+        """A segment that clears the edge must not pay the witness cost.
+
+        The violation witness (the two O(outline-edges)
+        ``_min_distance_to_outline`` calls) is only needed when a finding is
+        actually raised; computing it for every trace segment cost +42-90%
+        of ``EdgeClearanceRule.check()`` on clean boards (Issue #9715).
+        """
+        seg = self._segment(start=(25.0, 15.0), end=(25.0, 16.0), width=0.2)
+
+        rule = EdgeClearanceRule()
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        with patch.object(
+            EdgeClearanceRule,
+            "_min_distance_to_outline",
+        ) as witness:
+            rule._check_segments(
+                _make_pcb(segments=[seg]),
+                _outline_segments(),
+                _design_rules(copper_edge=0.3),
+                results,
+            )
+        assert witness.call_count == 0
+        assert len(results.errors) == 0
+
+    def test_violating_segment_still_computes_witness(self):
+        """A violating segment still resolves its witness for the finding."""
+        min_clearance = 0.3
+        half_width = 0.1
+        x = 0.25 + half_width  # 0.35
+        seg = self._segment(start=(x, 15.0), end=(x, 16.0), width=half_width * 2)
+
+        rule = EdgeClearanceRule()
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        with patch.object(
+            EdgeClearanceRule,
+            "_min_distance_to_outline",
+            wraps=rule._min_distance_to_outline,
+        ) as witness:
+            rule._check_segments(
+                _make_pcb(segments=[seg]),
+                _outline_segments(),
+                _design_rules(copper_edge=min_clearance),
+                results,
+            )
+        assert witness.call_count == 2
+        assert len(results.errors) == 1
+        # Witness is the endpoint closer to the outline: both sit at the
+        # same distance here, so the start (first) wins the <= tie.
+        assert results.errors[0].location == seg.start
 
 
 # ---------------------------------------------------------------------------
