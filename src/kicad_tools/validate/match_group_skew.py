@@ -19,7 +19,12 @@ This module provides the producer side -- a thin shim that:
 2. Sums per-net length from PCB-side segments + vias (via
    :meth:`MatchGroupTracker.measure_net_from_pcb`, a thin forwarder to
    :meth:`DiffPairLengthTracker.measure_net_from_pcb`) for every
-   declared member of each detected group.
+   declared member of each detected group -- the same summed
+   kicad-cli-semantics figure the router's match-group tuner
+   length-matches against, so producer and tuner share one ruler.
+   When total track length exceeds the selected pad-to-pad path length by
+   more than :data:`OFF_PATH_REPORT_EPSILON_MM` (Issue #9138), a warning
+   names the group, net and difference. The skew uses the summed length.
 3. Builds the ``group_skew_data`` (``max(L) - min(L)`` across the
    group), the detected ``tracker_match_groups`` list, and the per-group
    ``threshold_map`` from each group's net class
@@ -84,6 +89,36 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+# Off-path copper above this is reported alongside the derived skew
+# (Issue #9138 AC 2): a warning naming the group, the net and the
+# amount, so copper that inflates a member's length and can mask
+# real skew is visible instead of silently doing so.  It gates
+# REPORTING only -- never the measurement.  The measurement stays the
+# summed kicad-cli figure for every member (the ruler the router's own
+# match-group tuner length-matches against), because both ways of
+# shedding off-path copper measurably manufacture skew on this repo's
+# boards: a per-member threshold makes one group's ``max - min`` depend
+# on which ruler each member got (the 2.0 mm cliff put ADDR_BUS at
+# 2.030 mm against a 0.500 mm tolerance on the seed-42 re-route), and a
+# uniform path ruler sheds a different per-net slice of the #9117
+# residual.  The epsilon sits above the benign off-path residual this
+# repo's own boards carry and below the smallest measured anomaly, so
+# the warning names anomalies rather than the population: on the
+# committed board 07 artifact, 32 of 38 match-group members carry
+# 0.50-2.08 mm of benign residual (tuner cycle copper -- rejoined
+# length-matching bumps, zero dead-end branches -- plus barrel overlap
+# under pads/vias and in-pad joints, which is not a routing defect),
+# the seed-42 re-route's ADDR_BUS members carry 1.3-3.4 mm of it, and
+# the four genuine anomalies (the DQ7/LDQM branch stubs of #9138's
+# Notes / #9118 and BYTE1's UDQM/DQ13) sit at 6.7-10.25 mm.  4.0 mm
+# clears both benign bands and reports exactly those four.  Deciding
+# which copper is truly defect -- and repairing the tuner's cycle
+# copper and board 07's DQ7/LDQM stubs (#9118) so shedding the real
+# ones cannot fire committed-artifact gates -- is split out of
+# Issue #9138; until it lands, an anomalous member is loud instead of
+# corrected.
+OFF_PATH_REPORT_EPSILON_MM = 4.0
 
 
 def derive_group_skew_data(
@@ -155,6 +190,10 @@ def derive_group_skew_data(
         :meth:`MatchGroupTracker.get_all_skews` for routes recorded
         via :meth:`MatchGroupTracker.record_routes`.  This is the
         property tested in ``tests/test_validate_match_group_skew.py``.
+        A warning reports the difference between total track length and
+        the selected pad-to-pad path length when the difference exceeds
+        :data:`OFF_PATH_REPORT_EPSILON_MM` (Issue #9138). Every member
+        contributes its summed kicad-cli length to the skew figure.
 
         Suffix inference is OFF here (``enable_suffix_inference=False``,
         the detector's default).  Standalone ``kct check`` follows the
@@ -251,6 +290,7 @@ def derive_group_skew_data(
             if not _net_has_geometry(pcb, net_id):
                 any_unrouted = True
                 break
+            _warn_off_path_copper(pcb, net_id, net_names.get(net_id), grp.name)
             length = MatchGroupTracker.measure_net_from_pcb(
                 pcb,
                 net_id,
@@ -273,6 +313,8 @@ def derive_group_skew_data(
                 if not _net_has_geometry(pcb, p_id) or not _net_has_geometry(pcb, n_id):
                     any_unrouted = True
                     break
+                _warn_off_path_copper(pcb, p_id, net_names.get(p_id), grp.name)
+                _warn_off_path_copper(pcb, n_id, net_names.get(n_id), grp.name)
                 l_p = MatchGroupTracker.measure_net_from_pcb(
                     pcb,
                     p_id,
@@ -356,6 +398,37 @@ def resolve_group_tolerance_mm(
             default=DEFAULT_MATCH_GROUP_TOLERANCE_MM,
         )
     return DEFAULT_MATCH_GROUP_TOLERANCE_MM
+
+
+def _warn_off_path_copper(
+    pcb: PCB,
+    net_id: int,
+    net_name: str | None,
+    group_name: str,
+) -> None:
+    """Report a member net's off-path copper when it exceeds the epsilon.
+
+    Compare total track length with the longest of the shortest paths
+    between pad pairs, as selected by TraceLengthAnalyzer.measure_net_path.
+    The difference can include a branch serving a third pad or an alternate
+    route between two pads. Members with no path measurement stay silent.
+    All members retain their summed length for skew calculation.
+    """
+    if not net_name or not callable(getattr(pcb, "get_net_by_name", None)):
+        return
+
+    from kicad_tools.analysis.trace_length import TraceLengthAnalyzer
+
+    measurement = TraceLengthAnalyzer().measure_net_path(pcb, net_name)
+    off_path_mm = measurement.off_path_length_mm
+    if off_path_mm is not None and off_path_mm > OFF_PATH_REPORT_EPSILON_MM:
+        logger.warning(
+            "[match-group-skew] %s: net %s total track length exceeds the selected "
+            "pad-to-pad path length by %.3f mm (off-path copper included in summed length)",
+            group_name,
+            net_name,
+            off_path_mm,
+        )
 
 
 def _net_has_geometry(pcb: PCB, net_id: int) -> bool:

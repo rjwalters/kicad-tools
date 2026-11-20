@@ -31,7 +31,7 @@ const fs = require('node:fs');
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 const calls = [];
 const context = {
-  repo: {owner: 'rjwalters', repo: 'kicad-tools'},
+  repo: {owner: '2AMLogic', repo: 'kicad-tools'},
   issue: {number: 5130},
   payload: {issue: {user: input.author, author_association: 'CONTRIBUTOR'}}
 };
@@ -109,12 +109,12 @@ def test_nonmatching_accounts_keep_external_gate(author):
         "createComment",
     ]
     assert result["calls"][0]["args"] == {
-        "owner": "rjwalters",
+        "owner": "2AMLogic",
         "repo": "kicad-tools",
         "username": author["login"],
     }
     assert result["calls"][1]["args"] == {
-        "owner": "rjwalters",
+        "owner": "2AMLogic",
         "repo": "kicad-tools",
         "issue_number": 5130,
         "labels": ["external"],

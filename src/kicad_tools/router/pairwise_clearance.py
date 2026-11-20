@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, NamedTuple, 
 from kicad_tools.core.geometry import segment_to_segment_distance
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from kicad_tools.creepage.engine import VoltageInterval
     from kicad_tools.router.layers import Layer
     from kicad_tools.router.primitives import Route, Segment, Via
     from kicad_tools.schema.pcb import Footprint
@@ -321,6 +322,16 @@ class PairwiseClearanceTable:
         return max(self.dru, max(self.required_by_pair.values()))
 
 
+def _signed_endpoint(iv: VoltageInterval) -> float:
+    """Collapse a voltage interval to its largest-magnitude endpoint *with sign* (#4411).
+
+    The exact rule :func:`load_signed_voltage_map` applies to every net; shared
+    with :func:`route_understated_pairs` so the understatement detector cannot
+    drift from the loader.
+    """
+    return iv.hi if abs(iv.hi) >= abs(iv.lo) else iv.lo
+
+
 def load_signed_voltage_map(path: str | Path) -> dict[str, float]:
     """Load a ``--voltage-map`` sidecar preserving each net's **sign** (#4867).
 
@@ -339,12 +350,14 @@ def load_signed_voltage_map(path: str | Path) -> dict[str, float]:
     Range support (#4411): each net is parsed as a closed ``[lo, hi]`` interval
     and collapsed to the endpoint of largest magnitude *with its sign* --
     exactly the authored value for a scalar entry (the degenerate interval), and
-    the worst-case excursion for a swinging node.  The router's table is
-    scalar-per-net, so a genuinely swinging pair can still be differenced less
-    conservatively than the census' full
-    ``dv = max(|a.hi - b.lo|, |b.hi - a.lo|)``; consuming intervals end-to-end
-    is #4411 follow-up work, out of scope here.  For an all-non-negative map
-    this returns exactly what ``load_voltage_map`` does.
+    the worst-case excursion for a swinging node.  The collapse is kept only for
+    the scalar return contract (provenance/diagnostics); route-time consumers
+    now difference the full intervals end-to-end via
+    :func:`load_voltage_intervals` + ``net_intervals=`` (#9602) so a
+    range-bearing map matches the census' ``dv = max(|a.hi - b.lo|,
+    |b.hi - a.lo|)`` -- collapsing first can score a sign-flipping pair's
+    opposite bank at 0 V and drop it from the matrix entirely.  For an
+    all-non-negative map this returns exactly what ``load_voltage_map`` does.
 
     Raises:
         ValueError: If the file is not a JSON object, or any net voltage
@@ -358,7 +371,58 @@ def load_signed_voltage_map(path: str | Path) -> dict[str, float]:
         # ``ValueError`` contract the CLI loaders already catch.
         raise ValueError(f"voltage map must be a JSON object, got {type(raw).__name__}")
     intervals = voltage_map_from_dict(raw)[0]
-    return {name: (iv.hi if abs(iv.hi) >= abs(iv.lo) else iv.lo) for name, iv in intervals.items()}
+    return {name: _signed_endpoint(iv) for name, iv in intervals.items()}
+
+
+def load_voltage_intervals(path: str | Path) -> dict[str, tuple[float, float]]:
+    """Load a ``--voltage-map`` sidecar as per-net closed ``[lo, hi]`` intervals (#9602).
+
+    Counterpart to :func:`load_signed_voltage_map` reading the same file, with
+    the same parse contract (:func:`kicad_tools.creepage.engine.voltage_map_from_dict`
+    -- reserved ``_``-prefixed metadata keys skipped identically).  Where the
+    scalar loader collapses each range to its dominant endpoint, this loader
+    keeps the full interval so the pairwise builders can difference nets
+    end-to-end the way the creepage census does
+    (``dv = max(|a.hi - b.lo|, |b.hi - a.lo|)``).  A scalar entry is the
+    degenerate interval ``(v, v)``; ``/``-stripping of keys is left to the
+    consumer, mirroring :func:`load_signed_voltage_map`.
+
+    Raises:
+        ValueError: If the file is not a JSON object, or any net voltage
+            endpoint is not a finite real number.
+    """
+    from kicad_tools.creepage.engine import voltage_map_from_dict
+
+    raw = json.loads(Path(path).read_text())
+    if not isinstance(raw, dict):
+        # ``voltage_map_from_dict`` raises ``TypeError`` for a non-dict; keep the
+        # ``ValueError`` contract the CLI loaders already catch.
+        raise ValueError(f"voltage map must be a JSON object, got {type(raw).__name__}")
+    intervals = voltage_map_from_dict(raw)[0]
+    return {name: (iv.lo, iv.hi) for name, iv in intervals.items()}
+
+
+def load_edge_voltage(path: str | Path) -> float:
+    """Load the reserved ``_edge_voltage`` reference potential of a sidecar (#9685).
+
+    Counterpart to :func:`load_signed_voltage_map` reading the same file through
+    the same parse contract (:func:`kicad_tools.creepage.engine.voltage_map_from_dict`),
+    which is where the ``0.0`` V default and the scalar-only rule live -- so the
+    router and the census cannot disagree about the board-edge / earth reference
+    a copper-to-Edge.Cuts pair is differenced against.
+
+    Raises:
+        ValueError: If the file is not a JSON object or ``_edge_voltage`` is not
+            a finite real scalar.
+    """
+    from kicad_tools.creepage.engine import voltage_map_from_dict
+
+    raw = json.loads(Path(path).read_text())
+    if not isinstance(raw, dict):
+        # ``voltage_map_from_dict`` raises ``TypeError`` for a non-dict; keep the
+        # ``ValueError`` contract the CLI loaders already catch.
+        raise ValueError(f"voltage map must be a JSON object, got {type(raw).__name__}")
+    return voltage_map_from_dict(raw)[1]
 
 
 def load_pair_bounds(path: str | Path) -> dict[frozenset[str], tuple[float, str]]:
@@ -378,6 +442,58 @@ def load_pair_bounds(path: str | Path) -> dict[frozenset[str], tuple[float, str]
     return pair_bounds_from_dict(raw)
 
 
+def route_understated_pairs(
+    data: Mapping[str, Any],
+    *,
+    eps: float = 1e-9,
+) -> dict[frozenset[str], tuple[float, float]]:
+    """Pairs a *range-bearing* voltage map understates at route time (#4411, #9582).
+
+    :func:`load_signed_voltage_map` -- what ``kct route`` / ``kct pcb`` read a
+    ``--voltage-map`` sidecar with -- collapses each net's ``[lo, hi]`` interval
+    to its largest-magnitude endpoint (:func:`_signed_endpoint`).  On a map
+    carrying ranges (notably a ``kct voltage-map-merge`` envelope, #9582) a
+    sign-flipping net and its opposite bank can collapse to the *same* endpoint:
+    the pair's route-time |dV| then scores **below** the interval-aware census
+    value -- down to 0 V, dropping the pair out of the route widening matrix
+    entirely (the #4867 failure mode).
+
+    Args:
+        data: a raw voltage-map dict as decoded from the JSON sidecar (the
+            ``kicad_tools.creepage.engine.voltage_map_from_dict`` /
+            ``pair_bounds_from_dict`` parse contract).
+
+    Returns:
+        ``{frozenset({net_a, net_b}): (census_dv, route_dv)}`` for every pair
+        where the scalar-collapsed route-time |dV| falls short of the
+        interval-aware census worst case ``max(|a.hi - b.lo|, |b.hi - a.lo|)``
+        (capped by a ``_pair_bounds`` entry, exactly as the census applies it).
+        Nets are normalised; an all-scalar map -- where the collapse is the
+        identity -- yields ``{}``.
+    """
+    from kicad_tools.creepage.engine import pair_bounds_from_dict, voltage_map_from_dict
+
+    # ``voltage_map_from_dict`` keeps as-authored keys while
+    # ``pair_bounds_from_dict`` normalises them (#9608); normalise the interval
+    # keys so the bounds lookup below keys the same nets on either convention.
+    intervals = {_norm_net_key(name): iv for name, iv in voltage_map_from_dict(data)[0].items()}
+    bounds = pair_bounds_from_dict(data)
+    scalars = {name: _signed_endpoint(iv) for name, iv in intervals.items()}
+    out: dict[frozenset[str], tuple[float, float]] = {}
+    names = sorted(scalars)
+    for i, a in enumerate(names):
+        for b in names[i + 1 :]:
+            ia, ib = intervals[a], intervals[b]
+            census_dv = max(abs(ia.hi - ib.lo), abs(ib.hi - ia.lo))
+            bound = bounds.get(frozenset((a, b)))
+            if bound is not None:
+                census_dv = min(census_dv, bound[0])
+            route_dv = abs(scalars[a] - scalars[b])
+            if route_dv < census_dv - eps:
+                out[frozenset((a, b))] = (census_dv, route_dv)
+    return out
+
+
 def build_pairwise_clearance_table(
     net_voltages: Mapping[str, float],
     *,
@@ -387,6 +503,7 @@ def build_pairwise_clearance_table(
     material_group: str = "IIIa",
     hv_threshold: float = 30.0,
     pair_bounds: Mapping[frozenset[str], tuple[float, str]] | None = None,
+    net_intervals: Mapping[str, tuple[float, float]] | None = None,
 ) -> PairwiseClearanceTable:
     """Build a :class:`PairwiseClearanceTable` from a per-net voltage map.
 
@@ -417,6 +534,15 @@ def build_pairwise_clearance_table(
             creepage widening; pairs below it keep only the ``dru`` floor.
         pair_bounds: Optional device-bounded ``|ΔV|`` caps (#8043), see
             :func:`load_pair_bounds`. Only ever lowers a pair's ``|ΔV|``.
+        net_intervals: Optional per-net closed ``[lo, hi]`` intervals as read by
+            :func:`load_voltage_intervals` (#9602). When supplied, a pair's
+            stress is the census' worst-case endpoint combination
+            ``dv = max(|a.hi - b.lo|, |b.hi - a.lo|)`` (then ``_pair_bounds``
+            lowering, then ``hv_threshold``), matching
+            ``kct creepage`` on range-bearing maps. Nets absent from the mapping
+            stay degenerate ``(v, v)`` intervals, so a scalar-only map produces
+            byte-identical ``required_by_pair``. ``None`` (default) keeps the
+            scalar differencing of earlier releases.
 
     Returns:
         A frozen :class:`PairwiseClearanceTable`.
@@ -436,6 +562,11 @@ def build_pairwise_clearance_table(
     # both search-time avoidance and the post-route audit.  An all-non-negative
     # map is unaffected (``abs`` was the identity on it).
     normalised = {_norm_net_key(name): float(v) for name, v in net_voltages.items()}
+    normalised_intervals: dict[str, tuple[float, float]] | None = None
+    if net_intervals is not None:
+        normalised_intervals = {
+            _norm_net_key(name): (float(lo), float(hi)) for name, (lo, hi) in net_intervals.items()
+        }
     required = build_required_by_domain_pair(
         normalised,
         standard_id=standard_id,
@@ -443,6 +574,7 @@ def build_pairwise_clearance_table(
         material_group=material_group,
         hv_threshold=hv_threshold,
         pair_bounds=pair_bounds,
+        domain_intervals=normalised_intervals,
     )
     return PairwiseClearanceTable(
         dru=float(dru),
@@ -591,11 +723,16 @@ def subthreshold_coverage_gap(
     pollution_degree: int = 2,
     material_group: str = "IIIa",
     hv_threshold: float = 30.0,
+    pair_bounds: Mapping[frozenset[str], tuple[float, str]] | None = None,
+    net_intervals: Mapping[str, tuple[float, float]] | None = None,
 ) -> SubthresholdCoverage:
     """Measure what ``hv_threshold`` hides from the pairwise matrix (#4507).
 
     Mirrors :func:`build_pairwise_clearance_table`'s inputs exactly -- same
-    signed differencing (#4867), same standard lookup -- but reports the pairs
+    signed differencing (#4867), same interval differencing when *net_intervals*
+    is supplied (#9602), same ``_pair_bounds`` lowering (#8043, applied BEFORE
+    the threshold test exactly as ``build_required_by_domain_pair`` applies it),
+    same standard lookup -- but reports the pairs
     that fall on the *other* side of the threshold and would still carry a
     requirement above ``dru``.  See :class:`SubthresholdCoverage`.
 
@@ -608,11 +745,21 @@ def subthreshold_coverage_gap(
     skipped) rather than raised: this is a diagnostic, and the fail-loud
     contract belongs to :func:`build_pairwise_clearance_table`, which sees the
     same voltages.
+
+    Like *net_voltages*, *net_intervals* keys are normalised here
+    (:func:`_norm_net_key`), so the raw outputs of
+    :func:`load_signed_voltage_map` / :func:`load_voltage_intervals` may be
+    passed unmodified -- a map keyed ``/A`` matches the same net either way.
     """
     from kicad_tools.creepage.standards import StandardLookupError, get_standard
 
     std = get_standard(standard_id)
     normalised = {_norm_net_key(name): float(v) for name, v in net_voltages.items()}
+    normalised_intervals: dict[str, tuple[float, float]] | None = None
+    if net_intervals is not None:
+        normalised_intervals = {
+            _norm_net_key(name): (float(lo), float(hi)) for name, (lo, hi) in net_intervals.items()
+        }
     ids = sorted(normalised)
     lookup_cache: dict[float, float | None] = {}
 
@@ -623,7 +770,24 @@ def subthreshold_coverage_gap(
     for i in range(len(ids)):
         for j in range(i + 1, len(ids)):
             a, b = ids[i], ids[j]
-            dv = abs(normalised[a] - normalised[b])
+            # Issue #9602: interval-aware ΔV, mirroring
+            # build_required_by_domain_pair's worst-case endpoint combination.
+            iv_a = normalised_intervals.get(a) if normalised_intervals else None
+            iv_b = normalised_intervals.get(b) if normalised_intervals else None
+            if iv_a is not None or iv_b is not None:
+                lo_a, hi_a = iv_a if iv_a is not None else (normalised[a], normalised[a])
+                lo_b, hi_b = iv_b if iv_b is not None else (normalised[b], normalised[b])
+                dv = max(abs(hi_a - lo_b), abs(hi_b - lo_a))
+            else:
+                dv = abs(normalised[a] - normalised[b])
+            # Issue #8043: lower by the device-bounded cap BEFORE the threshold
+            # test, exactly as the matrix builder does -- a pair whose raw
+            # interval span is far above hv_threshold but whose real stress is
+            # device-limited below it lands here instead of silently nowhere.
+            if pair_bounds:
+                bound = pair_bounds.get(frozenset((a, b)))
+                if bound is not None:
+                    dv = min(dv, bound[0])
             if dv <= 0.0 or dv >= hv_threshold:
                 continue
             if dv not in lookup_cache:
@@ -2069,6 +2233,140 @@ def find_pairwise_violations(
                 tolerance=tolerance,
                 collect=out,
             )
+    return out
+
+
+def edge_required_clearances(
+    net_voltages: Mapping[str, float],
+    *,
+    edge_voltage: float,
+    standard_id: str = "iec60664",
+    pollution_degree: int = 2,
+    material_group: str = "IIIa",
+    hv_threshold: float = 30.0,
+    net_intervals: Mapping[str, tuple[float, float]] | None = None,
+) -> dict[str, float]:
+    """Per-net creepage requirement (mm) against the board edge (#9685).
+
+    The census scores one ``net vs <board edge>`` pair per HV net
+    (``creepage/engine.py``, ``BOARD_EDGE_LABEL``), differencing the net's
+    interval against the degenerate ``(_edge_voltage, _edge_voltage)``
+    reference; the router's pairwise model had no counterpart, so
+    ``route --complete --voltage-map`` could commit copper closer to
+    ``Edge.Cuts`` than the map requires and still exit 0.  This builder closes
+    that gap through the SAME delta-V -> creepage step every other pair uses
+    (:func:`kicad_tools.placement.hv_domains.build_required_by_domain_pair` --
+    no forked lookup): the edge enters as a pseudo-domain at
+    ``edge_voltage`` and the resulting edge column is extracted.
+
+    ``_pair_bounds`` caps deliberately do NOT apply: the census never bounds an
+    edge pair (``_pair_requirement(..., edge=True)`` skips the bound), and a
+    device-internal |dV| declaration says nothing about net-to-earth stress.
+
+    The returned values are the raw table lookups, NOT floored at ``dru``: the
+    caller does not know the DRU floor at preload time.  Consumers skip a net
+    whose value is at/below the floor (no widening) exactly as
+    :meth:`PairwiseClearanceTable.required_clearance` does for net pairs.
+
+    Raises:
+        StandardLookupError: If an edge-pair |Delta V| exceeds the highest
+            tabulated row -- fail loud, exactly like the net-pair build.
+    """
+    from kicad_tools.creepage.engine import BOARD_EDGE_LABEL
+    from kicad_tools.placement.hv_domains import build_required_by_domain_pair
+
+    pseudo = dict(net_voltages)
+    pseudo[BOARD_EDGE_LABEL] = float(edge_voltage)
+    intervals: dict[str, tuple[float, float]] | None = None
+    if net_intervals is not None:
+        intervals = dict(net_intervals)
+        intervals[BOARD_EDGE_LABEL] = (float(edge_voltage), float(edge_voltage))
+    required = build_required_by_domain_pair(
+        pseudo,
+        standard_id=standard_id,
+        pollution_degree=pollution_degree,
+        material_group=material_group,
+        hv_threshold=hv_threshold,
+        domain_intervals=intervals,
+    )
+    out: dict[str, float] = {}
+    for (a, b), mm in required.items():
+        if a == BOARD_EDGE_LABEL:
+            out[b] = float(mm)
+        elif b == BOARD_EDGE_LABEL:
+            out[a] = float(mm)
+    return out
+
+
+def board_edge_pairwise_violations(
+    routes: Iterable[Route],
+    edge_required: Mapping[str, float],
+    *,
+    edge_geometry: Any,
+    id_to_name: Mapping[int, str] | None = None,
+    floor: float,
+    tolerance: float = _PASS_TOLERANCE,
+) -> list[PairwiseViolation]:
+    """Scan routed copper against the ``Edge.Cuts`` outline (#9685).
+
+    The board-edge analogue of the ``foreign_pads`` walk in
+    :func:`find_pairwise_violations`: for every route whose net carries an edge
+    requirement above ``floor``, the route's whole copper footprint (fused
+    trace segments on every layer PLUS vias -- the census unions across layers
+    for its ``kind="edge"`` rows) is measured edge-to-edge against
+    ``edge_geometry`` (shapely linework built by
+    :func:`kicad_tools.creepage.engine.board_edge_geometry`, already shifted
+    into this module's sheet-absolute frame by the caller).  One worst-case
+    violation per offending route.
+
+    Two deliberate asymmetries with the census, both in the conservative
+    direction or neutral:
+
+    * The measurement is straight-line shapely distance, not the census's
+      bridged surface path -- a slot between the copper and the outer edge can
+      make the census's creepage (detour) LARGER than this distance, so a
+      slot-detour pair the census passes may be flagged here.  It can never
+      let a pair the census fails pass here.
+    * Attach zones never apply: the board edge is not a net terminating on a
+      rated footprint, and the census waives no edge row.
+    """
+    import shapely
+
+    from kicad_tools.creepage.engine import BOARD_EDGE_LABEL
+
+    out: list[PairwiseViolation] = []
+    for route in routes:
+        name = _resolve_net_name(id_to_name, route.net, route.net_name)
+        required = float(edge_required.get(_norm_net_key(name), 0.0))
+        if required <= floor + tolerance:
+            continue
+        fused = _fuse_collinear_runs(route.segments)
+        if not fused and not route.vias:
+            continue
+        copper = _copper_polygons(fused, route.vias)
+        polys = [poly for _, poly, _ in copper.segments] + [poly for poly, _ in copper.vias]
+        if not polys:
+            continue
+        union = shapely.union_all(polys)
+        gap = float(union.distance(edge_geometry))
+        if gap >= required - tolerance:
+            continue
+        line = shapely.shortest_line(union, edge_geometry)
+        if line is None or line.is_empty:
+            gx, gy = union.centroid.x, union.centroid.y
+        else:
+            (x1, y1), (x2, y2) = line.coords[0], line.coords[-1]
+            gx, gy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        out.append(
+            PairwiseViolation(
+                net_a=name,
+                net_b=BOARD_EDGE_LABEL,
+                actual_mm=gap,
+                required_mm=required,
+                x=gx,
+                y=gy,
+            )
+        )
     return out
 
 

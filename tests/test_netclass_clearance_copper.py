@@ -279,3 +279,65 @@ def test_message_prints_four_decimals_so_near_misses_differ(tmp_path: Path, caps
     _, report = _check(_board(tmp_path, STRAIGHT), tmp_path, capsys)
     msg = _hits(report)[0]["message"]
     assert "0.4500mm < netclass 'HV' minimum 0.5000mm" in msg
+
+
+def _margin_board(tmp_path: Path) -> Path:
+    """The #9619-review band-edge board: an authored class 300 nm above the
+    fab floor, copper 600 nm below the class requirement.
+
+    JLCPCB 2-layer floor 0.1270 mm; class ``MARGIN`` 0.1273 mm on N1 only;
+    two 0.2 mm tracks 0.1267 mm apart.  The acceptance band (500 nm) must
+    apply to the *measured gap* once -- not suppress the class-vs-floor
+    comparison, which the pre-fix code did at both gates (a 0.1273 class is
+    within 500 nm of the 0.1270 fab floor, so the rule returned early and
+    this 600 nm shortfall sailed through unflagged).
+    """
+    board = (
+        '(kicad_pcb (version 20241229) (generator "margin_9619")\n'
+        "\t(general (thickness 1.6) (legacy_teardrops no))\n"
+        '\t(paper "A4")\n'
+        '\t(layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))\n'
+        '\t(net 0 "") (net 1 "N1") (net 2 "N2")\n'
+        '\t(segment (start 20 20) (end 60 20) (width 0.2) (layer "F.Cu") (net 1))\n'
+        '\t(segment (start 20 20.3267) (end 60 20.3267) (width 0.2) (layer "F.Cu") (net 2))\n'
+        ")\n"
+    )
+    pcb = tmp_path / "margin.kicad_pcb"
+    pcb.write_text(board)
+    project = wall.project("margin")
+    project["net_settings"]["classes"].append(
+        {
+            "name": "MARGIN",
+            "clearance": 0.1273,
+            "track_width": 0.2,
+            "via_diameter": 0.6,
+            "via_drill": 0.3,
+            "microvia_diameter": 0.3,
+            "microvia_drill": 0.1,
+            "diff_pair_width": 0.2,
+            "diff_pair_gap": 0.25,
+            "diff_pair_via_gap": 0.25,
+            "wire_width": 6,
+            "bus_width": 12,
+            "line_style": 0,
+            "schematic_color": "rgba(0, 0, 0, 0.000)",
+            "pcb_color": "rgba(0, 0, 0, 0.000)",
+            "priority": 0,
+        }
+    )
+    project["net_settings"]["netclass_patterns"] = [{"netclass": "MARGIN", "pattern": "N1"}]
+    pcb.with_suffix(".kicad_pro").write_text(json.dumps(project))
+    return pcb
+
+
+def test_narrow_authored_margin_above_fab_floor_is_enforced(tmp_path: Path, capsys) -> None:
+    """The 500 nm acceptance band must not swallow the class-vs-floor
+    comparison (#9619 review): a class only 300 nm stricter than the fab
+    floor still governs, and copper 600 nm below it is flagged."""
+    code, report = _check(_margin_board(tmp_path), tmp_path, capsys)
+    assert code != 0, "a 0.1267 mm gap under an authored 0.1273 mm class must fail"
+    hits = _hits(report)
+    assert len(hits) == 1
+    assert hits[0]["actual_value"] == pytest.approx(0.1267, abs=1e-6)
+    assert hits[0]["required_value"] == pytest.approx(0.1273, abs=1e-9)
+    assert "'MARGIN'" in hits[0]["message"]

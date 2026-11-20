@@ -1454,7 +1454,20 @@ class DRCChecker:
             a declared net not covered by any resolved path. Empty when no
             path is declared.
         """
-        rule = PathAmpacityRule(specs=self.current_path_specs)
+        rule = PathAmpacityRule(
+            specs=self.current_path_specs,
+            # Issue #9648: a leg reinforcement_incomplete judges fully wired
+            # credits its buttress wire's cross-section here -- the same
+            # board-derived verdict (and sidecar gauge) that rule reports,
+            # so the two rules cannot disagree. Empty without a
+            # reinforcement-eligible declaration, leaving this check at
+            # bare copper width exactly as before.
+            wired_legs=ReinforcementIncompleteRule(
+                specs=self.current_path_specs,
+                wires=self.reinforcement_wires,
+                waived_nets=self.reinforcement_waived_nets,
+            ).fully_wired_legs(self.pcb, self.design_rules),
+        )
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_reinforcement_incomplete(self) -> DRCResults:

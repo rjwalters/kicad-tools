@@ -40,7 +40,7 @@ violations (e.g., a board with overflow=5 but DRC=50), this proxy can be
 replaced by an actual ``check_clearances`` call between attempts.  The
 machinery is in :class:`kicad_tools.validate.DRCChecker`.
 
-Issue: https://github.com/rjwalters/kicad-tools/issues/3352
+Issue: https://github.com/2AMLogic/kicad-tools/issues/3352
 """
 
 from __future__ import annotations

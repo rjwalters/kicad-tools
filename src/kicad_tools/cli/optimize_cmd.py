@@ -933,6 +933,13 @@ Shaped-on-purpose copper (Issue #9640):
     else:
         args._pairwise_voltages = None
         args._pairwise_required = None
+        # Mirror every stash attr ``_preload_voltage_map`` resets (#9685), so
+        # a namespace that skipped the preload can never carry a stale edge
+        # requirement from an earlier call.
+        args._pairwise_intervals = None
+        args._pairwise_pair_bounds = None
+        args._pairwise_edge_voltage = None
+        args._pairwise_edge_required = None
         # Issue #8433: the gate is silently off without a map; say so on
         # stderr (stdout may carry the table or the JSON document).
         if not args.quiet and not as_json:
@@ -1095,6 +1102,25 @@ Shaped-on-purpose copper (Issue #9640):
         {name: [(p[0], p[1]) for p in pts] for name, pts in pad_anchors.items()}
     )
     optimizer.set_attachment_points(attachments)
+
+    # Issue #9524: a rewrite may not break a pad's mask-clean escape (drop a
+    # terminating end inside a same-net opening, or carry a bend/crossing into
+    # any pad's opening).  Zones come from the schema parse, whose coordinates
+    # are board-relative; the segment text this optimizer edits is
+    # sheet-absolute, so add the board origin back.
+    import dataclasses
+
+    from kicad_tools.router.optimizer.geometry import pad_mask_zones_from_pcb
+    from kicad_tools.schema.pcb import PCB as ZonePCB
+
+    zone_pcb = ZonePCB.load(str(pcb_path))
+    origin_x, origin_y = getattr(zone_pcb, "_board_origin", (0.0, 0.0))
+    optimizer.set_pad_zones(
+        [
+            dataclasses.replace(zone, x=zone.x + origin_x, y=zone.y + origin_y)
+            for zone in pad_mask_zones_from_pcb(zone_pcb)
+        ]
+    )
 
     # ``optimize_pcb`` calls ``self.optimize_segments`` per net; route that
     # through the grid-synced wrapper (see its docstring).  optimize_pcb has no
