@@ -22,6 +22,7 @@ from kicad_tools.sexp import SExp
 
 from ..core.board_outline import (
     board_outline_bounds,
+    footprint_outline_closed_shapes,
     footprint_outline_graphics,
     is_degenerate_closed_curve,
     legacy_arc_points,
@@ -1333,6 +1334,24 @@ def _fill_token_is_filled(token: str) -> bool:
     return token.strip().lower() in _FILLED_FILL_TOKENS
 
 
+def _resolves_filled_cutout(graphic_type: str, fill: str, stroke_width: float) -> bool:
+    """KiCad's Edge.Cuts fill resolution for one closed shape.
+
+    The matrix black-box probed on the pinned kicad-cli image (Issue
+    #9690, board-level shapes; Issue #9692 pins it for footprint-local
+    ones): an explicit filled token wins in both directions, and with the
+    token absent only a circle/rect follows the legacy zero-stroke-width
+    default -- a poly is never implicitly filled.  ``stroke_width`` is the
+    shape's *effective* width (``(stroke (width N))`` else the legacy
+    top-level ``(width N)``, 0.0 when neither is authored).
+    """
+    if fill.strip():
+        return _fill_token_is_filled(fill)
+    if graphic_type == "poly":
+        return False
+    return not stroke_width
+
+
 @dataclass
 class FootprintGraphic:
     """Graphic element within a footprint (fp_line, fp_rect, fp_circle, fp_arc, fp_poly).
@@ -1542,13 +1561,13 @@ class BoardGraphic:
 
         Only the Edge.Cuts consumers may read this: the silkscreen default
         for an absent token stays "not filled" (:pyattr:`is_filled`,
-        Issue #5811).
+        Issue #5811).  The resolution itself is shared with the
+        footprint-local closed shapes (Issue #9692) through
+        :func:`_resolves_filled_cutout`.
         """
-        if self.fill.strip():
-            return _fill_token_is_filled(self.fill)
-        if self.graphic_type == "poly":
-            return False
-        return not (self.stroke_width or (self.legacy_width or 0.0))
+        return _resolves_filled_cutout(
+            self.graphic_type, self.fill, self.stroke_width or (self.legacy_width or 0.0)
+        )
 
     @classmethod
     def from_sexp(cls, sexp: SExp, graphic_type: str) -> BoardGraphic:
@@ -5628,12 +5647,14 @@ class PCB:
         return segments
 
     def get_board_outline_filled_regions(self) -> list[FilledOutlineRegion]:
-        """Filled Edge.Cuts shapes as cut-out regions (Issue #9690).
+        """Filled Edge.Cuts shapes as cut-out regions (Issues #9690, #9692).
 
         KiCad treats a filled ``gr_circle`` / ``gr_poly`` / ``gr_rect`` on
         Edge.Cuts as a cut-out region rather than a stroke: copper inside it
-        violates ``copper_edge_clearance`` with actual 0.0 mm.  Whether a
-        shape is filled follows KiCad's own resolution -- see
+        violates ``copper_edge_clearance`` with actual 0.0 mm.  A
+        footprint-local ``fp_circle`` / ``fp_poly`` / ``fp_rect`` is equally
+        a cut-out, in the footprint's (rotated, translated) board frame.
+        Whether a shape is filled follows KiCad's own resolution -- see
         :pyattr:`BoardGraphic.is_filled_cutout` for the probed matrix (in
         short: an explicit filled token always fills; with the token absent
         only a zero-stroke-width circle/rect fills, never a poly).
@@ -5682,6 +5703,27 @@ class PCB:
                 if len(graphic.points) < 3:
                     continue
                 regions.append(FilledOutlineRegion(shape_type="poly", ring=tuple(graphic.points)))
+
+        # Footprint-local closed shapes (Issue #9692): same fill resolution,
+        # geometry already transformed into the sheet-absolute board frame
+        # by the shared core reader.
+        for shape in footprint_outline_closed_shapes(self._sexp):
+            if not _resolves_filled_cutout(shape.shape_type, shape.fill, shape.stroke_width):
+                continue
+            if shape.shape_type == "circle":
+                if shape.center is None or shape.radius is None or shape.radius <= 0.0:
+                    continue
+                regions.append(
+                    FilledOutlineRegion(
+                        shape_type="circle", center=shape.center, radius=shape.radius
+                    )
+                )
+            elif shape.shape_type == "rect":
+                regions.append(FilledOutlineRegion(shape_type="rect", ring=shape.ring))
+            else:  # poly
+                if len(shape.ring) < 3:
+                    continue
+                regions.append(FilledOutlineRegion(shape_type="poly", ring=shape.ring))
 
         # Transform from sheet-absolute to board-relative coordinates, the
         # same shift get_board_outline_segments applies so that regions,

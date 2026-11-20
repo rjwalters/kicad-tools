@@ -444,6 +444,264 @@ class TestEdgeClearanceFilledCutouts:
 
 
 # ---------------------------------------------------------------------------
+# Footprint-local filled cut-outs (Issue #9692)
+# ---------------------------------------------------------------------------
+
+#: Footprint template carrying one closed Edge.Cuts shape (``{fp_shape}``)
+#: placed at ``(at {fpx} {fpy} {fpr})`` -- the fp-local half of the cut-out
+#: feature: KiCad resolves a filled ``fp_circle``/``fp_poly``/``fp_rect``
+#: exactly like its board-level siblings, but the geometry lives in the
+#: footprint's own (rotated, translated) frame.
+FP_BOARD_TMPL = """(kicad_pcb (version 20241229) (generator pcbnew)
+  (general (thickness 1.6)) (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (38 "B.Mask" user) (39 "F.Mask" user))
+  (net 0 "")
+  (net 1 "N1")
+  (setup (pad_to_mask_clearance 0))
+  (gr_rect (start {ox} {oy}) (end {ex} {ey}) (stroke (width 0.05) (type solid)) (fill no) (layer "Edge.Cuts"))
+  (footprint "CUT" (layer "{fplayer}") (at {fpx} {fpy} {fpr})
+    {fp_shape}
+    (pad "1" smd rect (at 0 0) (size 1.0 1.0) (layers "F.Cu" "F.Mask")))
+  {copper}
+)"""
+
+FP_BARE_CIRCLE = '(fp_circle (center 0 0) (end 20 0) (layer "Edge.Cuts"))'
+FP_FILLNO_CIRCLE = (
+    "(fp_circle (center 0 0) (end 20 0) "
+    '(stroke (width 0.05) (type solid)) (fill no) (layer "Edge.Cuts"))'
+)
+#: No fill token but a positive stroke width: KiCad's legacy convention
+#: keeps it stroke-only (circle/rect fill only on a zero stroke width).
+FP_STROKE_CIRCLE = (
+    '(fp_circle (center 0 0) (end 20 0) (stroke (width 0.05) (type solid)) (layer "Edge.Cuts"))'
+)
+#: Pre-KiCad-6 legacy ``(width N)`` token instead of a stroke node.
+FP_LEGACY_WIDTH_CIRCLE = '(fp_circle (center 0 0) (end 20 0) (width 0.05) (layer "Edge.Cuts"))'
+FP_LEGACY_ZERO_CIRCLE = '(fp_circle (center 0 0) (end 20 0) (width 0) (layer "Edge.Cuts"))'
+#: A filled fp_poly in a footprint rotated 90 deg at (60, 50): local
+#: (x, y) -> (60 + y, 50 - x), so the +-20 square lands on 40..80 x 30..70.
+FP_FILLED_POLY = (
+    "(fp_poly (pts (xy -20 -20) (xy 20 -20) (xy 20 20) (xy -20 20)) "
+    '(stroke (width 0.05) (type solid)) (fill yes) (layer "Edge.Cuts"))'
+)
+FP_BARE_POLY = '(fp_poly (pts (xy -20 -20) (xy 20 -20) (xy 20 20) (xy -20 20)) (layer "Edge.Cuts"))'
+#: A bare fp_rect (no stroke/fill token: the legacy filled default) in a
+#: footprint rotated 90 deg at (60, 50): local (-20, -15)-(20, 15) maps to
+#: the board-frame ring (45, 70), (45, 30), (75, 30), (75, 70).
+FP_BARE_RECT = '(fp_rect (start -20 -15) (end 20 15) (layer "Edge.Cuts"))'
+FP_FILLNO_RECT = (
+    "(fp_rect (start -20 -15) (end 20 15) "
+    '(stroke (width 0.05) (type solid)) (fill no) (layer "Edge.Cuts"))'
+)
+
+
+def _write_fp_board(
+    tmp_path: Path,
+    fp_shape: str,
+    copper: str = "",
+    *,
+    origin: tuple[float, float] = (0, 0),
+    fp: tuple[float, float] = (60, 50),
+    rot: float = 0.0,
+    fp_layer: str = "F.Cu",
+) -> PCB:
+    ox, oy = origin
+    path = (
+        tmp_path / f"fpboard_{abs(hash((fp_shape, copper, origin, fp, rot, fp_layer)))}.kicad_pcb"
+    )
+    path.write_text(
+        FP_BOARD_TMPL.format(
+            ox=ox,
+            oy=oy,
+            ex=ox + 100,
+            ey=oy + 100,
+            fp_shape=fp_shape,
+            fpx=fp[0],
+            fpy=fp[1],
+            fpr=rot,
+            fplayer=fp_layer,
+            copper=copper,
+        )
+    )
+    return PCB.load(path)
+
+
+class TestFootprintFilledRegions:
+    """``get_board_outline_filled_regions`` picks up fp-local filled shapes."""
+
+    def test_bare_fp_circle_yields_circle_region(self, tmp_path):
+        pcb = _write_fp_board(tmp_path, FP_BARE_CIRCLE)
+        regions = pcb.get_board_outline_filled_regions()
+        assert len(regions) == 1
+        assert regions[0].shape_type == "circle"
+        assert regions[0].center == pytest.approx((60.0, 50.0))
+        assert regions[0].radius == pytest.approx(20.0)
+
+    def test_fillno_fp_circle_yields_no_region(self, tmp_path):
+        assert _write_fp_board(tmp_path, FP_FILLNO_CIRCLE).get_board_outline_filled_regions() == []
+
+    def test_stroked_fp_circle_without_token_yields_no_region(self, tmp_path):
+        assert _write_fp_board(tmp_path, FP_STROKE_CIRCLE).get_board_outline_filled_regions() == []
+
+    def test_legacy_width_fp_circle_yields_no_region(self, tmp_path):
+        assert (
+            _write_fp_board(tmp_path, FP_LEGACY_WIDTH_CIRCLE).get_board_outline_filled_regions()
+            == []
+        )
+
+    def test_legacy_zero_width_fp_circle_yields_region(self, tmp_path):
+        regions = _write_fp_board(
+            tmp_path, FP_LEGACY_ZERO_CIRCLE
+        ).get_board_outline_filled_regions()
+        assert len(regions) == 1
+        assert regions[0].shape_type == "circle"
+
+    def test_filled_fp_poly_rotated_yields_ring_region(self, tmp_path):
+        pcb = _write_fp_board(tmp_path, FP_FILLED_POLY, rot=90.0)
+        regions = pcb.get_board_outline_filled_regions()
+        assert len(regions) == 1
+        assert regions[0].shape_type == "poly"
+        for got, want in zip(
+            regions[0].ring,
+            [(40.0, 70.0), (40.0, 30.0), (80.0, 30.0), (80.0, 70.0)],
+            strict=True,
+        ):
+            assert got == pytest.approx(want)
+
+    def test_bare_fp_poly_yields_no_region(self, tmp_path):
+        # A poly never defaults to filled, footprint-local or not.
+        assert (
+            _write_fp_board(tmp_path, FP_BARE_POLY, rot=90.0).get_board_outline_filled_regions()
+            == []
+        )
+
+    def test_bare_fp_rect_rotated_yields_ring_region(self, tmp_path):
+        pcb = _write_fp_board(tmp_path, FP_BARE_RECT, rot=90.0)
+        regions = pcb.get_board_outline_filled_regions()
+        assert len(regions) == 1
+        assert regions[0].shape_type == "rect"
+        for got, want in zip(
+            regions[0].ring,
+            [(45.0, 70.0), (45.0, 30.0), (75.0, 30.0), (75.0, 70.0)],
+            strict=True,
+        ):
+            assert got == pytest.approx(want)
+
+    def test_fillno_fp_rect_yields_no_region(self, tmp_path):
+        assert (
+            _write_fp_board(tmp_path, FP_FILLNO_RECT, rot=90.0).get_board_outline_filled_regions()
+            == []
+        )
+
+    def test_rotated_offset_fp_circle_region(self, tmp_path):
+        # Footprint at (60, 50) rotated 30 deg with a local (5, 0) circle
+        # centre: board centre (60 + 5 cos 30, 50 - 5 sin 30), radius 15
+        # (rotation-invariant; the local end (20, 0) is on the ring).
+        shape = '(fp_circle (center 5 0) (end 20 0) (layer "Edge.Cuts"))'
+        pcb = _write_fp_board(tmp_path, shape, rot=30.0)
+        regions = pcb.get_board_outline_filled_regions()
+        assert len(regions) == 1
+        assert regions[0].center == pytest.approx(
+            (60.0 + 5.0 * math.cos(math.radians(30.0)), 50.0 - 5.0 * math.sin(math.radians(30.0)))
+        )
+        assert regions[0].radius == pytest.approx(15.0)
+
+    def test_back_side_fp_circle_not_mirrored(self, tmp_path):
+        # A back-side footprint's local geometry is already mirrored in the
+        # file (Issue #8581): reading applies translation + rotation only,
+        # so local (5, 3) lands at (65, 53) with no extra y mirror.
+        shape = '(fp_circle (center 5 3) (end 20 3) (layer "Edge.Cuts"))'
+        pcb = _write_fp_board(tmp_path, shape, fp_layer="B.Cu")
+        regions = pcb.get_board_outline_filled_regions()
+        assert len(regions) == 1
+        assert regions[0].center == pytest.approx((65.0, 53.0))
+        assert regions[0].radius == pytest.approx(15.0)
+
+    def test_fp_regions_are_board_relative(self, tmp_path):
+        pcb = _write_fp_board(tmp_path, FP_BARE_CIRCLE, origin=(10, 20))
+        assert pcb.board_origin == pytest.approx((10.0, 20.0))
+        regions = pcb.get_board_outline_filled_regions()
+        assert regions[0].center == pytest.approx((50.0, 30.0))
+
+    def test_board_and_footprint_regions_coexist(self, tmp_path):
+        # A board-level cut-out plus an fp-local one: two distinct regions,
+        # nothing double-counted.
+        path = tmp_path / "both.kicad_pcb"
+        path.write_text(
+            FP_BOARD_TMPL.format(
+                ox=0,
+                oy=0,
+                ex=100,
+                ey=100,
+                fp_shape=FP_BARE_CIRCLE,
+                fpx=60,
+                fpy=50,
+                fpr=0.0,
+                fplayer="F.Cu",
+                copper=BARE_CIRCLE,
+            )
+        )
+        pcb = PCB.load(path)
+        regions = pcb.get_board_outline_filled_regions()
+        assert len(regions) == 2
+        assert all(r.shape_type == "circle" for r in regions)
+
+
+class TestEdgeClearanceFootprintCutouts:
+    """``EdgeClearanceRule`` reports gap 0 inside an fp-local filled shape."""
+
+    def test_deep_interior_track_inside_fp_circle_flagged(self, tmp_path):
+        pcb = _write_fp_board(
+            tmp_path, FP_BARE_CIRCLE, DEEP_INTERIOR_TRACK + "\n  " + FAR_EXTERIOR_TRACK
+        )
+        results = _run_rule(pcb)
+        traces = [v for v in results.errors if v.rule_id == "edge_clearance_trace"]
+        assert len(traces) == 1
+        assert traces[0].actual_value == pytest.approx(0.0)
+        assert traces[0].location[0] == pytest.approx(60.0)
+
+    def test_interior_track_inside_fillno_fp_circle_stays_clean(self, tmp_path):
+        pcb = _write_fp_board(
+            tmp_path, FP_FILLNO_CIRCLE, DEEP_INTERIOR_TRACK + "\n  " + FAR_EXTERIOR_TRACK
+        )
+        results = _run_rule(pcb)
+        assert _rule_ids(results) == []
+
+    def test_pad_inside_fp_cutout_flagged(self, tmp_path):
+        # The CUT footprint's own pad sits at (60, 50), the fp circle centre.
+        pcb = _write_fp_board(tmp_path, FP_BARE_CIRCLE)
+        results = _run_rule(pcb)
+        pads = [v for v in results.errors if v.rule_id.startswith("edge_clearance_pad")]
+        assert len(pads) == 1
+        assert pads[0].actual_value == pytest.approx(0.0)
+
+    def test_interior_track_inside_rotated_fp_poly_flagged(self, tmp_path):
+        pcb = _write_fp_board(
+            tmp_path, FP_FILLED_POLY, DEEP_INTERIOR_TRACK + "\n  " + FAR_EXTERIOR_TRACK, rot=90.0
+        )
+        results = _run_rule(pcb)
+        traces = [v for v in results.errors if v.rule_id == "edge_clearance_trace"]
+        assert len(traces) == 1
+        assert traces[0].actual_value == pytest.approx(0.0)
+
+    def test_interior_track_inside_rotated_fp_rect_flagged(self, tmp_path):
+        pcb = _write_fp_board(
+            tmp_path, FP_BARE_RECT, DEEP_INTERIOR_TRACK + "\n  " + FAR_EXTERIOR_TRACK, rot=90.0
+        )
+        results = _run_rule(pcb)
+        traces = [v for v in results.errors if v.rule_id == "edge_clearance_trace"]
+        assert len(traces) == 1
+        assert traces[0].actual_value == pytest.approx(0.0)
+
+    def test_interior_via_inside_fp_cutout_flagged(self, tmp_path):
+        pcb = _write_fp_board(tmp_path, FP_BARE_CIRCLE, INTERIOR_VIA + "\n  " + EXTERIOR_VIA)
+        results = _run_rule(pcb)
+        vias = [v for v in results.errors if v.rule_id == "edge_clearance_via"]
+        assert len(vias) == 1
+        assert vias[0].actual_value == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
 # Writer audit pin: the repo's gr_rect builder keeps an explicit (fill no)
 # ---------------------------------------------------------------------------
 
