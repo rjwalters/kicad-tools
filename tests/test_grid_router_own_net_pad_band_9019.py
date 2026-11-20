@@ -28,7 +28,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerDefinition, LayerStack, LayerType
 from kicad_tools.router.neck_down import band_safe_width
@@ -36,11 +36,6 @@ from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
 from kicad_tools.router.via_clearance import same_net_segment_pad_gap_acceptable
-
-requires_cpp = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ router backend not available",
-)
 
 EDGE = 0.15  # jlcpcb pad_spacing detection edge (#9016)
 WIDTH = 0.2
@@ -216,7 +211,7 @@ class TestRoutedFixture:
         # it a via.
         assert not guarded.vias
 
-    @requires_cpp
+    @pytest.mark.requires_router_cpp
     def test_python_and_cpp_emit_identical_routes(self) -> None:
         grid, rules, a, b = _fixture(EDGE)
         py_route = Router(grid, rules, diagonal_routing=True).route(a, b)
@@ -228,7 +223,7 @@ class TestRoutedFixture:
         assert not _band_segments(cpp_route, [_pad(6.0, 2.47)])
         assert _signature(cpp_route) == _signature(py_route)
 
-    @requires_cpp
+    @pytest.mark.requires_router_cpp
     def test_cpp_guard_off_without_an_edge(self) -> None:
         grid, rules, a, b = _fixture(None)
         py_route = Router(grid, rules, diagonal_routing=True).route(a, b)
@@ -238,7 +233,7 @@ class TestRoutedFixture:
         assert _signature(cpp_route) == _signature(py_route)
 
 
-@requires_cpp
+@pytest.mark.requires_router_cpp
 class TestStepPredicateParity:
     """Native ``own_net_band_step_ok`` == Python ``_own_net_band_step_ok``."""
 
@@ -312,7 +307,7 @@ class TestRoutedPlanarity:
         # The fix is the exemption, not the gate-off retry: no fallback ran.
         assert router._own_net_band_fallbacks == 0
 
-    @requires_cpp
+    @pytest.mark.requires_router_cpp
     @pytest.mark.parametrize("three_pads", [False, True], ids=["two-pad", "three-pad"])
     def test_guarded_route_keeps_vias_zero_cpp(self, three_pads: bool) -> None:
         grid, rules, a, b, pads = self._fixture(three_pads)
@@ -372,7 +367,7 @@ class TestBandSafeTaperWidths:
         router._convert_path_to_route(self._row_path(), route, a, b)
         _assert_band_safe_taper(route, c)
 
-    @requires_cpp
+    @pytest.mark.requires_router_cpp
     def test_cpp_conversion_keeps_base_width_over_the_pad(self) -> None:
         _grid, rules, a, b, c = self._fixture()
         pitches = {"U1": 0.6}
@@ -498,7 +493,7 @@ class TestBandFallbackRetry:
         assert router._own_net_band_fallbacks == 0
         assert not any("gate suspended" in r.message for r in caplog.records)
 
-    @requires_cpp
+    @pytest.mark.requires_router_cpp
     def test_retry_rescues_a_gate_blocked_net_and_counts_cpp(self, caplog) -> None:
         grid, rules, a, b = self._wall_fixture(EDGE)
         cpp = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
@@ -508,7 +503,7 @@ class TestBandFallbackRetry:
         assert getattr(cpp, "_own_net_band_fallbacks", 0) == 1
         assert any("gate suspended" in r.message for r in caplog.records)
 
-    @requires_cpp
+    @pytest.mark.requires_router_cpp
     def test_no_retry_when_the_gate_never_refused_cpp(self, caplog) -> None:
         grid, rules, a, b = self._walled_target_fixture(EDGE)
         cpp = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
