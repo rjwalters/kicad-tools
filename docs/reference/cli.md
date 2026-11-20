@@ -39,7 +39,7 @@ kct [--help] [--version] [--verbose] [-q] [--units {mm,mils}] <command> [options
 | | `net-status` | Report net connectivity status for a PCB |
 | | `constraints` | Constraint conflict detection and management |
 | | `detect-mistakes` | Detect common PCB design mistakes |
-| **Repair** | `fix-drc` | Automated DRC violation repair (clearance + drill + mask-copper) |
+| **Repair** | `fix-drc` | Automated DRC violation repair (clearance + drill + mask-copper + copper-gap) |
 | | `fix-erc` | Automated ERC violation repair (PWR_FLAG + no-connect) |
 | | `fix-vias` | Fix vias to meet manufacturer specifications |
 | | `fix-silkscreen` | Fix silkscreen line widths to meet manufacturer specs; `--clip-to-pads` also trims silk lines too close to pads; `--clip-to-holes` clips footprint silk lines/polygons off every drilled hole (run after routing) |
@@ -786,7 +786,8 @@ the top-level `verdict` (`ready`|`warning`|`not_ready`) and adds `gate_verdict`
 
 Automated DRC violation repair. By default it repairs clearance violations by
 nudging traces, drill-clearance violations by de-duplicating or sliding vias,
-and mask-to-copper findings when the report carries them. `--only` restricts
+mask-to-copper findings when the report carries them, and same-net
+`physical_copper_gap` slits when the report carries them. `--only` restricts
 the run to a single repair pass:
 
 | `--only` value | Repairs |
@@ -794,15 +795,18 @@ the run to a single repair pass:
 | `clearance` | Copper-clearance violations between tracks, vias and pads (nudge traces) |
 | `drill-clearance` | Hole-to-hole clearance violations (de-duplicate or slide vias) |
 | `mask-copper` | A track entering its own pad's opening off-centre (see below) |
+| `copper-gap` | Same-net `physical_copper_gap` slits: a via beside its own pad, or a track tangent to its own via (see below) |
 
 ```bash
 kct fix-drc board.kicad_pcb --only mask-copper --dry-run
+kct fix-drc board.kicad_pcb --only copper-gap --dry-run
 ```
 
-Without `--drc-report`, the mask-copper pass detects its findings itself by
-running the pure-Python `kct check` on the board. For the other `--only`
-values (and the default set), detection resolves in order: `--drc-report` if
-given, else kicad-cli's DRC if it is installed, else the pure-Python checker.
+Without `--drc-report`, the mask-copper and copper-gap passes detect their
+findings themselves by running the pure-Python `kct check` on the board. For
+the other `--only` values (and the default set), detection resolves in order:
+`--drc-report` if given, else kicad-cli's DRC if it is installed, else the
+pure-Python checker.
 
 `mask-copper` addresses the `same-net own-pad entry` class of the
 `mask_to_copper` check (see the [mask-to-copper guide](../guides/mask-to-copper.md)):
@@ -815,6 +819,20 @@ it is reverted and reported as unrepaired with a reason:
 move exposed a new finding on the moved segment or its pad) or
 `recheck_unavailable` (the re-check could not run — an unverified move is
 never kept).
+
+`copper-gap` addresses the same-net classes of `physical_copper_gap` (the fab
+cannot see nets, so a sub-spacing slit between two shapes of one net still
+fails the board): a via beside its own pad is moved along the pad-centre ray
+until the gap clears the finding's required value (or snapped to the pad
+centre when the profile declares a via-in-pad process), and a track tangent
+to its own via has the via snapped onto the track's centreline so the copper
+fully merges. Different-net gaps, zone fills and pad-pad / track-track pairs
+are never touched and are listed as unrepaired with a reason; a move that
+would crowd foreign copper or drill too close to another hole is declined,
+and same-net track ends anchored at the via move with it. Detection and the
+post-repair re-check use `kct check`'s rules with the stackup's fab-view gap
+bands resolved (kicad-cli has no such rule), and the pass also runs in the
+default set when the report carries such findings.
 
 ---
 

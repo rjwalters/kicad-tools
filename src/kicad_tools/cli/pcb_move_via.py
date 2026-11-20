@@ -210,6 +210,7 @@ def _via_hole_violations(pcb, via, pcb_path: Path) -> Counter:
     from kicad_tools.validate.rules.base import DRC_TOLERANCE
     from kicad_tools.validate.rules.clearance import (
         ClearanceRule,
+        _arc_copper_geom,
         _collect_zone_fills,
         _element_to_shapely_geom,
     )
@@ -223,7 +224,7 @@ def _via_hole_violations(pcb, via, pcb_path: Path) -> Counter:
     hole = Point(*via.position).buffer(via.drill / 2, quad_segs=64)
     me = ItemProps("Via", via.net_name, plated=True)
     me_id = f"via {via.uuid or 'moved'} hole"
-    kinds = {"segment": "Track", "pad": "Pad", "via": "Via"}
+    kinds = {"segment": "Track", "arc": "Track", "pad": "Pad", "via": "Via"}
     fills = _collect_zone_fills(pcb, include_unassigned=True)
 
     def foreign(net: int) -> bool:
@@ -239,6 +240,11 @@ def _via_hole_violations(pcb, via, pcb_path: Path) -> Counter:
             if elem.element_type == "segment":
                 x1, y1, x2, y2, width = elem.geometry
                 geom = LineString(((x1, y1), (x2, y2))).buffer(width / 2, quad_segs=64)
+            elif elem.element_type == "arc":
+                # Issue #9673: the arc's covering chord footprint (the same
+                # copper the pairwise rules measure), labelled "Track" --
+                # KiCad's own Type property counts arcs as Track.
+                geom = _arc_copper_geom(elem)
             else:
                 geom = _element_to_shapely_geom(elem)
             if geom is not None and foreign(elem.net_number):

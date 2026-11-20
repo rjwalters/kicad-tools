@@ -3,7 +3,7 @@
 Covers the emitter (``kicad_tools.creepage.export_rules``) and the
 ``kct creepage-export-rules`` CLI:
 
-* domain derivation groups nets by voltage magnitude;
+* domain derivation groups nets by signed voltage interval (#9659);
 * pairwise rules contain exactly the above-floor domain pairs with the
   ``build_required_by_domain_pair`` minima; no rules without a voltage map;
 * domain-bridging footprints become ``insideCourtyard`` exclusions on their
@@ -41,10 +41,11 @@ from kicad_tools.creepage.export_rules import (
     build_rule_clauses,
     detect_bridging_footprints,
     domain_name,
+    interval_domain_name,
     merge_dru_block,
     render_dru_block_body,
 )
-from kicad_tools.placement.hv_domains import build_required_by_domain_pair
+from kicad_tools.placement.hv_domains import build_required_by_domain_pair, interval_pair_dv
 
 # ---------------------------------------------------------------------------
 # Board fixtures (minimal-but-real KiCad S-expression boards)
@@ -152,12 +153,25 @@ def test_domain_name_sanitizes_decimal():
     assert domain_name(150) == "kct_150V"
     assert domain_name(3.3) == "kct_3p3V"
     assert domain_name(0) == "kct_0V"
-    # Magnitude-only: a signed potential collapses to its magnitude domain.
-    assert domain_name(-170) == "kct_170V"
+    # Sign-aware (#9659): a negative scalar keeps its sign as ``m`` so
+    # opposite-polarity nets land in distinct domains.
+    assert domain_name(-170) == "kct_m170V"
+    assert domain_name(-3.3) == "kct_m3p3V"
 
 
-def test_build_domains_groups_by_magnitude():
-    net_domains, domain_voltages = build_domains(
+def test_interval_domain_name():
+    # Degenerate intervals keep the legacy scalar names byte-for-byte.
+    assert interval_domain_name(150, 150) == "kct_150V"
+    assert interval_domain_name(0, 0) == "kct_0V"
+    assert interval_domain_name(-170, -170) == "kct_m170V"
+    # Genuine ranges render both endpoints sign-aware.
+    assert interval_domain_name(-150, 150) == "kct_m150Vto150V"
+    assert interval_domain_name(5, 150) == "kct_5Vto150V"
+    assert interval_domain_name(-150, -5) == "kct_m150Vtom5V"
+
+
+def test_build_domains_groups_by_interval():
+    net_domains, domain_intervals = build_domains(
         {"AC_LINE": 150, "GND": 0, "3V3": 3.3, "/AC_LINE2": 150},
         ["AC_LINE", "GND", "3V3", "AC_LINE2", "UNMAPPED"],
     )
@@ -168,7 +182,31 @@ def test_build_domains_groups_by_magnitude():
         "3V3": "kct_3p3V",
         "AC_LINE2": "kct_150V",
     }
-    assert domain_voltages == {"kct_150V": 150.0, "kct_0V": 0.0, "kct_3p3V": 3.3}
+    assert domain_intervals == {
+        "kct_150V": (150.0, 150.0),
+        "kct_0V": (0.0, 0.0),
+        "kct_3p3V": (3.3, 3.3),
+    }
+
+
+def test_build_domains_keys_by_signed_interval():
+    # #9659: opposite-polarity nets and swinging ranges get their own
+    # sign-aware domains instead of collapsing onto one magnitude class.
+    net_domains, domain_intervals = build_domains(
+        {"A": 150.0, "B": -150.0, "LINE": (-150, 150), "F1": (-150, 150)},
+        ["A", "B", "LINE", "F1"],
+    )
+    assert net_domains == {
+        "A": "kct_150V",
+        "B": "kct_m150V",
+        "LINE": "kct_m150Vto150V",
+        "F1": "kct_m150Vto150V",
+    }
+    assert domain_intervals == {
+        "kct_150V": (150.0, 150.0),
+        "kct_m150V": (-150.0, -150.0),
+        "kct_m150Vto150V": (-150.0, 150.0),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +262,114 @@ def test_out_of_table_voltage_fails_loud():
 
     with pytest.raises(StandardLookupError):
         build_rule_clauses({"kct_big": 100000.0, "kct_0V": 0.0}, {}, dru_floor_mm=0.2)
+
+
+def test_out_of_table_interval_dv_fails_loud():
+    # #9659: a range pair whose end-to-end |dV| leaves the table fails loud
+    # exactly like the scalar case -- never silently extrapolated.
+    from kicad_tools.creepage.standards import StandardLookupError
+
+    with pytest.raises(StandardLookupError):
+        build_rule_clauses(
+            {"kct_swing": (-100000.0, 100000.0), "kct_0V": 0.0}, {}, dru_floor_mm=0.2
+        )
+
+
+# ---------------------------------------------------------------------------
+# Unit: signed / interval domains (#9659)
+# ---------------------------------------------------------------------------
+
+
+def test_opposite_polarity_pair_gets_300v_rule():
+    # The issue #9659 probe: +150 V and -150 V are 300 V apart, not equal.
+    net_domains, domain_intervals = build_domains(
+        {"A": 150.0, "B": -150.0, "C": 5.0}, ["A", "B", "C"]
+    )
+    assert net_domains["A"] != net_domains["B"]
+
+    clauses = build_rule_clauses(domain_intervals, {}, dru_floor_mm=0.2)
+    by_name = {c.name: c for c in clauses}
+    # A<->B sized at 300 V: 3.2 mm (IEC 60664-1 basic, PD2, MG IIIa).
+    ab = by_name["kct_creepage_kct_150V_vs_kct_m150V"]
+    assert ab.min_mm == pytest.approx(3.2)
+    assert ab.condition == "A.NetClass == 'kct_150V' && B.NetClass == 'kct_m150V'"
+    # The pre-existing 150 V vs 5 V rule is unchanged.
+    assert by_name["kct_creepage_kct_150V_vs_kct_5V"].min_mm == pytest.approx(1.6)
+    # ... and the negative rail is also held off the 5 V net.
+    assert by_name["kct_creepage_kct_5V_vs_kct_m150V"].min_mm == pytest.approx(1.6)
+
+
+def test_identical_ranges_share_domain_with_self_rule():
+    # #9602 topology: LINE and F1 both swing [-150, +150].  They share ONE
+    # domain (rule count stays O(domains^2)), and the domain holds 300 V
+    # across its own members, so a same-class rule is emitted for it.
+    net_domains, domain_intervals = build_domains(
+        {"LINE": (-150, 150), "F1": (-150, 150)}, ["LINE", "F1"]
+    )
+    assert net_domains == {"LINE": "kct_m150Vto150V", "F1": "kct_m150Vto150V"}
+
+    clauses = build_rule_clauses(domain_intervals, {}, dru_floor_mm=0.2)
+    assert len(clauses) == 1
+    self_rule = clauses[0]
+    assert self_rule.name == "kct_creepage_kct_m150Vto150V_vs_kct_m150Vto150V"
+    assert self_rule.min_mm == pytest.approx(3.2)
+    assert (
+        self_rule.condition == "A.NetClass == 'kct_m150Vto150V' && B.NetClass == 'kct_m150Vto150V'"
+    )
+
+
+def test_scalar_positive_map_keeps_legacy_domains_and_rules():
+    # Regression guard (#9659 AC): an all-positive scalar map keeps its exact
+    # legacy netclass names and rule names -- committed .kicad_pro/.kicad_dru
+    # output for such boards is byte-identical.
+    net_domains, domain_intervals = build_domains(_voltage_map(), list(_voltage_map()))
+    assert sorted(domain_intervals) == ["kct_0V", "kct_150V", "kct_3p3V"]
+    clauses = build_rule_clauses(domain_intervals, {}, dru_floor_mm=0.2)
+    assert {c.name for c in clauses} == {
+        "kct_creepage_kct_0V_vs_kct_150V",
+        "kct_creepage_kct_150V_vs_kct_3p3V",
+    }
+
+
+def test_exported_rules_never_looser_than_interval_census():
+    """Property (#9659 AC): for every net pair, exported >= census requirement.
+
+    The oracle is the interval-aware census model itself: worst-case
+    ``dv = max(|a.hi - b.lo|, |b.hi - a.lo|)`` per net pair (#4411) looked up
+    in the same standard table at basic insulation.
+    """
+    from itertools import combinations
+
+    from kicad_tools.creepage.standards import get_standard
+
+    vmap = {
+        "A": 150.0,  # positive scalar
+        "B": -150.0,  # negative scalar
+        "C": 5.0,  # below hv_threshold
+        "D": (-150.0, 150.0),  # swinging range
+        "E": 0.0,  # earthed
+    }
+    nets = sorted(vmap)
+    plan = build_export(vmap, nets, [], dru_floor_mm=0.2)
+    rule_by_pair = {
+        tuple(r.name[len("kct_creepage_") :].split("_vs_")): r.min_mm for r in plan.rules
+    }
+
+    std = get_standard("iec60664")
+    for a, b in combinations(nets, 2):
+        iv_a, iv_b = (
+            (vmap[a], vmap[a]) if isinstance(vmap[a], float) else vmap[a],
+            (vmap[b], vmap[b]) if isinstance(vmap[b], float) else vmap[b],
+        )
+        dv = interval_pair_dv(iv_a, iv_b)
+        if dv < 30.0:  # hv_threshold gate (same in both engines)
+            continue
+        census_req = std.required_creepage(dv, 2, "IIIa", insulation="basic")[0]
+        pair = tuple(sorted((plan.net_domains[a], plan.net_domains[b])))
+        exported = rule_by_pair.get(pair, plan.dru_floor_mm)
+        assert exported >= census_req - 1e-9, (
+            f"pair {a}<->{b} (dv {dv} V): exported {exported} mm < census {census_req} mm"
+        )
 
 
 # ---------------------------------------------------------------------------
