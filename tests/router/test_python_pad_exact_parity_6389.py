@@ -24,7 +24,6 @@ import random
 import pytest
 
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.grid import pad_segment_edge_clearance
 from kicad_tools.router.io import validate_routes
 from kicad_tools.router.layers import Layer
@@ -180,7 +179,7 @@ def test_python_fallback_routes_on_one_layer_like_cpp():
         pytest.param(
             False,
             id="cpp",
-            marks=pytest.mark.skipif(not is_cpp_available(), reason="native build required"),
+            marks=pytest.mark.requires_router_cpp,
         ),
     ],
 )
@@ -196,7 +195,7 @@ def test_backends_agree_on_the_fixture(force_python):
     assert ys and all(y > ROW_Y for y in ys)
 
 
-@pytest.mark.skipif(not is_cpp_available(), reason="native build required")
+@pytest.mark.requires_router_cpp
 def test_landing_side_parity():
     """Both backends cross ``x = tip + 0.05`` on the same side of the row."""
     sides = []

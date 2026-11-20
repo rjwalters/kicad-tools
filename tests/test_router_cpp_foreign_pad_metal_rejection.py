@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import pytest
 
-from kicad_tools.router.cpp_backend import CppGrid, is_cpp_available, router_cpp
+from kicad_tools.router.cpp_backend import CppGrid, router_cpp
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import Pad
@@ -55,10 +55,7 @@ from kicad_tools.router.rules import DesignRules
 
 # C++ backend is mandatory for these tests -- the bug they regress is
 # C++-only by construction (the Python A* uses Python's own grid).
-requires_cpp = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ router backend not available; run `kct build-native`",
-)
+requires_cpp = pytest.mark.requires_router_cpp
 
 
 def _make_rules(

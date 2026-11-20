@@ -3,21 +3,19 @@
 import pytest
 from shapely.geometry import LineString, Polygon
 
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.fixed_copper import FixedFill, FixedFillObstacles
+from tests.conftest import require_router_cpp
 
 
 @pytest.fixture(autouse=True)
-def optional_native(request):
+def native_rows_require_backend(request):
     params = getattr(getattr(request.node, "callspec", None), "params", {})
-    if (
-        params.get("native")
-        or (
-            params.get("strategy") == "mesh"
-            and request.node.originalname == "test_real_valid_route_avoids_fixed_fill"
-        )
-    ) and not is_cpp_available():
-        pytest.skip("Native routing backend is optional")
+    if params.get("native") or (
+        params.get("strategy") == "mesh"
+        and request.node.originalname == "test_real_valid_route_avoids_fixed_fill"
+    ):
+        # Issue #9705: native rows fail with the build hint, never skip.
+        require_router_cpp()
 
 
 def model():
@@ -55,7 +53,7 @@ def test_via_span_and_diagonal_crossing():
     assert not fills.segment_clear((99, 105), (111, 105), 0, 0.1, 0.2)
 
 
-@pytest.mark.skipif(not is_cpp_available(), reason="Native backend unavailable")
+@pytest.mark.requires_router_cpp
 def test_native_true_geometry_parity():
     from kicad_tools.router.cpp_backend import router_cpp
 
@@ -190,6 +188,7 @@ def test_legacy_segment_fill_and_old_polygon_stroke(tmp_path):
     assert router.grid.fixed_fills.segment_clear((105, 103.59), (109, 103.59), 0, 0, 0.2)
 
 
+@pytest.mark.requires_router_cpp
 def test_bowtie_lobes_and_concave_notch(tmp_path):
     path = write_board(tmp_path, zone([(103, 104), (107, 108), (103, 108), (107, 104)]))
     router, _ = load_board(path)
@@ -197,8 +196,6 @@ def test_bowtie_lobes_and_concave_notch(tmp_path):
     assert not fills.segment_clear((105, 104.5), (105, 104.5), 0, 0, 0)
     assert not fills.segment_clear((105, 107.5), (105, 107.5), 0, 0, 0)
     assert fills.segment_clear((103.2, 106), (103.2, 106), 0, 0, 0)
-    if not is_cpp_available():
-        return
     from kicad_tools.router.cpp_backend import CppGrid
 
     native = CppGrid.from_routing_grid(router.grid)._impl

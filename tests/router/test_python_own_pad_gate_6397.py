@@ -39,10 +39,7 @@ from tests.router.test_pad_exact_validator_parity_6375 import (
     _u2_pads,
 )
 
-requires_cpp = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ router backend not available; run `kct build-native`",
-)
+requires_cpp = pytest.mark.requires_router_cpp
 
 NET = 1
 TARGET = (7.5, 7.5)

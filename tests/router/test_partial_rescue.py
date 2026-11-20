@@ -13,9 +13,12 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from kicad_tools.router.partial_rescue import (
     COMPLETION_PASS_OVERRIDES,
     CompletionResult,
+    ConnectivityReportError,
     RescueConfig,
     UnroutableLink,
     _completion_pass_config,
@@ -269,6 +272,51 @@ def test_partially_connected_signal_nets_bad_json(tmp_path: Path, monkeypatch) -
         lambda *a, **k: _Result(),
     )
     assert partially_connected_signal_nets(pcb) == []
+
+
+def test_partially_connected_signal_nets_error_body_is_unknown(tmp_path, monkeypatch) -> None:
+    """Issue #9620 review: a check that failed with an error-shaped body
+    (``{"error": ...}``, no findings list) is an UNKNOWN count, never zero --
+    strict mode must raise instead of letting an unassessed board pass the
+    promotion gates."""
+    pcb = _write_pcb(tmp_path)
+
+    class _Result:
+        stdout = json.dumps({"error": "check failed"})
+        stderr = ""
+        returncode = 1
+
+    monkeypatch.setattr(
+        "kicad_tools.router.partial_rescue.subprocess.run",
+        lambda *a, **k: _Result(),
+    )
+    with pytest.raises(ConnectivityReportError):
+        partially_connected_signal_nets(pcb, strict=True)
+    # Non-strict callers keep the historical empty-list fallback.
+    assert partially_connected_signal_nets(pcb) == []
+
+
+def test_partially_connected_signal_nets_strict_accepts_valid_report(tmp_path, monkeypatch) -> None:
+    """A well-formed report -- findings list present, connectivity findings
+    making ``kct check`` exit 1 -- is accepted under strict mode (Issue #9620
+    review): unknown means unreadable, not 'found violations'."""
+    pcb = _write_pcb(tmp_path)
+
+    class _Result:
+        stdout = _fake_check_payload()
+        stderr = ""
+        returncode = 1
+
+    monkeypatch.setattr(
+        "kicad_tools.router.partial_rescue.subprocess.run",
+        lambda *a, **k: _Result(),
+    )
+    assert partially_connected_signal_nets(pcb, excluded_nets=frozenset({"GNDD"}), strict=True) == [
+        "SDA"
+    ]
+    assert partially_connected_signal_nets(
+        pcb, excluded_nets=frozenset({"GNDD"}), include_unrouted=True, strict=True
+    ) == ["NRST", "SDA"]
 
 
 def test_build_rescue_command_pins_single_net_recipe(tmp_path: Path) -> None:

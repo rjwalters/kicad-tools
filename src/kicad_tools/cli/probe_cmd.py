@@ -142,19 +142,27 @@ PROBE_CHECK_CATEGORIES: tuple[str, ...] = (
 #: arcs, these categories run on a second check board carrying the arcs as
 #: real ``(arc ...)`` nodes (the write representation), so the probe's
 #: verdict matches the saved board's own ``kct check``; every other
-#: category keeps the covering chord tessellation.
+#: category measures an authored-width chord stand-in at
+#: :data:`_ARC_PROBE_SAGITTA_MM` (Issue #9702 -- previously covering
+#: chords 1 um per side wider than the true arc).
 _PAIRWISE_ARC_CATEGORIES: frozenset[str] = frozenset({"clearance", "netclass_clearance_copper"})
 
-#: Sagitta bound for the check-pass tessellation of proposed arcs, shared
-#: with the pairwise clearance rule's own arc tessellation
+#: Coarse sagitta bound for VALIDATING a proposed arc (it must tessellate
+#: within :meth:`Arc.centerline_points`' edge guard at all) and for the
+#: hostile-geometry fallback of the non-pairwise chord stand-in.  Shared
+#: with the pairwise clearance rule's own covering tessellation
 #: (:data:`kicad_tools.validate.rules.clearance.ARC_COPPER_SAGITTA_MM`,
-#: Issue #9673) so a probed arc and the authored ``(arc ...)`` node the
-#: checker measures agree within one coordinate quantum.  1 um is the
-#: coordinate quantum :mod:`kicad_tools.validate.copper_refs` keys
-#: findings on.
+#: Issue #9673).  The stand-in itself measures at the finer
+#: :data:`_ARC_PROBE_SAGITTA_MM` (Issue #9702).
 from kicad_tools.validate.rules.clearance import (
     ARC_COPPER_SAGITTA_MM as _ARC_TESSELLATION_UM,
 )
+
+#: Sagitta for the chord stand-in the non-pairwise categories measure
+#: (Issue #9702).  The chords carry the AUTHORED width at this bound, so
+#: the stand-in over- or under-covers the true arc by at most the 0.1 um
+#: chord error :mod:`.physical_gap` itself accepts on authored arc nodes.
+_ARC_PROBE_SAGITTA_MM: float = 0.0001
 
 #: Fields every item accepts regardless of its ``type`` (#9618).
 _COMMON_ITEM_FIELDS = frozenset({"type", "net"})
@@ -442,10 +450,23 @@ def _append_for_check(
                 layer=item.layer,
                 net_number=0,
             )
-            points = arc.centerline_points(max_error_mm=_ARC_TESSELLATION_UM)  # already relative
-            check_width = item.width + 2 * _ARC_TESSELLATION_UM  # cover the sagitta (see docstring)
+            # Issue #9702: measure the TRUE arc.  The covering width
+            # (authored + 2x sagitta) treated proposed arcs as 1 um per
+            # side wider than they are, so ``physical_copper_gap`` flagged
+            # gaps at/above the requirement that the saved board's own
+            # check accepts -- the probe/check disagreement this command
+            # exists to prevent.  The fine sagitta matches the 0.1 um
+            # chord error ``physical_gap`` itself tolerates on authored
+            # arc nodes, so the chord stand-in agrees with the saved board
+            # within that band.  A pathological arc that exceeds the
+            # edge guard at the fine bound falls back to the coarse one
+            # (still authored width, never inflated).
+            try:
+                points = arc.centerline_points(max_error_mm=_ARC_PROBE_SAGITTA_MM)
+            except ValueError:
+                points = arc.centerline_points(max_error_mm=_ARC_TESSELLATION_UM)
             for a, b in zip(points, points[1:], strict=False):
-                appended = pcb.add_trace(a, b, width=check_width, layer=item.layer, net=item.net)
+                appended = pcb.add_trace(a, b, width=item.width, layer=item.layer, net=item.net)
                 for seg in appended:
                     descriptors.setdefault(segment_ref(seg, origin), set()).add(item.index)
         else:

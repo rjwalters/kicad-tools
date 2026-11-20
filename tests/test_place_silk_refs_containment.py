@@ -156,10 +156,11 @@ def test_footprint_edge_cuts_cutout_is_supported_not_ignored(tmp_path):
         '(footprint "Cutout" (layer "F.Cu") (at 10 10)'
         ' (fp_rect (start -2 -2) (end 2 2) (layer "Edge.Cuts") (stroke (width .05) (type solid))))'
     )
-    path = _board(tmp_path, _rect(0, 0, 100, 60) + geometry)
+    path = _board(tmp_path, _rect(0, 0, 100, 60) + geometry, position=(10, 10))
     ref = SilkRefPlacer(path).plan().placements[0]
-    assert ref.status in ("placed", "unchanged")
-    assert "footprint-local" not in ref.reason
+    assert ref.status == "moved"
+    material = box(0, 0, 100, 60).difference(box(8, 8, 12, 12))
+    assert material.covers(_envelope(ref))
 
 
 @pytest.mark.parametrize(

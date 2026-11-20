@@ -65,6 +65,9 @@ class GridCppAdapter:
 
     name = "grid_cpp"
     group = 13
+    # Issue #9705: this adapter needs the compiled router extension; rows
+    # FAIL with the build hint when it is missing (conftest.requires_adapter).
+    native_backend = "router_cpp"
     pair_kinds = ALL_PAIR_KINDS
 
     def available(self) -> bool:

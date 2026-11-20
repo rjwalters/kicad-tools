@@ -84,12 +84,9 @@ _EPSILON_MM = 1e-4
 #: (Issue #8628; the value the reporter's post-pass used).
 ASSOCIATION_MARGIN_MM = 0.4
 
-#: Extra spacing (mm) the planner adds to pad/silk clearance because the shared
-#: text box (``_text_bbox_geometry``) under-sizes KiCad's real stroke-font
-#: extents. Measured against ``kicad-cli pcb drc`` on a probe board (10.0.x,
-#: 1 mm / 0.15 mm text beside a 1 mm pad, no clearance): "C22" and "LED4" both
-#: needed 0.225 mm more gap than the box model, independent of text length.
-#: Planner-only; ``kct check`` semantics are unchanged (Issue #8628).
+#: Planner allowance for KiCad DRC's clearance-inflated text extents. Retain
+#: the 0.225 mm margin established by the C22/LED4 pad probes (#8628).
+#: The Gerber measurements in #9515 calibrate ink extents only.
 KICAD_TEXT_EXTENT_SLACK_MM = 0.225
 
 

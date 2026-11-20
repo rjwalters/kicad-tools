@@ -31,6 +31,7 @@ from kicad_tools.router.layers import Layer
 from kicad_tools.router.optimizer.pcb import parse_segments, parse_vias
 from kicad_tools.router.primitives import Route, Segment, Via
 from kicad_tools.router.rules import DesignRules, NetClassRouting
+from tests.conftest import require_router_cpp
 
 BASE = 0.15
 ANALOG = 0.2
@@ -214,10 +215,7 @@ def _min_gap_to_kept_analog(out: Path) -> float:
 def test_route_preserve_existing_spaces_new_copper_at_the_wider_class(tmp_path, capsys, backend):
     """End to end: ``kct route --preserve-existing --net-class-map`` (#8577)."""
     if backend == "cpp":
-        from kicad_tools.router.cpp_backend import is_cpp_available
-
-        if not is_cpp_available():
-            pytest.skip("native build required")
+        require_router_cpp()
     board = _board(tmp_path)
     out = tmp_path / "out.kicad_pcb"
     rc = route_cmd.main(
