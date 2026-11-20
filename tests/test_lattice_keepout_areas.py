@@ -42,9 +42,10 @@ HV_VOLTS = 300.0
 # beyond the 3.2 mm requirement 300 V derives under IEC 60664-1 / PD2 / IIIa.
 # The same 3.2 mm applies from every HV copper feature to Edge.Cuts: the
 # post-route pairwise gate audits the board edge at the mapped voltage
-# (#9685), so the outline must keep >= 3.2 mm + trace half-width (0.05 mm)
-# / pad half-size (0.2 mm) around all HV pads and corridors -- hence the
-# 4 mm margin the (96, 96) .. (134, 120) rect gives the y = 103 / 113 pads.
+# (#9685), so the outline must keep >= 3.2 mm + trace half-width (0.1 mm,
+# i.e. 3.3 mm from trace centreline) / pad half-size (0.2 mm) around all
+# HV pads and corridors -- hence the 4 mm margin the (96, 96) .. (134, 120)
+# rect gives the y = 103 / 113 pads.
 A_LIMIT = 105.8
 B_LIMIT = 110.2
 
@@ -241,13 +242,9 @@ def test_two_domain_keepout_segregation_routes_100pct_and_passes_gate(
     # south (A) / north (B) of the declared corridor limit, with the 0.1 mm
     # half-width margin.
     for x1, y1, x2, y2 in by_net[1]:
-        assert max(y1, y2) <= A_LIMIT - 0.05, (
-            f"bank A segment crosses its guard: {(x1, y1, x2, y2)}"
-        )
+        assert max(y1, y2) <= A_LIMIT - 0.1, f"bank A segment crosses its guard: {(x1, y1, x2, y2)}"
     for x1, y1, x2, y2 in by_net[2]:
-        assert min(y1, y2) >= B_LIMIT + 0.05, (
-            f"bank B segment crosses its guard: {(x1, y1, x2, y2)}"
-        )
+        assert min(y1, y2) >= B_LIMIT + 0.1, f"bank B segment crosses its guard: {(x1, y1, x2, y2)}"
 
 
 def test_pour_void_only_rule_area_leaves_copper_byte_identical(tmp_path: Path, capsys) -> None:

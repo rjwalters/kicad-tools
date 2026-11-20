@@ -13,7 +13,7 @@ import time
 import warnings
 from dataclasses import dataclass, field
 from fractions import Fraction
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -127,6 +127,7 @@ from .failure_analysis import (
 )
 from .grid import RoutingGrid, routed_halo_radius_cells
 from .kelvin import detect_kelvin_topology
+from .layer_advisories import PlaneZoneOutline
 from .layers import Layer, LayerStack
 from .length import LengthTracker, LengthViolation
 from .match_group_length import MatchGroup, MatchGroupTracker
@@ -2039,6 +2040,9 @@ class Autorouter:
         # as ``(key, route, ("REF.PIN", "REF.PIN"))``.  Fixed copper during the
         # negotiation and merged into its output.
         self._lattice_pair_ties: list[tuple[object, Route, tuple[str, str]]] = []
+        # Issue #9636: per-pad start points on each listed net's kept copper
+        # (``--complete``), handed to the lattice pathfinder.
+        self._lattice_kept_anchors: dict[tuple[str, str], list[Any]] = {}
         # Issue #4472 (epic #4465, Phase 2): localized per-link lattice build.
         # When set to a WORLD-coordinate ``(x1, y1, x2, y2)`` box,
         # :meth:`_ensure_lattice_pathfinder` builds the octilinear lattice +
@@ -2186,6 +2190,17 @@ class Autorouter:
         self.placement_preserved_copper: str = ""
         self.placement_preserved_zones: tuple[str, ...] = ()
         self.placement_preserved_arcs: tuple[str, ...] = ()
+        # Issue #9597: pour zones on declared PLANE layers, parsed by the
+        # loader (sheet-absolute outlines).  Drives the route-time foreign
+        # zone cost (marked on the grid there), the post-route crossing
+        # report and the --protect-plane-zones hard refusal below.
+        self.plane_zones: tuple[PlaneZoneOutline, ...] = ()
+        self._plane_zone_source_pcb: str | None = None
+        # Set by load_pcb_for_routing when plane-zone parsing raised; the hard
+        # --protect-plane-zones veto refuses instead of running unprotected.
+        self._plane_zone_load_error: str | None = None
+        self.protect_plane_zones: bool = False
+        self.plane_zone_refusals: list[str] = []
         # Issue #5863: nets the loader dropped from routing because a pad on
         # them carries geometry this router cannot represent, and the pads
         # (id, net, disposition) responsible. Empty on every board whose pads
@@ -3177,6 +3192,248 @@ class Autorouter:
             parts.append(f"{unaccounted} no reason recorded")
         return " [unresolved: " + "; ".join(parts) + "]"
 
+    def _plane_zone_split_veto(self, route: Route, *, exclude_self: bool = False) -> str | None:
+        """Refuse copper that would split a foreign plane zone (#9597).
+
+        With ``--protect-plane-zones`` set on the router by the CLI, this is
+        consulted by :meth:`_mark_route` before any grid marking.  For each
+        plane-zone outline the candidate route crosses (foreign net, its own
+        layer), the #9591 piece counter -- :func:`plane_split.zone_pieces`,
+        the single shared implementation -- runs twice over the board's
+        copper (source PCB plus already-committed routes near the zone),
+        without and with the candidate's segments.  More pad-bearing pieces
+        with the candidate than without means the route would cut the pour
+        in two, and the commit is refused with a reason naming the zone.
+
+        ``exclude_self`` drops ``route`` itself from the committed-copper
+        side, for the post-optimization re-check (the optimized route is
+        already in ``self.routes`` there).
+
+        Returns the refusal reason, or ``None`` when the commit is clean.
+        Purely pad-local copper (intra-IC ties, kelvin bridges, escape
+        stubs) never reaches this gate through its own commit paths.
+        """
+        # Fail closed (#9597): a hard option never silently turns itself off.
+        if self._plane_zone_load_error is not None:
+            return (
+                "plane-zone protection unavailable: could not parse the board's "
+                f"zones ({self._plane_zone_load_error}); refusing the commit "
+                "(--protect-plane-zones)"
+            )
+        outlines = self.plane_zones
+        if not outlines or not route.segments:
+            return None
+        route_layers = {seg.layer.kicad_name for seg in route.segments}
+        candidates = [
+            o for o in outlines if o.layer_name in route_layers and o.net_number != route.net
+        ]
+        if not candidates:
+            return None
+        try:
+            from shapely.affinity import translate  # type: ignore[import-untyped]
+            from shapely.geometry import (  # type: ignore[import-untyped]
+                LineString,
+                Polygon,
+            )
+        except ImportError:
+            return (
+                "plane-zone protection unavailable: shapely is not installed; "
+                "refusing the commit (--protect-plane-zones)"
+            )
+
+        ox, oy = (
+            float(getattr(self.grid, "origin_x", 0.0)),
+            float(getattr(self.grid, "origin_y", 0.0)),
+        )
+
+        # Candidate track items in the schema PCB's board-relative frame.
+        def seg_item(seg: Any) -> Any:
+            from kicad_tools.validate.rules.plane_split import _Item
+
+            return _Item(
+                "track",
+                LineString([(seg.x1 - ox, seg.y1 - oy), (seg.x2 - ox, seg.y2 - oy)]).buffer(
+                    max(seg.width, 0.01) / 2.0
+                ),
+                route.net,
+                route.net_name,
+                f"route:{route.net_name or route.net}",
+            )
+
+        candidate_items = [seg_item(seg) for seg in route.segments]
+
+        zone_meta = self._plane_zone_board_state()
+        if zone_meta is None:
+            return (
+                "plane-zone protection unavailable: the source board could not be "
+                "loaded for the split check; refusing the commit (--protect-plane-zones)"
+            )
+        pcb, pcb_items, resolve = zone_meta
+
+        from shapely.validation import make_valid  # type: ignore[import-untyped]
+
+        from kicad_tools.validate.rules.plane_split import (
+            _keepout_covers,
+            keepout_geometry,
+            zone_pieces,
+        )
+
+        keepouts = [z for z in pcb.zones if getattr(z, "keepout", None) is not None]
+        net_name = route.net_name or f"net {route.net}"
+        for outline in candidates:
+            full_poly = translate(Polygon(outline.polygon), -ox, -oy)
+            if not full_poly.is_valid:
+                full_poly = make_valid(full_poly)
+            if full_poly.is_empty:
+                continue
+            # A zone whose outline repairs to a MultiPolygon / collection is
+            # still protected: every polygonal part is checked.
+            if full_poly.geom_type == "Polygon":
+                parts = [full_poly]
+            else:
+                parts = [
+                    g
+                    for g in getattr(full_poly, "geoms", [])
+                    if g.geom_type == "Polygon" and not g.is_empty
+                ]
+            for board_poly in parts:
+                # Cheap pre-filter: only zones the candidate actually touches.
+                if not any(it.geom.intersects(board_poly) for it in candidate_items):
+                    continue
+                layer_items = self._plane_zone_route_items(
+                    pcb_items.get(outline.layer_name, []),
+                    outline,
+                    board_poly,
+                    ox,
+                    oy,
+                    exclude=route if exclude_self else None,
+                )
+                obstacles = [
+                    g
+                    for g in (
+                        keepout_geometry(k)
+                        for k in keepouts
+                        if _keepout_covers(k, outline.layer_name)
+                    )
+                    if g is not None
+                ]
+                before = zone_pieces(
+                    board_poly, outline.net_number, layer_items, obstacles, outline.clearance
+                )
+                after = zone_pieces(
+                    board_poly,
+                    outline.net_number,
+                    [*layer_items, *candidate_items],
+                    obstacles,
+                    outline.clearance,
+                )
+                if len(after) > len(before):
+                    return (
+                        f"net {net_name}: committing this route would split zone "
+                        f"[{outline.net_name}] on {outline.layer_name} into "
+                        f"{len(after)} pad-bearing pieces (was {len(before)}); "
+                        "refusing the commit (--protect-plane-zones)"
+                    )
+        return None
+
+    def _plane_zone_board_state(self) -> tuple[Any, dict[str, list[Any]], Any] | None:
+        """Lazily load the source PCB and its per-layer copper items (#9597).
+
+        The board document is immutable for the router's lifetime, so both
+        are cached on the instance after the first call.  Items stay in the
+        schema PCB's board-relative frame, exactly as
+        :func:`plane_split.collect_copper_items` produces them.
+        """
+        cached = self.__dict__.get("_plane_zone_board_cache")
+        if cached is not None:
+            return cast(tuple[Any, dict[str, list[Any]], Any], cached)
+        path = self._plane_zone_source_pcb
+        if not path:
+            return None
+        try:
+            from kicad_tools.schema.pcb import PCB
+            from kicad_tools.validate.rules.plane_split import collect_copper_items
+        except ImportError:
+            return None
+        try:
+            pcb = PCB.load(path)
+        except Exception:
+            return None
+        name_to_number = {n.name: n.number for n in pcb.nets.values() if n.name}
+
+        def resolve(number: int, name: str) -> int:
+            if number == 0 and name:
+                return name_to_number.get(name, 0)
+            return number
+
+        copper_layers = [layer.name for layer in pcb.copper_layers] or ["F.Cu", "B.Cu"]
+        cached = (pcb, collect_copper_items(pcb, copper_layers, resolve), resolve)
+        self.__dict__["_plane_zone_board_cache"] = cached
+        return cached
+
+    def _plane_zone_route_items(
+        self,
+        pcb_layer_items: list[Any],
+        outline: Any,
+        board_poly: Any,
+        ox: float,
+        oy: float,
+        exclude: Any | None = None,
+    ) -> list[Any]:
+        """Committed-route copper near ``outline``, in the board frame (#9597).
+
+        Joins the cached PCB items for the zone's layer (already near-free)
+        with this router's committed segments / vias whose extent touches
+        the zone, translated from sheet to board coordinates.  Only
+        near-zone copper is materialised so a large board pays shapely work
+        proportional to the zone, not to the route count.
+        """
+        from shapely.geometry import LineString, Point
+
+        from kicad_tools.validate.rules.plane_split import _Item
+
+        minx, miny, maxx, maxy = board_poly.bounds
+        pad = outline.clearance + 1.0
+        items = list(pcb_layer_items)
+        for other in self.routes:
+            if exclude is not None and other is exclude:
+                continue
+            for seg in other.segments:
+                if seg.layer.kicad_name != outline.layer_name:
+                    continue
+                if (
+                    max(seg.x1 - ox, seg.x2 - ox) < minx - pad
+                    or min(seg.x1 - ox, seg.x2 - ox) > maxx + pad
+                    or max(seg.y1 - oy, seg.y2 - oy) < miny - pad
+                    or min(seg.y1 - oy, seg.y2 - oy) > maxy + pad
+                ):
+                    continue
+                items.append(
+                    _Item(
+                        "track",
+                        LineString([(seg.x1 - ox, seg.y1 - oy), (seg.x2 - ox, seg.y2 - oy)]).buffer(
+                            max(seg.width, 0.01) / 2.0
+                        ),
+                        other.net,
+                        other.net_name,
+                        f"route:{other.net_name or other.net}",
+                    )
+                )
+            for via in other.vias:
+                vx, vy = via.x - ox, via.y - oy
+                if not (minx - pad <= vx <= maxx + pad and miny - pad <= vy <= maxy + pad):
+                    continue
+                items.append(
+                    _Item(
+                        "via",
+                        Point(vx, vy).buffer(max(via.diameter, 0.01) / 2.0),
+                        other.net,
+                        other.net_name,
+                        f"via@({vx:.2f}, {vy:.2f})",
+                    )
+                )
+        return items
+
     def _mark_route(self, route: Route, *, enforce_pad_access: bool = False) -> bool:
         """Mark a route on both Python and C++ grids.
 
@@ -3194,6 +3451,11 @@ class Autorouter:
         invariant is consulted FIRST.  If committing ``route`` would reduce
         another unrouted pad's access set to empty, nothing is marked and this
         returns ``False`` -- the caller must treat the commit as refused.
+
+        Issue #9597: when ``protect_plane_zones`` is set, a route that would
+        split a foreign plane zone into more pad-bearing pieces is refused the
+        same way (nothing marked, ``False`` returned, the refusal recorded on
+        ``plane_zone_refusals`` naming the zone).
 
         Args:
             route: The copper to commit.
@@ -3218,6 +3480,18 @@ class Autorouter:
                 if veto is not None:
                     gate.record(veto)
                     return False
+
+        # Issue #9597: --protect-plane-zones hard refusal.  Checked on every
+        # commit path that runs through this method, BEFORE any marking, so a
+        # refused route leaves both grids untouched; the negotiated / MST
+        # drivers treat the ``False`` return as a failed connection (the
+        # #5891 refusal protocol) and the refusal itself is recorded on
+        # ``plane_zone_refusals`` naming the zone.
+        if self.protect_plane_zones:
+            refusal = self._plane_zone_split_veto(route)
+            if refusal is not None:
+                self.plane_zone_refusals.append(refusal)
+                return False
 
         self.grid.mark_route(route)
         self._mark_route_on_cpp_grid(route)
@@ -5624,6 +5898,8 @@ class Autorouter:
                     frozenset(pc.key for pc in pairs if len(pc.key) == 3 and pc.pair_name in taps)
                     - gateway_offer
                 )
+            if hasattr(pf, "kept_anchors"):
+                pf.kept_anchors = dict(self._lattice_kept_anchors)
             routes, stats_ = pf.route_netset(
                 conns,
                 coupled=pairs,
@@ -5959,6 +6235,7 @@ class Autorouter:
         self._lattice_exempt_pair_reservations(coupled)
 
         connections: list[tuple[object, Pad, Pad, object]] = []
+        self._lattice_kept_anchors = {}
         # Issue #6698: generated same-part equivalent-pin ties (rebuilt on
         # every call -- the #6535 tap-chain retry calls this again).
         tied = self._lattice_plan_pair_ties(reserved)
@@ -6016,8 +6293,26 @@ class Autorouter:
                     [seg for r in kept for seg in r.segments],
                     [via for r in kept for via in r.vias],
                 )
-                for seq, (a, b) in enumerate(island_bridges(pads, labels)):
+                bridges = island_bridges(pads, labels)
+                for seq, (a, b) in enumerate(bridges):
                     connections.append(((net, seq), a, b, net_class))
+                if not bridges:
+                    # Issue #9636 (review): a fully-joined net has no link a
+                    # kept-copper start could serve -- skip the anchor build.
+                    continue
+                # Issue #9636: a link may start from the kept copper already
+                # on its pad instead of re-escaping the pad at class width.
+                from .lattice.own_copper import kept_copper_anchors
+
+                layer_stack = self.layer_stack or LayerStack.two_layer()
+
+                def _layer_index(layer: Any, _ls: Any = layer_stack) -> int | None:
+                    try:
+                        return int(_ls.layer_enum_to_index(layer))
+                    except Exception:
+                        return None
+
+                self._lattice_kept_anchors.update(kept_copper_anchors(pads, kept, _layer_index))
                 continue
             anchor, terminals = _star_topology_pads(pads)
             for seq, other in enumerate(terminals):
@@ -6811,9 +7106,13 @@ class Autorouter:
 
         mst_router = MSTRouter(self.grid, self.router, self.rules, self.net_class_map)
 
-        def mark_route(route: Route):
-            self._mark_route(route)
+        def mark_route(route: Route) -> bool:
+            # Issue #9597: a False return (plane-zone refusal) must keep the
+            # route out of self.routes too -- mst.py honours it (#5891 style).
+            if not self._mark_route(route):
+                return False
             self.routes.append(route)
+            return True
 
         def record_failure(source_pad: Pad, target_pad: Pad):
             """Record a routing failure with detailed diagnostics."""
@@ -11789,8 +12088,10 @@ class Autorouter:
         # for ``failed_net`` afterwards.
         pre_routes = {id(r) for r in self.routes}
 
-        def mark_route(route: Route) -> None:
-            self._mark_route(route)
+        def mark_route(route: Route) -> bool:
+            # Issue #9597: propagate a plane-zone refusal (False) so the
+            # negotiated driver below treats it as a failed connection.
+            return self._mark_route(route)
 
         # Bump the budget counters for every net we're about to displace
         # (and for the failed net) before invoking targeted_ripup, so even
@@ -12244,9 +12545,12 @@ class Autorouter:
             # Intra-IC reduced the pad list, rebuild MST for reduced set
             mst_router = MSTRouter(self.grid, self.router, self.rules, self.net_class_map)
 
-            def mark_route(route: Route):
-                self._mark_route(route)
+            def mark_route(route: Route) -> bool:
+                # Issue #9597: keep refused copper out of self.routes.
+                if not self._mark_route(route):
+                    return False
                 self.routes.append(route)
+                return True
 
             def record_failure(source_pad: Pad, target_pad: Pad):
                 self._record_routing_failure(net, source_pad, target_pad)
@@ -15675,8 +15979,8 @@ class Autorouter:
 
                             if blocking_nets:
                                 # Use targeted rip-up to displace only blocking nets
-                                def mark_route(route: Route) -> None:
-                                    self._mark_route(route)
+                                def mark_route(route: Route) -> bool:
+                                    return self._mark_route(route)
 
                                 success = self._guarded_targeted_ripup(
                                     neg_router,
@@ -15968,8 +16272,8 @@ class Autorouter:
                                 f"    Attempting escape strategies starting from {escape_strategy_index + 1}..."
                             )
 
-                            def mark_route_targeted(route: Route) -> None:
-                                self._mark_route(route)
+                            def mark_route_targeted(route: Route) -> bool:
+                                return self._mark_route(route)
 
                             # Issue #2415: Compute escape budget from remaining time
                             escape_budget = self._escape_budget(
@@ -16639,8 +16943,8 @@ class Autorouter:
                             f"    Attempting escape strategies starting from {escape_strategy_index + 1}..."
                         )
 
-                        def mark_route(route: Route) -> None:
-                            self._mark_route(route)
+                        def mark_route(route: Route) -> bool:
+                            return self._mark_route(route)
 
                         # Issue #2415: Compute escape budget from remaining time
                         escape_budget = self._escape_budget(
@@ -20604,8 +20908,8 @@ class Autorouter:
             congestion_estimator=self._ensure_congestion_estimator(),
         )
 
-        def mark_route(route: Route):
-            self._mark_route(route)
+        def mark_route(route: Route) -> bool:
+            return self._mark_route(route)
 
         def record_failure(source_pad: Pad, target_pad: Pad):
             self._record_routing_failure(net, source_pad, target_pad)
@@ -20763,6 +21067,13 @@ class Autorouter:
         # Issue #6008: the fresh grid has no keepout rule areas yet -- replay
         # them, after the pads so pad metal keeps its own-net ownership.
         self._install_grid_rule_area_keepouts()
+        # Issue #9826: the load path marked plane zones on the grid discarded
+        # above; re-mark them (after pads/keepouts, as on load) so the next
+        # trial still pays ``cost_zone_foreign_plane`` on both backends.
+        # ``add_zone_cells`` mirrors the marks onto the paired CppGrid.
+        from .layer_advisories import remark_plane_zones
+
+        remark_plane_zones(self, self.grid)
         self.routes = []
 
     def _shuffle_within_tiers(self, net_order: list[int], promotion_rate: float = 0.0) -> list[int]:
@@ -27264,6 +27575,11 @@ class Autorouter:
         # Issue #6008: keepout rule areas on the fine grid too (after the pads,
         # so pad metal keeps its own-net ownership).
         self._install_grid_rule_area_keepouts(fine_grid)
+        # Issue #9826: plane zones too -- marked before the router below is
+        # built, so ``CppGrid.from_routing_grid`` copies them to C++.
+        from .layer_advisories import remark_plane_zones
+
+        remark_plane_zones(self, fine_grid)
 
         # Create a fine-grid router
         fine_router = create_hybrid_router(
@@ -27558,8 +27874,8 @@ class Autorouter:
                     congestion_estimator=self._ensure_congestion_estimator(),
                 )
 
-                def mark_route(route: Route) -> None:
-                    self._mark_route(route)
+                def mark_route(route: Route) -> bool:
+                    return self._mark_route(route)
 
                 # Try to route the net
                 new_routes = neg_router.route_net_negotiated(

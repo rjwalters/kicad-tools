@@ -311,6 +311,13 @@ class DesignRules:
 
     # Optional process-specific clearances; None preserves legacy profiles.
     min_silk_to_pad_clearance_mm: float | None = None
+    # Silk-to-drilled-hole clearance (Issue #9797).  ``None`` (the default)
+    # keeps the legacy behaviour: the shared ``SILK_HOLE_CLEARANCE_MM``
+    # overlap threshold of the ``silk_hole_overlap`` rule, which every
+    # hole-clearing tool falls back to.  A profile that publishes a real fab
+    # figure (e.g. the #9421 stackup measurements) sets it so
+    # ``legalize_silk`` clips silk to the fab's value instead.
+    min_silk_to_hole_clearance_mm: float | None = None
     # Two-tier silk-to-pad bands (Issue #8844): error at/below ``danger``,
     # warning at/below ``warning``.  None keeps the single-tier legacy
     # behaviour driven by ``min_silk_to_pad_clearance_mm``.

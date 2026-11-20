@@ -465,6 +465,14 @@ class DesignRules:
     # Zone routing costs
     cost_zone_same_net: float = 0.1  # Low cost - encourage using zone copper
     cost_zone_clearance: float = 2.0  # Cost near zone boundaries
+    # Issue #9597: per-cell added cost for entering a foreign net's zone on a
+    # plane layer the routing net may use (a class's ``allow_plane_layers``
+    # opt-in, or ``--no-reserve-plane-layers``).  A soft cost, never a block:
+    # KiCad pours flow around a legal trace, but a route that slices a plane
+    # into pieces is almost never what the designer wants, so A* pays this per
+    # grid cell inside the zone and prefers an around-path at equal length.
+    # Both backends charge it (the C++ A* reads the same zone-cell marks).
+    cost_zone_foreign_plane: float = 10.0
 
     # Hard layer constraints (Issue #715)
     # When set, only these layers are allowed for routing (blocks all others)

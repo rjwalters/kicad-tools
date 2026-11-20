@@ -14,10 +14,10 @@ path that PR #2586 (Phase 1C) left dormant.  Specifically:
 5. Backward-compatibility: when no diff pair is present, behavior is
    bit-for-bit identical to pre-#2559.
 
-These tests do not depend on the C++ ``.so`` being current -- the
-``CppPathfinder`` instantiation is gated by ``_CPP_AVAILABLE`` and skipped
-gracefully when the binding mismatches the source tree.  The Python-side
-wiring tests run unconditionally.
+The ``CppPathfinder`` cases carry the ``requires_router_cpp`` marker, so
+they fail with the build hint when the C++ router extension is not built
+(Issue #9705) instead of skipping.  The Python-side wiring tests run
+unconditionally.
 """
 
 from __future__ import annotations
@@ -28,7 +28,6 @@ import pytest
 
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.cpp_backend import (
-    _CPP_AVAILABLE,
     CppGrid,
     CppPathfinder,
 )
@@ -118,7 +117,7 @@ class TestPythonPathfinderPartnerResolution:
 # =============================================================================
 
 
-@pytest.mark.skipif(not _CPP_AVAILABLE, reason="C++ router backend unavailable")
+@pytest.mark.requires_router_cpp
 class TestCppPathfinderPartnerResolution:
     """Mirror of the Python tests for ``CppPathfinder``."""
 

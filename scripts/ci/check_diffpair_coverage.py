@@ -250,12 +250,10 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # regeneration remains the authority on the final counts (host-sensitive
 # board).  The C++ mirror ships both fixes as BUILD_VERSION 70.
 # Issue #9140 AC4 (all-boards re-measurement recorded 2026-11-18 at
-# 47aa7bdca): the #9019/#9140 family is INERT outside this fixture --
-# ``same_net_pad_gap_band_edge_mm`` / ``same_net_trace_gap_band_edge_mm``
-# resolve only in boards/06-diffpair-test/generate_design.py (#9019), and
-# every gate in the family returns True before touching copper when an
-# edge is 0 (#9195), so no other board's allowance can move because of
-# it.  This fixture: fresh seed-42 regen + identity gate at 47aa7bdca
+# 47aa7bdca): the coupled checks are off when the band edge is zero
+# (#9195). Board 06 resolves its edges in its in-process recipe. Recipes
+# that call `kct route` can also receive a resolved manufacturer edge
+# (#9017). This fixture: fresh seed-42 regen + identity gate at 47aa7bdca
 # (through #9337's escape-router rotated-pad AABB) -- 13 blocking
 # physical_copper_gap findings (MIPI_CLK+ 11, GND 2), 0 unallowed, 0
 # stale (both sibling via populations drained by #9124/#9208 stay gone),
@@ -271,6 +269,24 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # same-net gap + tht_smd_spacing #9325/#9332, board 04 unaccepted
 # silk_hole_overlap advisories #9097).  CI's regeneration remains the
 # authority on the final counts (host-sensitive board).
+# After the grid gate merged (#9019, PR #9141), scheduled run 44811568469
+# measured 3 physical_copper_gap errors (previous run 44741259243: 13).
+# A native seed-42 regen at 101e5d77d reproduced all three on F.Cu:
+#   * MIPI_CLK+, U4.1: the grid route already contains the 0.1627 mm taper
+#     segment at the pad corner before optimization. The checker measures
+#     a 0.14229 mm slit on the exposed copper. Its centerline is 0.200 mm
+#     from the pad. Both allowed taper extremes (0.1016 and 0.225 mm) leave
+#     air inside the 0.150 mm band, so restoring base width cannot clear it.
+#   * GND, U2.B4 (0.125 mm) and U3.48 (0.100 mm): the signal router skips
+#     GND. Replaying the recipe's pad-aware stitch on the first filled PCB
+#     introduces both 0.2 mm tracks. The gaps survive pour repair and the
+#     later relocation of the via at U3.48.
+# All three are pad-to-track gaps. Both net identities still fire and the
+# PCIE_RX+ and USB2_D- via populations remain at zero. The pinned-image gate
+# also counted 197 mask errors, with 0 unallowed and 0 stale identities.
+# In run 44811568469 boards 00/01 passed and board 07 had only its 54 allowed
+# mask errors. Boards 02-05 remained red (THT/SMD spacing, mask exposure,
+# reviewed drill validation and manufacturer checks, respectively).
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("physical_copper_gap", "GND"): 8962,
     ("physical_copper_gap", "MIPI_CLK+"): 8962,

@@ -55,6 +55,7 @@ Layer Stack Configuration:
 
 import argparse
 import contextlib
+import copy
 import functools
 import glob
 import logging
@@ -2071,6 +2072,18 @@ def _optimize_traces(router: "Autorouter", args: argparse.Namespace, *, quiet: b
     # whose pad-to-pad connectivity regresses can be reverted.
     _ci_snapshot = _connectivity_snapshot(router)
 
+    # Issue #9597: under --protect-plane-zones, snapshot the raw routes too.
+    # The optimizer straightens the per-grid-step staircases into long
+    # chords, which can cut a plane zone the RAW path threaded legally
+    # (e.g. squeezing past a pad halo); a commit-time gate only ever sees
+    # the raw copper, so the optimized result is re-checked below and the
+    # whole optimization reverted when it introduces a split.
+    _pz_snapshot = (
+        copy.deepcopy(router.routes)
+        if getattr(router, "protect_plane_zones", False) and getattr(router, "plane_zones", None)
+        else None
+    )
+
     with spinner("Optimizing traces...", quiet=quiet):
         # Issue #3507: grid-transactional optimize -- each mutated route's old
         # copper is unmarked and the new copper marked so the grid never goes
@@ -2086,6 +2099,37 @@ def _optimize_traces(router: "Autorouter", args: argparse.Namespace, *, quiet: b
         args=args,
         quiet=quiet,
     )
+
+    if _pz_snapshot is not None:
+        _restore_plane_zone_splits_after_optimize(router, _pz_snapshot, quiet=quiet)
+
+
+def _restore_plane_zone_splits_after_optimize(
+    router: "Autorouter", snapshot: "list", *, quiet: bool
+) -> None:
+    """Revert the optimization when it cut a protected plane zone (#9597).
+
+    Runs the same shared piece counter the commit-time gate uses
+    (:meth:`Autorouter._plane_zone_split_veto`, with ``exclude_self`` so the
+    optimized route under test is not also counted as background copper) over
+    every optimized route.  The first refusal restores the pre-optimization
+    routes wholesale via :meth:`Autorouter.restore_route_snapshot` (grids,
+    indexes and pathfinder caches included) and names the zone -- the shipped
+    copper then carries no split the hard option refused.
+    """
+    for route in router.routes:
+        refusal = router._plane_zone_split_veto(route, exclude_self=True)
+        if refusal is None:
+            continue
+        router.plane_zone_refusals.append(refusal)
+        if not quiet:
+            print(
+                "  Plane-zone guard: trace optimization would split a protected "
+                f"zone; keeping unoptimized copper ({refusal})",
+                file=sys.stderr,
+            )
+        router.restore_route_snapshot(snapshot)
+        return
 
 
 def _complete_staircase_pass_applies(args: argparse.Namespace, router: "Autorouter") -> bool:
@@ -12485,6 +12529,42 @@ def _audit_plane_layer_reservation(router: "Autorouter", layer_stack) -> "list":
     return violations
 
 
+def _apply_plane_zone_protection(router: "Autorouter", args) -> None:
+    """Stamp the ``--protect-plane-zones`` opt-in onto the router (#9597).
+
+    Called right after each per-attempt router load, beside the net-class
+    sidecar application, so every escalation rung routes under the same
+    hard-refusal setting.  A strict no-op when the flag is absent (the
+    ``getattr`` fallback matches the argparse default).
+    """
+    router.protect_plane_zones = bool(getattr(args, "protect_plane_zones", False))
+
+
+def _audit_plane_zone_crossings(router: "Autorouter", layer_stack) -> "list":
+    """Post-route audit: report / refuse-name plane-zone crossings (#9597).
+
+    Prints one line per ``(net, zone, layer)`` crossing found in the
+    committed routes ("crosses zone +3.3V on In2.Cu"), and echoes each
+    ``--protect-plane-zones`` refusal (already recorded at commit time)
+    naming the zone.  Advisory only -- stderr, never suppressed by
+    ``--quiet``, exit code unaffected -- mirroring
+    ``_audit_plane_layer_reservation``.  A strict no-op when the board
+    carries no plane-zone outlines.
+
+    Returns the list of :class:`~kicad_tools.router.layer_advisories.PlaneZoneCrossing`
+    found (empty when clean).
+    """
+    from kicad_tools.router.layer_advisories import plane_zone_crossings
+
+    outlines = getattr(router, "plane_zones", None) or ()
+    crossings = plane_zone_crossings(router.routes, outlines)
+    if crossings:
+        print("\n".join(c.message for c in crossings), file=sys.stderr)
+    for refusal in getattr(router, "plane_zone_refusals", None) or ():
+        print(f"WARNING: route refused: {refusal}", file=sys.stderr)
+    return crossings
+
+
 def _resolve_analog_net_names(router: "Autorouter", args) -> set[str]:
     """Resolve the set of analog net names selected by the analog flags (#3171).
 
@@ -13923,6 +14003,8 @@ def route_with_layer_escalation(
 
         # Issue #2996: merge --net-class-map sidecar onto router's map.
         _apply_net_class_map_sidecar(router, args, quiet=quiet)
+        # Issue #9597: stamp the plane-zone hard-refusal opt-in.
+        _apply_plane_zone_protection(router, args)
         # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
         _apply_pairwise_clearance(router, args, quiet=quiet)
         # Issue #6693: name overlapping different-net input pads up front.
@@ -14665,6 +14747,8 @@ def route_with_layer_escalation(
     # Each escalation flow returns before the direct-route audit. Use the
     # selected router's stack, which can differ from the last attempted rung.
     _audit_plane_layer_reservation(final_result.router, final_result.router.layer_stack)
+    # Issue #9597: report plane-zone crossings (and echo hard refusals).
+    _audit_plane_zone_crossings(final_result.router, final_result.router.layer_stack)
 
     # Issue #6376: carry a verified-open regression into ``final_result``
     # before the banner and before ``args._last_layer_result`` is stashed.
@@ -15143,6 +15227,8 @@ def route_with_rule_relaxation(
 
         # Issue #2996: merge --net-class-map sidecar onto router's map.
         _apply_net_class_map_sidecar(router, args, quiet=quiet)
+        # Issue #9597: stamp the plane-zone hard-refusal opt-in.
+        _apply_plane_zone_protection(router, args)
         # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
         _apply_pairwise_clearance(router, args, quiet=quiet)
         # Issue #6693: name overlapping different-net input pads up front.
@@ -15657,6 +15743,8 @@ def route_with_rule_relaxation(
     # Each escalation flow returns before the direct-route audit. Use the
     # selected router's stack, which can differ from the last attempted rung.
     _audit_plane_layer_reservation(final_result.router, final_result.router.layer_stack)
+    # Issue #9597: report plane-zone crossings (and echo hard refusals).
+    _audit_plane_zone_crossings(final_result.router, final_result.router.layer_stack)
 
     # Issue #6376: carry a verified-open regression into ``final_result``
     # before the banner and before ``args._last_layer_result`` is stashed.
@@ -17657,6 +17745,8 @@ def route_with_combined_escalation(
 
             # Issue #2996: merge --net-class-map sidecar onto router's map.
             _apply_net_class_map_sidecar(router, args, quiet=quiet)
+            # Issue #9597: stamp the plane-zone hard-refusal opt-in.
+            _apply_plane_zone_protection(router, args)
             # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
             _apply_pairwise_clearance(router, args, quiet=quiet)
             # Issue #6693: name overlapping different-net input pads up front.
@@ -18210,6 +18300,8 @@ def route_with_combined_escalation(
     # Each escalation flow returns before the direct-route audit. Use the
     # selected router's stack, which can differ from the last attempted rung.
     _audit_plane_layer_reservation(final_result.router, final_result.router.layer_stack)
+    # Issue #9597: report plane-zone crossings (and echo hard refusals).
+    _audit_plane_zone_crossings(final_result.router, final_result.router.layer_stack)
 
     # Issue #6376: carry a verified-open regression into ``final_result``
     # before the banner and before ``args._last_layer_result`` is stashed.
@@ -19880,9 +19972,27 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
         # keeps a geometric reason over a budget one -- the same merge the
         # ``.search_failures.json`` sidecar uses (#7879).
         search_failures = _lattice_search_failures(router)
+        # Issue #9636 (review): the width-tried / width-that-fits note must
+        # state the rules the completion pass actually enforced -- the
+        # router's per-net class map, and the board's own default width and
+        # clearance for a net with no class entry -- not the bare-file
+        # defaults (0.25 mm probe clearance, no width named).
+        classify_kwargs: dict[str, Any] = {}
+        class_map = getattr(router, "net_class_map", None)
+        if isinstance(class_map, dict) and class_map:
+            classify_kwargs["net_class_map"] = dict(class_map)
+        report_rules = getattr(router, "rules", None)
+        board_clearance = getattr(report_rules, "trace_clearance", None)
+        if board_clearance:
+            classify_kwargs["escape_clearance_mm"] = float(board_clearance)
+        board_width = getattr(report_rules, "trace_width", None)
+        if board_width:
+            classify_kwargs["default_trace_width_mm"] = float(board_width)
         diag_by_net = {
             d.net_name: d
-            for d in classify_stuck_nets(pcb_path, search_failures=search_failures).diagnoses
+            for d in classify_stuck_nets(
+                pcb_path, search_failures=search_failures, **classify_kwargs
+            ).diagnoses
         }
     except Exception:
         diag_by_net = {}
@@ -22100,6 +22210,25 @@ def _route_parser() -> argparse.ArgumentParser:
             "class stays off them (Issue #6876)."
         ),
     )
+    # Issue #9597: hard plane-zone split refusal.  The default (off) keeps
+    # foreign plane zones a soft routing cost plus a post-route report;
+    # this flag refuses any commit that would cut a pour into more
+    # pad-bearing pieces than before, naming the zone.
+    parser.add_argument(
+        "--protect-plane-zones",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Refuse (never merely reroute) any route that would split a "
+            "copper zone on a declared PLANE layer into more pad-bearing "
+            "pieces than before the route; the refusal names the zone "
+            "(Issue #9597). Without this flag a route crossing another "
+            "net's plane zone pays a per-cell routing cost and every "
+            "crossing is reported after routing ('crosses zone +3.3V on "
+            "In2.Cu'). A no-op on a stack with no PLANE layers or no "
+            "plane-layer zones."
+        ),
+    )
     # Issue #3154: advisory schematic/PCB drift banner.  When a schematic is
     # auto-discovered (or passed via --schematic) and the component sets have
     # drifted, kct route prints a one-line, non-blocking warning before
@@ -23517,6 +23646,12 @@ def _chain_complete_argv(
         chain_argv.append("--no-reserve-plane-layers")
     if getattr(args, "auto_pour", True) is False:
         chain_argv.append("--no-auto-pour")
+    # Issue #9597: a hard copper constraint -- without it the completion pass
+    # would route with the plane-zone split refusal off and could cut the very
+    # zone the operator asked to protect.  ``--no-protect-plane-zones`` is the
+    # default, so only the opt-in is forwarded.
+    if getattr(args, "protect_plane_zones", False):
+        chain_argv.append("--protect-plane-zones")
     # Issue #8694: the pass runs on the lattice engine and reaches the same
     # _run_match_group_tuning_phase as the outer run, which reads
     # ``args.length_match_groups`` (the ``length_critical`` engage mode).  Without
@@ -25770,6 +25905,8 @@ def _run_main_impl(args, parser, argv) -> int:
 
     # Issue #2996: merge --net-class-map sidecar onto router's map.
     _apply_net_class_map_sidecar(router, args, quiet=quiet)
+    # Issue #9597: stamp the plane-zone hard-refusal opt-in.
+    _apply_plane_zone_protection(router, args)
     # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
     _apply_pairwise_clearance(router, args, quiet=quiet)
     # Issue #6693: name overlapping different-net input pads up front.
@@ -27431,6 +27568,8 @@ def _run_main_impl(args, parser, argv) -> int:
     # a strict no-op when the resolved stack has no PLANE layers.
     if not args.dry_run:
         _audit_plane_layer_reservation(router, layer_stack)
+        # Issue #9597: report plane-zone crossings (and echo hard refusals).
+        _audit_plane_zone_crossings(router, layer_stack)
 
     # Summary
     from kicad_tools.router.completion_verdict import stranded_pour_blocks

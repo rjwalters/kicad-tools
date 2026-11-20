@@ -958,18 +958,19 @@ vcs = "github"
 category = "agent-interface"
 relation = "peer"
 verdict = "watch"
-license = "MIT"
-license_compat = "mit-clean"
+license = "AGPL-3.0"
+license_compat = "copyleft-ideas-only"
 language = "Python"
-stars = 119
-last_push = "2026-10-06"
-last_verified = "2026-10-06"
+stars = 229
+last_push = "2026-11-20"
+last_verified = "2026-11-20"
 summary = """
 an MCP server for KiCad with staged permission profiles: a default of 24 \
 read-only review tools, a `build` profile for controlled edits, and a \
 `release` profile for human-gated manufacturing export. Those stages map \
 onto our sign-off gates. It is candid that its SI/PI/EMC/thermal tools \
-are first-order estimates rather than sign-off.\
+are first-order estimates rather than sign-off. Relicensed from MIT to \
+AGPL-3.0 (seen 2026-11-16). AGPL: ideas only.\
 """
 reeval_trigger = """
 Look at its profile model when we next touch MCP tool permissions or the \

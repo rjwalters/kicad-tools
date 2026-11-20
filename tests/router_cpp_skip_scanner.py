@@ -16,6 +16,22 @@ placement backend expose the same function name, and their skips are
 deliberately out of scope (Issue #9705 "Out of Scope"). The scanner therefore
 resolves, per file, which local names are bound to the *router* probe and
 only flags guards expressed through those names.
+
+Since Issue #9821 the tracked names also include:
+
+* the router backend's module-level ``_CPP_AVAILABLE`` flag, imported from
+  ``kicad_tools.router.cpp_backend`` or ``kicad_tools.router`` (aliases
+  included), or read as ``<module alias>._CPP_AVAILABLE``. The DRC and
+  placement backends' flags of the same name stay out of scope;
+* module-level helper functions whose body imports the router extension
+  (``import kicad_tools.router.router_cpp``, ``from kicad_tools.router import
+  router_cpp``, ``from kicad_tools.router.router_cpp import ...``) or reads a
+  router probe already tracked -- e.g. a local ``def _cpp_available():`` that
+  tries the import -- plus variables assigned from a call to such a helper.
+
+Anything subtler (a helper defined in another module, a probe hidden behind a
+dynamic import) is left to the runtime backstop in ``tests/conftest.py``
+(Issue #9804), which fails any skip whose reason mentions the C++ router.
 """
 
 from __future__ import annotations
@@ -41,6 +57,21 @@ _IMPORT_AS = re.compile(
 )
 _IMPORTORSKIP_CPP_BACKEND = re.compile(
     r"(?P<var>\w+)\s*=\s*pytest\.importorskip\(\s*[\"']kicad_tools\.router\.cpp_backend[\"']"
+)
+# Attributes of the router ``cpp_backend`` module that report availability.
+_MODULE_PROBE_ATTRS = ("is_cpp_available", "_CPP_AVAILABLE")
+_MODULE_LEVEL_DEF = re.compile(r"^(?:async\s+)?def\s+(?P<name>\w+)\s*\(", re.MULTILINE)
+# The router extension imported inside a helper body (Issue #9821).
+_IMPORTS_ROUTER_EXTENSION = re.compile(
+    r"^[ \t]+(?:import\s+kicad_tools\.router\.router_cpp\b"
+    r"|from\s+kicad_tools\.router\.router_cpp\s+import\b"
+    r"|from\s+kicad_tools\.router\s+import\s+(?:\([^)]*\brouter_cpp\b|[^\n#]*\brouter_cpp\b))",
+    re.MULTILINE,
+)
+# Module-level only: a local variable inside some test that happens to call
+# a helper must not turn every later use of that name into a "probe".
+_ASSIGNED_FROM_CALL = re.compile(
+    r"^(?P<var>\w+)\s*=\s*(?:bool\(\s*)?(?P<expr>[\w.]+)\s*\(\s*\)", re.MULTILINE
 )
 _ALIAS_FROM_PROBE = re.compile(
     r"^\s*(?P<var>\w+)\s*=\s*(?:bool\(\s*)?(?P<expr>[\w.]*is_cpp_available)\(\s*\)?", re.MULTILINE
@@ -72,16 +103,18 @@ def router_probe_refs(source: str) -> set[str]:
     (``from kicad_tools.router import is_cpp_available``), module aliases
     (``import kicad_tools.router.cpp_backend as cb`` ->
     ``cb.is_cpp_available()``), ``importorskip``-bound modules and variables
-    assigned from a probe call (``available = is_cpp_available()``). A file
-    that binds only the DRC or placement probe of the same name -- or does
-    not reference the router extension at all -- yields an empty set.
+    assigned from a probe call (``available = is_cpp_available()``). The
+    router backend's ``_CPP_AVAILABLE`` flag is tracked through the same
+    bindings (Issue #9821). A file that binds only the DRC or placement probe
+    of the same name -- or does not reference the router extension at all --
+    yields an empty set.
     """
     refs: set[str] = set()
 
     def add_probe_binding(names: str) -> bool:
         bound = False
         for imported, local in _names_from_import_list(names):
-            if imported == "is_cpp_available":
+            if imported in ("is_cpp_available", "_CPP_AVAILABLE"):
                 refs.add(local)
                 bound = True
         return bound
@@ -93,17 +126,17 @@ def router_probe_refs(source: str) -> set[str]:
         probe_bound |= add_probe_binding(match.group("names"))
         for imported, local in _names_from_import_list(match.group("names")):
             if imported == "cpp_backend":
-                refs.add(f"{local}.is_cpp_available")
+                refs.update(f"{local}.{attr}" for attr in _MODULE_PROBE_ATTRS)
                 probe_bound = True
 
     for match in _IMPORT_AS.finditer(source):
-        refs.add(f"{match.group('alias')}.is_cpp_available")
+        refs.update(f"{match.group('alias')}.{attr}" for attr in _MODULE_PROBE_ATTRS)
         probe_bound = True
     if re.search(r"^\s*import\s+kicad_tools\.router\.cpp_backend\s*$", source, re.MULTILINE):
-        refs.add("kicad_tools.router.cpp_backend.is_cpp_available")
+        refs.update(f"kicad_tools.router.cpp_backend.{attr}" for attr in _MODULE_PROBE_ATTRS)
         probe_bound = True
     for match in _IMPORTORSKIP_CPP_BACKEND.finditer(source):
-        refs.add(f"{match.group('var')}.is_cpp_available")
+        refs.update(f"{match.group('var')}.{attr}" for attr in _MODULE_PROBE_ATTRS)
         probe_bound = True
 
     if probe_bound:
@@ -113,6 +146,54 @@ def router_probe_refs(source: str) -> set[str]:
             if expr in refs or expr.endswith("is_cpp_available") and "is_cpp_available" in refs:
                 refs.add(match.group("var"))
     return refs
+
+
+def _module_level_function_bodies(source: str) -> list[tuple[str, str]]:
+    """``[(name, body), ...]`` for every column-0 ``def`` in *source*."""
+    matches = list(_MODULE_LEVEL_DEF.finditer(source))
+    bodies: list[tuple[str, str]] = []
+    for match in matches:
+        start = match.end()
+        end = len(source)
+        for line in re.finditer(r"^(?=\S)(?!#)[^\n]*", source[start:], re.MULTILINE):
+            if line.start() == 0:
+                continue  # rest of the ``def`` line itself
+            end = start + line.start()
+            break
+        bodies.append((match.group("name"), source[start:end]))
+    return bodies
+
+
+def router_probe_helpers(source: str, refs: set[str] | None = None) -> set[str]:
+    """Module-level helpers (and variables bound from them) probing the router.
+
+    A helper counts when its body imports the router extension -- the
+    ``try: import kicad_tools.router.router_cpp`` / ``except ImportError``
+    shape of ``def _cpp_available()`` -- or reads a router probe in *refs*
+    (defaults to :func:`router_probe_refs`). Helpers calling such helpers are
+    resolved transitively. Issue #9821.
+    """
+    if refs is None:
+        refs = router_probe_refs(source)
+    bodies = _module_level_function_bodies(source)
+    helpers: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        known = refs | helpers
+        for name, body in bodies:
+            if name in helpers:
+                continue
+            if _IMPORTS_ROUTER_EXTENSION.search(body) or any(
+                re.search(rf"(?<![\w.]){re.escape(ref)}\b", body) for ref in known
+            ):
+                helpers.add(name)
+                changed = True
+    if helpers:
+        for match in _ASSIGNED_FROM_CALL.finditer(source):
+            if match.group("expr") in helpers:
+                helpers.add(match.group("var"))
+    return helpers
 
 
 def router_info_refs(source: str) -> set[str]:
@@ -167,13 +248,21 @@ def scan_source(source: str, path: str = "<source>") -> list[Violation]:
 
     * ``pytest.mark.skipif(not is_cpp_available(), ...)`` in any form --
       decorator, ``pytestmark``, ``marks=`` in a parametrization, or an
-      intermediate alias like ``requires_cpp = pytest.mark.skipif(...)``;
+      intermediate alias like ``requires_cpp = pytest.mark.skipif(...)`` --
+      and, since Issue #9804, any other ``skipif`` whose condition reads the
+      router backend's availability through ``get_backend_info()``, and,
+      since Issue #9821, any ``skipif`` reading the router ``_CPP_AVAILABLE``
+      flag or a module-level helper that probes the router extension;
     * ``pytest.importorskip("kicad_tools.router.router_cpp")``;
     * ``pytest.skip(...)`` inside a block guarded by ``not is_cpp_available()``
       (including ``if backend == "cpp" and not is_cpp_available():`` and
-      variables assigned from the probe).
+      variables assigned from the probe);
+    * an unconditional ``pytest.mark.skip`` (decorator, ``pytestmark``,
+      ``marks=`` in a parametrization, or an alias binding) in any module
+      that references the router backend at all (Issue #9804).
     """
     refs = router_probe_refs(source)
+    refs |= router_probe_helpers(source, refs)
     info_refs = router_info_refs(source)
     module_ref = references_router_module(source)
     if not refs and not info_refs and not module_ref and "router_cpp" not in source:
@@ -190,10 +279,15 @@ def scan_source(source: str, path: str = "<source>") -> list[Violation]:
                 return True
         return bool(module_ref and re.search(r"(?<![\w.])router_cpp\b", text))
 
+    def mentions_info_probe(text: str) -> bool:
+        # ``get_backend_info()["available"]`` / ``.get("available")`` reads
+        # the same availability through a different name (Issue #9804).
+        return any(re.search(rf"(?<![\w.]){re.escape(ref)}\s*\(\s*\)", text) for ref in info_refs)
+
     # 1. skipif(...) whose arguments reference the router probe.
     for match in re.finditer(r"skipif\s*\(", source):
         call = _balanced_call(source, match.end() - 1)
-        if mentions_probe(call):
+        if mentions_probe(call) or mentions_info_probe(call):
             violations.append(
                 Violation(
                     path,
@@ -258,7 +352,22 @@ def scan_source(source: str, path: str = "<source>") -> list[Violation]:
                             "require_router_cpp() instead (Issue #9705)",
                         )
                     )
-    # 4. ``try: from kicad_tools.router import router_cpp`` /
+    # 4. Unconditional ``pytest.mark.skip`` in a module that references the
+    #    router backend at all (the early return above already exempted
+    #    modules that do not): with no condition text to read, the skip
+    #    hides native cases as effectively as a probe-guarded ``skipif``
+    #    (Issue #9804).
+    for match in re.finditer(r"(?<![\w.])pytest\.mark\.skip\b", source):
+        violations.append(
+            Violation(
+                path,
+                line_of(match.start()),
+                "unconditional pytest.mark.skip in a module referencing the C++ "
+                "router backend: use the `requires_router_cpp` marker (fails with "
+                "the build hint), not a skip (Issue #9804)",
+            )
+        )
+    # 5. ``try: from kicad_tools.router import router_cpp`` /
     #    ``except ImportError: pytest.skip(...)``.
     for match in re.finditer(
         r"except\s+(?:\(?\s*)?(?:ImportError|ModuleNotFoundError)[^\n]*:[ \t]*\n", source

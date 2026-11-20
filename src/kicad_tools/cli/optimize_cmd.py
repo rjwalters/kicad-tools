@@ -442,6 +442,8 @@ def _build_collision_checker(pcb_path: Path):
             router_class_floors=False,
             validate_drc=False,
             load_existing_routes=True,
+            # Issue #9597: no A* here; skip the plane-zone marking cost.
+            mark_plane_zones=False,
         )
     # Issue #8250: rule-area keepouts are installed lazily by the route
     # flows, never at load, so install them before the checker reads the grid.
