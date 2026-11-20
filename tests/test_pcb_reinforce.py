@@ -3471,6 +3471,35 @@ class TestMaskOpening:
         assert result.legs[0].mask_status == "refused"
         assert "track on B.Cu at (" in result.legs[0].mask_reason
 
+    def test_crossing_blocker_reports_minimum_gap_over_the_run(self):
+        """#9731: a same-face blocker crossing the strip dead-on refuses
+        with the minimum gap over the whole run -- 0.000 mm, not the
+        first failing sample's near-miss (6.208 mm) that invites a
+        0.1 mm nudge no geometry can satisfy."""
+        from kicad_tools.router.pairwise_clearance import build_pairwise_clearance_table
+
+        table = build_pairwise_clearance_table(
+            {"FUSED_LINE": 600.0, "OTHER": 0.0}, dru=0.0, hv_threshold=30.0
+        )
+        assert table.required_clearance("FUSED_LINE", "OTHER") == pytest.approx(6.3)
+        pcb = _back_straight_run_pcb()
+        # 0.3 mm track crossing the strip's centerline at x = 67.5.
+        pcb.add_trace((67.5, 45.0), (67.5, 60.0), width=0.3, layer="B.Cu", net="OTHER")
+        result = reinforce_net(pcb, "FUSED_LINE", pairwise_clearance=table)
+        assert result.placed_count == 2
+        assert not result.openings and not _mask_lines(pcb, "B.Mask")
+        (ref,) = result.refused_openings
+        assert ref.rule == "mask_opening_voltage_map_pairwise"
+        assert ref.required_mm == pytest.approx(6.3)
+        assert ref.actual_mm == pytest.approx(0.0, abs=1e-6)
+        # The chosen obstacle and its location stay the blocker's (#9657).
+        assert ref.obstacle_net == "OTHER"
+        assert ref.obstacle_layer == "B.Cu"
+        assert ref.obstacle_kind == "track"
+        assert ref.obstacle_at == pytest.approx((67.5, 50.0))
+        assert result.legs[0].mask_status == "refused"
+        assert "0.000 mm from net 'OTHER'" in result.legs[0].mask_reason
+
     def test_through_via_refused_as_through(self):
         """#9649: a via's ring is on every face -- still an obstacle."""
         pcb = _back_straight_run_pcb()
@@ -3545,7 +3574,10 @@ class TestMaskOpening:
         assert ref.obstacle_kind == "track"
         # The blocking 4 mm track at y = 54, not the passing 0.2 mm one at y = 53.3.
         assert ref.obstacle_at == pytest.approx((60.0, 54.0))
-        assert ref.actual_mm == pytest.approx(1.52, abs=0.01)
+        # Minimum gap over the run (#9731): the perpendicular 1.0 mm where
+        # the run passes under the track (edge y = 52 vs strip edge y = 51),
+        # not the first failing sample's near-miss.
+        assert ref.actual_mm == pytest.approx(1.0, abs=0.01)
 
     def test_refusal_points_at_the_blocking_via_not_a_nearer_passing_one(self):
         """#9657: same attribution rule for through vias (and, via the
