@@ -456,9 +456,15 @@ def _edge_cuts_segments(pcb: PCB) -> list[tuple[tuple[float, float], tuple[float
     # arc entries loses every arc to the xy run alone, so both used to
     # publish the square-corner area (review finding on #9614). Those two
     # kinds are measured below with the same certified tessellators;
-    # every other kind stays delegated. Coordinates arrive
-    # sheet-absolute; footprints below are already board-relative, so
-    # shift by the detected board origin to match.
+    # every other kind stays delegated. Footprint blocks are excluded
+    # from the delegated root entirely: main's outline_graphics re-emits
+    # their Edge.Cuts graphics as board-coordinate gr_* nodes (squaring
+    # radius corners and dropping pts arcs the same way), so delegating
+    # them would double-count the footprint loop below and undo its
+    # curves; both spellings of the block tag, like the schema's own
+    # footprint predicate. Coordinates arrive sheet-absolute; footprints
+    # below are already board-relative, so shift by the detected board
+    # origin to match.
     ox, oy = getattr(pcb, "_board_origin", (0.0, 0.0))
 
     def sheet_to_board(point: tuple[float, float]) -> tuple[float, float]:
@@ -481,6 +487,8 @@ def _edge_cuts_segments(pcb: PCB) -> list[tuple[tuple[float, float], tuple[float
             )
         ):
             deferred.append(node)
+        elif not node.is_atom and node.tag in ("footprint", "module"):
+            continue  # measured by the footprint loop below, never delegated
         else:
             rest.append(node)
     segments = [
