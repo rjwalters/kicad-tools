@@ -1,7 +1,7 @@
 {
   "version": "1.0",
-  "kicad_tools_version": "0.20.0",
-  "generated_at": "2026-09-10T07:42:54.537851+00:00",
+  "kicad_tools_version": "0.29.0",
+  "generated_at": "2026-11-19T00:00:00+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -13,20 +13,20 @@
       "size": 1057
     },
     "assembly-back.pdf": {
-      "sha256": "2aeb374beef2e29c3ef4af69be17deb69c77a3c4e1c60e06e445403ebcc55359",
-      "size": 20566
+      "sha256": "be18f194c5002f92699c348fa8129e00a6884b97e1a74fdaf3c5a26acb7f095e",
+      "size": 23086
     },
     "assembly-front.pdf": {
-      "sha256": "fc8dfb167f98d4c8245b65566a5d2f613cb1756b083691c7b2920385a50437ba",
-      "size": 55162
+      "sha256": "ff020299cb684c557d02a883c7e2e3a139848a972922da294d609d93b24fd9b4",
+      "size": 66778
     },
     "bom_jlcpcb.csv": {
       "sha256": "22f4f6e0ae921146268a6a0c94e0267283a7a8d64f24d90be807bb449873b27f",
       "size": 640
     },
     "check-report.json": {
-      "sha256": "f0c3c458d61ee8d7bc8bd96173d154be13146fb82d36fab4cd1829c6f00d127c",
-      "size": 7697
+      "sha256": "5a28b9cc5d5e4aa91508cb109d786974e7082210abe2eda5ff154b25b2df72a6",
+      "size": 13022
     },
     "cpl_jlcpcb.csv": {
       "sha256": "5b6854e3efb25a771146c01fdf51dfff148bf7fc6079d582842f14bcfd2bda20",
@@ -41,60 +41,60 @@
       "size": 8273
     },
     "design-source/check_manufacturing.py": {
-      "sha256": "f2067a354c634e60d6f8082dfa27f31211db10d29b2fa56dfe4636ecf3202309",
-      "size": 3394
+      "sha256": "adb726e9fb17542050f0f7448b9aeae3f734e48f79ed268d17326f161660168d",
+      "size": 3393
     },
     "design-source/generate_design.py": {
-      "sha256": "69351de4d7f69eefcf1b499ef24832e03c377dc01fdb97f245a7bd7a11406787",
-      "size": 152446
+      "sha256": "efb3cdbeabc22894f68f8cd2bd263f7c0b4e0ad56919012551fbd3f6a33e2ddd",
+      "size": 170456
     },
     "design-source/manufacturing_process.py": {
-      "sha256": "982049e24965b623d7dec062dc932f2d12e3f77c21c9ad9ac493b3925c8bf6f8",
-      "size": 28107
+      "sha256": "0ca581ce5153e9923c3853d3e4a81212f4edc4943931f2083145ff0045674998",
+      "size": 28165
     },
     "design-source/project.kct": {
       "sha256": "9cacd7cb85b1207fb3353da55e04a25a51b7323dc8cc4af416d4f47f252156f0",
       "size": 4932
     },
     "fill-consistency.json": {
-      "sha256": "46e267b61fd6c645f2b530f0aa6d95c5c00c5ffdd0a0e4fae01d9dd2e4ef377f",
-      "size": 43
+      "sha256": "3369e42a5c0ea40c718cdf6016b83fa85b04260ad66cf757b282ea30ef9561b6",
+      "size": 33
     },
     "gerbers/gerbers.zip": {
-      "sha256": "46f237280f3656123aa836028a5e63128cd4d86925e40b21a398d6ee8922d19b",
-      "size": 51486
+      "sha256": "1e12c71b0d833127be0091e5549598ec1d9e04fc6e19239de82f7125214d9d4b",
+      "size": 55485
     },
     "images/assembly.png": {
-      "sha256": "13c8323b975a1191f79843c910fd5e1e4f3b6b936d0d9efd7a95f30d2e09a28f",
-      "size": 171061
+      "sha256": "a5db94fb615c52966bae1ec2fbf8a9c569b8e41a5fd2d4f1fb03cecdbb4a0ed9",
+      "size": 213944
     },
     "images/layer_B_Cu.png": {
-      "sha256": "3521d5bce1bc7e94c718183f630f4e3d8cb81052f8575341dca37212ae9b54f9",
-      "size": 103520
+      "sha256": "4a624101978f380762251daa1551880e6a97b02102c96b5bc450edabfbb2d2d7",
+      "size": 106034
     },
     "images/layer_F_Cu.png": {
-      "sha256": "4cd1499b1db465efe36524ac047f8fc347061b50853be441e147d50ed04cb073",
-      "size": 162599
+      "sha256": "6735364c236b4443b3e6200b988ac6d1a11b68b87d17f1b389d1a0cb2445d433",
+      "size": 176123
     },
     "images/pcb_back.png": {
-      "sha256": "394f7f6640abd0171a616fa3bc4a8cc824a10fd37fdaa24864ba5ffa6558f545",
-      "size": 105850
+      "sha256": "b688b2be329c41d5a6d54c6a668bb0b0dbef8bef69969a48a8e1671a5b0707a6",
+      "size": 108488
     },
     "images/pcb_copper.png": {
-      "sha256": "4e10851df7ec90c078dcc83de60a4533d3c0ef2f8883dcf6dda321a26890a636",
-      "size": 123076
+      "sha256": "23ca6fd3824668d3fdc88d196f1e9071228a2e7b38ef587e18da45919b02a4a5",
+      "size": 124684
     },
     "images/pcb_front.png": {
-      "sha256": "c199029e43608545425f43a202e21ebec8b74123c54d2bb028e6dfeba8c6b4a1",
-      "size": 219318
+      "sha256": "664cca6f63541f0bcf3af259a583cdccf809e9a57b20deaab78cd0a4cfd46417",
+      "size": 280022
     },
     "images/schematic_stm32_devboard.png": {
-      "sha256": "701fa6f1e47427d23becbd4c0d3e509a4dd66b0178ff50d7e61e7e7c5601cb1f",
-      "size": 278127
+      "sha256": "e0d58863c7071f9ef5fb2ba4940807a5fbb2a8df6f5321a377cd2f1f2c2f87ba",
+      "size": 279454
     },
     "kicad_project.zip": {
-      "sha256": "b265bbdd5306413bbc80ec24e0e27e52c60216f84045d5eb82168d5ea6c7e3e9",
-      "size": 72003
+      "sha256": "9c10246bbaf249c069a12dd0a775b29a2757e49e399e0bd5a5f904df1c4d1681",
+      "size": 72558
     },
     "manufacturing-requirements.json": {
       "sha256": "52ef1e5957c569c120a43b82a63c9dff8d3bf5dee2392e473e2e73f20b8fb199",
@@ -117,12 +117,12 @@
       "size": 3329
     },
     "report.md": {
-      "sha256": "2ac1352131fa3f8e086f378c7c92d8681080414031b6357541c8092dc89909ac",
-      "size": 4317
+      "sha256": "1ec6d386304980c71140cc43de580f43bf8a1e2c7df0f600834d4c2ec50da4fa",
+      "size": 3490
     },
     "report.pdf": {
-      "sha256": "c62a4519808e04ee81ac08ea22858355249bff2723e3babf667970ec5bd59ae1",
-      "size": 1210717
+      "sha256": "aa2a893b7764fcb60dd125f4e30b39ceffd72223afb59ba3a406de3ff438fa46",
+      "size": 1392418
     }
   },
   "board": {
@@ -134,12 +134,12 @@
       "name": "pcb_file",
       "status": "OK",
       "message": "PCB file parsed successfully",
-      "details": "Footprints: 17"
+      "details": "Footprints: 20"
     },
     {
       "name": "schematic_file",
       "status": "OK",
-      "message": "Schematic auto-detected: stm32_devboard.kicad_sch"
+      "message": "Schematic file found: stm32_devboard.kicad_sch"
     },
     {
       "name": "schematic_footprints",
@@ -154,7 +154,7 @@
     {
       "name": "footprints",
       "status": "OK",
-      "message": "All 17 footprints have library footprint names"
+      "message": "All 20 footprints have library footprint names"
     },
     {
       "name": "board_dimensions",
@@ -164,13 +164,29 @@
     {
       "name": "drill_holes",
       "status": "OK",
-      "message": "Drill holes present (29 vias, 8 TH pads)"
+      "message": "Drill holes present (34 vias, 8 TH pads)"
+    },
+    {
+      "name": "stackup_copper",
+      "status": "OK",
+      "message": "No usable stackup copper to reconcile; profile default copper applies"
     },
     {
       "name": "tht_in_cpl",
       "status": "OK",
       "message": "2 through-hole component(s) included in CPL",
       "details": "THT references: J1, Y1"
+    },
+    {
+      "name": "bottom_side_in_cpl",
+      "status": "OK",
+      "message": "No bottom-side components in CPL (single-sided assembly)"
+    },
+    {
+      "name": "assembly_package_limits",
+      "status": "OK",
+      "message": "All placed packages fit JLCPCB Capability Plus Economic PCBA (min package 0402, IC pitch 0.4 mm, BGA pitch 0.5 mm)",
+      "details": "15 package/pitch requirement(s) checked"
     },
     {
       "name": "bom_fields",
@@ -180,8 +196,59 @@
     },
     {
       "name": "bom_lcsc_values",
+      "status": "WARN",
+      "message": "7 of 17 assigned item(s) verified (parts cache); 10 unverifiable (not in parts cache or offline catalog)",
+      "details": "unverified: U1 -> C148031, U2 -> C8734, C16 -> C1779, Y1 -> C114147, C10 -> C1798, C11 -> C1798, J1 -> C37208, R2 -> C17414 (and 2 more)"
+    },
+    {
+      "name": "bom_lcsc_stock",
       "status": "OK",
-      "message": "No LCSC value/package mismatches detected (1 assigned item(s) checked against local parts cache)"
+      "message": "2 LCSC part(s) have recorded stock for 5 board(s)",
+      "data": {
+        "order_boards": 5,
+        "inventory_covered": [],
+        "strict": false,
+        "parts": [
+          {
+            "lcsc": "C15850",
+            "refs": [
+              "C1",
+              "C2"
+            ],
+            "per_board": 2,
+            "stock": 6481916,
+            "verified": false,
+            "source": "live",
+            "age_days": 32
+          },
+          {
+            "lcsc": "C49678",
+            "refs": [
+              "C12",
+              "C13",
+              "C14",
+              "C15",
+              "C3"
+            ],
+            "per_board": 5,
+            "stock": 23314203,
+            "verified": false,
+            "source": "live",
+            "age_days": 1
+          }
+        ],
+        "unresolved": [
+          "C114147",
+          "C131244",
+          "C148031",
+          "C17414",
+          "C17630",
+          "C1779",
+          "C1798",
+          "C37208",
+          "C8734"
+        ]
+      }
     },
     {
       "name": "bom_pcb_match",
@@ -195,28 +262,33 @@
     },
     {
       "name": "drc",
-      "status": "OK",
-      "message": "DRC: 0 errors, 0 warnings"
+      "status": "WARN",
+      "message": "DRC passed with 8 warning(s)"
     },
     {
       "name": "erc",
       "status": "OK",
-      "message": "Native ERC: 0 errors, 0 warnings; native-erc.json",
-      "details": "Verified after source correction"
+      "message": "ERC: 0 errors, 0 warnings"
     }
   ],
-  "mode": "assembly",
-  "manufacturing_requirements": {
+  "ordered_copper": {
     "layers": 2,
-    "via_type": "through",
-    "minimum_via_drill_mm": 0.15,
-    "minimum_via_diameter_mm": 0.3,
-    "minimum_via_annular_ring_mm": 0.075,
-    "via_covering": "Tented",
-    "paid_factory_option": "0.15 mm minimum via hole size",
-    "via_in_pad": false,
-    "source": "https://jlcpcb.com/capabilities/pcb-capabilities/"
-  },
-  "warning_counts": {},
-  "native_warning_counts": {}
+    "stackup_outer_oz": null,
+    "stackup_inner_oz": null,
+    "profile_options": [
+      [
+        1.0,
+        0.0
+      ],
+      [
+        2.0,
+        0.0
+      ]
+    ],
+    "ordered_outer_oz": 1.0,
+    "ordered_inner_oz": 0.0,
+    "status": "undeclared",
+    "source": "https://jlcpcb.com/help/article/jlcpcb-copper-weight",
+    "source_verified": "2026-10-18"
+  }
 }

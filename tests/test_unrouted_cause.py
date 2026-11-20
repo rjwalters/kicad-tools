@@ -28,7 +28,6 @@ import numpy as np
 import pytest
 
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.output import get_routing_diagnostics_json
 from kicad_tools.router.rules import DesignRules
@@ -45,7 +44,7 @@ BACKENDS = [
     pytest.param(
         False,
         id="cpp",
-        marks=pytest.mark.skipif(not is_cpp_available(), reason="C++ router backend not built"),
+        marks=pytest.mark.requires_router_cpp,
     ),
 ]
 

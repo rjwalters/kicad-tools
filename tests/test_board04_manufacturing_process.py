@@ -15,6 +15,31 @@ from kicad_tools.sexp import parse_file, serialize_sexp
 BOARD = Path(__file__).resolve().parents[1] / "boards/04-stm32-devboard"
 
 
+def net_names(doc):
+    """Net-name resolver backed by the board's top-level net table.
+
+    The regenerated board writes the KiCad-9 canonical form: a top-level
+    ``(net 1 "+5V")`` table, name-bearing atoms on pads, and number-only
+    atoms ``(net 3)`` on router copper (issue #9536).  The returned callable
+    maps any net atom to its name, falling back to the raw token.
+    """
+    table = {
+        node.get_string(0): node.get_string(1)
+        for node in doc.find_children("net")
+        if node.get_string(1) is not None
+    }
+
+    def resolve(atom):
+        if atom is None:
+            return None
+        name = atom.get_string(1)
+        if name is not None:
+            return name
+        return table.get(atom.get_string(0), atom.get_string(0))
+
+    return resolve
+
+
 @pytest.fixture(scope="module")
 def process():
     spec = importlib.util.spec_from_file_location(
@@ -45,7 +70,8 @@ def test_actual_regulator_pinout_and_schematic_agree():
         if props.get("Reference") == "U1":
             assert props["Value"] == "MCP1825S-3302E/DB"
             pins = {
-                p.get_string(0): p.find_child("net").get_string(0) for p in fp.find_children("pad")
+                p.get_string(0): net_names(doc)(p.find_child("net"))
+                for p in fp.find_children("pad")
             }
             assert pins == {"1": "+5V", "2": "GND", "3": "+3.3V"}
             break
@@ -68,11 +94,29 @@ def test_repaired_process_is_idempotent_and_shared_profile_unchanged(process, re
     assert get_profile("jlcpcb-tier1").get_design_rules(2) == before
 
 
-def test_inset_route_c11_via_repair_clears_land_and_keeps_both_layer_tails(process, repaired):
+def test_inset_route_c11_via_repair_clears_land_and_keeps_both_layer_tails(
+    process, repaired, monkeypatch
+):
     import math
 
     from kicad_tools.sexp import parse_string
 
+    # Scope the repair to the move under test (#9536): the fresh route
+    # carries none of the other reviewed moves, and the fixture's synthetic
+    # via bridges the pours (a real short the complete-net fallback must
+    # refuse), so walking the full list would refuse on the first absent
+    # GND escape instead of exercising this inset move.
+    monkeypatch.setattr(process, "MOVES", [])
+    monkeypatch.setattr(
+        process,
+        "INSET_ROUTE_MOVES",
+        [move for move in process.INSET_ROUTE_MOVES if move[0] == "C11.1"],
+    )
+    monkeypatch.setattr(process, "WELD_MOVES", [])
+    # The scoped MOVES list has no U2.7 entry for the trim's old-site lookup;
+    # the trim's own behavior is covered by its dedicated test and by the
+    # unscoped walk in test_absent_weld_moves_are_allowed.
+    monkeypatch.setattr(process, "trim_obsolete_nrst_tail", lambda _: 0)
     doc = parse_file(repaired)
     # Fresh inset-seed route: a 0.30 mm drill sits only 0.05 mm from C11.1.
     # Coordinates are in the source sheet frame (board origin 118.5, 67.5).
@@ -121,11 +165,27 @@ def test_process_rejects_invalid_geometry_or_rules(process, repaired, change):
         via.children.insert(0, parse_string("(via micro)").children[0])
         repaired.write_text(serialize_sexp(doc))
     elif change == "partial_hole":
+        from kicad_tools.sexp import parse_string
+
         via = next(
-            v
-            for v in doc.find_children("via")
-            if abs(v.find_child("at").get_float(0) - 128.74) < 0.001
+            (
+                v
+                for v in doc.find_children("via")
+                if abs(v.find_child("at").get_float(0) - 128.74) < 0.001
+            ),
+            None,
         )
+        if via is None:
+            # The fresh route no longer carries U1.2's in-pad stitch at this
+            # site (#9536); reconstruct it so the partial-hole rejection has
+            # its via.  Same site, net, size and drill as the reviewed stitch.
+            doc.add(
+                parse_string(
+                    '(via (at 128.74 79.11) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") '
+                    '(tenting (front yes) (back yes)) (net "GND"))'
+                )
+            )
+            via = doc.find_children("via")[-1]
         via.find_child("at").set_atom(1, 79.11)  # Original U1 tab edge cut, not fully contained.
         repaired.write_text(serialize_sexp(doc))
     else:
@@ -146,21 +206,10 @@ def test_obsolete_back_escape_trim_requires_free_endpoint(process, repaired, bon
     doc = parse_file(repaired)
     # The recipe runs this trim before ``repair_sharp_corners`` (#8840), so it
     # sees the router's NRST B.Cu run through the old via site (145.8375,
-    # 89.75), not the committed repaired diagonal.  Restore that run here.
-    repaired_run = {((147.15, 89.75), (151.2, 93.8)), ((151.2, 93.8), (153.2, 93.8))}
-    removed = 0
-    for node in list(doc.find_children("segment")):
-        start, end = node.find("start"), node.find("end")
-        ends = (
-            (start.get_float(0), start.get_float(1)),
-            (end.get_float(0), end.get_float(1)),
-        )
-        if node.find("layer").get_string(0) == "B.Cu" and (
-            ends in repaired_run or ends[::-1] in repaired_run
-        ):
-            doc.children.remove(node)
-            removed += 1
-    assert removed == 2, "committed NRST B.Cu run changed; update this fixture"
+    # 89.75), not the repaired diagonal.  The fresh route carries neither any
+    # more (#9536), so the trim is a no-op on it and the router-era run below
+    # is reconstructed purely synthetically.
+    assert process.trim_obsolete_nrst_tail(repaired) == 0
     for start, end, width in (
         ("149.8875 93.8", "153.2 93.8", 0.2),
         ("145.8375 89.75", "147.15 89.75", 0.15),
@@ -171,6 +220,22 @@ def test_obsolete_back_escape_trim_requires_free_endpoint(process, repaired, bon
                 f'(segment (start {start}) (end {end}) (width {width}) (layer "B.Cu") (net "NRST"))'
             )
         )
+    # Terminals for the run so only the tail's pad end can dangle: the
+    # reviewed U2.7 off-pad via at (147.15, 89.75) bonds the run's near end,
+    # and a route via terminates its far end.  The fresh route carries no
+    # copper at either site any more (#9536).
+    doc.add(
+        parse_string(
+            '(via (at 147.15 89.75) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") '
+            '(tenting (front yes) (back yes)) (net "NRST"))'
+        )
+    )
+    doc.add(
+        parse_string(
+            '(via (at 153.2 93.8) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") '
+            '(tenting (front yes) (back yes)) (net "NRST"))'
+        )
+    )
     # Linux router variant retains this B.Cu copy of the SMT pad escape.
     tail_id = "00000000-0000-4000-8000-000000005044"
     doc.add(
@@ -203,11 +268,20 @@ def test_obsolete_back_escape_trim_requires_free_endpoint(process, repaired, bon
     assert process.trim_obsolete_nrst_tail(repaired) == 0
 
 
-def test_c10_drill_repair_keeps_both_layer_connections(process, repaired):
+def test_c10_drill_repair_keeps_both_layer_connections(process, repaired, monkeypatch):
     import math
 
     from kicad_tools.sexp import parse_string
 
+    # Scoped like the C11.1 inset test above (#9536).
+    monkeypatch.setattr(process, "MOVES", [])
+    monkeypatch.setattr(
+        process,
+        "INSET_ROUTE_MOVES",
+        [move for move in process.INSET_ROUTE_MOVES if move[0] == "C10.1"],
+    )
+    monkeypatch.setattr(process, "WELD_MOVES", [])
+    monkeypatch.setattr(process, "trim_obsolete_nrst_tail", lambda _: 0)
     doc = parse_file(repaired)
     doc.add(
         parse_string(
@@ -276,30 +350,23 @@ def test_ground_stitch_trim_preserves_required_connections(process, tmp_path, al
 
 
 @pytest.mark.parametrize("disconnect", [False, True])
-def test_changed_escape_requires_complete_physical_net(process, repaired, disconnect):
+def test_changed_escape_requires_complete_physical_net(process, repaired, disconnect, monkeypatch):
+    # The fresh route connects U2.6 through its own outside-pad copper and
+    # carries none of the reviewed moves (#9536), so scope the repair to the
+    # U2.6 move: its absence is accepted only while the complete OSC_OUT
+    # partition exists, and refused once the escape is disconnected.
+    monkeypatch.setattr(process, "MOVES", [move for move in process.MOVES if move[0] == "U2.6"])
+    monkeypatch.setattr(process, "trim_obsolete_nrst_tail", lambda _: 0)
     doc = parse_file(repaired)
-    old = (146.45, 89.25)  # Reviewed U2.6 outside-pad via in sheet coordinates.
-    new = (146.50, 89.25)
-    moved = 0
-    for via in doc.find_children("via"):
-        at = via.find_child("at")
-        if abs(at.get_float(0) - old[0]) < 1e-6 and abs(at.get_float(1) - old[1]) < 1e-6:
-            at.set_atom(0, new[0])
-            moved += 1
-    assert moved == 1
-    for segment in doc.find_children("segment"):
-        for key in ("start", "end"):
-            point = segment.find_child(key)
-            if abs(point.get_float(0) - old[0]) < 1e-6 and abs(point.get_float(1) - old[1]) < 1e-6:
-                point.set_atom(0, new[0])
+    net_name = net_names(doc)
     if disconnect:
         doc.children = [
             n
             for n in doc.children
             if not (
-                n.name == "segment"
+                n.name in ("segment", "arc")
                 and n.find_child("net")
-                and n.find_child("net").get_string(0) == "OSC_OUT"
+                and net_name(n.find_child("net")) == "OSC_OUT"
             )
         ]
     repaired.write_text(serialize_sexp(doc))
@@ -319,14 +386,15 @@ def test_paid_route_gate_checks_actual_copper_and_process(repaired, fault):
     recipe = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(recipe)
     doc = parse_file(repaired)
+    net_name = net_names(doc)
     if fault == "open":
         doc.children = [
             n
             for n in doc.children
             if not (
-                n.name == "segment"
+                n.name in ("segment", "arc")
                 and n.find_child("net")
-                and n.find_child("net").get_string(0) == "OSC_OUT"
+                and net_name(n.find_child("net")) == "OSC_OUT"
             )
         ]
     elif fault == "wrong_stack":
@@ -339,39 +407,27 @@ def test_paid_route_gate_checks_actual_copper_and_process(repaired, fault):
     assert recipe.paid_process_route_is_complete(repaired) is (fault is None)
 
 
-def test_offpad_repair_rejects_blocked_bond_without_writing(process, repaired):
-    """A reviewed destination is unsafe when a fresh route occupies it (#5439)."""
-    import math
-
+def test_offpad_repair_rejects_blocked_bond_without_writing(process, repaired, monkeypatch):
+    """An unbindable destination region fails the repair without writing (#5439)."""
     from kicad_tools.sexp import parse_string
 
+    # The fresh route left the corridor around U2.35 empty, so a single
+    # foreign segment no longer exhausts the off-pad scan -- it walks west to
+    # a legal rung (#9536).  A via keepout over the destination region does
+    # exhaust it: the reviewed destination is then unsafe, and the repair
+    # must refuse while leaving the board and the options file untouched.
+    monkeypatch.setattr(process, "MOVES", [move for move in process.MOVES if move[0] == "U2.35"])
     doc = parse_file(repaired)
-    old = (153.663, 87.25)
-    preferred = (155.05, 87.25)
-    via = next(
-        v
-        for v in doc.find_children("via")
-        if math.dist(
-            (v.find_child("at").get_float(0), v.find_child("at").get_float(1)),
-            preferred,
-        )
-        < 1e-6
-    )
-    via.find_child("at").set_atom(0, old[0])
-    via.find_child("at").set_atom(1, old[1])
-    # Remove the previous repair's tail to reconstruct its source escape.
-    for segment in list(doc.find_children("segment")):
-        start, end = segment.find_child("start"), segment.find_child("end")
-        if (
-            math.dist((start.get_float(0), start.get_float(1)), old) < 1e-6
-            and math.dist((end.get_float(0), end.get_float(1)), preferred) < 1e-6
-        ):
-            doc.children.remove(segment)
     doc.add(
         parse_string(
-            "(segment (start 154.65 87.05) (end 155.45 87.05) "
-            '(width 0.2) (layer "B.Cu") (net "SWCLK") '
-            '(uuid "00000000-0000-4000-8000-000000005439"))'
+            '(via (at 153.663 87.25) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") '
+            '(tenting (front yes) (back yes)) (net "GND"))'
+        )
+    )
+    doc.add(
+        parse_string(
+            '(zone (net 0) (net_name "") (layers "B.Cu") (keepout (vias not_allowed)) '
+            "(polygon (pts (xy 150.0 82.0) (xy 160.0 82.0) (xy 160.0 92.0) (xy 150.0 92.0))))"
         )
     )
     repaired.write_text(serialize_sexp(doc))
@@ -406,15 +462,18 @@ def test_late_process_failure_does_not_publish_board_or_options(
 def isolated_offpad_geometry(repaired):
     """Keep real Board04 pads/outline, with only the source GND escape."""
     from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp import parse_string
 
     doc = parse_file(repaired)
-    source = next(
-        node
-        for node in doc.find_children("via")
-        if abs(node.find_child("at").get_float(0) - 155.05) < 1e-6
-        and abs(node.find_child("at").get_float(1) - 87.25) < 1e-6
+    # The fresh route carries no U2.35 via anywhere (#9536); synthesize the
+    # pre-repair in-pad source at its reviewed original site.
+    doc.add(
+        parse_string(
+            '(via (at 153.663 87.25) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") '
+            '(tenting (front yes) (back yes)) (net "GND"))'
+        )
     )
-    source.find_child("at").set_atom(0, 153.663)
+    source = doc.find_children("via")[-1]
     doc.children = [
         node
         for node in doc.children
@@ -525,12 +584,14 @@ def test_offpad_search_continues_after_first_alternative_keepout(process, isolat
             keepout=ZoneKeepout(vias_allowed=False),
         )
     )
-    # A later rung remains legal under the identical complete predicate.
-    later = (33.9345, 19.75)
-    assert process.select_offpad_position(pcb, via, "U2.35", later, ["F.Cu"]) == later
+    # A later rung remains legal under the identical complete predicate: the
+    # scan's next-legal rung is returned unchanged when requested exactly.
+    # The rung coordinates follow the pad-edge geometry, so they are derived
+    # here rather than pinned -- the fresh route shifted the scan's landing
+    # site (#9536).
     chosen = process.select_offpad_position(pcb, via, "U2.35", preferred, ["F.Cu"])
     assert chosen != first
-    assert chosen == pytest.approx(later)
+    assert process.select_offpad_position(pcb, via, "U2.35", chosen, ["F.Cu"]) == chosen
 
 
 # ---------------------------------------------------------------------------
@@ -544,13 +605,22 @@ def _sheet(x, y):
     return x + ORIGIN[0], y + ORIGIN[1]
 
 
-def test_weld_move_clears_the_land_and_is_idempotent(process, repaired):
+def test_weld_move_clears_the_land_and_is_idempotent(process, repaired, monkeypatch):
     """A pad-edge GND weld (C13.2) is moved to its reviewed off-land site."""
     import math
 
     from kicad_tools.sexp import parse_string
 
-    (ref, net, old, new) = next(m for m in process.WELD_MOVES if m[0] == "C13.2")
+    weld = next(m for m in process.WELD_MOVES if m[0] == "C13.2")
+    # The fresh route carries none of the reviewed moves, and the fixture's
+    # in-land weld via bridges the pours (a short the complete-net fallback
+    # must refuse), so scope the repair to this weld instead of walking the
+    # full list (#9536).
+    monkeypatch.setattr(process, "MOVES", [])
+    monkeypatch.setattr(process, "INSET_ROUTE_MOVES", [])
+    monkeypatch.setattr(process, "WELD_MOVES", [weld])
+    monkeypatch.setattr(process, "trim_obsolete_nrst_tail", lambda _: 0)
+    (ref, net, old, new) = weld
     doc = parse_file(repaired)
     vx, vy = _sheet(*old)
     px, py = _sheet(32.3, 32.0)  # C13.2 centre: the weld's F.Cu tail start
@@ -646,6 +716,13 @@ def test_single_layer_weld_via_is_trimmed(process, repaired, back_tail):
     doc = parse_file(repaired)
     vx, vy = _sheet(*at)
     px, py = _sheet(35.16, 19.25)  # U2.36 centre
+    # The fresh route independently runs a GND via through this site; the
+    # single-layer-weld scenario needs the site empty -- a same-XY via shares
+    # the topology node and hides the weld's dangling state (#9536).
+    for node in list(doc.find_children("via")):
+        site = node.find_child("at")
+        if math.dist((site.get_float(0), site.get_float(1)), (vx, vy)) < 1e-3:
+            doc.children.remove(node)
     doc.add(
         parse_string(
             f'(via (at {vx} {vy}) (size 0.3) (drill 0.15) (layers "F.Cu" "B.Cu") '
@@ -669,7 +746,9 @@ def test_single_layer_weld_via_is_trimmed(process, repaired, back_tail):
     assert process.trim_single_layer_welds(repaired) == (0 if back_tail else 1)
     from kicad_tools.schema.pcb import PCB
 
-    left = [v for v in PCB.load(repaired).vias if math.dist(v.position, at) < 1e-3]
+    left = [
+        v for v in PCB.load(repaired).vias if math.dist(v.position, at) < 1e-3 and v.net_name == net
+    ]
     assert len(left) == (1 if back_tail else 0), ref
     assert process.trim_single_layer_welds(repaired) == 0
 

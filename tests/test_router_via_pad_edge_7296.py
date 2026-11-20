@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import pytest
 
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.diffpair_routing import CoupledPathfinder
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer
@@ -19,12 +18,13 @@ from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules, NetClassRouting
 from kicad_tools.router.via_in_pad_eligibility import via_drill_at_pad_edge
 from kicad_tools.validate.rules.via_pad_geometry import drill_to_mask_aperture_gap
+from tests.conftest import require_router_cpp
 
 BACKENDS = [
     "python",
     pytest.param(
         "cpp",
-        marks=pytest.mark.skipif(not is_cpp_available(), reason="C++ backend not built"),
+        marks=pytest.mark.requires_router_cpp,
     ),
 ]
 
@@ -171,8 +171,7 @@ def test_floor_applies_where_via_in_pad_is_allowed(backend):
 
 
 def test_backends_agree_with_the_floor_on():
-    if not is_cpp_available():
-        pytest.skip("C++ backend not built")
+    require_router_cpp()
     _, _, py = _pair(WIDE_FLOOR, "python", "jlcpcb")
     _, _, cpp = _pair(WIDE_FLOOR, "cpp", "jlcpcb")
     assert py is not None and cpp is not None
@@ -230,8 +229,7 @@ def test_single_ended_floor_applies_where_via_in_pad_is_allowed(backend):
 
 
 def test_single_ended_backends_agree_with_the_floor_on():
-    if not is_cpp_available():
-        pytest.skip("C++ backend not built")
+    require_router_cpp()
     _, py = _single_ended(WIDE_FLOOR, "python")
     _, cpp = _single_ended(WIDE_FLOOR, "cpp")
     assert py is not None and cpp is not None

@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import pytest
 
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.diffpair_routing import CoupledPathfinder
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layer_advisories import plane_layer_signal_violations
@@ -32,6 +31,7 @@ from kicad_tools.router.rules import (
     allowed_plane_layer_indices,
     layer_permitted,
 )
+from tests.conftest import require_router_cpp
 
 IN1, IN2, B_CU = 1, 2, 3
 RESERVED = ["F.Cu", "B.Cu"]
@@ -42,7 +42,7 @@ BACKENDS = [
     pytest.param(
         "cpp",
         id="cpp",
-        marks=pytest.mark.skipif(not is_cpp_available(), reason="router_cpp not built"),
+        marks=pytest.mark.requires_router_cpp,
     ),
     pytest.param("python", id="python"),
 ]
@@ -148,7 +148,7 @@ def test_hard_avoid_wins_over_opt_in(backend: str) -> None:
         assert Layer.IN2_CU not in {s.layer for s in route.segments}
 
 
-@pytest.mark.skipif(not is_cpp_available(), reason="router_cpp not built")
+@pytest.mark.requires_router_cpp
 def test_cpp_routable_layers_restored_for_next_net() -> None:
     """The per-call widening is undone: the next (plain) net stays off In2.Cu."""
     from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
@@ -176,7 +176,7 @@ def test_cpp_routable_layers_restored_for_next_net() -> None:
         assert not {s.layer for s in second.segments} & {Layer.IN1_CU, Layer.IN2_CU}
 
 
-@pytest.mark.skipif(not is_cpp_available(), reason="router_cpp not built")
+@pytest.mark.requires_router_cpp
 def test_cpp_single_layer_lock_holds_for_opted_in_net() -> None:
     """A caller's ``[0]`` lock (``_layer_locked_router``) is never widened.
 
@@ -219,8 +219,7 @@ def test_cpp_single_layer_lock_holds_for_opted_in_net() -> None:
 
 def test_cpp_widening_adds_only_opted_in_planes() -> None:
     """Widening adds the class's excluded opted-in layers only (not In1.Cu)."""
-    if not is_cpp_available():
-        pytest.skip("router_cpp not built")
+    require_router_cpp()
     from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
 
     rules = _rules()
@@ -291,7 +290,7 @@ def _route_coupled(use_cpp: bool, net_class_map: dict[str, NetClassRouting]):
 COUPLED_BACKENDS = [
     pytest.param(
         True, id="cpp",
-        marks=pytest.mark.skipif(not is_cpp_available(), reason="router_cpp not built"),
+        marks=pytest.mark.requires_router_cpp,
     ),
     pytest.param(False, id="python"),
 ]  # fmt: skip

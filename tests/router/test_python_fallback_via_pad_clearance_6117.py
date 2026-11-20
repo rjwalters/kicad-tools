@@ -14,12 +14,13 @@ from dataclasses import replace
 
 import pytest
 
-from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.primitives import Pad, Route, Via
 from kicad_tools.router.rules import DesignRules
+from tests.conftest import require_router_cpp
 
 VIA_DIAMETER = 0.6
 FOREIGN_Y = 5.0
@@ -111,8 +112,7 @@ def test_python_and_cpp_via_pad_verdicts_agree(gap, relaxed):
     """Python and C++ give the same via verdict, including under the #2452
     corridor relief.  A relaxed ref is "skip" mode in both validators, so
     a positive-gap via is exempt in both."""
-    if not is_cpp_available():
-        pytest.skip("C++ backend unavailable")
+    require_router_cpp()
     rules, grid, start, end = _fixture()
     if relaxed:
         grid._relaxed_clearance_refs.add("U1")

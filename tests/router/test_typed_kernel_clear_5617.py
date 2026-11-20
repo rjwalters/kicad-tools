@@ -21,12 +21,7 @@ import random
 
 import pytest
 
-from kicad_tools.router.cpp_backend import is_cpp_available
-
-requires_cpp = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ router backend not available",
-)
+requires_cpp = pytest.mark.requires_router_cpp
 
 ALL_LAYERS = -1
 LAYERS = (ALL_LAYERS, 0, 1, 2, 3)

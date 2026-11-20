@@ -272,6 +272,43 @@ def test_collect_drc_splits_counts_per_engine():
     assert parsed["drc_violations"] == 42 == data["error_count"]
 
 
+def test_report_names_reviewed_rules_when_design_rules_override_audit():
+    """Issue #9536: counts computed under a reviewed ``design_rules`` override
+    must not be attributed to the stock ``--mfr`` profile's rules."""
+    from kicad_tools.manufacturers import get_profile
+
+    rules = get_profile("jlcpcb-tier1").get_design_rules(2)
+    from dataclasses import replace
+
+    rules = replace(
+        rules, min_via_drill_mm=0.15, min_via_diameter_mm=0.30, min_annular_ring_mm=0.075
+    )
+    status = _drc_status(0, {}, geometric_ran=False)
+    collector = ReportDataCollector(
+        Path("board.kicad_pcb"), manufacturer="jlcpcb-tier1", design_rules=rules
+    )
+    data = collector.collect_drc(SimpleNamespace(drc=status))
+    assert "via drill 0.15 mm" in data["rules_override"]
+    rendered = ReportGenerator()._render(
+        ReportData(
+            project_name="b",
+            revision="1",
+            date="2026-10-18",
+            manufacturer="jlcpcb-tier1",
+            drc=data,
+        )
+    )
+    section = rendered.split("## DRC Status", 1)[1].split("\\newpage", 1)[0]
+    assert "reviewed fabrication process" in section.splitlines()[0]
+    assert "annular ring 0.075 mm" in section.splitlines()[0]
+    assert "| Errors: kct (reviewed process rules, not stock `--mfr jlcpcb-tier1`) | 0 |" in section
+    assert "| Errors: kct (`--mfr jlcpcb-tier1` rules)" not in section
+
+    # Without an override the profile label is unchanged.
+    plain = ReportDataCollector(Path("board.kicad_pcb"), manufacturer="jlcpcb-tier1")
+    assert "rules_override" not in plain.collect_drc(SimpleNamespace(drc=status))
+
+
 def test_collect_drc_geometric_not_run():
     status = _drc_status(3, {"clearance_pad_pad": 3}, geometric_ran=False)
     collector = ReportDataCollector(Path("board.kicad_pcb"), manufacturer="pcbway")

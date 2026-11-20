@@ -25,7 +25,6 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.router.authored_clearance import authored_violations
-from kicad_tools.router.cpp_backend import is_cpp_available
 
 NETS = {1: "HV", 2: "SIG"}
 HV_CLEARANCE = 0.5
@@ -235,9 +234,7 @@ BACKENDS = [
     # The pure-Python search needs ~60 s for the detour, over the bulk job's
     # per-test budget; it runs in the slow-tests workflow instead.
     pytest.param("python", marks=pytest.mark.slow),
-    pytest.param(
-        "cpp", marks=pytest.mark.skipif(not is_cpp_available(), reason="native build required")
-    ),
+    pytest.param("cpp", marks=pytest.mark.requires_router_cpp),
 ]
 
 
