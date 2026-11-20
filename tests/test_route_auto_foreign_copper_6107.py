@@ -33,7 +33,6 @@ import pytest
 from kicad_tools.cli import main as kct_main
 from kicad_tools.mcp.tools.routing import route_net_auto
 from kicad_tools.router.clearance_kernel import CLEARANCE_EPSILON_MM, KSegment, copper_gap
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.foreign_copper import (
     KICAD_DEFAULT_CLEARANCE_MM,
     board_copper,
@@ -163,7 +162,7 @@ def test_hierarchical_grid_holds_other_nets_pads_and_arcs(tmp_path) -> None:
         assert cpp._impl.at(gx, gy, 0).blocked
 
 
-@pytest.mark.skipif(not is_cpp_available(), reason="C++ router backend not built")
+@pytest.mark.requires_router_cpp
 def test_hierarchical_board_route_uses_the_cpp_grid(tmp_path) -> None:
     """The C++ grid sees the obstacles, so the C++ search -- not a fallback -- routes."""
     orchestrator = _orchestrator(_copy(tmp_path, PAD))

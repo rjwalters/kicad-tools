@@ -12,11 +12,15 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.drc.geometric import run_geometric_drc
+from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.mesh.navmesh import NavMesh
 from kicad_tools.router.mesh.pathfinder import MeshPathfinder
 from kicad_tools.router.rules import DesignRules
 
-router_cpp = pytest.importorskip("kicad_tools.router.router_cpp")
+if is_cpp_available():
+    from kicad_tools.router import router_cpp
+else:  # extension absent: collection still succeeds; marked tests fail with the build hint
+    router_cpp = None
 
 # Issue #5556: CI's `Test` job runs `pytest -n auto -o addopts=
 # --benchmark-disable --timeout=60` (ci.yml "Run tests"); `-o addopts=` means
@@ -42,7 +46,7 @@ router_cpp = pytest.importorskip("kicad_tools.router.router_cpp")
 # matches tests/test_board_05_drc_allowlist.py and leaves ~23x headroom over the
 # measured CI-equivalent cost (4.7x over the 38.1 s this test costs locally
 # *with* `--cov=kicad_tools`).
-pytestmark = pytest.mark.timeout(180)
+pytestmark = [pytest.mark.requires_router_cpp, pytest.mark.timeout(180)]
 
 _REPO = Path(__file__).resolve().parents[3]
 _CHARLIEPLEX = _REPO / "boards/02-charlieplex-led/output/charlieplex_3x3.kicad_pcb"

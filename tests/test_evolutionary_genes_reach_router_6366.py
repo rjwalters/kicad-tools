@@ -25,6 +25,7 @@ from kicad_tools.router.algorithms.evolutionary import (
 )
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.rules import DesignRules, NetClassRouting
+from tests.conftest import require_router_cpp
 
 NUM_NETS = 4
 
@@ -112,9 +113,9 @@ def test_astar_weight_reaches_pathfinder_route_python(monkeypatch):
 
 
 def test_astar_weight_reaches_cpp_dispatch(monkeypatch):
-    cpp = pytest.importorskip("kicad_tools.router.cpp_backend")
-    if not cpp.is_cpp_available():
-        pytest.skip("C++ backend not built")
+    from kicad_tools.router import cpp_backend as cpp
+
+    require_router_cpp()
     router_cpp = Autorouter(width=40, height=40)
     if type(router_cpp.router).__name__ != "CppPathfinder":
         pytest.skip("C++ pathfinder not in use")
@@ -284,9 +285,8 @@ class _Abort(Exception):
 
 
 def _cpp_router():
-    cpp = pytest.importorskip("kicad_tools.router.cpp_backend")
-    if not cpp.is_cpp_available():
-        pytest.skip("C++ backend not built")
+
+    require_router_cpp()
     router = Autorouter(width=40, height=40)
     if type(router.router).__name__ != "CppPathfinder":
         pytest.skip("C++ pathfinder not in use")

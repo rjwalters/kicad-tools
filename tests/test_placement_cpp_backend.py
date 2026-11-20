@@ -186,10 +186,7 @@ class TestPythonFallback:
 # Cross-check tests (require C++ backend)
 # ---------------------------------------------------------------------------
 
-cpp_required = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ placement backend not available",
-)
+cpp_required = pytest.mark.requires_router_cpp
 
 
 @cpp_required

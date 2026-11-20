@@ -26,6 +26,7 @@ from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.rules import DesignRules
 from kicad_tools.router.search_radius import search_radius_cells
+from tests.conftest import require_router_cpp
 
 # ---------------------------------------------------------------------------
 # Oracle: the literal guarded expression (do NOT route this through the
@@ -119,10 +120,8 @@ def test_router_and_coupled_pathfinder_agree_at_default_rules() -> None:
 
 
 def _router_cpp():
-    from kicad_tools.router.cpp_backend import is_cpp_available
 
-    if not is_cpp_available():
-        pytest.skip("C++ router backend not built")
+    require_router_cpp()
     from kicad_tools.router import router_cpp  # type: ignore[attr-defined]
 
     return router_cpp

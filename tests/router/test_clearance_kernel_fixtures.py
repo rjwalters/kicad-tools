@@ -36,7 +36,6 @@ import math
 import pytest
 
 from kicad_tools.router import clearance_kernel as ck
-from kicad_tools.router.cpp_backend import is_cpp_available
 from tests.conformance.adapters import BOARD_EDGE, KIND_CLEARANCE, Verdict
 from tests.conformance.board import FIXTURES_DIR
 from tests.conformance.fixtures import (
@@ -48,10 +47,7 @@ from tests.conformance.fixtures import (
 from tests.conformance.generator import PadSpec, PairKind
 from tests.conformance.oracle import kicad_cli_available, run_oracle
 
-requires_cpp = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ router backend not available",
-)
+requires_cpp = pytest.mark.requires_router_cpp
 requires_kicad_cli = pytest.mark.skipif(not kicad_cli_available(), reason="kicad-cli not installed")
 
 # Every named Phase 1a fixture.  ``roundrect-corner-gap`` joined the list once

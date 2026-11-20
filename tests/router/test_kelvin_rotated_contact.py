@@ -7,12 +7,12 @@ from shapely.geometry import LineString, Polygon, box
 from shapely.ops import unary_union
 
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.cpp_backend import get_backend_info
 from kicad_tools.router.io import load_pads_for_analysis
 from kicad_tools.router.kelvin_obstacles import _pad_outline
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Route, Segment
 from kicad_tools.router.rules import DesignRules
+from tests.conftest import require_router_cpp
 
 # KiCad 10.0.6 PAD.GetEffectivePolygon(F_Cu), from the adjacent saved fixture.
 # Its authored +30 degree angle points clockwise in board coordinates.
@@ -35,8 +35,8 @@ def test_imported_rotated_pad_matches_native_polygon():
 def test_preserved_force_track_not_shared_outside_native_shunt(
     force_python, angle, trace_width, resolution
 ):
-    if not force_python and not get_backend_info()["available"]:
-        pytest.skip("C++ extension unavailable")
+    if not force_python:
+        require_router_cpp()
     pad = load_pads_for_analysis(FIXTURE)[0]
     router = Autorouter(
         22,

@@ -4,153 +4,482 @@
       "issue": 6269,
       "kind": "exception",
       "summary": "Paid 0.15 mm mechanical-drill via process (ruling #7147); the generic jlcpcb-tier1 kct check reports the reviewed vias as errors, the board's own check_manufacturing.py models the process",
-      "recorded": "2026-10-19",
+      "recorded": "2026-11-19",
       "errors": [
         {
           "rule": "dimension_annular_ring",
           "at": [
-            144.3,
-            90.25
+            124.65,
+            86.0
           ]
         },
         {
           "rule": "dimension_annular_ring",
           "at": [
-            146.45,
-            89.25
+            124.85,
+            78.0
           ]
         },
         {
           "rule": "dimension_annular_ring",
           "at": [
-            147.15,
-            89.75
+            130.15,
+            79.9
           ]
         },
         {
           "rule": "dimension_annular_ring",
           "at": [
-            147.25,
-            86.5
+            135.0,
+            78.65
           ]
         },
         {
           "rule": "dimension_annular_ring",
           "at": [
-            151.25,
-            86.5
+            135.0,
+            84.65
           ]
         },
         {
           "rule": "dimension_annular_ring",
           "at": [
-            151.75,
-            92.45
+            137.78,
+            83.08
           ]
         },
         {
           "rule": "dimension_annular_ring",
           "at": [
-            155.05,
-            87.25
+            145.0,
+            84.65
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            146.0,
+            104.65
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            146.58,
+            90.75
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            146.65,
+            100.0
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            147.75,
+            86.58
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            151.0,
+            104.65
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            151.65,
+            100.0
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            152.25,
+            94.9
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            154.9,
+            86.75
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            156.0,
+            100.65
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            167.0,
+            90.65
+          ]
+        },
+        {
+          "rule": "dimension_annular_ring",
+          "at": [
+            175.05,
+            96.35
           ]
         },
         {
           "rule": "dimension_via_diameter",
           "at": [
-            144.3,
-            90.25
+            124.65,
+            86.0
           ]
         },
         {
           "rule": "dimension_via_diameter",
           "at": [
-            146.45,
-            89.25
+            124.85,
+            78.0
           ]
         },
         {
           "rule": "dimension_via_diameter",
           "at": [
-            147.15,
-            89.75
+            130.15,
+            79.9
           ]
         },
         {
           "rule": "dimension_via_diameter",
           "at": [
-            147.25,
-            86.5
+            135.0,
+            78.65
           ]
         },
         {
           "rule": "dimension_via_diameter",
           "at": [
-            151.25,
-            86.5
+            135.0,
+            84.65
           ]
         },
         {
           "rule": "dimension_via_diameter",
           "at": [
-            151.75,
-            92.45
+            137.78,
+            83.08
           ]
         },
         {
           "rule": "dimension_via_diameter",
           "at": [
-            155.05,
-            87.25
+            145.0,
+            84.65
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            146.0,
+            104.65
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            146.58,
+            90.75
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            146.65,
+            100.0
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            147.75,
+            86.58
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            151.0,
+            104.65
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            151.65,
+            100.0
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            152.25,
+            94.9
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            154.9,
+            86.75
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            156.0,
+            100.65
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            167.0,
+            90.65
+          ]
+        },
+        {
+          "rule": "dimension_via_diameter",
+          "at": [
+            175.05,
+            96.35
           ]
         },
         {
           "rule": "dimension_via_drill",
           "at": [
-            144.3,
-            90.25
+            124.65,
+            86.0
           ]
         },
         {
           "rule": "dimension_via_drill",
           "at": [
-            146.45,
-            89.25
+            124.85,
+            78.0
           ]
         },
         {
           "rule": "dimension_via_drill",
           "at": [
-            147.15,
-            89.75
+            130.15,
+            79.9
           ]
         },
         {
           "rule": "dimension_via_drill",
           "at": [
-            147.25,
-            86.5
+            135.0,
+            78.65
           ]
         },
         {
           "rule": "dimension_via_drill",
           "at": [
-            151.25,
-            86.5
+            135.0,
+            84.65
           ]
         },
         {
           "rule": "dimension_via_drill",
           "at": [
-            151.75,
-            92.45
+            137.25,
+            83.75
           ]
         },
         {
           "rule": "dimension_via_drill",
           "at": [
-            155.05,
-            87.25
+            137.78,
+            83.08
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            143.1,
+            87.4
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            143.35,
+            89.1
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            143.9,
+            90.05
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            145.0,
+            84.65
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            146.0,
+            104.65
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            146.58,
+            90.75
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            146.65,
+            100.0
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            147.75,
+            86.58
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            151.0,
+            104.65
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            151.65,
+            100.0
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            152.25,
+            94.9
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            153.15,
+            93.3
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            154.9,
+            86.75
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            156.0,
+            100.65
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            158.2,
+            87.7
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            158.7,
+            84.5
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            160.45,
+            85.45
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            161.3,
+            86.3
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            163.5,
+            87.7
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            163.85,
+            83.65
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            167.0,
+            90.65
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            169.8,
+            87.15
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            170.95,
+            88.3
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            172.6,
+            87.4
+          ]
+        },
+        {
+          "rule": "dimension_via_drill",
+          "at": [
+            175.05,
+            96.35
           ]
         },
         {

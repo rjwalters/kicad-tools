@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import require_router_cpp
+
 # Exact float endpoints and authored widths from the USB2_D- / USB_CC1
 # rejection. Both segments lie on x+y=178.75; their closest endpoints are
 # 1.80312444994434 mm apart. Native38 instead reported a proper crossing.
@@ -60,7 +62,10 @@ def _permuted(a, b, permutation):
 
 @pytest.fixture(scope="module")
 def native():
-    return pytest.importorskip("kicad_tools.router.router_cpp")
+    require_router_cpp()
+    from kicad_tools.router import router_cpp
+
+    return router_cpp
 
 
 @pytest.mark.parametrize("a,b,distance,proper", CASES)

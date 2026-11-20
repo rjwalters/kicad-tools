@@ -22,7 +22,7 @@ from kicad_tools.router.primitives import Pad
 
 # The mesh pathfinder routes through the compiled C++ backend; skip where the
 # extension is not built (matches the other tests/router/mesh acceptance runs).
-pytest.importorskip("kicad_tools.router.router_cpp")
+pytestmark = pytest.mark.requires_router_cpp
 
 
 def _add_pad(router: Autorouter, pad: Pad) -> None:

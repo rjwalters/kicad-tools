@@ -633,6 +633,43 @@ _VARIANT_BOARDS = {
         '\t\t(fp_line (start 40 0) (end 0 0) (layer "Edge.Cuts")))',
         [("TRACK_EDGE", (60.0, 28.0), (60.0, 32.0)), ("TRACK_IN", (60.0, 35.0), (60.0, 40.0))],
     ),
+    # The Issue #9689 probe board: a closed board-level outline of three
+    # gr_lines and one gr_arc -- start (73, 38), mid (80.04, 49), end
+    # (73, 60), bulging right over x in [73, 80.04] -- with the two named
+    # probes from the issue's measured table.  PROBE_BULGE sits in the
+    # pocket between the old start->mid->end chords and the true arc (true
+    # gap 0.442 mm: kicad-cli flags it, the two-chord checker measured
+    # 0.877 mm and passed it); PROBE_CHORD hugs the old chord instead
+    # (true gap 1.360 mm: kicad-cli passes it, the two-chord checker
+    # measured 0.496 mm and flagged it).
+    "board_gr_arc": _variant_board(
+        '\t(gr_line (start 73 38) (end 55 38) (layer "Edge.Cuts"))\n'
+        '\t(gr_line (start 55 38) (end 55 60) (layer "Edge.Cuts"))\n'
+        '\t(gr_line (start 55 60) (end 73 60) (layer "Edge.Cuts"))\n'
+        '\t(gr_arc (start 73 38) (mid 80.04 49) (end 73 60) (layer "Edge.Cuts"))',
+        [
+            ("PROBE_BULGE", (78.0, 44.0), (78.5, 44.3)),
+            ("PROBE_CHORD", (78.0, 50.0), (78.5, 50.3)),
+        ],
+    ),
+    # The same outline drawn inside a footprint rotated 30 degrees at
+    # (65, 49): the local frame is the board_gr_arc geometry around its
+    # (65, 49) pivot, and the probes are the same local points carried
+    # through the anchor + R(30 deg) Y-down rotation the reader applies
+    # (the same frame _to_board_a pins), so the gaps -- and the verdicts
+    # -- are identical to board_gr_arc.
+    "fp_arc": _variant_board(
+        '\t(footprint "OUTLINE" (layer "F.Cu") (at 65 49 30)\n'
+        "\t\t(attr board_only exclude_from_pos_files exclude_from_bom)\n"
+        '\t\t(fp_line (start 8 -11) (end -10 -11) (layer "Edge.Cuts"))\n'
+        '\t\t(fp_line (start -10 -11) (end -10 11) (layer "Edge.Cuts"))\n'
+        '\t\t(fp_line (start -10 11) (end 8 11) (layer "Edge.Cuts"))\n'
+        '\t\t(fp_arc (start 8 -11) (mid 15.04 0) (end 8 11) (layer "Edge.Cuts")))',
+        [
+            ("PROBE_BULGE", (73.758330, 38.169873), (74.341343, 38.179681)),
+            ("PROBE_CHORD", (76.758330, 43.366025), (77.341343, 43.375833)),
+        ],
+    ),
 }
 
 
@@ -674,8 +711,26 @@ _VARIANT_BOARDS = {
             {"TRACK_EDGE"},
             {"TRACK_IN"},
         ),
+        (
+            _VARIANT_BOARDS["board_gr_arc"],
+            {
+                "PROBE_BULGE": ((78.0, 44.0), (78.5, 44.3)),
+                "PROBE_CHORD": ((78.0, 50.0), (78.5, 50.3)),
+            },
+            {"PROBE_BULGE"},
+            {"PROBE_CHORD"},
+        ),
+        (
+            _VARIANT_BOARDS["fp_arc"],
+            {
+                "PROBE_BULGE": ((73.758330, 38.169873), (74.341343, 38.179681)),
+                "PROBE_CHORD": ((76.758330, 43.366025), (77.341343, 43.375833)),
+            },
+            {"PROBE_BULGE"},
+            {"PROBE_CHORD"},
+        ),
     ],
-    ids=["back_side", "fp_poly", "fp_circle", "fp_curve"],
+    ids=["back_side", "fp_poly", "fp_circle", "fp_curve", "board_gr_arc", "fp_arc"],
 )
 def test_outline_representations_match_kicad_cli(
     board_text, probes, kicad_violating, kct_clean, tmp_path
