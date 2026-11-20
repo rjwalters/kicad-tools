@@ -340,6 +340,12 @@ Three conventions this batch adds:
   contract. `metrics.generated_at` is the one deliberately volatile field
   (it belongs to the board.json contract), so determinism is asserted
   modulo that key.
+- **`boards[].metrics.layout_quality` (issue #9594).** The board.json
+  artifact gained an additive optional `layout_quality` block (track/ground
+  via split, corner counts, track length, outline area, diff-pair skew),
+  bound to the selected PCB's `sha256`. It flows through the envelope's
+  `boards[].metrics` unchanged; boards whose PCB is not selectable omit it.
+  Field reference: `docs/board-json-schema.md` → `layout_quality`.
 - **Producers say whether they produced.** Anything that can run without
   writing (`--dry-run`) reports it structurally: `saved`/`output_path`
   rather than exit 0 alone.
@@ -557,6 +563,19 @@ Missing sheets, unresolved library definitions, and unsupported multi-unit or
 alternate-body pin geometry fail before any file is written. Repeated references
 to one child file are processed once, using that
 file's embedded library definitions. Unchanged files are never rewritten.
+
+
+### `voltage-map-merge` envelope document
+
+`kct voltage-map-merge forward.json reverse.json -o envelope.json
+[--format text|json]` (#9582) merges per-scenario voltage maps into one
+envelope map written to the output path (an ordinary `--voltage-map`
+sidecar); `--format json` additionally emits the run summary on stdout.
+Shapes:
+
+| Command | Document |
+|---|---|
+| `voltage-map-merge` | Success: `{"command": "voltage-map-merge", "inputs": [path, …], "output", "nets", "pair_bounds", "route_understated_pairs": [{nets, census_dv, route_dv}], "success": true}` — `nets` / `pair_bounds` count the written envelope's non-reserved net keys and generated `_pair_bounds` entries; `route_understated_pairs` carries the pairs the stderr warning names (the #4411 signed-collapse route-consumer gap), so machine consumers need not scrape stderr. Failure: `{"command": "voltage-map-merge", "error", "success": false}` with unchanged exit codes — including a scenario that spells one net two ways normalising together (`/VCC` and `VCC`), which is refused naming both spellings instead of silently dropping one potential (issue #9665) |
 
 
 ## Findings: the shared, versioned locator shape

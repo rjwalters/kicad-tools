@@ -46,4 +46,4 @@ pad shapes with a positive mathematical angle. That validator issue is tracked
 separately; these router predicates retain the verified negative KiCad board
 rotation convention rather than reproducing the validator discrepancy.
 
-The independently confirmed validator polygon rotation-sign discrepancy is tracked in [#5227](https://github.com/rjwalters/kicad-tools/issues/5227). It is separate from this router-consumer change.
+The independently confirmed validator polygon rotation-sign discrepancy is tracked in [#5227](https://github.com/2AMLogic/kicad-tools/issues/5227). It is separate from this router-consumer change.

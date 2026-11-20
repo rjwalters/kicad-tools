@@ -1,8 +1,8 @@
 ---
 title: "stm32_devboard_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.20.0"
-date: "Rev 1 | 2026-09-10 | jlcpcb-tier1"
+author: "kicad-tools 0.29.0"
+date: "Rev 1 | 2026-11-19 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -18,10 +18,10 @@ header-includes:
 | Property | Value |
 |----------|-------|
 | Layers | 2 copper (F.Cu, B.Cu) |
-| Footprints | 17 (15 SMD, 2 THT, 0 other) |
+| Footprints | 20 (18 SMD, 2 THT, 0 other) |
 | Nets | 12 |
-| Traces | 158 segments |
-| Vias | 29 |
+| Traces | 93 segments |
+| Vias | 34 |
 | Board Size | 60.0 x 40.0 mm |
 
 ## Design Overview
@@ -36,7 +36,7 @@ Demonstrates circuit blocks API
 
 ### Power Architecture
 
-**Power Rails**: +5V, +3.3V, GND
+**Power Rails**: +3.3V, +5V, GND
 
 | Regulator | Device |
 |-----------|--------|
@@ -51,8 +51,14 @@ Demonstrates circuit blocks API
 
 ## ERC Status
 
-Native KiCad ERC: **0 errors, 0 warnings**. The real MCP1825S pinout and
-portable symbol library are checked; see native-erc.json.
+| Metric | Count |
+|--------|-------|
+| Errors | 0 |
+| Warnings | 0 |
+
+**Status**: PASS
+
+\newpage
 
 ## Schematic Overview
 
@@ -112,56 +118,55 @@ portable symbol library are checked; see native-erc.json.
 
 \newpage
 
-## DRC Status
+## DRC Status (`--mfr jlcpcb-tier1` profile with reviewed fabrication process: via drill 0.15 mm, via diameter 0.3 mm, annular ring 0.075 mm)
 
 | Metric | Count |
-|---|---|
+|--------|-------|
 | Errors | 0 |
-| Warnings | 0 |
+| Errors: kct (reviewed process rules, not stock `--mfr jlcpcb-tier1`) | 0 |
+| Errors: kicad-cli (geometric) | 0 |
+| Warnings | 8 |
+| Blocking | 0 |
 
-**PASS: 0 errors, 0 warnings** with the explicitly reviewed two-layer mechanical
-drilling process. Ordinary through vias use a minimum 0.15mm drill, 0.30mm
-diameter and 0.075mm annular ring. This paid JLC drilling option is documented
-in manufacturing-requirements.json. No findings are suppressed. All eight
-SMT-land drill overlaps were repaired with explicit connectivity tails.
+**Status**: PASS
 
-Native DRC also has zero violations and opens. Schematic/copper LVS is clean.
-See check-report.json for complete checks and override provenance,
-native-drc.json for independent native evidence, and fill-consistency.json
-for exact exported-copper parity against an independent native refill.
+### Violations by Type
+
+| Violation Type | Count |
+|----------------|-------|
+| pour_slot | 8 |
+
+
+
+\newpage
 
 ## Manufacturing Readiness
 
-**READY for fabrication and assembly with the specified process.** Select the
-paid 0.15mm mechanical-drill option, two layers, 1.6mm FR4, 1oz copper and
-tented through vias. There are no laser microvias or drill overlaps with SMT
-lands. U1 must be MCP1825S-3302E/DB (C148031); do not fit AMS1117.
+**Verdict**: WARNING
 
-Use the 17-placement BOM/CPL: 15 SMT parts plus the through-hole J1 and Y1,
-which JLCPCB assembles (procurement must review those rows; see
-procurement-review.md). Power only from regulated 5V. First-article supply,
-thermal/load, SWD, crystal, reset and LED tests remain unperformed; see
-DESIGN_REVIEW.md. Geometric readiness does not claim physical qualification.
+### Action Items
+
+- **[OPTIONAL]** Refill zones to verify 3 zone-connected nets, then re-run kct audit
+- **[OPTIONAL]** Review 8 DRC warnings
+
+
+\newpage
 
 ## Routing Status
 
 | Metric | Value |
 |--------|-------|
 | Signal Net Completion | 100.0% (9/9) |
-| Overall Completion | 91.7% |
-| Complete Nets | 11 / 12 |
+| Overall Completion | 100.0% |
+| Complete Nets | 12 / 12 |
 | Zone-Connected Nets | 3 |
-| Incomplete Nets | 1 |
-| Unconnected Pads | 1 |
+| Incomplete Nets | 0 |
+| Unconnected Pads | 0 |
 
 ### Zone-Connected Nets
 
 - +3.3V
 - +5V
-- GND
-
-### Incomplete Nets
-
 - GND
 
 
@@ -170,9 +175,9 @@ DESIGN_REVIEW.md. Geometric readiness does not claim physical qualification.
 | Metric | Per Board (estimated) |
 |--------|-------|
 | PCB Fabrication | ~0.88 USD |
-| Components (estimated) | ~1.36 USD |
-| Assembly (estimated) | ~2.02 USD |
-| **Total (estimated)** | **~4.26 USD** |
+| Components (estimated) | ~1.4 USD |
+| Assembly (estimated) | ~2.04 USD |
+| **Total (estimated)** | **~4.31 USD** |
 | Batch Quantity | 5 |
-| Batch Total (estimated) | ~21.3 USD |
+| Batch Total (estimated) | ~21.55 USD |
 

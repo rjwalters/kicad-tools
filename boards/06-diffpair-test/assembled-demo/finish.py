@@ -46,6 +46,72 @@ def repair_drill_overlaps(pcb):
                     point.set_value(1, new[1])
 
 
+def repair_pad_mask_escapes(path):
+    """Collapse each IN net's staircase exit from its R pad into one 45-degree leg.
+
+    Issue #9548: the deterministic router passes the IN trace straight
+    through R5-R8 pad 1 -- it enters the mask aperture from the left and
+    leaves through a grid-quantized staircase (a 45-degree entry diagonal
+    into the aperture's rounded bottom-right corner, then a 0.05 mm nub
+    and an off-pad leg) that puts same-net copper beside the opening on
+    two sides, beyond the one straight entry a pad's own escape gets in
+    ``mask_to_copper``'s within-own-pad class.  The quantizer reintroduces
+    that corner-hugging copper whenever a reviewed endpoint drag is
+    off-angle, so this runs after ``quantize_pcb_file`` and replaces the
+    exit with one perpendicular drop from the pad centre -- the exact
+    shape the allowance models (``width x clearance`` under the straight
+    bottom edge, copper on one side only) -- plus the re-anchored
+    corridor run.  Exact-match: a chain that no longer matches the
+    deterministic router output raises here instead of shipping
+    unreviewed copper to the gate.
+    """
+    from kicad_tools.core.schematic_uuids import UuidMinter
+
+    moves = json.loads((Path(__file__).parent / "pad-mask-escape-repairs.json").read_text())
+    pcb = parse_file(path)
+    net_numbers = {n.get_string(1): n.get_int(0) for n in pcb.find_children("net")}
+    mint = UuidMinter()
+
+    def _endpoint(node):
+        return (node.get_float(0), node.get_float(1))
+
+    def _matches(item, number, a, b):
+        if item.name != "segment":
+            return False
+        net = item.find_child("net")
+        if net is None or net.get_int(0) != number:
+            return False
+        start, end = _endpoint(item.find_child("start")), _endpoint(item.find_child("end"))
+        return any(
+            math.dist(p, a) < 1e-6 and math.dist(q, b) < 1e-6
+            for p, q in ((start, end), (end, start))
+        )
+
+    changed = 0
+    for move in moves:
+        number = net_numbers[move["net"]]
+        for a, b in move["remove"]:
+            victim = next((c for c in pcb.children if _matches(c, number, a, b)), None)
+            if victim is None:
+                raise RuntimeError(
+                    f"pad-mask escape repair: {move['net']} segment {a}->{b} not found"
+                )
+            pcb.remove(victim)
+            changed += 1
+        for a, b in move["add"]:
+            pcb.append(
+                parse_string(
+                    f"(segment (start {a[0]} {a[1]}) (end {b[0]} {b[1]}) (width 0.2) "
+                    f'(layer "F.Cu") (net {number}) '
+                    f'(uuid "{mint.mint("segment", move["net"], a[0], a[1], b[0], b[1], 0.2, "F.Cu")}"))'
+                )
+            )
+            changed += 1
+    if changed:
+        path.write_text(pcb.to_string() + "\n")
+    return changed
+
+
 def check_process_geometry(path):
     """Inner planes remain continuous references; ordinary through vias stay off lands."""
     from kicad_tools.schema.pcb import PCB
@@ -119,6 +185,7 @@ def main():
     # The off-land drill repairs drag attached endpoints. Quantize their
     # resulting chords before refill and all native/process checks.
     quantize_pcb_file(path)
+    repair_pad_mask_escapes(path)
     moved = relocate_pad_edge_vias(path)
     # Issue #8532 / #8759: every board carries global fiducials and a board-ID
     # silkscreen (the title block in generate.py supplies its rev).  Added

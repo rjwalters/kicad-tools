@@ -90,23 +90,25 @@ def netclass_assignment_value(settings: dict[str, Any], class_name: str) -> str 
     return class_name if _schema_version(settings) == 3 else [class_name]
 
 
-def resolve_project_clearances(
+#: KiCad stores netclass fields as nm integers, so anything above the
+#: 2^31-1 nm ceiling cannot be a real authored value (mm bound).
+_MAX_NETCLASS_FIELD_MM = (2**31 - 1) / 1_000_000
+
+
+def _prepare_netclass_resolution(
     project: dict[str, Any], net_names: Iterable[str]
-) -> dict[str, NetclassClearance]:
-    """Resolve schema 3–5 netclasses with native priority/inheritance semantics.
+) -> tuple[list[str], dict[str, dict[str, Any]], dict[str, set[str]]] | None:
+    """Shared netclass resolution front end: validate, migrate, match.
 
-    Smaller priority numbers win; ties sort by class name. A class lacking a
-    clearance inherits from the next matching class that supplies one, then
-    Default. Default is not a minimum imposed on explicitly assigned classes.
-    Schema 3 class order and string assignments are migrated in a private copy.
-    No manufacturer choice or route relaxation changes these authored values.
-
-    Missing or ``null`` net_settings returns an empty mapping (no authored
-    netclasses); an unversioned block is read as the current schema, as KiCad
-    reads it (#6262). Malformed declarations, unsupported patterns, a stated
-    but unsupported schema, and unresolved references fail explicitly.
-    Custom DRC rules, board minima and fabrication limits remain separate
-    constraints for the routing caller to combine.
+    Everything :func:`resolve_project_clearances` does before the
+    per-field walk -- argument validation, schema-3 migration, ``Default``
+    injection, pattern/assignment matching and priority validation -- so a
+    field-specific resolver (clearance today, track width for the #9600
+    neck census) can walk the same memberships without duplicating the
+    semantics.  Returns ``(names, definitions, memberships)``, or ``None``
+    when the project declares no ``net_settings`` (nothing authored to
+    resolve, #6262).  Field values are NOT validated here: each resolver
+    validates its own field with its own bounds.
     """
     if not isinstance(project, dict):
         raise ProjectClearanceError("Expected a project object")
@@ -118,7 +120,7 @@ def resolve_project_clearances(
     if project.get("net_settings") is None:
         # Absent or JSON ``null``: the project declares no netclasses, so
         # there is nothing authored to resolve (#6262).
-        return {}
+        return None
     data = deepcopy(project)
     settings = data["net_settings"]
     if not isinstance(settings, dict):
@@ -159,17 +161,6 @@ def resolve_project_clearances(
         priority = item.get("priority", -1)
         if type(priority) is not int or not -(2**31) <= priority < 2**31:
             raise ProjectClearanceError(f"Invalid priority for class {name!r}")
-        value = item.get("clearance")
-        if value is None and name != "Default":
-            continue
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or value < 0
-            or value > (2**31 - 1) / 1_000_000
-            or not math.isfinite(value)
-        ):
-            raise ProjectClearanceError(f"Invalid clearance for class {name!r}")
 
     memberships: dict[str, set[str]] = {name: set() for name in names if name}
     for row in report["patterns"]:
@@ -178,6 +169,43 @@ def resolve_project_clearances(
     for net, targets in (settings.get("netclass_assignments") or {}).items():
         if net in memberships:
             memberships[net].update(targets)
+    return names, definitions, memberships
+
+
+def resolve_project_clearances(
+    project: dict[str, Any], net_names: Iterable[str]
+) -> dict[str, NetclassClearance]:
+    """Resolve schema 3–5 netclasses with native priority/inheritance semantics.
+
+    Smaller priority numbers win; ties sort by class name. A class lacking a
+    clearance inherits from the next matching class that supplies one, then
+    Default. Default is not a minimum imposed on explicitly assigned classes.
+    Schema 3 class order and string assignments are migrated in a private copy.
+    No manufacturer choice or route relaxation changes these authored values.
+
+    Missing or ``null`` net_settings returns an empty mapping (no authored
+    netclasses); an unversioned block is read as the current schema, as KiCad
+    reads it (#6262). Malformed declarations, unsupported patterns, a stated
+    but unsupported schema, and unresolved references fail explicitly.
+    Custom DRC rules, board minima and fabrication limits remain separate
+    constraints for the routing caller to combine.
+    """
+    prepared = _prepare_netclass_resolution(project, net_names)
+    if prepared is None:
+        return {}
+    names, definitions, memberships = prepared
+    for name, item in definitions.items():
+        value = item.get("clearance")
+        if value is None and name != "Default":
+            continue
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or value < 0
+            or value > _MAX_NETCLASS_FIELD_MM
+            or not math.isfinite(value)
+        ):
+            raise ProjectClearanceError(f"Invalid clearance for class {name!r}")
 
     # Unconnected copper uses Default; wildcard assignments cannot give an
     # unnamed net an electrical identity.
@@ -231,3 +259,70 @@ def authored_netclass_clearances(
     return {
         name: value for name, value in resolved.items() if name and value.source_class != "Default"
     }
+
+
+@dataclass(frozen=True)
+class NetclassWidth:
+    """An effective authored track width (mm) and the class supplying it."""
+
+    width: float
+    source_class: str
+
+
+def authored_netclass_widths(
+    project: dict[str, Any], net_names: Iterable[str]
+) -> dict[str, NetclassWidth]:
+    """Nets whose effective track width comes from a netclass other than ``Default``.
+
+    Issue #9600 (audit row 3): the neck census measures emitted copper
+    against the width the designer authored for that net -- the project's
+    ``netclass_assignments`` / ``netclass_patterns`` resolved with the same
+    priority-and-inheritance semantics as
+    :func:`authored_netclass_clearances`, reading each class's
+    ``track_width`` instead of its ``clearance``.  ``Default``-sourced
+    widths are deliberately excluded (mirroring the clearance resolver):
+    the board-wide width flows through the caller's own default (PCB
+    rules, ``--trace-width`` override), which must keep winning over the
+    project file.
+
+    A project that declares no ``track_width`` on any class other than
+    ``Default`` cannot give a net a non-``Default`` width, so it returns
+    ``{}`` without consulting the full resolver -- same rationale as the
+    clearance fast path.  A ``track_width`` that is present but not a
+    valid non-negative millimetre value fails explicitly.
+    """
+    if not isinstance(project, dict) or project.get("net_settings") is None:
+        return {}
+    settings = project["net_settings"]
+    classes = settings.get("classes") if isinstance(settings, dict) else None
+    if isinstance(classes, list) and not any(
+        isinstance(item, dict) and item.get("name") != "Default" and "track_width" in item
+        for item in classes
+    ):
+        return {}
+    prepared = _prepare_netclass_resolution(project, net_names)
+    if prepared is None:
+        return {}
+    _names, definitions, memberships = prepared
+    for name, item in definitions.items():
+        value = item.get("track_width")
+        if value is None:
+            continue
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or value < 0
+            or value > _MAX_NETCLASS_FIELD_MM
+            or not math.isfinite(value)
+        ):
+            raise ProjectClearanceError(f"Invalid track_width for class {name!r}")
+    result: dict[str, NetclassWidth] = {}
+    for net, members in memberships.items():
+        ordered = sorted(members, key=lambda cls: (definitions[cls].get("priority", -1), cls))
+        for cls in [*ordered, "Default"]:
+            value = definitions[cls].get("track_width")
+            if value is not None:
+                if cls != "Default":
+                    result[net] = NetclassWidth(float(value), cls)
+                break
+    return result

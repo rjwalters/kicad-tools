@@ -134,6 +134,7 @@ class TestProfileThreading:
                 skip_erc,
                 net_class_map_path=None,
                 schematic_path=None,
+                design_rules=None,
             ):
                 captured["manufacturer"] = manufacturer
                 captured["net_class_map_path"] = net_class_map_path
@@ -245,7 +246,12 @@ class TestProfileThreading:
 
         class FakeCollector:
             def __init__(
-                self, pcb_path, manufacturer, net_class_map_path=None, schematic_path=None
+                self,
+                pcb_path,
+                manufacturer,
+                net_class_map_path=None,
+                schematic_path=None,
+                design_rules=None,
             ):
                 captured["manufacturer"] = manufacturer
                 captured["net_class_map_path"] = net_class_map_path

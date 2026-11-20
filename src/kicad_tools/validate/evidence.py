@@ -82,6 +82,14 @@ KEY_SEPARATOR = "|"
 EVIDENCE_HASH_VERSION = "ev4"
 EVIDENCE_HASH_PREFIX = EVIDENCE_HASH_VERSION + ":"
 
+# The one superseded recipe :func:`compute_evidence_hash` can still reproduce
+# (Issue #9454).  ``ev3`` differs from ``ev4`` in exactly one field -- the named
+# footprints' ``at`` is board-relative instead of sheet-absolute -- so a waiver
+# recorded under ``ev3`` can be *proven* unchanged by recomputing its digest and
+# then re-bound to ``ev4`` (``kct check --migrate-waivers``).  It is not a
+# selectable recipe: nothing records new hashes with it.
+PRIOR_EVIDENCE_HASH_VERSION = "ev3"
+
 # ``kct detect-mistakes`` hashes (Issue #6006) add the check's structured
 # measurements to the recipe above, so they carry a compound version
 # ``<evidence version>.<measurement recipe>`` (``ev4.m1``).  Bumping either
@@ -431,12 +439,20 @@ def _pad_bbox_distance(
 class EvidenceContext:
     """Per-board lookup tables shared by every hash computed for one run."""
 
-    def __init__(self, pcb: PCB | None) -> None:
+    def __init__(self, pcb: PCB | None, *, recipe: str = EVIDENCE_HASH_VERSION) -> None:
+        if recipe not in (EVIDENCE_HASH_VERSION, PRIOR_EVIDENCE_HASH_VERSION):
+            raise ValueError(f"cannot compute evidence hashes with recipe {recipe!r}")
+        #: Hash version this context computes (``ev4``, or ``ev3`` for migration).
+        self.recipe = recipe
         self.footprints: dict[str, Any] = _footprint_index(pcb) if pcb is not None else {}
         self.net_members: dict[str, list[str]] = _net_members(pcb) if pcb is not None else {}
         self.net_pads: dict[str, list[_NetPad]] = _net_pads(pcb) if pcb is not None else {}
         self.board_origin: tuple[float, float] = (
             _board_origin(pcb) if pcb is not None else (0.0, 0.0)
+        )
+        # ev3 hashed footprint ``at`` board-relative (no origin shift added back).
+        self.footprint_origin: tuple[float, float] = (
+            self.board_origin if recipe == EVIDENCE_HASH_VERSION else (0.0, 0.0)
         )
         self.has_board = pcb is not None
 
@@ -503,7 +519,7 @@ def evidence_payload(
         for item in violation.items:
             ref = _resolve_ref(item, ctx.footprints)
             if ref is not None and ref not in footprints:
-                footprints[ref] = _footprint_evidence(ctx.footprints[ref], ctx.board_origin)
+                footprints[ref] = _footprint_evidence(ctx.footprints[ref], ctx.footprint_origin)
         payload["footprints"] = dict(sorted(footprints.items()))
         nets = sorted(set(violation.nets))
         radius = net_evidence_radius(violation.rule_id)
@@ -528,14 +544,19 @@ def compute_evidence_hash(
     *,
     multiplicity: int = 1,
 ) -> str:
-    """Hash the local evidence of ``violation`` (see module docstring)."""
+    """Hash the local evidence of ``violation`` (see module docstring).
+
+    The prefix is the version of ``context``'s recipe: ``ev4`` normally, ``ev3``
+    for a context built with ``recipe="ev3"`` (waiver migration, Issue #9454).
+    """
     canonical = json.dumps(
         evidence_payload(violation, context, multiplicity=multiplicity),
         sort_keys=True,
         separators=(",", ":"),
     )
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
-    return EVIDENCE_HASH_PREFIX + digest
+    recipe = context.recipe if context is not None else EVIDENCE_HASH_VERSION
+    return f"{recipe}:{digest}"
 
 
 def annotate_evidence(results: DRCResults, pcb: PCB | None) -> None:

@@ -14,6 +14,7 @@ from kicad_tools.router.cpp_backend import (
     get_backend_info,
     is_cpp_available,
 )
+from tests.conftest import require_router_cpp
 
 
 @pytest.mark.parametrize("exit_path", ["normal", "failure", "skip"])
@@ -213,8 +214,7 @@ class TestCppBackendDiagnosticMessages:
 
     def test_native_import_retains_types_after_diagnostic(self):
         """A skipped missing-extension probe must not break later native imports."""
-        if not is_cpp_available():
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
         native = importlib.import_module("kicad_tools.router.router_cpp")
         assert native.Grid3D is not None
         assert native.Pathfinder is not None
@@ -299,10 +299,7 @@ class TestCppPathfinderPadBounds:
 
     def test_compute_pad_bounds_smd(self):
         """Test _compute_pad_bounds for an SMD pad returns correct metal/approach grid bounds."""
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
         from kicad_tools.router.layers import Layer, LayerStack
@@ -345,10 +342,7 @@ class TestCppPathfinderPadBounds:
 
     def test_compute_pad_bounds_through_hole(self):
         """Test _compute_pad_bounds for a through-hole pad with drill."""
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
         from kicad_tools.router.layers import Layer, LayerStack
@@ -402,10 +396,7 @@ class TestCppPathfinderPadBounds:
         Steiner edge this way, on every route of the board.  The fix
         clamps empty spans to the nearest grid cell.
         """
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
         from kicad_tools.router.grid import RoutingGrid
@@ -458,10 +449,7 @@ class TestCppPathfinderPadBounds:
         Creates a scenario where the pad center is offset by half a grid cell,
         verifying the metal area expansion allows the route to succeed.
         """
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
         from kicad_tools.router.layers import Layer, LayerStack
@@ -512,10 +500,7 @@ class TestAvoidanceCost:
 
     def test_boost_region_cost_modifies_cells(self):
         """Test that boost_region_cost correctly sets avoidance_cost in cells within radius."""
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid
 
@@ -546,10 +531,7 @@ class TestAvoidanceCost:
 
     def test_boost_region_cost_tapers_with_distance(self):
         """Test that avoidance cost tapers off with distance from center."""
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid
 
@@ -565,10 +547,7 @@ class TestAvoidanceCost:
 
     def test_clear_avoidance_costs_zeros_all(self):
         """Test that clear_avoidance_costs zeros all avoidance_cost fields."""
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid
 
@@ -592,10 +571,7 @@ class TestAvoidanceCost:
 
     def test_avoidance_cost_shifts_route(self):
         """Test that A* path shifts away from cells with high avoidance_cost."""
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
         from kicad_tools.router.layers import Layer, LayerStack
@@ -671,10 +647,7 @@ class TestAvoidanceCost:
 
     def test_clear_avoidance_costs_method_on_pathfinder(self):
         """Test that CppPathfinder exposes clear_avoidance_costs method."""
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
         from kicad_tools.router.layers import LayerStack
@@ -703,10 +676,7 @@ class TestAvoidanceCost:
 
     def test_avoidance_cost_no_overhead_when_zero(self):
         """Test that default zero avoidance_cost adds no overhead to A* routing."""
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid
 
@@ -719,10 +689,7 @@ class TestAvoidanceCost:
 
     def test_gridcell_avoidance_cost_exposed(self):
         """Test that GridCell.avoidance_cost is readable and writable via bindings."""
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid
 
@@ -742,10 +709,7 @@ class TestResumableRouting:
 
     def test_route_resumable_finds_path(self):
         """Test that route_resumable finds a path identical to route()."""
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
         from kicad_tools.router.layers import Layer, LayerStack
@@ -791,10 +755,7 @@ class TestResumableRouting:
 
     def test_route_resumable_bindings_exist(self):
         """Test that route_resumable, resume, clear_search_state bindings exist."""
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from kicad_tools.router import router_cpp
         from kicad_tools.router.cpp_backend import CppGrid
@@ -825,10 +786,7 @@ class TestResumableRouting:
 
     def test_route_resumable_and_resume_cycle(self):
         """Test route_resumable + resume finds alternative path after rejection."""
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from kicad_tools.router import router_cpp
         from kicad_tools.router.cpp_backend import CppGrid
@@ -883,10 +841,7 @@ class TestResumableRouting:
 
     def test_clear_search_state_resets(self):
         """Test that clear_search_state releases memory and resets state."""
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from kicad_tools.router import router_cpp
         from kicad_tools.router.cpp_backend import CppGrid
@@ -932,10 +887,7 @@ class TestResumableRouting:
 
     def test_route_still_works_after_resumable(self):
         """Test that non-resumable route() still works after route_resumable()."""
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from kicad_tools.router import router_cpp
         from kicad_tools.router.cpp_backend import CppGrid
@@ -987,10 +939,7 @@ class TestResumableRouting:
 
     def test_python_wrapper_uses_resumable(self):
         """Test that CppPathfinder.route() uses resumable API internally."""
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
         from kicad_tools.router.layers import Layer, LayerStack
@@ -1036,10 +985,7 @@ class TestResumableRouting:
 
     def test_exception_safety_clears_state(self):
         """Test that search state is cleared even when validation raises."""
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
         from kicad_tools.router.layers import Layer, LayerStack
@@ -1158,10 +1104,7 @@ class TestCppPathfinderPythonFallback:
 
     def test_fallback_stats_initial_state(self):
         """Test that fallback stats are empty on fresh CppPathfinder."""
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
         from kicad_tools.router.grid import RoutingGrid
@@ -1193,8 +1136,7 @@ class TestCppPathfinderPythonFallback:
         the Python ``Router.route`` stubbed, so the dispatch AND its stats
         bookkeeping are exercised end-to-end.
         """
-        if not is_cpp_available():
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from unittest import mock
 
@@ -1313,8 +1255,7 @@ class TestCppPathfinderPythonFallback:
     def test_fallback_opt_in_dispatches_route_auto(self):
         """Issue #6527: when opted in the fallback runs ``route_auto`` with the
         fallback threshold, forwarding the deadline and Steiner goals."""
-        if not is_cpp_available():
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from unittest import mock
 
@@ -1350,8 +1291,7 @@ class TestCppPathfinderPythonFallback:
         committed path is the one the real Python ``Router`` produced.  Fails
         if ``route_bidirectional`` is stubbed out to return ``None``.
         """
-        if not is_cpp_available():
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from unittest import mock
 
@@ -1390,8 +1330,7 @@ class TestCppPathfinderPythonFallback:
     def test_length_constrained_nets_stay_one_way(self, nc_kwargs, pass_net_class):
         """Issue #6527: diff-pair legs and match-group members never call
         ``route_bidirectional``; they keep the one-way fallback."""
-        if not is_cpp_available():
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from unittest import mock
 
@@ -1423,8 +1362,7 @@ class TestCppPathfinderPythonFallback:
 
         Issue #7012 port of ``test_fallback_none_result`` (row 2).
         """
-        if not is_cpp_available():
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from unittest import mock
 
@@ -1443,8 +1381,7 @@ class TestCppPathfinderPythonFallback:
 
     def test_fallback_skipped_when_no_py_grid(self):
         """Fallback is skipped when the CppGrid has no ``_py_grid`` (row 3)."""
-        if not is_cpp_available():
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from unittest import mock
 
@@ -1466,8 +1403,7 @@ class TestCppPathfinderPythonFallback:
 
     def test_fallback_stats_accumulate(self):
         """Multiple fallbacks accumulate in ``fallback_stats`` (row 4)."""
-        if not is_cpp_available():
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from unittest import mock
 
@@ -1492,8 +1428,7 @@ class TestCppPathfinderPythonFallback:
 
     def test_py_router_reused_across_fallbacks(self):
         """The Python Router is constructed once and reused (row 5)."""
-        if not is_cpp_available():
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from unittest import mock
 
@@ -1516,10 +1451,7 @@ class TestCppPathfinderPythonFallback:
 
     def test_fallback_not_invoked_when_cpp_succeeds(self):
         """Test Python fallback is NOT constructed when C++ succeeds."""
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
         from kicad_tools.router.grid import RoutingGrid
@@ -1570,10 +1502,7 @@ class TestCppBuildVersionGuard:
 
     def test_build_version_exposed_when_cpp_available(self):
         """When C++ loads successfully, router_cpp.BUILD_VERSION matches required."""
-        if not is_cpp_available():
-            import pytest
-
-            pytest.skip("C++ backend not available")
+        require_router_cpp()
 
         from kicad_tools.router import cpp_backend
 
@@ -1604,9 +1533,7 @@ class TestCppBuildVersionGuard:
         # Snapshot the live router_cpp module (None if backend already disabled)
         router_cpp_mod = original.router_cpp
         if router_cpp_mod is None:
-            import pytest
-
-            pytest.skip("C++ backend not available - guard already engaged")
+            require_router_cpp()
 
         # Force BUILD_VERSION to a mismatched value before re-importing
         monkeypatch.setattr(router_cpp_mod, "BUILD_VERSION", 999_999, raising=False)
@@ -1641,9 +1568,7 @@ class TestCppBuildVersionGuard:
 
         router_cpp_mod = original.router_cpp
         if router_cpp_mod is None:
-            import pytest
-
-            pytest.skip("C++ backend not available - guard already engaged")
+            require_router_cpp()
 
         # Remove the attribute entirely
         if hasattr(router_cpp_mod, "BUILD_VERSION"):

@@ -40,7 +40,6 @@ from kicad_tools.router.clearance_kernel import (
     KZonePoly,
     copper_gap,
 )
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.fixed_copper import FixedFill, FixedFillObstacles
 from kicad_tools.router.fixed_copper_kernel import (
     TOUCH_EPSILON_MM,
@@ -48,9 +47,7 @@ from kicad_tools.router.fixed_copper_kernel import (
     polygon_rings,
 )
 
-requires_cpp = pytest.mark.skipif(
-    not is_cpp_available(), reason="C++ router backend not built in this worktree"
-)
+requires_cpp = pytest.mark.requires_router_cpp
 
 #: Layer every probe in this module uses; group 6 is a per-layer predicate and
 #: the layer gate has its own test.

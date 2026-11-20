@@ -79,6 +79,7 @@ class PlacementOptimizer:
         config: PlacementConfig | None = None,
         record_decisions: bool = False,
         perf_config: PerformanceConfig | None = None,
+        board_holes: list[Polygon] | None = None,
     ):
         """
         Initialize the optimizer.
@@ -88,8 +89,15 @@ class PlacementOptimizer:
             config: Optimization parameters
             record_decisions: If True, record placement decisions for later querying
             perf_config: Performance configuration for GPU acceleration
+            board_holes: Cut-out holes inside the board (Edge.Cuts interior
+                rings). A component whose center falls in one is projected
+                back onto the hole's boundary each step and reported by
+                :meth:`out_of_bounds_components` -- the plain outline polygon
+                cannot express holes, so without them the optimizer happily
+                parks parts inside a board cut-out (#9593).
         """
         self.board_outline = board_outline
+        self.board_holes: list[Polygon] = list(board_holes or [])
         self.config = config or PlacementConfig()
         self.components: list[Component] = []
         self.springs: list[Spring] = []
@@ -239,6 +247,7 @@ class PlacementOptimizer:
         # unavailable (ImportError), so that a real parse failure is surfaced
         # rather than silently degrading to an estimated outline (#3804).
         board = None
+        board_holes: list[Polygon] = []
         shapely_parse_error: Exception | None = None
         try:
             from kicad_tools.pcb.board_geometry import BoardGeometry, has_shapely
@@ -247,6 +256,19 @@ class PlacementOptimizer:
                 try:
                     board_geom = BoardGeometry.from_pcb(pcb)
                     board = board_geom.to_optim_polygon()
+                    # Interior rings are the board's cut-outs; the plain
+                    # optim polygon copies only the exterior, so carry the
+                    # holes separately (#9593).
+                    board_holes = [
+                        Polygon(
+                            vertices=[
+                                Vector2D(x, y)
+                                for x, y in ring.coords[:-1]  # drop closing duplicate
+                            ]
+                        )
+                        for ring in board_geom.polygon.interiors
+                        if len(ring.coords) >= 4
+                    ]
                     # BoardGeometry.from_pcb subtracts pcb.board_origin from
                     # every Edge.Cuts vertex, so to_optim_polygon() is already
                     # in the origin-relative frame that Footprint.position
@@ -316,7 +338,13 @@ class PlacementOptimizer:
                     max_y - min_y,
                 )
 
-        optimizer = cls(board, config, record_decisions=record_decisions, perf_config=perf_config)
+        optimizer = cls(
+            board,
+            config,
+            record_decisions=record_decisions,
+            perf_config=perf_config,
+            board_holes=board_holes,
+        )
 
         # Add components
         for fp in pcb.footprints:
@@ -2125,6 +2153,28 @@ class PlacementOptimizer:
                 comp.vx = 0.0
                 comp.vy = 0.0
 
+            # Board cut-outs (Edge.Cuts interior rings) are outside the
+            # placeable board even though they sit inside the outer
+            # boundary. The keepout-style repulsion forces cancel by
+            # symmetry at a hole's centre, so containment is enforced
+            # geometrically: project the centre onto the hole boundary and
+            # nudge it outward, into board material (#9593).
+            for hole in self.board_holes:
+                center = Vector2D(comp.x, comp.y)
+                if not hole.contains_point(center):
+                    continue
+                nearest = hole.nearest_point_on_boundary(center)
+                outward = nearest - hole.centroid()
+                magnitude = outward.magnitude()
+                if magnitude > 1e-9:
+                    outward = outward * (1.0 / magnitude)
+                else:
+                    outward = Vector2D(0.0, 0.0)
+                push = max(self.config.boundary_margin, 0.1)
+                comp.x, comp.y = nearest.x + outward.x * push, nearest.y + outward.y * push
+                comp.vx = 0.0
+                comp.vy = 0.0
+
             # Update pin positions based on new position and rotation
             comp.update_pin_positions()
 
@@ -2433,7 +2483,8 @@ class PlacementOptimizer:
         A component center is considered out of bounds if it lies outside the
         board outline's axis-aligned bounding box inset by ``margin`` (or, for
         non-rectangular outlines with more than four vertices, outside the
-        polygon itself). Fixed components are excluded since they are intended
+        polygon itself), or inside one of the board's cut-out holes
+        (``board_holes``). Fixed components are excluded since they are intended
         to be pinned by the caller and may legitimately sit on/near the edge.
 
         This is the end-of-run containment check for issue #3804: a healthy run
@@ -2479,6 +2530,12 @@ class PlacementOptimizer:
             )
             if not outside and len(verts) > 4:
                 outside = not self.board_outline.contains_point(Vector2D(comp.x, comp.y))
+            if not outside:
+                # A cut-out hole is not placeable board material, even
+                # though it lies inside the outer boundary (#9593).
+                outside = any(
+                    hole.contains_point(Vector2D(comp.x, comp.y)) for hole in self.board_holes
+                )
             if outside:
                 violators.append(comp.ref)
         return sorted(violators)

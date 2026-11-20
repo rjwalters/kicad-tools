@@ -28,7 +28,7 @@ The preexisting native segment carve-out policy is unchanged.
 These are the grid's existing rectangular/disc approximations, not arbitrary
 KiCad pad-shape geometry. Zero-residual equal-width/height pads still use the
 legacy disc heuristic. Shape discrimination, including square pads, is tracked
-separately in [#5229](https://github.com/rjwalters/kicad-tools/issues/5229).
+separately in [#5229](https://github.com/2AMLogic/kicad-tools/issues/5229).
 Rounded rectangles and ovals continue to use the rectangle envelope where
 width differs from height; this change does not claim exact shape fidelity.
 

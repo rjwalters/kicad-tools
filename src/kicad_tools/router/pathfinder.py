@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .body_surcharge import BodySurchargeRegion
     from .pairwise_clearance import PairwiseClearanceTable
 
 import numpy as np
@@ -47,6 +48,15 @@ from .quantize import dogleg_points, is_45_aligned
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting, layer_permitted
 from .search_radius import search_radius_cells
 from .via_clearance import point_clear_of_copper, segment_clears_foreign_via
+
+# Issue #9622: the Python under-body mirror packs one bit per surcharge
+# region into per-cell int64 bitmasks, one plane per
+# ``_UNDER_BODY_REGIONS_PER_PLANE`` regions.  Boards with more fine-pitch
+# ICs than one plane simply get more planes, so every region stays priced
+# on the Python engine exactly like the uncapped C++ budget lookup (a
+# 64-region cap made the charged set depend on component insertion order,
+# review of #9635).
+_UNDER_BODY_REGIONS_PER_PLANE = 64
 
 # Issue #3135: env-gated A* neighbor-expansion trace.  Set
 # ``KICAD_ROUTER_TRACE_ASTAR=1`` to log every accept/reject decision from the
@@ -753,6 +763,13 @@ class Router:
         self._pairwise_band_kernel_cache: tuple[tuple[int, int], np.ndarray, np.ndarray] | None = (
             None
         )
+
+        # Issue #9622: cached per-cell region-bitmask planes for the
+        # under-body surcharge, identity-checked against the grid's region
+        # list (which expires when the pad registry changes).
+        self._under_body_mask_cache: (
+            tuple[list[BodySurchargeRegion], tuple[np.ndarray, ...]] | None
+        ) = None
 
         # Issue #2929: Per-A*-call wall-clock instrumentation.  When
         # ``_per_call_timing_enabled`` is True, every ``route()`` invocation
@@ -3720,6 +3737,102 @@ class Router:
         self._pairwise_band_kernel_cache = ((hard_r, band), dist_sq, band_mask)
         return dist_sq, band_mask
 
+    # ------------------------------------------------------------------
+    # Under-body surcharge (Issue #9622, audit row 9)
+    # ------------------------------------------------------------------
+    #
+    # Python mirror of the C++ engine's under-body cost: CppPathfinder
+    # installs the same regions as per-net-filtered ``PadChannelBudget``
+    # entries, so both engines price the identical additive term through
+    # their per-cell cost lookups.  Regions come from the grid's cached
+    # ``under_body_surcharges`` (see ``body_surcharge.py``); a net with a
+    # pad on the component ("local") is exempt.  Dormant (``None`` mask
+    # array) on boards without a qualifying fine-pitch component or with
+    # ``rules.cost_under_body <= 0`` -- the hot loop then adds nothing and
+    # stays byte-identical to pre-#9622 behaviour.
+    #
+    # Where two regions overlap (two fine-pitch bodies whose margin-grown
+    # pad bboxes share cells), the C++ lookup builder SUMS the budgets
+    # (``out[key] += b.overflow_penalty`` in ``pathfinder.cpp``), so the
+    # mirror charges ``popcount(cell_mask & ~local_mask) * penalty``: one
+    # penalty per covering region the net is NOT local to.  The bitmask
+    # (rather than a single region id per cell) is what makes the two
+    # engines agree on overlaps -- and keeps the charge independent of the
+    # order the components were added in.
+
+    def _under_body_regions(self) -> "list[BodySurchargeRegion]":
+        """The board's under-body surcharge regions ([] when none)."""
+        return getattr(self.grid, "under_body_surcharges", None) or []
+
+    def _under_body_mask_planes(self) -> "tuple[np.ndarray, ...] | None":
+        """Per-cell region-bitmask planes (int64 each), or ``None``.
+
+        Region ``i`` (1-based, in the grid's region-list order
+        ``_under_body_net_state`` indexes the same way) sets bit
+        ``(i - 1) % 64`` of plane ``(i - 1) // 64`` in
+        ``plane[layer, gy, gx]`` when it covers the cell.  ALL regions are
+        packed -- one plane per
+        ``_UNDER_BODY_REGIONS_PER_PLANE`` regions -- so a board with more
+        fine-pitch bodies than one int64 holds keeps every region priced,
+        exactly like the uncapped C++ budget lookup, and the charged set
+        stays independent of component insertion order (a 64-region slice
+        made body 65 free in one add order and surcharged in the other;
+        review of #9635).  Cached until the grid's region list is replaced
+        (pad registry change), mirroring the grid's own invalidation
+        contract.
+        """
+        regions = self._under_body_regions()
+        if not regions or self.rules.cost_under_body <= 0.0:
+            return None
+        cached = self._under_body_mask_cache
+        if cached is not None and cached[0] is regions:
+            return cached[1]
+        mask = np.zeros((self.grid.num_layers, self.grid.rows, self.grid.cols), dtype=np.int64)
+        planes = [mask]
+        cols = self.grid.cols
+        rows = self.grid.rows
+        for i, region in enumerate(regions, start=1):
+            if (i - 1) % _UNDER_BODY_REGIONS_PER_PLANE == 0 and i > 1:
+                mask = np.zeros((self.grid.num_layers, rows, cols), dtype=np.int64)
+                planes.append(mask)
+            gx1 = max(0, region.gx1)
+            gy1 = max(0, region.gy1)
+            gx2 = min(cols - 1, region.gx2)
+            gy2 = min(rows - 1, region.gy2)
+            if gx1 > gx2 or gy1 > gy2:
+                continue
+            for layer in region.layers:
+                if 0 <= layer < self.grid.num_layers:
+                    mask[layer, gy1 : gy2 + 1, gx1 : gx2 + 1] |= np.int64(1) << np.int64(
+                        (i - 1) % _UNDER_BODY_REGIONS_PER_PLANE
+                    )
+        plane_tuple = tuple(planes)
+        self._under_body_mask_cache = (regions, plane_tuple)
+        return plane_tuple
+
+    def _under_body_net_state(self, net: int) -> tuple[tuple[int, ...], float]:
+        """``(per-plane non-local region bitmasks, per-region surcharge)``.
+
+        The returned tuple parallels ``_under_body_mask_planes``' planes:
+        entry ``c`` has bit ``(i - 1) % 64`` set for every region ``i`` of
+        plane ``c`` the net has NO pad on.  The hot loop charges, per plane,
+        ``popcount(cell_mask & nonlocal_mask) * surcharge`` -- summing the
+        planes then yields one penalty per covering non-local region, over
+        the FULL region list (no cap, no insertion-order dependence).
+        """
+        regions = self._under_body_regions()
+        plane_bits = _UNDER_BODY_REGIONS_PER_PLANE
+        local_masks = [0] * ((len(regions) + plane_bits - 1) // plane_bits)
+        for i, region in enumerate(regions, start=1):
+            if net in region.local_nets:
+                local_masks[(i - 1) // plane_bits] |= 1 << ((i - 1) % plane_bits)
+        nonlocal_masks = []
+        for c, local in enumerate(local_masks):
+            bits_in_plane = min(plane_bits, len(regions) - c * plane_bits)
+            nonlocal_masks.append(((1 << bits_in_plane) - 1) & ~local)
+        penalty = self.rules.cost_under_body * self.rules.cost_straight
+        return tuple(nonlocal_masks), penalty
+
     def _pairwise_gradient_band(self, net: int, deadline: float | None = None) -> np.ndarray | None:
         """Cells where :meth:`_pairwise_avoidance_cost` can be non-zero.
 
@@ -4879,6 +4992,27 @@ class Router:
             ),
         )
 
+        # Issue #9622: soft under-body surcharge state.  ``None`` mask
+        # array (boards without a qualifying fine-pitch component, or the
+        # cost disabled) keeps the hot loop byte-identical to pre-#9622
+        # behaviour.  ``under_body_masks`` is the FIRST plane (the only
+        # one on boards with <= _UNDER_BODY_REGIONS_PER_PLANE bodies, i.e.
+        # every realistic board); ``under_body_extra`` carries the rest as
+        # ``(plane, nonlocal_mask)`` pairs for boards with more.
+        under_body_planes = self._under_body_mask_planes()
+        under_body_masks = under_body_planes[0] if under_body_planes else None
+        under_body_extra: tuple[tuple[np.ndarray, int], ...] = ()
+        under_body_nonlocal = 0
+        under_body_penalty = 0.0
+        if under_body_planes is not None:
+            nonlocal_masks, under_body_penalty = self._under_body_net_state(start.net)
+            under_body_nonlocal = nonlocal_masks[0]
+            if len(under_body_planes) > 1:
+                under_body_extra = tuple(
+                    (plane, mask)
+                    for plane, mask in zip(under_body_planes[1:], nonlocal_masks[1:], strict=True)
+                )
+
         # Create heuristic context - for PTH end pads, use closest routable layer
         # for heuristic estimation (the actual goal check will accept any)
         heuristic_goal_layer = end_layers[0] if end_layers else end_layer
@@ -5459,6 +5593,26 @@ class Router:
                         pairwise_cost_cache[cache_key] = cached_cost
                     pairwise_cost = cached_cost
 
+                # Issue #9622: soft under-body surcharge for a non-local net
+                # (the Python mirror of the per-cell cost CppPathfinder
+                # installs through its pad-channel lookup).  Zero unless the
+                # cell sits inside a fine-pitch component's body bbox on an
+                # outer layer AND this net has no pad on that component;
+                # one penalty per covering non-local region, so overlapping
+                # bodies sum exactly like the C++ budget lookup.
+                under_body_cost = 0.0
+                if under_body_masks is not None:
+                    cover = int(under_body_masks[nlayer, ny, nx]) & under_body_nonlocal
+                    if cover:
+                        under_body_cost = cover.bit_count() * under_body_penalty
+                    if under_body_extra:
+                        # Boards with more fine-pitch bodies than one int64
+                        # plane: the remaining planes' charges add on top.
+                        for extra_mask, extra_nonlocal in under_body_extra:
+                            cover = int(extra_mask[nlayer, ny, nx]) & extra_nonlocal
+                            if cover:
+                                under_body_cost += cover.bit_count() * under_body_penalty
+
                 positive_step_cost = (
                     neighbor_cost_mult * self.rules.cost_straight * layer_pref_mult
                     + turn_cost
@@ -5469,6 +5623,7 @@ class Router:
                     + layer_util_cost
                     + corridor_cost
                     + pairwise_cost
+                    + under_body_cost
                 )
                 if attractor_bonus > 0.0:
                     positive_step_cost = max(0.0, positive_step_cost - attractor_bonus)
@@ -5644,6 +5799,26 @@ class Router:
                 if self.rules.via_cost_cap_factor > 0.0:
                     via_cap = self.rules.via_cost_cap_factor * self.rules.cost_via
                     via_incremental = min(via_incremental, via_cap)
+
+                # Issue #9622: the same surcharge on the via-drop destination
+                # cell, mirroring the C++ via branch (which charges its
+                # pad-channel lookup on ``new_layer``).  Added after the #2325
+                # cap so the surcharge survives it -- the C++ term is uncapped.
+                # Overlapping bodies sum (one penalty per covering non-local
+                # region), matching the C++ budget-lookup semantics.
+                if under_body_masks is not None:
+                    cover = (
+                        int(under_body_masks[new_layer, current.y, current.x]) & under_body_nonlocal
+                    )
+                    if cover:
+                        via_incremental += cover.bit_count() * under_body_penalty
+                    if under_body_extra:
+                        for extra_mask, extra_nonlocal in under_body_extra:
+                            cover = (
+                                int(extra_mask[new_layer, current.y, current.x]) & extra_nonlocal
+                            )
+                            if cover:
+                                via_incremental += cover.bit_count() * under_body_penalty
 
                 # Issue #2911: Apply the attractor AFTER the cap so the
                 # bonus is felt even when the via cost is at the ceiling.
@@ -6778,6 +6953,32 @@ class Router:
         own_gate: tuple[set[str] | None, float, dict[tuple[int, int, int, int, int], bool]] | None
         own_gate = None if self.relief_mode else (*self._own_pad_gate_inputs(start, end), {})
 
+        # Issue #9622: soft under-body surcharge state for BOTH frontiers,
+        # the same tuple ``_route_impl`` prepares for the one-way search
+        # (first plane, its non-local mask, the extra planes, the per-region
+        # penalty).  Both frontiers route the same net (``start.net``), so
+        # one preparation serves them.  ``None`` -- boards without a
+        # qualifying fine-pitch body, or the cost disabled -- keeps the
+        # bidirectional hot loop byte-identical to pre-#9622 behaviour.
+        # Review of #9635: the expansion previously omitted the surcharge
+        # entirely, so the public ``--fallback-bidirectional`` path (and
+        # ``route_auto`` over a long Manhattan distance) crossed bodies the
+        # one-way search detours around.
+        under_body_state: tuple[np.ndarray, int, tuple[tuple[np.ndarray, int], ...], float] | None
+        under_body_state = None
+        under_body_planes = self._under_body_mask_planes()
+        if under_body_planes is not None:
+            nonlocal_masks, under_body_penalty = self._under_body_net_state(start.net)
+            under_body_state = (
+                under_body_planes[0],
+                nonlocal_masks[0],
+                tuple(
+                    (plane, mask)
+                    for plane, mask in zip(under_body_planes[1:], nonlocal_masks[1:], strict=True)
+                ),
+                under_body_penalty,
+            )
+
         # Best meeting point tracking
         best_path_cost = float("inf")
         meeting_point: tuple[int, int, int] | None = None
@@ -6842,6 +7043,7 @@ class Router:
                         partner_active=partner_active_flag,
                         seq_counter=forward_seq_counter,
                         own_gate=own_gate,
+                        under_body_state=under_body_state,
                     )
 
             # Process backward step
@@ -6883,6 +7085,7 @@ class Router:
                         partner_active=partner_active_flag,
                         seq_counter=backward_seq_counter,
                         own_gate=own_gate,
+                        under_body_state=under_body_state,
                     )
 
             # Issue #6527: one drained frontier without a meeting point ends
@@ -6947,6 +7150,9 @@ class Router:
         own_gate: (
             tuple[set[str] | None, float, dict[tuple[int, int, int, int, int], bool]] | None
         ) = None,
+        under_body_state: (
+            tuple[np.ndarray, int, tuple[tuple[np.ndarray, int], ...], float] | None
+        ) = None,
     ) -> None:
         """Expand neighbors for bidirectional A* search.
 
@@ -6973,11 +7179,27 @@ class Router:
                 own-pad step gate, from :meth:`_own_pad_gate_inputs`, shared
                 by both frontiers of one search.  ``None`` disables the gate
                 (relief probes, and legacy callers).
+            under_body_state: Issue #9622 -- the under-body surcharge state
+                prepared by ``route_bidirectional`` (first mask plane, its
+                non-local region bitmask, the extra ``(plane, nonlocal_mask)``
+                pairs beyond 64 regions, the per-region penalty), shared by
+                both frontiers of one search.  ``None`` (boards without a
+                qualifying fine-pitch body) adds no cost.
         """
         # Extract bounds (Issue #990: also need source bounds for pad exit check)
         src_gx1, src_gy1, src_gx2, src_gy2 = source_metal_bounds
         tgt_gx1, tgt_gy1, tgt_gx2, tgt_gy2 = target_metal_bounds
         source_gx, source_gy = self.grid.world_to_grid(source_pad.x, source_pad.y)
+
+        # Issue #9622: unpack the under-body surcharge state once (``None``
+        # locals keep both expansion types below free of it on boards
+        # without a fine-pitch body).
+        ub_masks: np.ndarray | None = None
+        ub_nonlocal = 0
+        ub_extra: tuple[tuple[np.ndarray, int], ...] = ()
+        ub_penalty = 0.0
+        if under_body_state is not None:
+            ub_masks, ub_nonlocal, ub_extra, ub_penalty = under_body_state
 
         # Issue #1618: Precompute geometry-derived pad approach bounds
         pad_escape_margin = 2  # cells beyond pad metal edge
@@ -7225,6 +7447,24 @@ class Router:
                 self.rules.cost_corridor_attractor,
             )
 
+            # Issue #9622: soft under-body surcharge for a non-local net,
+            # the mirror of the one-way expansion's term (see ``_route_impl``
+            # for the full rationale).  One penalty per covering non-local
+            # region, so overlapping bodies sum exactly like the C++ budget
+            # lookup.  Review of #9635: this expansion previously omitted
+            # the term, so the bidirectional search crossed fine-pitch
+            # bodies at zero cost.
+            under_body_cost = 0.0
+            if ub_masks is not None:
+                cover = int(ub_masks[nlayer, ny, nx]) & ub_nonlocal
+                if cover:
+                    under_body_cost = cover.bit_count() * ub_penalty
+                if ub_extra:
+                    for extra_mask, extra_nonlocal in ub_extra:
+                        cover = int(extra_mask[nlayer, ny, nx]) & extra_nonlocal
+                        if cover:
+                            under_body_cost += cover.bit_count() * ub_penalty
+
             positive_step_cost = (
                 neighbor_cost_mult * self.rules.cost_straight * layer_pref_mult
                 + turn_cost
@@ -7234,6 +7474,7 @@ class Router:
                 + crossing_cost
                 + layer_util_cost
                 + corridor_cost
+                + under_body_cost
             )
             if attractor_bonus > 0.0:
                 positive_step_cost = max(0.0, positive_step_cost - attractor_bonus)
@@ -7353,6 +7594,21 @@ class Router:
             if self.rules.via_cost_cap_factor > 0.0:
                 via_cap = self.rules.via_cost_cap_factor * self.rules.cost_via
                 via_incremental = min(via_incremental, via_cap)
+
+            # Issue #9622: the same surcharge on the via-drop destination
+            # cell, mirroring the one-way via branch (added AFTER the
+            # #2325 cap so the surcharge survives it -- the C++ term is
+            # uncapped).  Review of #9635: previously omitted here, so a
+            # bidirectional via drop under a fine-pitch body was free.
+            if ub_masks is not None:
+                cover = int(ub_masks[new_layer, current.y, current.x]) & ub_nonlocal
+                if cover:
+                    via_incremental += cover.bit_count() * ub_penalty
+                if ub_extra:
+                    for extra_mask, extra_nonlocal in ub_extra:
+                        cover = int(extra_mask[new_layer, current.y, current.x]) & extra_nonlocal
+                        if cover:
+                            via_incremental += cover.bit_count() * ub_penalty
 
             # Issue #2911: Apply the attractor AFTER the cap so the bonus
             # is felt even when the via cost is at the ceiling.

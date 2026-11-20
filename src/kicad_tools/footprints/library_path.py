@@ -5,9 +5,12 @@ Detects the location of KiCad's standard footprint libraries on different platfo
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import os
 import platform
-from dataclasses import dataclass
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from kicad_tools.kicad_install import windows_kicad_base_dirs, windows_kicad_install_roots
@@ -77,6 +80,136 @@ STANDARD_LIBRARY_MAPPINGS = {
 }
 
 
+@dataclass(frozen=True)
+class LibraryRead:
+    """One footprint file resolved from a detected standard library (Issue #9526).
+
+    Emitted by the read funnel (:meth:`LibraryPaths.get_footprint_file` and
+    :meth:`LibraryPaths.find_footprint_by_name`) so an evidence producer can
+    record *which* standard-library geometry it consumed: the ``.kicad_mod``
+    files ``PCB.add_footprint`` embeds come from whatever root
+    :func:`detect_kicad_library_path` resolved, which no version file pins.
+    Reads made through explicit paths (project ``fp-lib-table`` entries,
+    repo-local ``.pretty`` directories, ``add_footprint_from_file``) never go
+    through the funnel and are deliberately not recorded.
+    """
+
+    root: Path
+    """The library root the read resolved under."""
+    source: str
+    """That root's ``detect_kicad_library_path`` source: 'config'/'env'/'auto'."""
+    path: Path
+    """The resolved ``.kicad_mod`` file."""
+    sha256: str
+    """Digest of the bytes the producer consumed, snapshotted when the file
+    was first read (Issue #9526 review).  Recorded here -- not re-read at
+    evidence time -- so a later edit of the library file cannot rewrite what
+    the producer actually used; the parser reuses the same snapshot
+    (:func:`recorded_footprint_bytes`), so the digest always describes the
+    geometry that was placed."""
+
+
+@dataclass
+class _ReadScope:
+    """One evidence run's collection.
+
+    ``reads`` records each consumed file (deduplicated per ``(root, path)``
+    in first-seen order); ``snapshots`` keeps the bytes each read returned so
+    the standard-library funnel in ``PCB.add_footprint`` parses exactly what
+    the digest describes, however many times the same footprint is placed
+    (Issue #9526 review).
+    """
+
+    reads: dict[tuple[str, str], LibraryRead] = field(default_factory=dict)
+    snapshots: dict[str, bytes] = field(default_factory=dict)
+
+
+#: Stack of per-evidence-run scopes.  Each :func:`library_read_scope` (one
+#: :func:`kicad_tools.cli.kicad_toolchain.evidence_toolchain` context) pushes
+#: a fresh scope so consecutive runs never see each other's reads and a
+#: nested exit restores the outer collection untouched (Issue #9526 review).
+#: Outside any scope nothing is recorded *or read*: plain path resolution
+#: stays free of provenance reads (Issue #9526 review).
+_READ_SCOPES: list[_ReadScope] = []
+
+
+def _active_scope() -> _ReadScope | None:
+    """The scope new reads record into, or None outside any evidence run."""
+    return _READ_SCOPES[-1] if _READ_SCOPES else None
+
+
+def record_library_read(root: Path, source: str, path: Path) -> None:
+    """Record *path* as consumed from the library *root* (idempotent).
+
+    Only an active :func:`library_read_scope` collects -- that is, an evidence
+    producer.  Plain lookups (``kct sch set-footprint`` validation and
+    friends) resolve paths without opening anything, keeping their best-effort
+    error handling (Issue #9526 review).  Inside a scope the bytes are read
+    once, at consumption: digested into the record and snapshotted for the
+    parser, together with the *source* the lookup resolved under -- so later
+    file edits or environment changes cannot rewrite the record, and repeated
+    placements reuse the recorded bytes instead of re-reading the file.
+    """
+    scope = _active_scope()
+    if scope is None:
+        return
+    key = (str(root), str(path))
+    if key not in scope.reads:
+        data = Path(path).read_bytes()
+        scope.reads[key] = LibraryRead(
+            root=Path(root),
+            source=source,
+            path=Path(path),
+            sha256=hashlib.sha256(data).hexdigest(),
+        )
+        scope.snapshots[str(path)] = data
+
+
+def recorded_library_reads() -> tuple[LibraryRead, ...]:
+    """The standard-library reads recorded in the active scope, first-seen order.
+
+    Empty outside any :func:`library_read_scope` -- no producer, no record."""
+    scope = _active_scope()
+    return tuple(scope.reads.values()) if scope else ()
+
+
+def recorded_footprint_bytes(path: str | Path) -> bytes | None:
+    """The bytes the active scope recorded for *path*, if it has.
+
+    The standard-library funnel in ``PCB.add_footprint`` hands this snapshot
+    to the parser, so a standard placement's geometry is always the bytes the
+    provenance digest describes -- across repeated placements of one
+    footprint and across a mid-run library edit.  Explicit-path loads
+    (direct ``add_footprint_from_file`` calls, project ``fp-lib-table``
+    entries) read the file as it stands instead (Issue #9526 review)."""
+    scope = _active_scope()
+    if scope is None:
+        return None
+    return scope.snapshots.get(str(Path(path)))
+
+
+@contextlib.contextmanager
+def library_read_scope() -> Iterator[None]:
+    """Collect standard-library reads into a fresh scope (Issue #9526 review).
+
+    Reads made inside the ``with`` block go to a collection that vanishes at
+    exit; the outer collection is restored untouched.  One scope per
+    :func:`kicad_tools.cli.kicad_toolchain.evidence_toolchain` entry keeps
+    each evidence run's provenance its own, with no manual reset between
+    consecutive runs.
+    """
+    _READ_SCOPES.append(_ReadScope())
+    try:
+        yield
+    finally:
+        _READ_SCOPES.pop()
+
+
+def reset_library_reads() -> None:
+    """Forget every recorded read, in every scope (test isolation)."""
+    _READ_SCOPES.clear()
+
+
 @dataclass
 class LibraryPaths:
     """Container for KiCad library paths."""
@@ -139,6 +272,9 @@ class LibraryPaths:
         if lib_path:
             fp_path = lib_path / fp_filename
             if fp_path.exists():
+                root = self.footprints_path
+                if root is not None:
+                    record_library_read(root, self.source, fp_path)
                 return fp_path
 
         # If library wasn't found or footprint not in library, try fallback search
@@ -174,6 +310,7 @@ class LibraryPaths:
             if lib_dir.is_dir() and lib_dir.name.endswith(".pretty"):
                 fp_path = lib_dir / fp_filename
                 if fp_path.exists():
+                    record_library_read(self.footprints_path, self.source, fp_path)
                     return fp_path
 
         return None

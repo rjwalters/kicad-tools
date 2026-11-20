@@ -202,6 +202,7 @@ class GridCppMarkingAdapter:
 
     name = "grid_cpp_marking"
     group = 2
+    native_backend = "router_cpp"  # Issue #9705: rows fail, never skip
     pair_kinds = ROUTED_COPPER_KINDS
 
     def available(self) -> bool:
@@ -271,6 +272,7 @@ class CppTraceBlockedAdapter:
 
     name = "cpp_blocked_kernel"
     group = 3
+    native_backend = "router_cpp"  # Issue #9705: rows fail, never skip
     pair_kinds = ROUTED_COPPER_KINDS
 
     def available(self) -> bool:

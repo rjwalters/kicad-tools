@@ -3,7 +3,7 @@
 Covers the emitter (``kicad_tools.creepage.export_rules``) and the
 ``kct creepage-export-rules`` CLI:
 
-* domain derivation groups nets by voltage magnitude;
+* domain derivation groups nets by signed voltage interval (#9659);
 * pairwise rules contain exactly the above-floor domain pairs with the
   ``build_required_by_domain_pair`` minima; no rules without a voltage map;
 * domain-bridging footprints become ``insideCourtyard`` exclusions on their
@@ -13,7 +13,10 @@ Covers the emitter (``kicad_tools.creepage.export_rules``) and the
   and re-emit is byte-idempotent;
 * emitted rules parse back via the DRU importer (``mfr_dru``);
 * the emitted board is clean under ``kicad-cli pcb drc`` when available
-  (skipped otherwise), and an intentionally-close pair is flagged.
+  (skipped otherwise), and an intentionally-close pair is flagged;
+* on the pinned kicad-cli (required -- a missing one fails), a swinging
+  domain's same-netclass rule flags two distinct nets inside it and never a
+  net against its own copper (#9712).
 """
 
 from __future__ import annotations
@@ -41,10 +44,11 @@ from kicad_tools.creepage.export_rules import (
     build_rule_clauses,
     detect_bridging_footprints,
     domain_name,
+    interval_domain_name,
     merge_dru_block,
     render_dru_block_body,
 )
-from kicad_tools.placement.hv_domains import build_required_by_domain_pair
+from kicad_tools.placement.hv_domains import build_required_by_domain_pair, interval_pair_dv
 
 # ---------------------------------------------------------------------------
 # Board fixtures (minimal-but-real KiCad S-expression boards)
@@ -152,12 +156,25 @@ def test_domain_name_sanitizes_decimal():
     assert domain_name(150) == "kct_150V"
     assert domain_name(3.3) == "kct_3p3V"
     assert domain_name(0) == "kct_0V"
-    # Magnitude-only: a signed potential collapses to its magnitude domain.
-    assert domain_name(-170) == "kct_170V"
+    # Sign-aware (#9659): a negative scalar keeps its sign as ``m`` so
+    # opposite-polarity nets land in distinct domains.
+    assert domain_name(-170) == "kct_m170V"
+    assert domain_name(-3.3) == "kct_m3p3V"
 
 
-def test_build_domains_groups_by_magnitude():
-    net_domains, domain_voltages = build_domains(
+def test_interval_domain_name():
+    # Degenerate intervals keep the legacy scalar names byte-for-byte.
+    assert interval_domain_name(150, 150) == "kct_150V"
+    assert interval_domain_name(0, 0) == "kct_0V"
+    assert interval_domain_name(-170, -170) == "kct_m170V"
+    # Genuine ranges render both endpoints sign-aware.
+    assert interval_domain_name(-150, 150) == "kct_m150Vto150V"
+    assert interval_domain_name(5, 150) == "kct_5Vto150V"
+    assert interval_domain_name(-150, -5) == "kct_m150Vtom5V"
+
+
+def test_build_domains_groups_by_interval():
+    net_domains, domain_intervals = build_domains(
         {"AC_LINE": 150, "GND": 0, "3V3": 3.3, "/AC_LINE2": 150},
         ["AC_LINE", "GND", "3V3", "AC_LINE2", "UNMAPPED"],
     )
@@ -168,7 +185,31 @@ def test_build_domains_groups_by_magnitude():
         "3V3": "kct_3p3V",
         "AC_LINE2": "kct_150V",
     }
-    assert domain_voltages == {"kct_150V": 150.0, "kct_0V": 0.0, "kct_3p3V": 3.3}
+    assert domain_intervals == {
+        "kct_150V": (150.0, 150.0),
+        "kct_0V": (0.0, 0.0),
+        "kct_3p3V": (3.3, 3.3),
+    }
+
+
+def test_build_domains_keys_by_signed_interval():
+    # #9659: opposite-polarity nets and swinging ranges get their own
+    # sign-aware domains instead of collapsing onto one magnitude class.
+    net_domains, domain_intervals = build_domains(
+        {"A": 150.0, "B": -150.0, "LINE": (-150, 150), "F1": (-150, 150)},
+        ["A", "B", "LINE", "F1"],
+    )
+    assert net_domains == {
+        "A": "kct_150V",
+        "B": "kct_m150V",
+        "LINE": "kct_m150Vto150V",
+        "F1": "kct_m150Vto150V",
+    }
+    assert domain_intervals == {
+        "kct_150V": (150.0, 150.0),
+        "kct_m150V": (-150.0, -150.0),
+        "kct_m150Vto150V": (-150.0, 150.0),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +265,114 @@ def test_out_of_table_voltage_fails_loud():
 
     with pytest.raises(StandardLookupError):
         build_rule_clauses({"kct_big": 100000.0, "kct_0V": 0.0}, {}, dru_floor_mm=0.2)
+
+
+def test_out_of_table_interval_dv_fails_loud():
+    # #9659: a range pair whose end-to-end |dV| leaves the table fails loud
+    # exactly like the scalar case -- never silently extrapolated.
+    from kicad_tools.creepage.standards import StandardLookupError
+
+    with pytest.raises(StandardLookupError):
+        build_rule_clauses(
+            {"kct_swing": (-100000.0, 100000.0), "kct_0V": 0.0}, {}, dru_floor_mm=0.2
+        )
+
+
+# ---------------------------------------------------------------------------
+# Unit: signed / interval domains (#9659)
+# ---------------------------------------------------------------------------
+
+
+def test_opposite_polarity_pair_gets_300v_rule():
+    # The issue #9659 probe: +150 V and -150 V are 300 V apart, not equal.
+    net_domains, domain_intervals = build_domains(
+        {"A": 150.0, "B": -150.0, "C": 5.0}, ["A", "B", "C"]
+    )
+    assert net_domains["A"] != net_domains["B"]
+
+    clauses = build_rule_clauses(domain_intervals, {}, dru_floor_mm=0.2)
+    by_name = {c.name: c for c in clauses}
+    # A<->B sized at 300 V: 3.2 mm (IEC 60664-1 basic, PD2, MG IIIa).
+    ab = by_name["kct_creepage_kct_150V_vs_kct_m150V"]
+    assert ab.min_mm == pytest.approx(3.2)
+    assert ab.condition == "A.NetClass == 'kct_150V' && B.NetClass == 'kct_m150V'"
+    # The pre-existing 150 V vs 5 V rule is unchanged.
+    assert by_name["kct_creepage_kct_150V_vs_kct_5V"].min_mm == pytest.approx(1.6)
+    # ... and the negative rail is also held off the 5 V net.
+    assert by_name["kct_creepage_kct_5V_vs_kct_m150V"].min_mm == pytest.approx(1.6)
+
+
+def test_identical_ranges_share_domain_with_self_rule():
+    # #9602 topology: LINE and F1 both swing [-150, +150].  They share ONE
+    # domain (rule count stays O(domains^2)), and the domain holds 300 V
+    # across its own members, so a same-class rule is emitted for it.
+    net_domains, domain_intervals = build_domains(
+        {"LINE": (-150, 150), "F1": (-150, 150)}, ["LINE", "F1"]
+    )
+    assert net_domains == {"LINE": "kct_m150Vto150V", "F1": "kct_m150Vto150V"}
+
+    clauses = build_rule_clauses(domain_intervals, {}, dru_floor_mm=0.2)
+    assert len(clauses) == 1
+    self_rule = clauses[0]
+    assert self_rule.name == "kct_creepage_kct_m150Vto150V_vs_kct_m150Vto150V"
+    assert self_rule.min_mm == pytest.approx(3.2)
+    assert (
+        self_rule.condition == "A.NetClass == 'kct_m150Vto150V' && B.NetClass == 'kct_m150Vto150V'"
+    )
+
+
+def test_scalar_positive_map_keeps_legacy_domains_and_rules():
+    # Regression guard (#9659 AC): an all-positive scalar map keeps its exact
+    # legacy netclass names and rule names -- committed .kicad_pro/.kicad_dru
+    # output for such boards is byte-identical.
+    net_domains, domain_intervals = build_domains(_voltage_map(), list(_voltage_map()))
+    assert sorted(domain_intervals) == ["kct_0V", "kct_150V", "kct_3p3V"]
+    clauses = build_rule_clauses(domain_intervals, {}, dru_floor_mm=0.2)
+    assert {c.name for c in clauses} == {
+        "kct_creepage_kct_0V_vs_kct_150V",
+        "kct_creepage_kct_150V_vs_kct_3p3V",
+    }
+
+
+def test_exported_rules_never_looser_than_interval_census():
+    """Property (#9659 AC): for every net pair, exported >= census requirement.
+
+    The oracle is the interval-aware census model itself: worst-case
+    ``dv = max(|a.hi - b.lo|, |b.hi - a.lo|)`` per net pair (#4411) looked up
+    in the same standard table at basic insulation.
+    """
+    from itertools import combinations
+
+    from kicad_tools.creepage.standards import get_standard
+
+    vmap = {
+        "A": 150.0,  # positive scalar
+        "B": -150.0,  # negative scalar
+        "C": 5.0,  # below hv_threshold
+        "D": (-150.0, 150.0),  # swinging range
+        "E": 0.0,  # earthed
+    }
+    nets = sorted(vmap)
+    plan = build_export(vmap, nets, [], dru_floor_mm=0.2)
+    rule_by_pair = {
+        tuple(r.name[len("kct_creepage_") :].split("_vs_")): r.min_mm for r in plan.rules
+    }
+
+    std = get_standard("iec60664")
+    for a, b in combinations(nets, 2):
+        iv_a, iv_b = (
+            (vmap[a], vmap[a]) if isinstance(vmap[a], float) else vmap[a],
+            (vmap[b], vmap[b]) if isinstance(vmap[b], float) else vmap[b],
+        )
+        dv = interval_pair_dv(iv_a, iv_b)
+        if dv < 30.0:  # hv_threshold gate (same in both engines)
+            continue
+        census_req = std.required_creepage(dv, 2, "IIIa", insulation="basic")[0]
+        pair = tuple(sorted((plan.net_domains[a], plan.net_domains[b])))
+        exported = rule_by_pair.get(pair, plan.dru_floor_mm)
+        assert exported >= census_req - 1e-9, (
+            f"pair {a}<->{b} (dv {dv} V): exported {exported} mm < census {census_req} mm"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -531,3 +680,148 @@ def _load_board(PCB, source):
         return PCB.load(path)
     finally:
         path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# kicad-cli referee: the same-netclass clause of a swinging domain (#9712)
+# ---------------------------------------------------------------------------
+
+#: Name of the clause #9659 emits for a domain whose own interval spans
+#: >= hv_threshold: both sides are the same netclass.
+_SELF_RULE = "kct_creepage_kct_m150Vto150V_vs_kct_m150Vto150V"
+
+#: ``_HEADER`` with the net table swapped for the two swinging nets.
+_SWING_HEADER = _HEADER[: _HEADER.index("  (net 1 ")] + '  (net 1 "LINE")\n  (net 2 "F1")\n'
+
+
+def _swinging_domain_board(f1_y: float) -> str:
+    """LINE and F1, both swinging [-150, +150] V, on separate footprints.
+
+    ``P1`` carries two LINE pads at 2 mm pitch (1 mm copper gap) joined by a
+    LINE track, plus a LINE stub track running up past pad 2 (1.375 mm
+    track-to-pad gap): every LINE-LINE spacing is far below the 3.2 mm the
+    domain's self-rule demands, so any same-net enforcement would show here.
+    ``P2`` carries the lone F1 pad directly below LINE pad 1; *f1_y* sets the
+    LINE-F1 copper gap (``f1_y - 110 - 1``).  The two nets never share a
+    footprint, so no bridging-footprint exemption applies.
+    """
+    parts = [_SWING_HEADER, _OUTLINE]
+    parts.append(_footprint("P1", 110, 110, [("1", 1, "LINE", 0, 0), ("2", 1, "LINE", 2, 0)]))
+    parts.append(_footprint("P2", 110, f1_y, [("1", 2, "F1", 0, 0)]))
+    parts.append('  (segment (start 110 110) (end 112 110) (width 0.25) (layer "F.Cu") (net 1))\n')
+    parts.append('  (segment (start 110 110) (end 110 104) (width 0.25) (layer "F.Cu") (net 1))\n')
+    parts.append(")\n")
+    return "".join(parts)
+
+
+def _pinned_kicad_cli() -> str:
+    """The pinned kicad-cli; a hard failure (never a skip) when it is absent.
+
+    CI's Test job runs inside the pinned image (native 10.0.6); locally
+    ``KCT_KICAD_DOCKER=1`` makes the session fixture route ``find_kicad_cli``
+    through that image.  Any other answer fails: the question this test
+    answers is what *that* release's DRC does with the emitted rule.
+    """
+    from kicad_tools.cli.kicad_toolchain import PINNED_KICAD_VERSION
+
+    binary = find_kicad_cli()
+    if binary is None:
+        pytest.fail(
+            f"pinned kicad-cli {PINNED_KICAD_VERSION} not found (CI's Test job has it "
+            "natively; locally set KCT_KICAD_DOCKER=1 to route through the pinned image)"
+        )
+    try:
+        answer = subprocess.run(
+            [str(binary), "--version"], capture_output=True, text=True, timeout=600
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        pytest.fail(f"pinned kicad-cli at {binary} is unusable: {exc!r}")
+    if answer.returncode != 0 or PINNED_KICAD_VERSION not in answer.stdout:
+        pytest.fail(
+            f"kicad-cli at {binary} is not the pinned {PINNED_KICAD_VERSION} "
+            f"(rc={answer.returncode}, stdout={answer.stdout.strip()!r}); set "
+            "KCT_KICAD_DOCKER=1 to route through the pinned image"
+        )
+    return str(binary)
+
+
+def _item_net(item: dict) -> str | None:
+    """The net a DRC report item names, from its ``[<net>]`` description tag."""
+    desc = item.get("description", "")
+    for net in ("LINE", "F1"):
+        if f"[{net}]" in desc:
+            return net
+    return None
+
+
+def _clearance_findings(report: dict) -> list[tuple[str, list[str | None], list[str]]]:
+    """``(description, item nets, item descriptions)`` per clearance finding."""
+    out = []
+    for violation in report.get("violations", []):
+        if violation.get("type") != "clearance":
+            continue
+        items = violation.get("items", [])
+        out.append(
+            (
+                violation.get("description", ""),
+                [_item_net(i) for i in items],
+                [i.get("description", "") for i in items],
+            )
+        )
+    return out
+
+
+@pytest.mark.pr_required
+def test_pinned_kicad_cli_enforces_self_rule_between_distinct_nets_only(tmp_path):
+    """#9712: the same-netclass clause gates LINE<->F1, never LINE<->LINE.
+
+    Both nets swing [-150, +150] V and share the ``kct_m150Vto150V`` domain,
+    so #9659 emits a clause whose two sides are that one netclass (3.2 mm).
+    KiCad's ``clearance`` constraint applies between items on different nets;
+    this pins that on the pinned kicad-cli instead of assuming it: a 1.5 mm
+    LINE-F1 gap is flagged *by that rule*, a 4.5 mm gap is not, and the
+    1 mm / 1.375 mm LINE-LINE spacings are never flagged in either layout.
+    """
+    from kicad_tools.cli.runner import run_drc
+
+    _pinned_kicad_cli()  # hard-fails unless the pinned binary answers
+
+    pro = tmp_path / "swing.kicad_pro"
+    save_project(create_minimal_project("swing.kicad_pro"), pro)
+    pcb = tmp_path / "swing.kicad_pcb"
+    pcb.write_text(_swinging_domain_board(f1_y=112.5))
+    vmap = tmp_path / "voltages.json"
+    vmap.write_text(
+        json.dumps({"LINE": {"min": -150, "max": 150}, "F1": {"min": -150, "max": 150}})
+    )
+    assert _run(["creepage-export-rules", str(pro), "--voltage-map", str(vmap)]) == 0
+    dru = (tmp_path / "swing.kicad_dru").read_text()
+    assert f'(rule "{_SELF_RULE}"' in dru
+    assert "(constraint clearance (min 3.2mm))" in dru
+
+    def _drc(name: str, f1_y: float) -> list[tuple[str, list[str | None], list[str]]]:
+        pcb.write_text(_swinging_domain_board(f1_y))
+        report = tmp_path / f"drc_{name}.json"
+        result = run_drc(
+            pcb, output_path=report, format="json", schematic_parity=False, refill_zones=True
+        )
+        assert report.exists(), f"kicad-cli wrote no report ({name}): {result.stderr}"
+        return _clearance_findings(json.loads(report.read_text()))
+
+    near = _drc("near", f1_y=112.5)  # LINE-F1 copper gap 1.5 mm: floor < 1.5 < 3.2
+    far = _drc("far", f1_y=115.5)  # LINE-F1 copper gap 4.5 mm: beyond 3.2
+
+    # Never a clearance finding between two LINE items (own pad/own track).
+    for name, findings in (("near", near), ("far", far)):
+        same_net = [f for f in findings if f[1] == ["LINE", "LINE"]]
+        assert not same_net, f"{name}: same-net clearance finding(s): {same_net}"
+
+    line_f1_near = [f for f in near if sorted(n or "" for n in f[1]) == ["F1", "LINE"]]
+    assert line_f1_near, f"near: no LINE<->F1 clearance finding; clearance findings: {near}"
+    assert all(_SELF_RULE in desc for desc, _nets, _items in line_f1_near), line_f1_near
+
+    line_f1_far = [f for f in far if sorted(n or "" for n in f[1]) == ["F1", "LINE"]]
+    assert not line_f1_far, f"far: LINE<->F1 still flagged beyond 3.2 mm: {line_f1_far}"
+    # Nothing else is a clearance finding on this board at all.
+    assert len(near) == len(line_f1_near), near
+    assert not far, far

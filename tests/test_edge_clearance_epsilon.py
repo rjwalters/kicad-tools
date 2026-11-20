@@ -8,10 +8,11 @@ rounding) do not produce false-positive violations.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from kicad_tools.core.board_outline import OutlineSegments
 from kicad_tools.validate.rules.edge import _CLEARANCE_EPSILON_MM, EdgeClearanceRule
 
 # ---------------------------------------------------------------------------
@@ -94,8 +95,8 @@ class TestCheckSegmentsEpsilon:
             net_number=1,
         )
 
-    def test_segment_at_exact_clearance_passes(self):
-        """Distance == min_clearance must NOT be a violation."""
+    @pytest.mark.parametrize("geometry_error", [0.0, 0.02])
+    def test_segment_at_exact_clearance(self, geometry_error):
         min_clearance = 0.3
         # Place segment centerline at distance = min_clearance + half_width
         # from the left edge (x=0).  So actual_clearance == min_clearance.
@@ -109,11 +110,13 @@ class TestCheckSegmentsEpsilon:
         results = DRCResults()
         rule._check_segments(
             _make_pcb(segments=[seg]),
-            _outline_segments(),
+            OutlineSegments(_outline_segments(), max_error_mm=geometry_error),
             _design_rules(copper_edge=min_clearance),
             results,
         )
-        assert len(results.errors) == 0
+        assert len(results.errors) == (1 if geometry_error else 0)
+        for error in results.errors:
+            assert error.actual_value == pytest.approx(min_clearance - geometry_error)
 
     def test_segment_slightly_below_epsilon_passes(self):
         """Distance just under min_clearance by less than epsilon must pass."""
@@ -155,6 +158,61 @@ class TestCheckSegmentsEpsilon:
         )
         assert len(results.errors) > 0
 
+    def test_non_violating_segment_skips_witness_computation(self):
+        """A segment that clears the edge must not pay the witness cost.
+
+        The violation witness (the two O(outline-edges)
+        ``_min_distance_to_outline`` calls) is only needed when a finding is
+        actually raised; computing it for every trace segment cost +42-90%
+        of ``EdgeClearanceRule.check()`` on clean boards (Issue #9715).
+        """
+        seg = self._segment(start=(25.0, 15.0), end=(25.0, 16.0), width=0.2)
+
+        rule = EdgeClearanceRule()
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        with patch.object(
+            EdgeClearanceRule,
+            "_min_distance_to_outline",
+        ) as witness:
+            rule._check_segments(
+                _make_pcb(segments=[seg]),
+                _outline_segments(),
+                _design_rules(copper_edge=0.3),
+                results,
+            )
+        assert witness.call_count == 0
+        assert len(results.errors) == 0
+
+    def test_violating_segment_still_computes_witness(self):
+        """A violating segment still resolves its witness for the finding."""
+        min_clearance = 0.3
+        half_width = 0.1
+        x = 0.25 + half_width  # 0.35
+        seg = self._segment(start=(x, 15.0), end=(x, 16.0), width=half_width * 2)
+
+        rule = EdgeClearanceRule()
+        from kicad_tools.validate.violations import DRCResults
+
+        results = DRCResults()
+        with patch.object(
+            EdgeClearanceRule,
+            "_min_distance_to_outline",
+            wraps=rule._min_distance_to_outline,
+        ) as witness:
+            rule._check_segments(
+                _make_pcb(segments=[seg]),
+                _outline_segments(),
+                _design_rules(copper_edge=min_clearance),
+                results,
+            )
+        assert witness.call_count == 2
+        assert len(results.errors) == 1
+        # Witness is the endpoint closer to the outline: both sit at the
+        # same distance here, so the start (first) wins the <= tie.
+        assert results.errors[0].location == seg.start
+
 
 # ---------------------------------------------------------------------------
 # Tests: _check_vias
@@ -173,7 +231,8 @@ class TestCheckViasEpsilon:
             net_number=1,
         )
 
-    def test_via_at_exact_clearance_passes(self):
+    @pytest.mark.parametrize("geometry_error", [0.0, 0.02])
+    def test_via_at_exact_clearance(self, geometry_error):
         min_clearance = 0.5
         half_size = 0.3
         x = min_clearance + half_size
@@ -185,11 +244,13 @@ class TestCheckViasEpsilon:
         results = DRCResults()
         rule._check_vias(
             _make_pcb(vias=[via]),
-            _outline_segments(),
+            OutlineSegments(_outline_segments(), max_error_mm=geometry_error),
             _design_rules(hole_edge=min_clearance),
             results,
         )
-        assert len(results.errors) == 0
+        assert len(results.errors) == (1 if geometry_error else 0)
+        for error in results.errors:
+            assert error.actual_value == pytest.approx(min_clearance - geometry_error)
 
     def test_via_below_clearance_by_2x_epsilon_fails(self):
         min_clearance = 0.5
@@ -234,7 +295,8 @@ class TestCheckPadsEpsilon:
         )
         return fp
 
-    def test_pad_at_exact_clearance_passes(self):
+    @pytest.mark.parametrize("geometry_error", [0.0, 0.02])
+    def test_pad_at_exact_clearance(self, geometry_error):
         min_clearance = 0.3
         half_size = 0.4
         # Pad center at x = min_clearance + half_size from left edge
@@ -246,11 +308,13 @@ class TestCheckPadsEpsilon:
         results = DRCResults()
         rule._check_pads(
             _make_pcb(footprints=[fp]),
-            _outline_segments(),
+            OutlineSegments(_outline_segments(), max_error_mm=geometry_error),
             _design_rules(copper_edge=min_clearance),
             results,
         )
-        assert len(results.errors) == 0
+        assert len(results.errors) == (1 if geometry_error else 0)
+        for error in results.errors:
+            assert error.actual_value == pytest.approx(min_clearance - geometry_error)
 
     def test_pad_well_below_clearance_fails(self):
         min_clearance = 0.3
@@ -288,8 +352,8 @@ class TestCheckZonesEpsilon:
             net_name="GND",
         )
 
-    def test_zone_at_exact_clearance_passes(self):
-        """Zone vertex at exactly min_clearance from edge must pass."""
+    @pytest.mark.parametrize("geometry_error", [0.0, 0.02])
+    def test_zone_at_exact_clearance(self, geometry_error):
         min_clearance = 0.3
         # Inset rectangle: each vertex is exactly 0.3mm from board edge
         inset = min_clearance
@@ -307,11 +371,13 @@ class TestCheckZonesEpsilon:
         results = DRCResults()
         rule._check_zones(
             _make_pcb(zones=[zone]),
-            _outline_segments(),
+            OutlineSegments(_outline_segments(), max_error_mm=geometry_error),
             _design_rules(copper_edge=min_clearance),
             results,
         )
-        assert len(results.errors) == 0
+        assert len(results.errors) == (4 if geometry_error else 0)
+        for error in results.errors:
+            assert error.actual_value == pytest.approx(min_clearance - geometry_error)
 
     def test_zone_slightly_inside_epsilon_passes(self):
         """Zone vertex at min_clearance - epsilon/2 must still pass."""
@@ -559,39 +625,6 @@ class TestCheckPadsRotationSignConvention:
                 f"errors -- likely the rule still uses the buggy "
                 f"negated rotation, placing the pad off-board."
             )
-
-
-# ---------------------------------------------------------------------------
-# Tests: all four methods use epsilon (code-level verification)
-# ---------------------------------------------------------------------------
-
-
-class TestAllMethodsUseEpsilon:
-    """Verify that the source code of all four check methods references epsilon."""
-
-    def test_check_segments_uses_epsilon(self):
-        import inspect
-
-        src = inspect.getsource(EdgeClearanceRule._check_segments)
-        assert "_CLEARANCE_EPSILON_MM" in src
-
-    def test_check_vias_uses_epsilon(self):
-        import inspect
-
-        src = inspect.getsource(EdgeClearanceRule._check_vias)
-        assert "_CLEARANCE_EPSILON_MM" in src
-
-    def test_check_pads_uses_epsilon(self):
-        import inspect
-
-        src = inspect.getsource(EdgeClearanceRule._check_pads)
-        assert "_CLEARANCE_EPSILON_MM" in src
-
-    def test_check_zones_uses_epsilon(self):
-        import inspect
-
-        src = inspect.getsource(EdgeClearanceRule._check_zones)
-        assert "_CLEARANCE_EPSILON_MM" in src
 
 
 @pytest.mark.parametrize("net_number", [0, 2])

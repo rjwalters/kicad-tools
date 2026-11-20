@@ -27,13 +27,9 @@ import math
 import pytest
 
 from kicad_tools.core.geometry import point_to_segment_distance
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.via_clearance import same_net_segment_trace_gap_acceptable
 
-requires_cpp = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ router backend not available",
-)
+requires_cpp = pytest.mark.requires_router_cpp
 
 # Dyadic lattice and dimensions so exact-edge probes are exact in float32 AND
 # float64 (the 1e-9 slack in both predicates then decides, not rounding).

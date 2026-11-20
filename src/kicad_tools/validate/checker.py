@@ -27,6 +27,7 @@ from .rules.impedance import ImpedanceRule
 from .rules.match_group_length_skew import MatchGroupLengthSkewRule
 from .rules.path_ampacity import PathAmpacityRule
 from .rules.placement import FootprintOutsideBoardRule
+from .rules.plane_split import PlaneSplitRule
 from .rules.pour_slot import PourSlotRule
 from .rules.redundant_copper import RedundantCopperRule
 from .rules.reinforcement_courtyard import ReinforcementCourtyardRule
@@ -153,6 +154,7 @@ class DRCChecker:
         require_routing_policy: bool = False,
         routing_policy_defer_pair_vias: bool = True,
         strict_copper: bool = True,
+        declared_reference_height_mm: float | None = None,
     ) -> None:
         """Initialize the DRC checker.
 
@@ -264,6 +266,13 @@ class DRCChecker:
                 that applies the DFM threshold table's fail-closed
                 ``incomplete`` verdict right after construction
                 (``kct check``, Issue #8839).
+
+            declared_reference_height_mm: The project's declared minimum
+                reference-designator height (``requirements.manufacturing.
+                silkscreen_min_reference_height_mm`` in ``project.kct``), or
+                ``None``.  Relaxes the ``silkscreen_text_height`` floor for
+                reference designators only; labels and board text keep the fab
+                floor (Issue #9448).
 
         Raises:
             ValueError: If manufacturer ID is not recognized
@@ -383,6 +392,14 @@ class DRCChecker:
                 ),
             )
 
+        # Issue #9448: carry the project's declared designator height into the
+        # rules (a copy -- the preset instance may be shared).
+        if declared_reference_height_mm is not None:
+            self.design_rules = replace(
+                self.design_rules,
+                declared_reference_height_mm=declared_reference_height_mm,
+            )
+
     # The canonical ordered list of bound-method names that
     # :meth:`check_all` invokes.  Exposed as a class attribute so the CLI
     # dispatcher (``cli/check_cmd.py::run_selected_checks``) can assert
@@ -409,6 +426,7 @@ class DRCChecker:
         "check_copper_slivers",
         "check_courtyard_overlap",
         "check_dangling_copper",
+        "check_plane_split",
         "check_pour_slot",
         "check_redundant_copper",
         "check_diffpair_clearance_intra",
@@ -567,6 +585,7 @@ class DRCChecker:
         # Redundant copper (Issue #8218): warning-only advisories for
         # avoidable copper (duplicates, fragment runs, detours, off-centre
         # via ends).  Explicit entries keep them out of fab-blocking prefixes.
+        "plane_split": CATEGORY_ADVISORY,
         "pour_slot": CATEGORY_ADVISORY,
         "redundant_copper": CATEGORY_ADVISORY,
         "redundant_copper_duplicate": CATEGORY_ADVISORY,
@@ -812,10 +831,10 @@ class DRCChecker:
                 provided, matching violations are suppressed or reclassified
                 and the ``suppressed_count`` field is populated.
             pad_grid_auto_derive: When ``True``, the ``pad_grid`` check
-                derives its tolerance from the board's pad-offset
-                histogram instead of the fixed 0.05 mm default -- the
-                same policy ``kct check`` applies by default (issue
-                #3061).  Defaults to ``False`` to preserve the existing
+                derives its tolerance per footprint from that
+                footprint's own pad lattice instead of the fixed 0.05 mm
+                default -- the same policy ``kct check`` applies by
+                default (issues #3061, #9434).  Defaults to ``False`` to preserve the existing
                 Python-API behaviour; gating consumers that must agree
                 with ``kct check`` (e.g. ``ManufacturingAudit``) opt in
                 so report and CLI verdicts cannot drift (issue #3497).
@@ -1066,6 +1085,14 @@ class DRCChecker:
         ``netclass_clearances`` maps net name to authored netclass clearance.
         """
         rule = PourSlotRule(netclass_clearances)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_plane_split(self) -> DRCResults:
+        """Report zones cut into pad-bearing pieces by foreign tracks (Issue #9591).
+
+        Own CLI category (``plane_split``) so ``--skip plane_split`` works.
+        """
+        rule = PlaneSplitRule()
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_redundant_copper(self) -> DRCResults:
@@ -1427,7 +1454,20 @@ class DRCChecker:
             a declared net not covered by any resolved path. Empty when no
             path is declared.
         """
-        rule = PathAmpacityRule(specs=self.current_path_specs)
+        rule = PathAmpacityRule(
+            specs=self.current_path_specs,
+            # Issue #9648: a leg reinforcement_incomplete judges fully wired
+            # credits its buttress wire's cross-section here -- the same
+            # board-derived verdict (and sidecar gauge) that rule reports,
+            # so the two rules cannot disagree. Empty without a
+            # reinforcement-eligible declaration, leaving this check at
+            # bare copper width exactly as before.
+            wired_legs=ReinforcementIncompleteRule(
+                specs=self.current_path_specs,
+                wires=self.reinforcement_wires,
+                waived_nets=self.reinforcement_waived_nets,
+            ).fully_wired_legs(self.pcb, self.design_rules),
+        )
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_reinforcement_incomplete(self) -> DRCResults:
@@ -2134,8 +2174,8 @@ class DRCChecker:
                 explicit ``threshold`` always wins over
                 ``auto_derive_threshold``.
             auto_derive_threshold: When ``True`` and ``threshold`` is
-                ``None``, derive the threshold per-board from the
-                pad-offset histogram (issue #3061).  Defaults to
+                ``None``, derive the threshold per footprint from that
+                footprint's own pad lattice (issues #3061, #9434).  Defaults to
                 ``False`` so the Python API preserves PR #3057 behaviour;
                 ``kct check`` opts in by default.
             aggregate: When ``True`` (the default), collapse the per-pad

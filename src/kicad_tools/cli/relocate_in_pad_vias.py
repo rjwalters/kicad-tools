@@ -68,8 +68,8 @@ from shapely.geometry import LineString, Point, box  # type: ignore[import-untyp
 
 from kicad_tools.cli.stitch_cmd import point_in_polygon
 from kicad_tools.core.geometry import point_to_segment_distance
+from kicad_tools.validate.rules.base import WRITER_CLEARANCE_MARGIN_MM
 from kicad_tools.validate.rules.via_pad_geometry import (
-    DRC_TOLERANCE,
     drill_to_mask_aperture_gap,
     is_smd_pad,
     pad_absolute_bbox,
@@ -1693,7 +1693,7 @@ def relocate_pad_edge_vias(
     result = RelocationResult()
     dam = float(getattr(design_rules, "min_solder_mask_dam_mm", 0.0) or 0.0)
     band = float(same_net_pad_gap_mm or 0.0)
-    if dam <= DRC_TOLERANCE and band <= 0:
+    if dam <= WRITER_CLEARANCE_MARGIN_MM and band <= 0:
         return result
     setup = getattr(pcb, "setup", None)
     pad_to_mask = float(getattr(setup, "pad_to_mask_clearance", 0.0) or 0.0)
@@ -1739,14 +1739,14 @@ def relocate_pad_edge_vias(
                 if not via_inside_pad(via, bbox, pad, fp)
                 and (
                     (
-                        dam > DRC_TOLERANCE
+                        dam > WRITER_CLEARANCE_MARGIN_MM
                         and (
                             gap := drill_to_mask_aperture_gap(
                                 via, pad, fp, pad_to_mask_clearance=pad_to_mask
                             )
                         )
                         is not None
-                        and gap < dam - DRC_TOLERANCE
+                        and gap < dam - WRITER_CLEARANCE_MARGIN_MM
                     )
                     or (
                         band > 0
@@ -1830,7 +1830,7 @@ def relocate_pad_edge_vias(
             for step in steps:
                 # Whole micrometres: what KiCad's own serializer keeps.
                 nx, ny = round(vx + dx * step, 3), round(vy + dy * step, 3)
-                if dam > DRC_TOLERANCE:
+                if dam > WRITER_CLEARANCE_MARGIN_MM:
                     gap = _pad_edge_gap(via, nx, ny, candidates, pad_to_mask)
                     if gap is None or gap < dam + 1e-6:
                         # Still in the zone, or into a pad's copper: keep sliding.
