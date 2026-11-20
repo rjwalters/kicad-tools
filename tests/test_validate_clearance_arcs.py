@@ -23,13 +23,11 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("shapely")
-
-from kicad_tools.cli import main  # noqa: E402
-from kicad_tools.cli.pcb_move_via import run_move_via  # noqa: E402
-from kicad_tools.manufacturers import get_profile  # noqa: E402
-from kicad_tools.schema.pcb import PCB  # noqa: E402
-from kicad_tools.validate import DRCChecker  # noqa: E402
+from kicad_tools.cli import main
+from kicad_tools.cli.pcb_move_via import run_move_via
+from kicad_tools.manufacturers import get_profile
+from kicad_tools.schema.pcb import PCB
+from kicad_tools.validate import DRCChecker
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
