@@ -16,6 +16,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-20
 
+- **Issue #9779** (closed): CI red in Test (extended): test_two_domain_keepout_segregation fails on an HV_A-vs-board-edge pairwise finding (2.900 vs 3.200 mm)
+- **PR #9780**: test: widen lattice keepout fixture outline to clear board-edge creepage gate
 - **PR #9776**: test: give the remaining _route() verdict tests the 180s timeout cap
 - **Issue #9766** (closed): test flake: test_stranded_pour_unknown_is_unverified[direct] times out (>60s) on Test (sibling of #9115)
 - **PR #9760**: refactor: share the voltage-map sidecar read and non-object check in creepage.engine
