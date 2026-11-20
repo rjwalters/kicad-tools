@@ -45,6 +45,34 @@ class CorridorAssignment:
     layer: int = 0
 
 
+@dataclass(frozen=True)
+class UnderBodyAvoidArea:
+    """Coarse-graph mirror of one under-body surcharge region (Issue #9622).
+
+    The fine-grid surcharge regions live in grid-cell coordinates on the
+    routing grid; the global router plans on the coarse region graph in
+    board millimetres, so the orchestrator converts each qualifying
+    fine-pitch component's region into this world-space rectangle before
+    corridor planning.  ``penalty`` is charged once per coarse region the
+    corridor ENTERS that intersects the rectangle -- a soft cost, so a
+    board whose only corridor crosses the body still routes through it
+    (matching the fine-grid surcharge's never-blocking semantics), while a
+    board with free space around the part prefers the detour.
+
+    Review of #9635: without this mirror the corridor search priced a
+    straight line through the body at zero cost, and every
+    corridor-materialising strategy accepted copper the detailed A* cost
+    model exists to prevent.
+    """
+
+    min_x: float
+    min_y: float
+    max_x: float
+    max_y: float
+    local_nets: frozenset[int]
+    penalty: float
+
+
 @dataclass
 class GlobalRoutingResult:
     """Result of global routing for all nets.
@@ -119,6 +147,7 @@ class GlobalRouter:
         net: int,
         pad_positions: list[tuple[float, float]],
         layer: int | None = None,
+        under_body_areas: list[UnderBodyAvoidArea] | None = None,
     ) -> CorridorAssignment | None:
         """Assign a corridor for a single net.
 
@@ -133,6 +162,13 @@ class GlobalRouter:
             net: Net ID
             pad_positions: List of (x, y) coordinates for the net's pads
             layer: Routing layer (default: ``self.default_layer``)
+            under_body_areas: Issue #9622 -- coarse mirrors of the board's
+                under-body surcharge regions.  Regions the net has a pad on
+                (``net in area.local_nets``) are exempt; every other area
+                adds its penalty to each coarse region it intersects, so
+                the corridor prefers an available detour around the body
+                (soft: never blocks).  ``None`` (boards without a
+                fine-pitch body) leaves the search unchanged.
 
         Returns:
             CorridorAssignment if successful, None if routing fails
@@ -152,8 +188,14 @@ class GlobalRouter:
         if src_region is None or tgt_region is None:
             return None
 
-        # Find path through region graph
-        region_path = self.region_graph.find_path(src_region.id, tgt_region.id)
+        # Find path through region graph.  Issue #9622: regions whose
+        # rectangle intersects a non-local under-body area carry a soft
+        # entry penalty, so the corridor detours around the body when a
+        # path around it exists (review of #9635).
+        entry_penalties = self._under_body_entry_penalties(net, under_body_areas)
+        region_path = self.region_graph.find_path(
+            src_region.id, tgt_region.id, entry_penalties=entry_penalties
+        )
         if region_path is None:
             return None
 
@@ -188,6 +230,42 @@ class GlobalRouter:
             waypoint_coords=waypoint_coords,
             layer=layer,
         )
+
+    def _under_body_entry_penalties(
+        self,
+        net: int,
+        areas: list[UnderBodyAvoidArea] | None,
+    ) -> dict[int, float] | None:
+        """Per-region entry penalties for ``net`` from the avoid areas.
+
+        A coarse region is penalised by the summed ``penalty`` of every
+        area it intersects whose ``local_nets`` does not contain ``net``.
+        Intersecting (not containing the region centre) is deliberate: the
+        emitted corridor centreline hops region CENTRES, and a region the
+        body merely clips would still put centre-to-centre segments
+        through it.  Regions fully inside a body stay reachable -- the
+        penalty is finite, preserving the soft fallback when the body
+        strip is the only corridor (Issue #9622).
+        """
+        if not areas:
+            return None
+        active = [area for area in areas if net not in area.local_nets]
+        if not active:
+            return None
+        penalties: dict[int, float] = {}
+        for region in self.region_graph.regions.values():
+            total = 0.0
+            for area in active:
+                if (
+                    region.min_x <= area.max_x
+                    and region.max_x >= area.min_x
+                    and region.min_y <= area.max_y
+                    and region.max_y >= area.min_y
+                ):
+                    total += area.penalty
+            if total > 0.0:
+                penalties[region.id] = total
+        return penalties or None
 
     def route_all(
         self,
