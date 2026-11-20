@@ -118,12 +118,12 @@ Demonstrates circuit blocks API
 
 \newpage
 
-## DRC Status (`--mfr jlcpcb-tier1` rules)
+## DRC Status (`--mfr jlcpcb-tier1` profile with reviewed fabrication process: via drill 0.15 mm, via diameter 0.3 mm, annular ring 0.075 mm)
 
 | Metric | Count |
 |--------|-------|
 | Errors | 0 |
-| Errors: kct (`--mfr jlcpcb-tier1` rules) | 0 |
+| Errors: kct (reviewed process rules, not stock `--mfr jlcpcb-tier1`) | 0 |
 | Errors: kicad-cli (geometric) | 0 |
 | Warnings | 8 |
 | Blocking | 0 |

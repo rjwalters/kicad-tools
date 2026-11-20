@@ -25,8 +25,8 @@
       "size": 640
     },
     "check-report.json": {
-      "sha256": "425f2ccd4dd29d2749a086a2fa6787a46cecaa3c2e81cae81239b364220b7d0f",
-      "size": 12901
+      "sha256": "b854620dbed06fa26233c4e69056178b431c8b24ba84ed1c75b7a82aac7a58d4",
+      "size": 13077
     },
     "cpl_jlcpcb.csv": {
       "sha256": "5b6854e3efb25a771146c01fdf51dfff148bf7fc6079d582842f14bcfd2bda20",
@@ -61,8 +61,8 @@
       "size": 33
     },
     "gerbers/gerbers.zip": {
-      "sha256": "b11b0910fbe7fa84cdc6d22c2a80039be82c1e1a33b212ca1846bc04d12c03cd",
-      "size": 55285
+      "sha256": "1e12c71b0d833127be0091e5549598ec1d9e04fc6e19239de82f7125214d9d4b",
+      "size": 55485
     },
     "images/assembly.png": {
       "sha256": "a5db94fb615c52966bae1ec2fbf8a9c569b8e41a5fd2d4f1fb03cecdbb4a0ed9",
@@ -93,7 +93,7 @@
       "size": 279454
     },
     "kicad_project.zip": {
-      "sha256": "aa2781213ba3106624eb92060a7850f4abbe9b11875bfb69437a26c31307825b",
+      "sha256": "9c10246bbaf249c069a12dd0a775b29a2757e49e399e0bd5a5f904df1c4d1681",
       "size": 72558
     },
     "manufacturing-requirements.json": {
@@ -117,12 +117,12 @@
       "size": 3329
     },
     "report.md": {
-      "sha256": "74c76e5c10b51209691264b8fc054cc016bade77a17b9aa5b14ad34e9d198908",
-      "size": 3363
+      "sha256": "1ec6d386304980c71140cc43de580f43bf8a1e2c7df0f600834d4c2ec50da4fa",
+      "size": 3490
     },
     "report.pdf": {
-      "sha256": "77e81c1a5745b4b18e25f5f0f917ecc6d374d1fe5ca45b81a76652a5b29fd31a",
-      "size": 1391662
+      "sha256": "aa2a893b7764fcb60dd125f4e30b39ceffd72223afb59ba3a406de3ff438fa46",
+      "size": 1392418
     }
   },
   "board": {
@@ -197,29 +197,18 @@
     {
       "name": "bom_lcsc_values",
       "status": "WARN",
-      "message": "13 of 17 assigned item(s) verified (parts cache); 4 unverifiable (not in parts cache or offline catalog)",
-      "details": "unverified: U1 -> C148031, J1 -> C37208, R1 -> C17630, D1 -> C131244"
+      "message": "7 of 17 assigned item(s) verified (parts cache); 10 unverifiable (not in parts cache or offline catalog)",
+      "details": "unverified: U1 -> C148031, U2 -> C8734, C16 -> C1779, Y1 -> C114147, C10 -> C1798, C11 -> C1798, J1 -> C37208, R2 -> C17414 (and 2 more)"
     },
     {
       "name": "bom_lcsc_stock",
       "status": "OK",
-      "message": "7 LCSC part(s) have recorded stock for 5 board(s)",
+      "message": "2 LCSC part(s) have recorded stock for 5 board(s)",
       "data": {
         "order_boards": 5,
         "inventory_covered": [],
         "strict": false,
         "parts": [
-          {
-            "lcsc": "C114147",
-            "refs": [
-              "Y1"
-            ],
-            "per_board": 1,
-            "stock": 9765,
-            "verified": true,
-            "source": "live",
-            "age_days": 0
-          },
           {
             "lcsc": "C15850",
             "refs": [
@@ -227,44 +216,10 @@
               "C2"
             ],
             "per_board": 2,
-            "stock": 9078655,
-            "verified": true,
+            "stock": 6481916,
+            "verified": false,
             "source": "live",
-            "age_days": 0
-          },
-          {
-            "lcsc": "C17414",
-            "refs": [
-              "R2"
-            ],
-            "per_board": 1,
-            "stock": 46294714,
-            "verified": true,
-            "source": "live",
-            "age_days": 0
-          },
-          {
-            "lcsc": "C1779",
-            "refs": [
-              "C16"
-            ],
-            "per_board": 1,
-            "stock": 1930404,
-            "verified": true,
-            "source": "live",
-            "age_days": 0
-          },
-          {
-            "lcsc": "C1798",
-            "refs": [
-              "C10",
-              "C11"
-            ],
-            "per_board": 2,
-            "stock": 106508,
-            "verified": true,
-            "source": "live",
-            "age_days": 0
+            "age_days": 32
           },
           {
             "lcsc": "C49678",
@@ -276,28 +231,22 @@
               "C3"
             ],
             "per_board": 5,
-            "stock": 22759722,
-            "verified": true,
+            "stock": 23314203,
+            "verified": false,
             "source": "live",
-            "age_days": 0
-          },
-          {
-            "lcsc": "C8734",
-            "refs": [
-              "U2"
-            ],
-            "per_board": 1,
-            "stock": 185887,
-            "verified": true,
-            "source": "live",
-            "age_days": 0
+            "age_days": 1
           }
         ],
         "unresolved": [
+          "C114147",
           "C131244",
           "C148031",
+          "C17414",
           "C17630",
-          "C37208"
+          "C1779",
+          "C1798",
+          "C37208",
+          "C8734"
         ]
       }
     },

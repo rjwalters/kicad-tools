@@ -453,6 +453,19 @@ class ReportDataCollector:
         # so the native share is the remainder.  ``blocking_count`` and
         # ``passed`` are left untouched.
         data["manufacturer"] = self.manufacturer
+        # Issue #9536: when a reviewed DesignRules override drove the audit,
+        # the ``--mfr`` profile's stock floors were NOT the rules the counts
+        # were computed under.  Record the override so the report names the
+        # rules actually used rather than attributing the counts to the
+        # profile (a generic ``--mfr`` run can report many more errors).
+        if self.design_rules is not None:
+            dr = self.design_rules
+            data["rules_override"] = (
+                "reviewed fabrication process: via drill "
+                f"{dr.min_via_drill_mm:g} mm, via diameter "
+                f"{dr.min_via_diameter_mm:g} mm, annular ring "
+                f"{dr.min_annular_ring_mm:g} mm"
+            )
         by_type = data.get("violations_by_type") or {}
         geometric = sum(
             int(count) for key, count in by_type.items() if str(key).startswith("kicad-cli:")

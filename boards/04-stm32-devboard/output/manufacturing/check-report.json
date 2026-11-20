@@ -8,12 +8,13 @@
     "warnings": 8,
     "infos": 0,
     "waived": 0,
-    "rules_checked": 77,
+    "rules_checked": 78,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
       "track_dangling": 1,
       "via_dangling": 1,
+      "plane_split": 1,
       "pour_slot": 1,
       "redundant_copper_duplicate": 1,
       "redundant_copper_fragments": 1,
@@ -430,7 +431,11 @@
     },
     "overall": "PASSED",
     "schematic_missing": false,
-    "incomplete_categories": []
+    "incomplete_categories": [],
+    "schematic": {
+      "path": "/tmp/refresh-bundles-f4ak35em/04-stm32-devboard/output/stm32_devboard.kicad_sch",
+      "source": "--schematic"
+    }
   },
   "fabrication_overrides": {
     "layers": 2,
@@ -444,6 +449,6 @@
     "source": "https://jlcpcb.com/capabilities/pcb-capabilities/",
     "suppressed_findings": 0,
     "waived_findings": 0,
-    "tracking_issue": "https://github.com/rjwalters/kicad-tools/issues/5009"
+    "tracking_issue": "https://github.com/2AMLogic/kicad-tools/issues/5009"
   }
 }
