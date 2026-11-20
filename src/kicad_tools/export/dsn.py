@@ -213,11 +213,6 @@ class NetClassInfo:
     nets: list[str] = field(default_factory=list)
 
 
-def _node_on_edge_cuts(node: SExp) -> bool:
-    layer = node.find("layer")
-    return bool(layer and layer.children and _get_str(layer.children[0]) == "Edge.Cuts")
-
-
 class KiCadToDSNExporter:
     """Export a KiCad PCB file to Specctra DSN format.
 
@@ -361,30 +356,22 @@ class KiCadToDSNExporter:
     def _extract_board_outline(self) -> None:
         """Extract the board boundary and cutouts from the Edge.Cuts layer.
 
-        Every top-level Edge.Cuts graphic is polygonized, so segments need not
-        be stored head to tail. The board is the face whose *exterior* ring
-        encloses the most area: a face's own ``area`` has its holes subtracted,
-        so ranking by it lets a large cutout outrank the board around it. The
-        board's interior rings are its cutouts; ``_generate_structure`` emits
-        them as keepouts on every copper layer. Geometry that cannot be carried
-        is listed, never dropped.
+        Every Edge.Cuts graphic -- top-level or footprint-local (re-emitted in
+        board coordinates by the shared core reader) -- is polygonized, so
+        segments need not be stored head to tail. The board is the face whose
+        *exterior* ring encloses the most area: a face's own ``area`` has its
+        holes subtracted, so ranking by it lets a large cutout outrank the
+        board around it. The board's interior rings are its cutouts;
+        ``_generate_structure`` emits them as keepouts on every copper layer.
+        Geometry that cannot be carried is listed, never dropped.
         """
         assert self._pcb is not None
         self._board_outline = []
         self._outline_cutouts = []
 
-        for fp_node in self._pcb.children:
-            if not hasattr(fp_node, "name") or not _is_footprint_tag(fp_node.name):
-                continue
-            if any(
-                _node_on_edge_cuts(g)
-                for g in fp_node.children
-                if (getattr(g, "name", None) or "").startswith("fp_")
-            ):
-                self._omit(
-                    "footprint-embedded Edge.Cuts graphics are not exported as board outline"
-                )
-                break
+        # Footprint-local Edge.Cuts graphics are board outline too; the shared
+        # core reader re-emits them as board-frame gr_* nodes, so they
+        # polygonize here exactly like top-level graphics.
 
         from ..core.board_outline import board_outline_segments, outline_graphics
 
