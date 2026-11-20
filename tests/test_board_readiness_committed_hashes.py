@@ -75,22 +75,6 @@ EXPECTED_STALE: dict[str, str] = {
         "(wedge fix + #8532 fiducials/board-ID) is ahead of the committed "
         "copper too; the gate-pass rebuild owns the re-pin."
     ),
-    # Issue #8979: board 02 was regenerated through its recipe so the routed
-    # PCB clears the strict Routed PCB DRC gate (13 same-net slits + 1
-    # tht_smd_spacing -> 0).  Its release producer, package_release.py, run
-    # on the pinned toolchain, refuses to re-publish: readiness's kct check
-    # completes native mask attribution and grades 88 mask_to_copper errors
-    # (127 on the PRE-change committed board under the same run, so not
-    # introduced here -- the default-on mask_to_copper qualification is
-    # #8858, operator-held), plus unacknowledged silk_hole_overlap warnings
-    # (5 on the committed board, 9 after).  The old package stays committed,
-    # bound to the old readiness record, until that re-pin can run.
-    "02-charlieplex-led": (
-        "Issue #8979/#8858: copper regenerated to clear the routed-DRC gate; "
-        "package_release.py refuses to re-pin while readiness's native-complete "
-        "kct check grades mask_to_copper errors (pre-existing, #8858) and "
-        "silk_hole_overlap warnings remain unacknowledged."
-    ),
     # Issue #9097 (PR #9131) added recipe passes to board 04's
     # ``generate_design.py``; #9455 landed the via slide + silk-hole gate, and
     # #9536 regenerated the committed copper/evidence from that recipe on the

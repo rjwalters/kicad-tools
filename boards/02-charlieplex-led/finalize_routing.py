@@ -120,6 +120,15 @@ _ESCAPE_BEND_MM = 0.4
 #: Clearance a re-routed escape keeps from other-net copper (netclass floor +
 #: margin); native DRC re-verifies everything this module writes.
 _ESCAPE_CLEARANCE_MM = 0.16
+#: Power-width tracks carry the 0.2 mm ``Power`` netclass floor, so their
+#: escape obstacle buffer is wider than the signal-track one (#9467).
+_ESCAPE_POWER_CLEARANCE_MM = 0.25
+#: Same-net copper within this distance of a mask opening, without an
+#: endpoint inside the owning pad, is graded ``mask_to_copper`` (the
+#: checker's warning clearance, ``mask_copper`` policy) -- corridor legs are
+#: nudged beyond it plus margin (#9467).
+_ESCAPE_WARN_BAND_MM = 0.15
+_ESCAPE_NUDGE_MARGIN_MM = 0.075
 #: A via ring closer than this to its own pad is slid out (ring overlap).
 _RING_GAP_MM = 0.05
 #: Ring-to-pad gap a slid via is given.
@@ -429,6 +438,387 @@ def _touches(seg, node):
     return _near(seg.start, node) or _near(seg.end, node)
 
 
+def _line_distance(point, a, b):
+    """Distance from ``point`` to the infinite line through ``a`` and ``b``."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length = math.hypot(dx, dy)
+    if length <= 1e-12:
+        return math.dist(point, a)
+    return abs((point[0] - a[0]) * dy - (point[1] - a[1]) * dx) / length
+
+
+def _bend_count(points):
+    count = 0
+    for a, b, c in zip(points, points[1:], points[2:]):
+        cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])
+        if abs(cross) > 1e-9:
+            count += 1
+    return count
+
+
+def _escape_obstacle_clearance(width):
+    """Obstacle buffer for an escape of this width (netclass-aware)."""
+    if width >= 0.45:
+        return _ESCAPE_POWER_CLEARANCE_MM
+    return _ESCAPE_CLEARANCE_MM
+
+
+def _strip_covered_spans(pcb):
+    """Remove same-net track fully covered by a longer collinear same-net run.
+
+    The seed-42 route leaves short spokes that lie inside a longer segment's
+    copper beside a pad (``redundant_copper_covered``).  Readiness's prune
+    step will not touch them -- #9524's pad guard keeps it away from pad
+    centres -- so the recipe removes them itself: every removed span is
+    copper-identical to what remains, and each endpoint keeps a
+    copper connection (the board's T-taps and pad lands).
+    """
+    removed = 0
+    changed = True
+    while changed:
+        changed = False
+        for cand in list(pcb.segments):
+            a, b = tuple(cand.start), tuple(cand.end)
+            if math.dist(a, b) < 1e-6:
+                continue
+            for other in pcb.segments:
+                if other is cand or other.net_number != cand.net_number:
+                    continue
+                if other.layer != cand.layer:
+                    continue
+                c, d = tuple(other.start), tuple(other.end)
+                if math.dist(c, d) <= math.dist(a, b) + 1e-6:
+                    continue
+                if (
+                    _line_distance(a, c, d) > 0.02
+                    or _line_distance(b, c, d) > 0.02
+                    or _line_distance(c, a, b) > 0.02
+                ):
+                    continue
+
+                def _within(p):
+                    return (
+                        min(c[0], d[0]) - 0.02 <= p[0] <= max(c[0], d[0]) + 0.02
+                        and min(c[1], d[1]) - 0.02 <= p[1] <= max(c[1], d[1]) + 0.02
+                    )
+
+                if not (_within(a) and _within(b)):
+                    continue
+                pcb.remove_segments([cand])
+                removed += 1
+                changed = True
+                break
+    return removed
+
+
+def _minimal_candidate_routes(pad_xy, target):
+    """One-bend (or straight) routes from a pad centre to ``target``.
+
+    Ordered so the emitted escape survives the release cleanup chain
+    (``kct readiness --generate`` runs optimize-traces with #9524's pad
+    guard): straight and diagonal-first routes leave no corner for the
+    optimizer to chamfer into a fresh ``redundant_copper_staircase``, the
+    slanted Ls keep their corner off the 90/45 degree chamfer grid, and the
+    plain Ls come last.
+    """
+    px, py = pad_xy
+    tx, ty = target
+    dx, dy = tx - px, ty - py
+    d = min(abs(dx), abs(dy))
+    sx = 1.0 if dx > 0 else -1.0
+    sy = 1.0 if dy > 0 else -1.0
+    out = [[(px, py), (tx, ty)]]
+    out.append([(px, py), (px + sx * d, py + sy * d), (tx, ty)])
+    out.append([(px, py), (tx - sx * d, ty - sy * d), (tx, ty)])
+    if abs(dy) > abs(dx):
+        for s in (0.6, 0.4, -0.4, -0.6):
+            out.append([(px, py), (px, ty + s), (tx, ty)])
+    else:
+        for s in (0.6, 0.4, -0.4, -0.6):
+            out.append([(px, py), (tx + s, py), (tx, ty)])
+    out.append([(px, py), (px, ty), (tx, ty)])
+    out.append([(px, py), (tx, py), (tx, ty)])
+    return out
+
+
+def _walk_escape_chain(pcb, ctx, pad, centre, layer, spoke):
+    """Vertices and segments of one track chain leaving ``centre``.
+
+    Stops at the first hard node (via, other pad centre) or branch, like
+    ``_reroute_spoke``; shared with the minimalize and nudge passes.
+    """
+    same = [s for s in pcb.segments if s.layer == layer and s.net_number == pad.net_number]
+
+    def other_end(seg, node):
+        return tuple(seg.end) if _near(seg.start, node) else tuple(seg.start)
+
+    chain = [centre]
+    used = [spoke]
+    current = spoke
+    node = other_end(spoke, centre)
+    while True:
+        chain.append(node)
+        if _is_node_hard(ctx, node, pad, layer) or len(chain) > 8:
+            break
+        onward = [s for s in same if s is not current and s not in used and _touches(s, node)]
+        if len(onward) != 1:
+            break
+        current = onward[0]
+        used.append(current)
+        node = other_end(current, node)
+    return chain, used
+
+
+def _minimal_escapes(pcb):
+    """Re-write pad escapes that still carry avoidable bends.
+
+    ``_square_pad_escapes`` stops once every interior bend clears the pad
+    zone, but the release cleanup (optimize-traces, pad-guarded since #9524)
+    can no longer collapse the staircases that leaves behind, so
+    ``redundant_copper_staircase`` fails the trace-quality gate.  This pass
+    replaces each escape chain with the fewest-bend legal route to its first
+    hard node; chains with no legal replacement are left as routed.
+    """
+    from shapely.geometry import LineString  # type: ignore[import-untyped]
+
+    rerouted = 0
+    for ref, pad_num in _escape_pads(pcb):
+        ctx = _EscapeContext(pcb)
+        entry = next((e for e in ctx.pads if e[0] == ref and e[1].number == pad_num), None)
+        if entry is None:
+            continue
+        _ref, pad, bbox, centre = entry
+        if not pad.net_number:
+            continue
+        for layer in _pad_layers(pad):
+            same = [s for s in pcb.segments if s.layer == layer and s.net_number == pad.net_number]
+            for spoke in [s for s in same if _near(s.start, centre) or _near(s.end, centre)]:
+                if spoke not in pcb.segments:
+                    continue
+                chain, used = _walk_escape_chain(pcb, ctx, pad, centre, layer, spoke)
+                if len(chain) < 3 or _bend_count(chain) <= 1:
+                    continue
+                target = chain[-1]
+                obstacles = ctx.obstacles(layer, pad.net_number)
+                width = spoke.width
+                clearance = _escape_obstacle_clearance(width)
+                best = None
+                for route in _minimal_candidate_routes(centre, target):
+                    if any(
+                        _bbox_distance(v, bbox) < _ESCAPE_BEND_MM - 1e-6 for v in route[1:-1]
+                    ):
+                        continue
+                    shape = LineString(route).buffer(width / 2 + clearance)
+                    if any(shape.intersects(o) for o in obstacles):
+                        continue
+                    key = (_bend_count(route), round(_route_length(route), 3))
+                    if best is None or key < best[0]:
+                        best = (key, route)
+                if best is None or _bend_count(best[1]) >= _bend_count(chain):
+                    continue
+                route = best[1]
+                pcb.remove_segments(used)
+                pcb.add_trace(
+                    route[0],
+                    route[-1],
+                    width=width,
+                    layer=layer,
+                    net=pad.net_number,
+                    waypoints=[tuple(round(c, 4) for c in v) for v in route[1:-1]] or None,
+                    dedupe=False,
+                )
+                rerouted += 1
+                ctx = _EscapeContext(pcb)
+    return rerouted
+
+
+def _trim_pass_throughs(pcb):
+    """Split pad centres that only pass a track through.
+
+    Two same-net spokes that leave one pad centre in opposite directions make
+    that centre a degree-2 node of the checker's maximal-chain walk, so the
+    chain runs *through* the pad and its detours read as one long staircase.
+    The longer spoke is trimmed back onto the pad's inner rectangle: its
+    copper connection is unchanged, but the maximal chain now ends on the pad
+    instead of crossing it.
+    """
+    ctx = _EscapeContext(pcb)
+    trimmed = 0
+    for ref, pad, bbox, centre in ctx.pads:
+        if not pad.net_number or pad.type == "np_thru_hole":
+            continue
+        for layer in _pad_layers(pad):
+            same = [s for s in pcb.segments if s.layer == layer and s.net_number == pad.net_number]
+            spokes = [s for s in same if _near(s.start, centre) or _near(s.end, centre)]
+            if len(spokes) != 2:
+                continue
+            fars = [tuple(s.end) if _near(s.start, centre) else tuple(s.start) for s in spokes]
+            if _near(fars[0], fars[1]):
+                continue
+            pick = 0 if math.dist(centre, fars[0]) >= math.dist(centre, fars[1]) else 1
+            long_ = spokes[pick]
+            far = fars[pick]
+            dx, dy = far[0] - centre[0], far[1] - centre[1]
+            length = math.hypot(dx, dy)
+            if length < 1e-6:
+                continue
+            ux, uy = dx / length, dy / length
+            half_w = (bbox[2] - bbox[0]) / 4.0
+            half_h = (bbox[3] - bbox[1]) / 4.0
+            t = min(half_w / max(abs(ux), 1e-9), half_h / max(abs(uy), 1e-9))
+            new_end = (round(centre[0] + ux * t, 3), round(centre[1] + uy * t, 3))
+            if math.dist(new_end, centre) >= length:
+                continue
+            pcb.remove_segments([long_])
+            pcb.add_trace(
+                far,
+                new_end,
+                width=long_.width,
+                layer=layer,
+                net=pad.net_number,
+                dedupe=False,
+            )
+            trimmed += 1
+            ctx = _EscapeContext(pcb)
+    return trimmed
+
+
+def _nudge_corridors(pcb):
+    """Move escape legs that hug their own pad's mask opening.
+
+    A corridor leg whose column passes inside the opening's warning band is
+    exactly where optimize-traces' pull-tight lands its replacement bend
+    (the bend sits just outside #9524's pad zone but the copper beside the
+    opening still grades ``mask_to_copper``).  The leg slides -- with its two
+    chain neighbours -- to the nearest column clear of both the band and
+    other-net copper; a column *inside* the zone span is fine too, because
+    the pad guard then blocks the pull outright.
+    """
+    from shapely.geometry import LineString  # type: ignore[import-untyped]
+
+    nudged = 0
+    for ref, pad_num in _escape_pads(pcb):
+        ctx = _EscapeContext(pcb)
+        entry = next((e for e in ctx.pads if e[0] == ref and e[1].number == pad_num), None)
+        if entry is None:
+            continue
+        _ref, pad, bbox, centre = entry
+        if not pad.net_number:
+            continue
+        ox0, oy0, ox1, oy1 = bbox[0] - 0.05, bbox[1] - 0.05, bbox[2] + 0.05, bbox[3] + 0.05
+        for layer in _pad_layers(pad):
+            same = [s for s in pcb.segments if s.layer == layer and s.net_number == pad.net_number]
+            for spoke in [s for s in same if _near(s.start, centre) or _near(s.end, centre)]:
+                chain, used = _walk_escape_chain(pcb, ctx, pad, centre, layer, spoke)
+                if len(used) < 3:
+                    continue
+                obstacles = ctx.obstacles(layer, pad.net_number)
+                for idx in range(1, len(used) - 1):
+                    seg = used[idx]
+                    a, b = tuple(seg.start), tuple(seg.end)
+                    if math.dist(a, b) < 1.0:
+                        continue
+                    vertical = abs(a[0] - b[0]) < 1e-6
+                    horizontal = abs(a[1] - b[1]) < 1e-6
+                    if not (vertical or horizontal):
+                        continue
+                    need = _ESCAPE_WARN_BAND_MM + seg.width / 2 + _ESCAPE_NUDGE_MARGIN_MM
+                    if vertical:
+                        x = a[0]
+                        if ox0 <= x <= ox1:
+                            continue
+                        near = (ox0 - x) if x < ox0 else (x - ox1)
+                        if min(a[1], b[1]) - oy1 > 1.0 or oy0 - max(a[1], b[1]) > 1.0:
+                            continue
+                        cands = (
+                            [round(ox0 - need, 3), round(ox0 + need, 3)]
+                            if x < ox0
+                            else [round(ox1 + need, 3), round(ox1 - need, 3)]
+                        )
+                    else:
+                        y = a[1]
+                        if oy0 <= y <= oy1:
+                            continue
+                        near = (oy0 - y) if y < oy0 else (y - oy1)
+                        if min(a[0], b[0]) - ox1 > 1.0 or ox0 - max(a[0], b[0]) > 1.0:
+                            continue
+                        cands = (
+                            [round(oy0 - need, 3), round(oy0 + need, 3)]
+                            if y < oy0
+                            else [round(oy1 + need, 3), round(oy1 - need, 3)]
+                        )
+                    if near > need:
+                        continue
+                    clearance = _escape_obstacle_clearance(seg.width)
+                    applied = False
+                    for cand in cands:
+                        if vertical:
+                            new_a, new_b = (cand, a[1]), (cand, b[1])
+                        else:
+                            new_a, new_b = (a[0], cand), (b[0], cand)
+                        legs = [(seg, new_a, new_b)]
+                        for nb in (used[idx - 1], used[idx + 1]):
+                            na, nb2 = tuple(nb.start), tuple(nb.end)
+                            if _near(na, a):
+                                na = new_a
+                            if _near(na, b):
+                                na = new_b
+                            if _near(nb2, a):
+                                nb2 = new_a
+                            if _near(nb2, b):
+                                nb2 = new_b
+                            legs.append((nb, na, nb2))
+                        ok = True
+                        for s2, p1, p2 in legs:
+                            if math.dist(p1, p2) < 1e-6:
+                                ok = False
+                                break
+                            shape = LineString([p1, p2]).buffer(s2.width / 2 + clearance)
+                            if any(shape.intersects(o) for o in obstacles):
+                                ok = False
+                                break
+                        if not ok:
+                            continue
+                        for s2, p1, p2 in legs:
+                            pcb.remove_segments([s2])
+                            pcb.add_trace(
+                                p1,
+                                p2,
+                                width=s2.width,
+                                layer=s2.layer,
+                                net=s2.net_number,
+                                dedupe=False,
+                            )
+                        applied = True
+                        break
+                    if applied:
+                        nudged += 1
+                        ctx = _EscapeContext(pcb)
+                        break
+    return nudged
+
+
+def _stabilize_escapes(pcb):
+    """Make the recipe's pad escapes survive the release cleanup chain.
+
+    Runs after ``_square_pad_escapes``: strip covered spans, collapse
+    avoidable bends, split pass-through pad centres, and nudge corridor legs
+    off their pad's mask-opening band, so ``kct readiness --generate``'s
+    pad-guarded cleanup (dedupe/prune/optimize-traces) finds nothing left to
+    rewrite beside a pad (#9467).
+    """
+    stripped = _strip_covered_spans(pcb)
+    minimalized = _minimal_escapes(pcb)
+    trimmed = _trim_pass_throughs(pcb)
+    nudged = _nudge_corridors(pcb)
+    stripped += _strip_covered_spans(pcb)
+    print(
+        f"Board02: stabilized escapes: covered-stripped={stripped} "
+        f"minimalized={minimalized} pass-throughs-trimmed={trimmed} nudged={nudged}"
+    )
+    return stripped + minimalized + trimmed + nudged
+
+
 def _square_escapes_file(path):
     """Load ``path``, slide ring-overlapping vias, re-square pad escapes, save."""
     from kicad_tools.schema.pcb import PCB
@@ -436,7 +826,8 @@ def _square_escapes_file(path):
     pcb = PCB.load(path)
     slid = _slide_ring_vias(pcb)
     squared = _square_pad_escapes(pcb)
-    if slid or squared:
+    stabilized = _stabilize_escapes(pcb)
+    if slid or squared or stabilized:
         pcb.save(path)
     return slid, squared
 

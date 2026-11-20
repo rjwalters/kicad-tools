@@ -44,6 +44,9 @@
 (rule "Silkscreen Height - jlcpcb"
   (condition "A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')")
   (constraint text_height (min 1.0mm)))
+(rule "Ampacity Min Width (Power 0.1A, external) - jlcpcb"
+  (condition "(A.NetName == 'VCC') && A.Type == 'track' && (A.Layer == 'F.Cu' || A.Layer == 'B.Cu')")
+  (constraint track_width (min 0.0125mm)))
 
 (rule "Reviewed clearance - Audio"
   (condition "(A.NetClass == 'Audio' || B.NetClass == 'Audio') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")

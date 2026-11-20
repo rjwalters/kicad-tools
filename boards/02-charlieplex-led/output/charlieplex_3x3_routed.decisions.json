@@ -1,0 +1,329 @@
+{
+  "version": "1.0",
+  "decisions": [
+    {
+      "id": "dec_719f8fb9",
+      "timestamp": "2026-11-20T11:43:53.261281+00:00",
+      "action": "route",
+      "components": [
+        "J2",
+        "U1"
+      ],
+      "nets": [
+        "ISP_SCK"
+      ],
+      "position": null,
+      "rationale": "Routed with 0.2mm trace width; 0.2mm clearance",
+      "decided_by": "autorouter",
+      "alternatives": [],
+      "constraints_satisfied": [],
+      "constraints_violated": [],
+      "parent_decision": null,
+      "metrics": {
+        "total_length_mm": 16.208,
+        "via_count": 0,
+        "segment_count": 4,
+        "route_count": 1
+      }
+    },
+    {
+      "id": "dec_08ccb6b0",
+      "timestamp": "2026-11-20T11:43:53.261314+00:00",
+      "action": "route",
+      "components": [
+        "U1",
+        "R2"
+      ],
+      "nets": [
+        "LINE_B"
+      ],
+      "position": null,
+      "rationale": "Routed with 0.2mm trace width; 0.15mm clearance",
+      "decided_by": "autorouter",
+      "alternatives": [],
+      "constraints_satisfied": [],
+      "constraints_violated": [],
+      "parent_decision": null,
+      "metrics": {
+        "total_length_mm": 12.945,
+        "via_count": 0,
+        "segment_count": 4,
+        "route_count": 1
+      }
+    },
+    {
+      "id": "dec_eb4c6296",
+      "timestamp": "2026-11-20T11:43:53.261333+00:00",
+      "action": "route",
+      "components": [
+        "R1",
+        "U1"
+      ],
+      "nets": [
+        "LINE_A"
+      ],
+      "position": null,
+      "rationale": "Routed with 0.2mm trace width; 0.15mm clearance; Used 1 via(s) for layer transitions",
+      "decided_by": "autorouter",
+      "alternatives": [],
+      "constraints_satisfied": [],
+      "constraints_violated": [],
+      "parent_decision": null,
+      "metrics": {
+        "total_length_mm": 14.864,
+        "via_count": 1,
+        "segment_count": 6,
+        "route_count": 1
+      }
+    },
+    {
+      "id": "dec_e5b9900b",
+      "timestamp": "2026-11-20T11:43:53.261347+00:00",
+      "action": "route",
+      "components": [
+        "J2",
+        "R5",
+        "U1"
+      ],
+      "nets": [
+        "RESET"
+      ],
+      "position": null,
+      "rationale": "Routed with 0.2mm trace width; 0.15mm clearance; Used 2 via(s) for layer transitions",
+      "decided_by": "autorouter",
+      "alternatives": [],
+      "constraints_satisfied": [],
+      "constraints_violated": [],
+      "parent_decision": null,
+      "metrics": {
+        "total_length_mm": 31.423,
+        "via_count": 2,
+        "segment_count": 8,
+        "route_count": 2
+      }
+    },
+    {
+      "id": "dec_8cd425c1",
+      "timestamp": "2026-11-20T11:43:53.261360+00:00",
+      "action": "route",
+      "components": [
+        "J2",
+        "U1",
+        "R4"
+      ],
+      "nets": [
+        "LINE_D"
+      ],
+      "position": null,
+      "rationale": "Routed with 0.2mm trace width; 0.15mm clearance; Used 1 via(s) for layer transitions",
+      "decided_by": "autorouter",
+      "alternatives": [],
+      "constraints_satisfied": [],
+      "constraints_violated": [],
+      "parent_decision": null,
+      "metrics": {
+        "total_length_mm": 28.505,
+        "via_count": 1,
+        "segment_count": 6,
+        "route_count": 2
+      }
+    },
+    {
+      "id": "dec_ba57261b",
+      "timestamp": "2026-11-20T11:43:53.261381+00:00",
+      "action": "route",
+      "components": [
+        "R3",
+        "J2",
+        "U1"
+      ],
+      "nets": [
+        "LINE_C"
+      ],
+      "position": null,
+      "rationale": "Routed with 0.2mm trace width; 0.15mm clearance; Used 3 via(s) for layer transitions",
+      "decided_by": "autorouter",
+      "alternatives": [],
+      "constraints_satisfied": [],
+      "constraints_violated": [],
+      "parent_decision": null,
+      "metrics": {
+        "total_length_mm": 49.809,
+        "via_count": 3,
+        "segment_count": 16,
+        "route_count": 2
+      }
+    },
+    {
+      "id": "dec_cacc54e3",
+      "timestamp": "2026-11-20T11:43:53.261398+00:00",
+      "action": "route",
+      "components": [
+        "R1",
+        "D3",
+        "D6",
+        "D5",
+        "D4",
+        "D2",
+        "D1"
+      ],
+      "nets": [
+        "NODE_A"
+      ],
+      "position": null,
+      "rationale": "Routed with 0.2mm trace width; 0.15mm clearance; Used 4 via(s) for layer transitions",
+      "decided_by": "autorouter",
+      "alternatives": [],
+      "constraints_satisfied": [],
+      "constraints_violated": [],
+      "parent_decision": null,
+      "metrics": {
+        "total_length_mm": 74.024,
+        "via_count": 4,
+        "segment_count": 18,
+        "route_count": 6
+      }
+    },
+    {
+      "id": "dec_57eb3ac6",
+      "timestamp": "2026-11-20T11:43:53.261418+00:00",
+      "action": "route",
+      "components": [
+        "D7",
+        "D9",
+        "R2",
+        "D2",
+        "D8",
+        "D1"
+      ],
+      "nets": [
+        "NODE_B"
+      ],
+      "position": null,
+      "rationale": "Routed with 0.2mm trace width; 0.15mm clearance; Used 6 via(s) for layer transitions",
+      "decided_by": "autorouter",
+      "alternatives": [],
+      "constraints_satisfied": [],
+      "constraints_violated": [],
+      "parent_decision": null,
+      "metrics": {
+        "total_length_mm": 82.741,
+        "via_count": 6,
+        "segment_count": 25,
+        "route_count": 5
+      }
+    },
+    {
+      "id": "dec_fe945078",
+      "timestamp": "2026-11-20T11:43:53.261433+00:00",
+      "action": "route",
+      "components": [
+        "D3",
+        "R3",
+        "D7",
+        "D4",
+        "D8"
+      ],
+      "nets": [
+        "NODE_C"
+      ],
+      "position": null,
+      "rationale": "Routed with 0.2mm trace width; 0.15mm clearance; Used 6 via(s) for layer transitions",
+      "decided_by": "autorouter",
+      "alternatives": [],
+      "constraints_satisfied": [],
+      "constraints_violated": [],
+      "parent_decision": null,
+      "metrics": {
+        "total_length_mm": 59.651,
+        "via_count": 6,
+        "segment_count": 19,
+        "route_count": 4
+      }
+    },
+    {
+      "id": "dec_5b01b436",
+      "timestamp": "2026-11-20T11:43:53.261447+00:00",
+      "action": "route",
+      "components": [
+        "D5",
+        "D6",
+        "D9",
+        "R4"
+      ],
+      "nets": [
+        "NODE_D"
+      ],
+      "position": null,
+      "rationale": "Routed with 0.2mm trace width; 0.15mm clearance; Used 2 via(s) for layer transitions",
+      "decided_by": "autorouter",
+      "alternatives": [],
+      "constraints_satisfied": [],
+      "constraints_violated": [],
+      "parent_decision": null,
+      "metrics": {
+        "total_length_mm": 35.357,
+        "via_count": 2,
+        "segment_count": 13,
+        "route_count": 3
+      }
+    },
+    {
+      "id": "dec_5cd5260c",
+      "timestamp": "2026-11-20T11:43:53.261463+00:00",
+      "action": "route",
+      "components": [
+        "C2",
+        "C1",
+        "U1",
+        "J2",
+        "J1"
+      ],
+      "nets": [
+        "GND"
+      ],
+      "position": null,
+      "rationale": "High-priority net (NetClassRouting); Routed with 0.5mm trace width; 0.2mm clearance; Used 4 via(s) for layer transitions",
+      "decided_by": "autorouter",
+      "alternatives": [],
+      "constraints_satisfied": [],
+      "constraints_violated": [],
+      "parent_decision": null,
+      "metrics": {
+        "total_length_mm": 80.675,
+        "via_count": 4,
+        "segment_count": 18,
+        "route_count": 4
+      }
+    },
+    {
+      "id": "dec_80f666fd",
+      "timestamp": "2026-11-20T11:43:53.261482+00:00",
+      "action": "route",
+      "components": [
+        "C2",
+        "C1",
+        "R5",
+        "U1",
+        "J2",
+        "J1"
+      ],
+      "nets": [
+        "VCC"
+      ],
+      "position": null,
+      "rationale": "High-priority net (NetClassRouting); Routed with 0.5mm trace width; 0.2mm clearance; Used 5 via(s) for layer transitions",
+      "decided_by": "autorouter",
+      "alternatives": [],
+      "constraints_satisfied": [],
+      "constraints_violated": [],
+      "parent_decision": null,
+      "metrics": {
+        "total_length_mm": 55.475,
+        "via_count": 5,
+        "segment_count": 26,
+        "route_count": 5
+      }
+    }
+  ]
+}

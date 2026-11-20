@@ -2,7 +2,7 @@
 title: "charlieplex_3x3_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.29.0"
-date: "Rev 1 | 2026-11-11 | jlcpcb"
+date: "Rev 1 | 2026-11-20 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,8 +20,8 @@ header-includes:
 | Layers | 2 copper (F.Cu, B.Cu) |
 | Footprints | 22 (19 SMD, 3 THT, 0 other) |
 | Nets | 12 |
-| Traces | 207 segments |
-| Vias | 28 |
+| Traces | 143 segments |
+| Vias | 34 |
 | Board Size | 50.0 x 55.0 mm |
 
 ## Design Overview
@@ -109,18 +109,11 @@ ATtiny85 Charlieplex LED Grid
 | Errors | 0 |
 | Errors: kct (`--mfr jlcpcb` rules) | 0 |
 | Errors: kicad-cli (geometric) | 0 |
-| Warnings | 4 |
+| Warnings | 0 |
 | Blocking | 0 |
 
 **Status**: PASS
 
-### Violations by Type
-
-| Violation Type | Count |
-|----------------|-------|
-| redundant_copper_detour | 2 |
-| redundant_copper_covered | 2 |
-| silk_geometry_unmodeled | 1 |
 
 
 
@@ -128,11 +121,10 @@ ATtiny85 Charlieplex LED Grid
 
 ## Manufacturing Readiness
 
-**Verdict**: WARNING
+**Verdict**: READY
 
 ### Action Items
 
-- **[OPTIONAL]** Review 4 DRC warnings
 - **[OPTIONAL]** Analog net: LINE_A — audio signal; keep short, away from digital/switching nets
 - **[OPTIONAL]** Analog net: LINE_B — audio signal; keep short, away from digital/switching nets
 - **[OPTIONAL]** Analog net: LINE_C — audio signal; keep short, away from digital/switching nets

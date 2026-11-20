@@ -127,8 +127,9 @@ class TestBoard02PartialRouteFastFail:
             return (True, True)
 
         # Issue #8399: route_pcb is stubbed, so no routed PCB exists for the
-        # copper cleanup (cleanup_copper) the recipe now runs after routing.
-        monkeypatch.setattr("kicad_tools.pcb_prune.cleanup_copper", lambda *a, **k: {})
+        # copper cleanup the recipe now runs after routing.  The optimizer
+        # fixed-point loop (#9467) would equally run on a stub board.
+        monkeypatch.setattr(module, "stabilize_release_copper", lambda *a, **k: None)
         # Fiducials/board-ID steps also operate on the routed PCB (#8759).
         monkeypatch.setattr(
             "kicad_tools.cli.pcb_add_fiducials.run_add_fiducials", lambda *a, **k: 0

@@ -1,0 +1,25 @@
+{
+  "schema": "kicad-tools.route-artifacts.v1",
+  "route_exit_code": 0,
+  "scope": "Final artifact bytes only; not DRC or factory DFM qualification",
+  "files": {
+    "board": {
+      "path": "charlieplex_3x3_routed.kicad_pcb",
+      "state": "present",
+      "sha256": "c05fa07b7a8023066e665bb4a43e4cb64087a362ed19e8d931754c11cbbdc169",
+      "size": 97353
+    },
+    "project": {
+      "path": "charlieplex_3x3_routed.kicad_pro",
+      "state": "present",
+      "sha256": "229dbb7c91a7eb4314d94b8e7a7e1d339b978e129f67675a941d7a0d7b1aac19",
+      "size": 6709
+    },
+    "rules": {
+      "path": "charlieplex_3x3_routed.kicad_dru",
+      "state": "present",
+      "sha256": "418c00781661ec9903217f79c7321da7f3e5cab24ecc58e5dda333c0842838a2",
+      "size": 11683
+    }
+  }
+}
