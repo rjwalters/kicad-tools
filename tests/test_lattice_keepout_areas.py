@@ -37,9 +37,14 @@ from kicad_tools.cli.route_cmd import main as route_main
 
 HV_VOLTS = 300.0
 
-# Corridor bands (sheet coordinates).  Board rect: (100, 100) .. (130, 116).
+# Corridor bands (sheet coordinates).  Board rect: (96, 96) .. (134, 120).
 # Bank A routes in y < 105.8, bank B in y > 110.2 -- a 4.4 mm declared gap,
 # beyond the 3.2 mm requirement 300 V derives under IEC 60664-1 / PD2 / IIIa.
+# The same 3.2 mm applies from every HV copper feature to Edge.Cuts: the
+# post-route pairwise gate audits the board edge at the mapped voltage
+# (#9685), so the outline must keep >= 3.2 mm + trace half-width (0.05 mm)
+# / pad half-size (0.2 mm) around all HV pads and corridors -- hence the
+# 4 mm margin the (96, 96) .. (134, 120) rect gives the y = 103 / 113 pads.
 A_LIMIT = 105.8
 B_LIMIT = 110.2
 
@@ -111,7 +116,7 @@ def _board(extra: str = "") -> str:
   (net 0 "")
   (net 1 "/HV_A")
   (net 2 "/HV_B")
-  (gr_rect (start 100 100) (end 130 116)
+  (gr_rect (start 96 96) (end 134 120)
     (stroke (width 0.1) (type default))
     (fill none)
     (layer "Edge.Cuts")
@@ -125,12 +130,12 @@ def _two_domain_guards() -> str:
     ``A_LIMIT``, bank B from everything south of ``B_LIMIT``."""
     guard_a = _keepout_zone(
         "hv-a-corridor-guard",
-        [(100, A_LIMIT), (130, A_LIMIT), (130, 116), (100, 116)],
+        [(96, A_LIMIT), (134, A_LIMIT), (134, 120), (96, 120)],
         uid="cccccccc-0000-0000-0000-000000000001",
     )
     guard_b = _keepout_zone(
         "hv-b-corridor-guard",
-        [(100, 100), (130, 100), (130, B_LIMIT), (100, B_LIMIT)],
+        [(96, 96), (134, 96), (134, B_LIMIT), (96, B_LIMIT)],
         uid="cccccccc-0000-0000-0000-000000000002",
     )
     return guard_a + guard_b
