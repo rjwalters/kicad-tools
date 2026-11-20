@@ -35,7 +35,7 @@ python -c "from kicad_tools.mcp import create_server; print('MCP server availabl
 
 ```bash
 # Clone repository
-git clone https://github.com/rjwalters/kicad-tools.git
+git clone https://github.com/2AMLogic/kicad-tools.git
 cd kicad-tools
 
 # Install with MCP dependencies

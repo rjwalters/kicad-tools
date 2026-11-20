@@ -33,7 +33,7 @@ Coordinate convention:
     the file, but every consumer of this module treats the smallest-y
     corner as the anchor for the corner-anchored grow.
 
-Issue: https://github.com/rjwalters/kicad-tools/issues/3352
+Issue: https://github.com/2AMLogic/kicad-tools/issues/3352
 """
 
 from __future__ import annotations

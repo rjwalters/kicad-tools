@@ -13,6 +13,8 @@ the spec's machine-checkable ``requirements`` against the board and reports:
   ``target_fab`` differs from the tier ``kct check`` resolved.
 
 Coverage (:func:`coverage_for`): ``skipped:no_project_kct`` without a spec,
+``skipped:board_not_spec_artifact`` when the board is not one the spec's
+``artifacts`` name (a sibling revision under the same ``project.kct``, #9637),
 ``unknown:unread_spec_keys:<paths>`` when the spec declares requirement keys
 nothing reads, otherwise ``checked``.  The category is deliberately not in
 ``BLOCKING_CATEGORIES``: an ``unknown`` never blocks readiness, its errors do.
@@ -91,6 +93,20 @@ def _load(pcb_path: Path) -> ProjectSpec | None:
         return None
 
 
+def _board_is_spec_artifact(pcb_path: Path, spec: ProjectSpec) -> bool:
+    """Whether ``pcb_path`` is the board ``project.kct`` names (Issue #9637).
+
+    A sibling revision under the same ``project.kct`` is a different board:
+    holding it to the named revision's outline/layers is a false finding.
+    """
+    kct = find_project_kct(pcb_path)
+    if kct is None:
+        return False
+    from ..sync.discover import pcb_matches_spec
+
+    return pcb_matches_spec(pcb_path, kct, spec)
+
+
 def unread_spec_keys(spec: ProjectSpec) -> list[str]:
     """Dotted ``requirements.*`` paths this check does not read, sorted."""
     from ..spec.parser import collect_unknown_keys
@@ -121,6 +137,8 @@ def coverage_for(category: str, pcb_path: Path | None) -> Coverage:
     spec = _load(pcb_path)
     if spec is None:
         return cov.unknown(category, "unreadable_project_kct")
+    if not _board_is_spec_artifact(pcb_path, spec):
+        return cov.skipped(category, "board_not_spec_artifact")
     unread = unread_spec_keys(spec)
     if unread:
         return cov.unknown(category, f"unread_spec_keys:{','.join(unread)}")
@@ -162,6 +180,8 @@ def check_spec_conformance(
     if pcb_path is None:
         return results
     spec = _load(pcb_path)
+    if spec is not None and not _board_is_spec_artifact(pcb_path, spec):
+        return results  # Issue #9637: the spec describes a different board
     reqs = spec.requirements if spec is not None else None
     if reqs is None:
         return results
