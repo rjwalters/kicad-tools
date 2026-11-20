@@ -244,7 +244,10 @@ def _supervise(
     # until the last process able to write the output has exited.
     held_path, _, held_pid = (held or "").rpartition(":")
     if held_path and held_pid.isdigit() and os.name == "posix":
-        extend_lock_owner(Path(held_path), pgid=process.pid)
+        # expected_pid keeps the extension honest about *whose* record it is:
+        # a lock stolen and re-taken after this supervisor died is never
+        # adopted (issue #9628 review).
+        extend_lock_owner(Path(held_path), pgid=process.pid, expected_pid=os.getpid())
     timed_out = False
     group_killed = False
     try:
@@ -352,10 +355,12 @@ def _supervise(
                         except OSError as exc:
                             state.setdefault("quarantine_context_errors", []).append(str(exc))
                     state["unverified_sidecars"] = sidecars
-            # else (issue #9628 review): a --dry-run writes nothing; the
-            # canonical board and its sidecars belong to whichever run holds
-            # the output and are left exactly as found.
-            report = output.with_suffix(".timeout.json")
+                report = output.with_suffix(".timeout.json")
+            else:
+                # Issue #9628 review: a --dry-run writes nothing and takes no
+                # lock, so its timeout diagnostics must not replace the
+                # canonical report of whichever run does hold the output.
+                report = output.with_suffix(".dry-run.timeout.json")
             report.parent.mkdir(parents=True, exist_ok=True)
             report.write_text(json.dumps(state, indent=2) + "\n")
             print(
@@ -566,21 +571,25 @@ def _note_skipped_failed_export(parsed, state: dict) -> None:
         pass
 
 
-def _extend_inherited_lock_owner() -> None:
+def _extend_inherited_lock_owner() -> bool:
     """Name this worker's group as co-owner of the inherited lock (#9628 review).
 
     The supervisor names the group itself right after launch; this covers a
     supervisor that died inside that window, so the lock stays live until the
-    last process able to write the output has exited.
+    last process able to write the output has exited. Returns False when the
+    inherited lock no longer names this worker's supervisor as its holder --
+    another run stole and re-took it after the supervisor died -- in which
+    case the caller must refuse to write the output.
     """
     if os.name != "posix":
-        return
+        return True
     held = os.environ.get(LOCK_HELD_ENV)
     if not held:
-        return
+        return True
     name, _, pid_text = held.rpartition(":")
     if pid_text.isdigit():
-        extend_lock_owner(Path(name), pgid=os.getpgrp())
+        return extend_lock_owner(Path(name), pgid=os.getpgrp(), expected_pid=int(pid_text))
+    return True
 
 
 def _worker() -> int:
@@ -589,7 +598,16 @@ def _worker() -> int:
     signal.signal(signal.SIGTERM, _deadline_signal)
     if hasattr(signal, "SIGBREAK"):
         signal.signal(signal.SIGBREAK, _deadline_signal)
-    _extend_inherited_lock_owner()
+    if not _extend_inherited_lock_owner():
+        # The lock this run relied on was taken over by another run; writing
+        # the output now would be exactly the two-writers bug the lock exists
+        # to stop (issue #9628 review).
+        print(
+            "Error: the run lock this worker inherited no longer names its supervisor; "
+            "another run has taken over the output. Refusing to write it.",
+            file=sys.stderr,
+        )
+        return 1
     try:
         return _in_process_main(sys.argv[1:])
     except RouteDeadlineExpired:

@@ -1,6 +1,7 @@
 """Advisory run lock for ``kct route`` outputs (issue #9628)."""
 
 import contextlib
+import errno
 import json
 import os
 import signal
@@ -8,6 +9,7 @@ import socket
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -208,19 +210,23 @@ def test_invalid_policy_raises_clear_error(tmp_path, monkeypatch):
         acquire_route_lock(tmp_path / "b.kicad_pcb")
 
 
-@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs POSIX non-root")
 def test_unwritable_directory_is_a_clear_error(tmp_path, monkeypatch, capsys):
-    ro = tmp_path / "ro"
-    ro.mkdir()
-    ro.chmod(0o500)
-    try:
-        with pytest.raises(RouteLockError, match="cannot create route lock"):
-            acquire_route_lock(ro / "b.kicad_pcb")
-        monkeypatch.setenv(LOCK_POLICY_ENV, "warn")
-        assert not acquire_route_lock(ro / "b.kicad_pcb").acquired
-        assert "cannot create route lock" in capsys.readouterr().err
-    finally:
-        ro.chmod(0o700)
+    """A lock that cannot be created is a policy error, not a raw OSError.
+
+    The write failure is injected (chmod-based probes skip under root, which
+    is exactly what CI runs as).
+    """
+    out = tmp_path / "b.kicad_pcb"
+
+    def denied(self, *args, **kwargs):
+        raise PermissionError(errno.EACCES, "Permission denied", str(self))
+
+    monkeypatch.setattr(Path, "mkdir", denied)
+    with pytest.raises(RouteLockError, match="cannot create route lock"):
+        acquire_route_lock(out)
+    monkeypatch.setenv(LOCK_POLICY_ENV, "warn")
+    assert not acquire_route_lock(out).acquired
+    assert "cannot create route lock" in capsys.readouterr().err
 
 
 def test_missing_output_directory_is_created(tmp_path):
@@ -360,7 +366,15 @@ def test_supervised_timeout_releases_lock(tmp_path):
 def test_sigterm_to_supervisor_releases_lock_and_stops_worker(tmp_path):
     """SIGTERM on a supervised run unwinds like Ctrl-C: worker killed, lock removed."""
     if os.name != "posix":
-        pytest.skip("POSIX signals")
+        # Windows terminate() is a hard kill no handler sees, but the early
+        # net itself still installs and unwinds like Ctrl-C where it exists.
+        before = signal.getsignal(signal.SIGTERM)
+        with route_deadline._sigterm_as_interrupt():
+            assert signal.getsignal(signal.SIGTERM) is route_deadline._early_sigterm_net
+        assert signal.getsignal(signal.SIGTERM) == before
+        with pytest.raises(KeyboardInterrupt):
+            route_deadline._early_sigterm_net(signal.SIGTERM, None)
+        return
     out = tmp_path / "o.kicad_pcb"
     script = tmp_path / "driver.py"
     script.write_text(
@@ -408,13 +422,20 @@ def test_timed_dry_run_leaves_preexisting_board_and_live_lock(tmp_path):
 
     The dry run takes no lock, so a canonical board that another run owns (its
     live lock planted here) must survive a timeout byte-identically, with no
-    ``*_timeout_unverified_*`` sibling.
+    ``*_timeout_unverified_*`` sibling -- and its canonical ``.timeout.json``
+    report must survive too: dry-run diagnostics land in a separate
+    ``.dry-run.timeout.json`` instead of replacing the active writer's report.
     """
     out = tmp_path / "o.kicad_pcb"
     out.write_bytes(b"canonical from another run")
     out.with_suffix(".kicad_pro").write_text("pro")
     lock = _foreign_live_pid_lock(out)
     before = lock.read_bytes()
+    canonical_report = out.with_suffix(".timeout.json")
+    canonical_report.write_text(
+        json.dumps({"snapshot": "precious-snapshot.kicad_pcb", "status": "partial"}) + "\n"
+    )
+    report_before = canonical_report.read_bytes()
     result = route_deadline.run_attempt(
         [str(tmp_path / "in.kicad_pcb"), "-o", str(out), "--dry-run", "--timeout", "0.001"]
     )
@@ -423,13 +444,22 @@ def test_timed_dry_run_leaves_preexisting_board_and_live_lock(tmp_path):
     assert out.with_suffix(".kicad_pro").read_text() == "pro"
     assert lock.read_bytes() == before
     assert not list(tmp_path.glob("*_timeout_unverified_*"))
-    report = json.loads(out.with_suffix(".timeout.json").read_text())
-    assert "unverified_output" not in report and "snapshot" not in report
+    assert canonical_report.read_bytes() == report_before
+    dry = json.loads(out.with_suffix(".dry-run.timeout.json").read_text())
+    assert "unverified_output" not in dry and "snapshot" not in dry
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX process groups")
-def test_lock_outlives_supervisor_until_worker_group_exits(tmp_path):
+def test_lock_outlives_supervisor_until_worker_group_exits(tmp_path, monkeypatch):
     """A killed supervisor's live worker keeps the lock held (#9628 review)."""
+    if os.name != "posix":
+        # Documented non-POSIX behaviour: no process group is recorded, so a
+        # killed supervisor's lock is decided by its pid alone.
+        calls = []
+        monkeypatch.setattr(route_deadline, "extend_lock_owner", lambda *a, **k: calls.append(a))
+        control = tmp_path / "control.json"
+        route_deadline._supervise([sys.executable, "-c", "pass"], 30, control)
+        assert calls == []
+        return
     out = tmp_path / "o.kicad_pcb"
     lock = lock_path_for(out)
     script = tmp_path / "driver.py"
@@ -504,9 +534,17 @@ def test_extend_lock_owner_keeps_dead_pid_lock_live(tmp_path):
         worker.wait()
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX process groups")
-def test_worker_names_its_group_on_inherited_lock(tmp_path):
+def test_worker_names_its_group_on_inherited_lock(tmp_path, monkeypatch):
     """The worker itself covers a supervisor that died before extending."""
+    if os.name != "posix":
+        # Documented non-POSIX behaviour: the worker never claims group
+        # co-ownership; the inherited record is left untouched.
+        out = tmp_path / "o.kicad_pcb"
+        with route_run_lock(out) as handle:
+            monkeypatch.setenv(LOCK_HELD_ENV, held_env_value())
+            assert route_deadline._extend_inherited_lock_owner() is True
+            assert "owner_pgid" not in json.loads(handle.path.read_text())
+        return
     out = tmp_path / "o.kicad_pcb"
     probe = tmp_path / "extended"
     with route_run_lock(out):
@@ -536,9 +574,14 @@ def test_worker_names_its_group_on_inherited_lock(tmp_path):
     assert not lock_path_for(out).exists()
 
 
-@pytest.mark.skipif(os.name != "posix", reason="flock-serialized stale recovery")
 def test_stale_recovery_is_serialized_across_processes(tmp_path):
     """Exactly one contender may steal one stale lock (issue #9628 review)."""
+    if lock_mod.fcntl is None:
+        # Documented behaviour where flock is unavailable: recovery runs
+        # unguarded (best effort) and the guard reports that.
+        with lock_mod._steal_guard(tmp_path / "x.lock") as guarded:
+            assert guarded is False
+        return
     out = tmp_path / "o.kicad_pcb"
     _write_lock(out, pid=_dead_pid())
     total = 12
@@ -636,7 +679,15 @@ def test_nested_path_alias_shares_outer_lock_and_keeps_it(tmp_path, monkeypatch)
 def test_early_sigterm_to_unsupervised_run_releases_lock(tmp_path):
     """SIGTERM between acquisition and the routing handler cleans up (#9628 review)."""
     if os.name != "posix":
-        pytest.skip("POSIX signals")
+        # Windows terminate() is a hard kill no handler sees; the early net
+        # still installs and unwinds like Ctrl-C where signals are catchable.
+        before = signal.getsignal(signal.SIGTERM)
+        with route_deadline._sigterm_as_interrupt():
+            assert signal.getsignal(signal.SIGTERM) is route_deadline._early_sigterm_net
+        assert signal.getsignal(signal.SIGTERM) == before
+        with pytest.raises(KeyboardInterrupt):
+            route_deadline._early_sigterm_net(signal.SIGTERM, None)
+        return
     out = tmp_path / "o.kicad_pcb"
     script = tmp_path / "driver.py"
     script.write_text(
@@ -679,3 +730,209 @@ def test_unrepresentable_pid_is_malformed_holder(tmp_path, monkeypatch, capsys, 
     assert not acquire_route_lock(out).acquired
     assert "Warning:" in capsys.readouterr().err
     assert lock.read_bytes() == before
+
+
+@pytest.mark.parametrize("pgid", [2**32, -(2**31) - 1])
+def test_unrepresentable_owner_pgid_is_malformed_holder(tmp_path, monkeypatch, capsys, pgid):
+    """An out-of-range owner_pgid must not escape the policy (issue #9628 review)."""
+    out = tmp_path / "b.kicad_pcb"
+    lock = _write_lock(out, pid=os.getpid(), owner_pgid=pgid)
+    before = lock.read_bytes()
+    with pytest.raises(RouteLockError):
+        acquire_route_lock(out)
+    monkeypatch.setenv(LOCK_POLICY_ENV, "warn")
+    assert not acquire_route_lock(out).acquired
+    assert "Warning:" in capsys.readouterr().err
+    assert lock.read_bytes() == before
+
+
+def test_guard_io_error_goes_through_policy(tmp_path, monkeypatch, capsys):
+    """An unopenable steal guard is a policy problem, not a raw PermissionError."""
+    out = tmp_path / "b.kicad_pcb"
+    _foreign_live_pid_lock(out)
+    real_open = os.open
+
+    def denied(path, flags, *args, **kwargs):
+        if str(path).endswith(".guard"):
+            raise PermissionError(errno.EACCES, "Permission denied", str(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", denied)
+    with pytest.raises(RouteLockError, match="cannot check route lock"):
+        acquire_route_lock(out)
+    monkeypatch.setenv(LOCK_POLICY_ENV, "warn")
+    assert not acquire_route_lock(out).acquired
+    assert "cannot check route lock" in capsys.readouterr().err
+
+
+def test_interrupted_publish_never_leaves_a_zero_byte_lock(tmp_path, monkeypatch):
+    """Dying anywhere inside acquisition leaves no lock name at all (#9628 review).
+
+    The record is staged in a temp file and published by an atomic link, so a
+    signal between the claim and the payload write can only ever leave the
+    (distinct) temp file, never a zero-byte lock later runs would refuse as
+    malformed.
+    """
+    out = tmp_path / "b.kicad_pcb"
+    real_link = os.link
+
+    def broken_link(src, dst):
+        raise OSError("simulated interruption before publication")
+
+    monkeypatch.setattr(os, "link", broken_link)
+    with pytest.raises(RouteLockError, match="cannot create route lock"):
+        acquire_route_lock(out)
+    monkeypatch.setattr(os, "link", real_link)
+    assert not lock_path_for(out).exists()
+    assert not list(tmp_path.glob("*.tmp"))
+    handle = acquire_route_lock(out)
+    assert handle.acquired
+    assert json.loads(handle.path.read_text())["pid"] == os.getpid()
+    release_route_lock(handle)
+
+
+def test_symlinked_directory_alias_shares_one_lock(tmp_path):
+    """A path through a symlinked directory cannot fork a second lock (#9628 review)."""
+    real = tmp_path / "real"
+    (real / "sub").mkdir(parents=True)
+    link = tmp_path / "link"
+    link.symlink_to(real / "sub")
+    plain = tmp_path / "plain"
+    plain.symlink_to(real)
+    canonical = real / "out.kicad_pcb"
+    alias = link / ".." / "out.kicad_pcb"
+    assert lock_path_for(alias) == lock_path_for(canonical)
+    assert lock_path_for(plain / "out.kicad_pcb") == lock_path_for(canonical)
+    outer = acquire_route_lock(canonical)
+    assert outer.acquired
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys\n"
+            "from kicad_tools.core.route_run_lock import acquire_route_lock\n"
+            "try:\n"
+            "    acquire_route_lock(sys.argv[1])\n"
+            "except Exception:\n"
+            "    sys.exit(3)\n"
+            "sys.exit(0)\n",
+            str(alias),
+        ],
+        timeout=60,
+    )
+    assert probe.returncode == 3, "the alias acquired a lock on a held output"
+    # A nested alias acquire is a no-op reentrancy, not a second owner.
+    for spelling in (alias, plain / "out.kicad_pcb"):
+        inner = acquire_route_lock(spelling)
+        assert not inner.acquired and inner.path == outer.path
+        release_route_lock(inner)
+    assert outer.path.exists()
+    release_route_lock(outer)
+    assert not outer.path.exists()
+
+
+def test_unreaped_zombie_group_and_pid_are_dead(tmp_path):
+    """An unreaped zombie cannot pin the lock forever (issue #9628 review).
+
+    A container init that never reaps adopted orphans keeps a killed worker
+    group answering ``killpg(0)`` indefinitely. On Linux (/proc available) a
+    zombie-only group or pid counts as dead; elsewhere the documented
+    behaviour keeps trusting killpg alone.
+    """
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess, sys, time\n"
+            "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],"
+            " start_new_session=True)\n"
+            "print(g.pid, flush=True)\n"
+            "time.sleep(60)\n",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    zombie = None
+    try:
+        zombie = int(child.stdout.readline())
+        os.killpg(zombie, signal.SIGKILL)
+        time.sleep(0.2)  # SIGKILL reaps nothing: the parent only sleeps
+        holder = {
+            "pid": zombie,
+            "hostname": socket.gethostname(),
+            "started_at": "t",
+            "owner_pgid": zombie,
+        }
+        if Path("/proc/self/stat").exists():
+            # The zombie is never reaped, yet it can never write the output.
+            assert lock_mod._holder_is_dead(holder)
+            assert lock_mod._holder_is_dead(dict(holder, owner_pgid=None))
+            out = tmp_path / "b.kicad_pcb"
+            _write_lock(out, pid=zombie, owner_pgid=zombie)
+            handle = acquire_route_lock(out)
+            assert handle.acquired
+            release_route_lock(handle)
+        else:
+            # Without /proc the killpg answer stands: group live, pid live.
+            assert not lock_mod._holder_is_dead(holder)
+            assert not lock_mod._holder_is_dead(dict(holder, owner_pgid=None))
+    finally:
+        child.kill()
+        child.wait()
+        if zombie is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(zombie, signal.SIGKILL)
+
+
+def test_worker_refuses_to_adopt_a_replacement_lock(tmp_path, monkeypatch):
+    """An orphaned worker never joins a lock another run re-took (#9628 review).
+
+    The supervisor dies before the worker registers; a second run steals the
+    dead-pid lock and records its own pid. The worker's extension must refuse
+    instead of adopting the new owner's record.
+    """
+    out = tmp_path / "o.kicad_pcb"
+    lock = _write_lock(out, pid=os.getppid() + 1)  # the second run's fresh record
+    before = lock.read_bytes()
+    monkeypatch.setenv(LOCK_HELD_ENV, held_env_value(lock, os.getppid()))
+    if os.name == "posix":
+        assert route_deadline._extend_inherited_lock_owner() is False
+    else:
+        # Documented non-POSIX behaviour: no group co-ownership is attempted.
+        assert route_deadline._extend_inherited_lock_owner() is True
+    assert lock.read_bytes() == before
+
+
+def test_worker_extends_only_a_lock_naming_its_supervisor(tmp_path, monkeypatch):
+    out = tmp_path / "o.kicad_pcb"
+    lock = _write_lock(out, pid=os.getpid())
+    monkeypatch.setenv(LOCK_HELD_ENV, held_env_value(lock, os.getpid()))
+    assert route_deadline._extend_inherited_lock_owner() is True
+    record = json.loads(lock.read_text())
+    if os.name == "posix":
+        assert record["owner_pgid"] == os.getpgrp()
+    else:
+        assert "owner_pgid" not in record
+
+
+def test_worker_exits_without_writing_when_lock_was_replaced(tmp_path, monkeypatch):
+    """The supervised worker refuses the output once its lock was re-taken."""
+    from kicad_tools.cli import route_cmd
+
+    out = tmp_path / "o.kicad_pcb"
+    lock = _write_lock(out, pid=os.getppid() + 1)
+    monkeypatch.setenv(LOCK_HELD_ENV, held_env_value(lock, os.getppid()))
+    ran = []
+    monkeypatch.setattr(route_cmd, "_in_process_main", lambda argv: ran.append(argv) or 0)
+    previous = signal.getsignal(signal.SIGTERM)
+    try:
+        code = route_deadline._worker()
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    if os.name == "posix":
+        assert code == 1
+        assert ran == []
+    else:
+        # Documented non-POSIX behaviour: no group co-ownership, no refusal.
+        assert code == 0
+        assert len(ran) == 1

@@ -18,7 +18,16 @@ from another host, or one that cannot be parsed, cannot be proven dead and is
 refused; the message names the file so the user can delete it if sure. On
 non-POSIX platforms ``os.kill(pid, 0)`` is not a liveness probe (it would
 terminate the process), so a foreign-pid lock there is also treated as live.
-A pid too large for ``os.kill`` to represent is malformed, not dead.
+A pid too large for ``os.kill`` to represent is malformed, not dead, and so
+is an out-of-range ``owner_pgid``. Liveness is zombie-aware on Linux: a pid
+or process group whose remaining members are unreaped zombies counts as dead
+(a zombie can never write the output again, and a container init that never
+reaps adopted orphans must not pin the lock forever).
+
+The record is staged in a temp file and published with ``os.link``, so the
+lock name never exists half-written: a run killed anywhere between the
+exclusive claim and the payload write leaves no zero-byte lock that later
+runs would refuse as malformed.
 
 Stale recovery is serialized per output through a companion ``<lock>.guard``
 file held with ``flock``, so two contenders cannot both steal one stale lock;
@@ -26,8 +35,10 @@ the guard file is never removed (an unlinked flock guard would let a newcomer
 flock a fresh inode beside a waiter on the old one). A supervised run also
 records its worker's process group as a co-owner: the lock stays live until
 the last process able to write the output has exited, even when the recording
-supervisor dies first. Lock identity is the lexically normalized absolute
-path, so ``out`` and ``sub/../out`` share one lock.
+supervisor dies first, and a worker only extends the lock while it still
+names its own supervisor as the holder. Lock identity is the output's
+resolved parent directory plus its name, so ``out``, ``sub/../out`` and a
+path through a symlinked directory all share one lock.
 
 This is advisory: it neither prevents a non-kct tool from writing the output
 nor offers cross-host (NFS) guarantees.
@@ -76,14 +87,17 @@ class RouteLockHandle:
 
 
 def lock_path_for(output: str | Path) -> Path:
-    """Lock file for ``output``; relative, absolute and dot-dot spellings agree.
+    """Lock file for ``output``; relative, absolute, dot-dot and symlink spellings agree.
 
-    The identity is lexically normalized (``out`` and ``sub/../out`` share one
-    lock, issue #9628 review), so a nested alias of a held output is a no-op
-    reentrant acquire instead of an accidental steal-and-release.
+    Identity is the parent directory after ``Path.resolve`` -- which collapses
+    ``..`` by the *resolved* route rather than lexically -- plus the output's
+    name, so ``out`` and ``sub/../out`` share one lock (a nested alias is a
+    no-op reentrant acquire instead of an accidental steal-and-release) and a
+    path through a symlinked directory cannot fork a second lock beside the
+    canonical one (issue #9628 review).
     """
-    destination = Path(os.path.normpath(Path(output).absolute()))
-    return destination.with_name(f".{destination.name}.kct-route.lock")
+    destination = Path(output).absolute()
+    return destination.parent.resolve() / f".{destination.name}.kct-route.lock"
 
 
 def held_env_value(lock_path: Path | None = None, pid: int | None = None) -> str | None:
@@ -127,7 +141,58 @@ def _read_holder(path: Path) -> dict | None:
         # Unrepresentable in os.kill (OverflowError otherwise); treat as
         # malformed so refusal and warn still apply (issue #9628 review).
         return None
+    group = data.get("owner_pgid")
+    if group is not None and (
+        isinstance(group, bool) or not isinstance(group, int) or not 0 < group <= _PID_MAX
+    ):
+        # Same reasoning as the pid range: os.killpg would OverflowError and
+        # the error would escape the selected policy (issue #9628 review).
+        return None
     return data
+
+
+def _proc_fields(pid: int) -> list[bytes] | None:
+    """Fields of ``/proc/<pid>/stat`` after the comm column, or None.
+
+    ``[0]`` is the state, ``[2]`` the process group. None where /proc does not
+    exist (non-Linux) or the pid raced out of existence.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as stream:
+            stat = stream.read()
+    except OSError:
+        return None
+    # comm can contain spaces and parens; everything after the last ")" is
+    # plain whitespace-separated fields.
+    fields = stat.rsplit(b")", 1)[-1].split()
+    return fields if len(fields) >= 3 else None
+
+
+_DEAD_STATES = (b"Z", b"X", b"x")
+
+
+def _linux_live_group_members(group: int) -> bool | None:
+    """Whether /proc shows a live (non-zombie) member of ``group``.
+
+    None where /proc is unreadable (non-Linux): the caller keeps the
+    ``os.killpg`` answer alone there.
+    """
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return None
+    for name in names:
+        if not name.isdigit():
+            continue
+        fields = _proc_fields(int(name))
+        if fields is None or fields[0] in _DEAD_STATES:
+            continue  # a zombie can never write the output again
+        try:
+            if int(fields[2]) == group:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def _holder_is_dead(holder: dict | None) -> bool:
@@ -146,7 +211,13 @@ def _holder_is_dead(holder: dict | None) -> bool:
         except OSError:
             return False  # exists but is not ours to signal
         else:
-            return False
+            # killpg(0) still answers while only unreaped zombies remain: a
+            # container init that never reaps adopted orphans would pin the
+            # lock forever, so require a live member where /proc allows the
+            # check (issue #9628 review).
+            live = _linux_live_group_members(group)
+            if live is not False:
+                return False
     pid = holder["pid"]
     if pid == os.getpid():
         # We hold nothing at this path (checked by the caller), so a record
@@ -160,7 +231,8 @@ def _holder_is_dead(holder: dict | None) -> bool:
         return True
     except OSError:  # PermissionError: exists, owned by someone else
         return False
-    return False
+    fields = _proc_fields(pid)
+    return fields is not None and fields[0] in _DEAD_STATES
 
 
 def _describe(holder: dict | None) -> str:
@@ -216,25 +288,40 @@ def _steal_guard(lock: Path) -> Iterator[bool]:
         os.close(fd)
 
 
-def extend_lock_owner(lock_path: Path, *, pgid: int) -> None:
+def extend_lock_owner(lock_path: Path, *, pgid: int, expected_pid: int | None = None) -> bool:
     """Record ``pgid`` as a co-owner keeping the lock at ``lock_path`` live.
 
     A supervised run writes its board from a separate process group; when the
     supervisor is killed, the recorded pid alone looks dead while the worker
-    can still save (issue #9628 review). Best effort: a failed extension
-    leaves the record exactly as it was.
+    can still save (issue #9628 review). ``expected_pid`` -- the supervisor's
+    own pid, or the one a worker inherited via ``KCT_ROUTE_LOCK_HELD`` --
+    refuses the rewrite when the lock at this path now belongs to a different
+    run: an orphaned worker must never adopt a replacement lock. Returns
+    whether the record is (still) this run's to extend. Best effort: a failed
+    extension write leaves the record exactly as it was.
     """
-    holder = _read_holder(lock_path)
-    if holder is None or holder.get("owner_pgid") == pgid:
-        return
-    holder["owner_pgid"] = pgid
-    try:
-        temporary = lock_path.with_name(f"{lock_path.name}.{os.getpid()}.owner.tmp")
-        with open(temporary, "w", encoding="utf-8") as stream:
-            json.dump(holder, stream)
-        os.replace(temporary, lock_path)
-    except OSError:
-        return
+    with contextlib.ExitStack() as stack:
+        # The read-modify-write runs under the steal guard so it cannot
+        # interleave with a contender stealing the very record being extended;
+        # where the guard cannot be opened the rewrite stays best effort.
+        with contextlib.suppress(OSError):
+            stack.enter_context(_steal_guard(lock_path))
+        holder = _read_holder(lock_path)
+        if holder is None:
+            return False  # gone or unreadable: no longer this run's lock
+        if expected_pid is not None and holder.get("pid") != expected_pid:
+            return False  # stolen and re-taken by another run
+        if holder.get("owner_pgid") == pgid:
+            return True
+        holder["owner_pgid"] = pgid
+        try:
+            temporary = lock_path.with_name(f"{lock_path.name}.{os.getpid()}.owner.tmp")
+            with open(temporary, "w", encoding="utf-8") as stream:
+                json.dump(holder, stream)
+            os.replace(temporary, lock_path)
+        except OSError:
+            pass
+        return True
 
 
 def acquire_route_lock(output: str | Path, *, policy: str | None = None) -> RouteLockHandle:
@@ -243,6 +330,10 @@ def acquire_route_lock(output: str | Path, *, policy: str | None = None) -> Rout
     ``policy`` overrides ``KCT_ROUTE_LOCK_POLICY`` (``error`` default). ``ignore``
     touches nothing; ``warn`` reports a live holder or an uncreatable lock on
     stderr and proceeds without the lock. An invalid value raises ValueError.
+    The record is staged in a temp file and published with :func:`os.link`, so
+    the lock name never exists half-written: a run killed anywhere inside
+    acquisition leaves no zero-byte lock that later runs would refuse as
+    malformed (issue #9628 review).
     """
     selected = _selected_policy(policy)
     if selected == "ignore":
@@ -258,6 +349,7 @@ def acquire_route_lock(output: str | Path, *, policy: str | None = None) -> Rout
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
     payload = json.dumps(record).encode("utf-8")
+    temporary = lock.with_name(f"{lock.name}.{os.getpid()}.tmp")
 
     def problem(message: str) -> RouteLockHandle:
         if selected == "warn":
@@ -268,34 +360,47 @@ def acquire_route_lock(output: str | Path, *, policy: str | None = None) -> Rout
     for _attempt in range(3):
         try:
             lock.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            with open(temporary, "wb") as stream:
+                stream.write(payload)
+            # link(2) is the exclusive publish: it fails with FileExistsError
+            # when the name is taken and never exposes a partial file.
+            os.link(temporary, lock)
         except FileExistsError:
-            with _steal_guard(lock):
-                if not lock.exists():
-                    # Recovered by a contender that held the guard first;
-                    # retry the create so the new holder is checked normally.
-                    continue
-                holder = _read_holder(lock)
-                if not _holder_is_dead(holder):
-                    return problem(_refusal(destination, lock, holder))
-                # Only one contender at a time can be inside this window, so
-                # the unlink cannot race a rival's just-acquired lock away
-                # (issue #9628 review).
-                with contextlib.suppress(FileNotFoundError):
-                    lock.unlink()
+            with contextlib.suppress(OSError):
+                temporary.unlink()
+            try:
+                with _steal_guard(lock):
+                    if not lock.exists():
+                        # Recovered by a contender that held the guard first;
+                        # retry the create so the new holder is checked normally.
+                        continue
+                    holder = _read_holder(lock)
+                    if not _holder_is_dead(holder):
+                        return problem(_refusal(destination, lock, holder))
+                    # Only one contender at a time can be inside this window, so
+                    # the unlink cannot race a rival's just-acquired lock away
+                    # (issue #9628 review).
+                    with contextlib.suppress(FileNotFoundError):
+                        lock.unlink()
+            except OSError as exc:
+                # The guard or the recovery itself failed (e.g. a read-only
+                # directory): route it through the selected policy instead of
+                # escaping as a raw PermissionError (issue #9628 review).
+                return problem(
+                    f"cannot check route lock {str(lock)!r} ({exc.strerror or exc}); fix the "
+                    "directory permissions, or delete the lock file if you are sure no "
+                    "run is using this output."
+                )
             continue
         except OSError as exc:
+            with contextlib.suppress(OSError):
+                temporary.unlink()
             return problem(
                 f"cannot create route lock {str(lock)!r} ({exc.strerror or exc}); the output "
                 f"directory must be writable. Set {LOCK_POLICY_ENV}=ignore to skip locking."
             )
-        try:
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(payload)
-        except OSError as exc:
-            with contextlib.suppress(OSError):
-                lock.unlink()
-            return problem(f"cannot write route lock {str(lock)!r} ({exc.strerror or exc})")
+        with contextlib.suppress(OSError):
+            temporary.unlink()
         _held[lock] = record
         return RouteLockHandle(lock, True)
     return problem(
