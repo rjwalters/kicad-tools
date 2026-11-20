@@ -3601,14 +3601,27 @@ class CppPathfinder:
             # exact (off-grid) pad centres to the first/last grid cell
             # with a single straight tail, which is off the 0/45/90/135
             # angle set in general.  Split such segments into an exact
-            # two-leg dogleg HERE, in float64 -- the C++ side stores
-            # float32 coordinates whose ulp at board scale (~1.5e-5 mm)
-            # is too coarse to construct exactly-aligned legs.
+            # two-leg dogleg HERE, in float64.
+            #
+            # Issue #9734: the C++ ``Segment`` stores float32 coordinates,
+            # whose ulp at board scale (~1.5e-5 mm at 130 mm) round-trips a
+            # grid-exact 132.855 as 132.854996.  Feeding those to the exact
+            # float64 clearance gates turns pairs DESIGNED to sit exactly at
+            # ``(w_a + w_b) / 2 + trace_clearance`` into sub-clearance by a
+            # few nm, and the finalize seg-seg SHORT gate correctly refuses
+            # to ship them (board 05: VCP's escape stub vs VM's committed
+            # trace at 0.324997 vs 0.325 required -- VCP demoted to
+            # unrouted, exit 3).  Snap every received coordinate back onto
+            # the 4-decimal (0.1 um) lattice -- the same contract
+            # ``RoutingGrid.grid_to_world`` already applies to every
+            # Python-backend cell coordinate -- so both backends emit
+            # identical, lattice-exact geometry.  (The width sibling of
+            # this fix is the #3456 float64 echo.)
             points = dogleg_points(
-                float(cpp_seg.x1),
-                float(cpp_seg.y1),
-                float(cpp_seg.x2),
-                float(cpp_seg.y2),
+                round(float(cpp_seg.x1), 4),
+                round(float(cpp_seg.y1), 4),
+                round(float(cpp_seg.x2), 4),
+                round(float(cpp_seg.y2), 4),
             )
             from .neck_down import taper_points
 
@@ -3691,8 +3704,11 @@ class CppPathfinder:
 
         for cpp_via in result.vias:
             via = Via(
-                x=cpp_via.x,
-                y=cpp_via.y,
+                # Issue #9734: snap via centres onto the same 0.1 um
+                # lattice as segment endpoints (float32 round-trip
+                # recovery; see the segment loop above).
+                x=round(float(cpp_via.x), 4),
+                y=round(float(cpp_via.y), 4),
                 drill=via_drill,
                 diameter=via_diameter,
                 layers=(physical_top_layer, physical_bottom_layer),
