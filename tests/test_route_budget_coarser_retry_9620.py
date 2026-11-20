@@ -1123,3 +1123,174 @@ def test_format_json_promoted_document_points_at_published_artifacts(board, monk
     assert doc["export"] == {}
     # ...and whose inner document never also landed on stderr.
     assert "routing_plan" not in captured.err
+
+
+# --- Issue #9620 review round 3: promotion fidelity ------------------------
+
+
+def _fake_retry(files: dict[str, str], rc: int = 0):
+    """A fake inner run that writes *files* (names relative to the staged dir)."""
+
+    def fake_main(argv):
+        staged = Path(argv[argv.index("-o") + 1])
+        staged.write_text("coarser")
+        for name, text in files.items():
+            (staged.parent / name).write_text(text)
+        return rc
+
+    return fake_main
+
+
+def test_promotion_never_overwrites_authored_inputs(board, monkeypatch):
+    """Finding 1: sidecars named like the authored inputs divert at the destination."""
+    ncm = board.with_name("out.net_class_map.json")
+    cur = board.with_name("current_paths.json")
+    ncm.write_text("authored-map")
+    cur.write_text("authored-paths")
+    _stub_open(monkeypatch, [["VCP"], []])
+    monkeypatch.setattr(
+        route_cmd,
+        "_main_impl",
+        _fake_retry({"out.net_class_map.json": "eff-map", "current_paths.json": "eff-paths"}),
+    )
+    _published(monkeypatch, board)
+    args = _args(board, net_class_map=str(ncm), current_paths=str(cur))
+    assert _chain_budget_coarser_pass(args, None, 2) == 0
+    assert ncm.read_text() == "authored-map"
+    assert cur.read_text() == "authored-paths"
+    assert board.with_name("out.net_class_map.effective.json").read_text() == "eff-map"
+    assert board.with_name("current_paths.effective.json").read_text() == "eff-paths"
+
+
+def test_promotion_carries_project_and_rules_and_binds_receipt(board, monkeypatch):
+    """Finding 2: the winning board keeps its .kicad_pro/.kicad_dru, bound in the receipt."""
+    from kicad_tools.cli import route_receipt
+
+    _stub_open(monkeypatch, [["VCP"], []])
+    inner_holder = {}
+
+    def fake_main(argv):
+        rc = _fake_retry({"out.kicad_pro": "pro", "out.kicad_dru": "dru"})(argv)
+        staged = Path(argv[argv.index("-o") + 1])
+        inner = route_receipt._Invocation(
+            source=board.with_name("in.kicad_pcb"), outputs={}, authored={}
+        )
+        inner.propagated.add(staged.absolute())
+        route_receipt._current.set(inner)
+        inner_holder["inner"] = inner
+        return rc
+
+    monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    _published(monkeypatch, board)
+    outer = route_receipt._current.get()
+    assert _chain_budget_coarser_pass(_args(board), None, 2) == 0
+    assert board.with_suffix(".kicad_pro").read_text() == "pro"
+    assert board.with_suffix(".kicad_dru").read_text() == "dru"
+    assert board.absolute() in outer.propagated
+
+
+def test_failed_promotion_keeps_first_board_and_reports(board, monkeypatch):
+    """Finding 3: a destination that cannot be replaced rolls the whole set back."""
+    plan_dir = board.with_name("out.routing_plan.json")
+    plan_dir.mkdir()
+    failed = board.with_name("failed.json")
+    failed.write_text("first-report")
+    _stub_open(monkeypatch, [["VCP"], []])
+    monkeypatch.setattr(route_cmd, "_main_impl", _fake_retry({"out.routing_plan.json": "{}"}))
+    _published(monkeypatch, board)
+    result = _chain_budget_coarser_pass(
+        _args(board),
+        [
+            str(board.with_name("in.kicad_pcb")),
+            "-o",
+            str(board),
+            "--export-failed-nets",
+            str(failed),
+        ],
+        2,
+    )
+    assert result == 2
+    assert board.read_text() == "negotiated"
+    assert failed.read_text() == "first-report"
+    assert plan_dir.is_dir()
+    assert not list(board.parent.glob(".*.bak-*"))
+
+
+def test_publish_transaction_rolls_back_midway(tmp_path):
+    a, b = tmp_path / "a.txt", tmp_path / "b.txt"
+    a.write_text("old-a")
+    (tmp_path / "src-a").write_text("new-a")
+    (tmp_path / "src-b").write_text("new-b")
+    missing = tmp_path / "missing-src"
+    with pytest.raises(OSError):
+        route_cmd._publish_transaction([(a, tmp_path / "src-a"), (b, missing)])
+    assert a.read_text() == "old-a"
+    assert not b.exists()
+
+
+@pytest.mark.parametrize(
+    "argv_tail",
+    [["-oout.kicad_pcb"], ["-o", "ignored.kicad_pcb", "-oout.kicad_pcb"]],
+)
+def test_retry_argv_resolves_attached_short_output(argv_tail):
+    """Finding 4: ``-oPATH`` is the output option, not a stray token."""
+    out = _budget_retry_argv(["in.kicad_pcb", *argv_tail], 0.2, Path("d/s.kicad_pcb"))
+    assert not any(t == "-oout.kicad_pcb" for t in out)
+    assert all("out.kicad_pcb" not in t for t in out)
+    assert any(t.startswith("-o") and t.endswith("s.kicad_pcb") for t in out)
+
+
+def test_retry_argv_resolves_abbreviated_report_option():
+    """Finding 4: ``--export-failed`` is ``--export-failed-nets`` (argparse prefix)."""
+    reports: dict[str, Path] = {}
+    out = _budget_retry_argv(
+        ["in.kicad_pcb", "--export-failed", "failed.json"], 0.2, Path("d/s.kicad_pcb"), reports
+    )
+    assert list(reports) == ["failed.json"]
+    assert "failed.json" not in out
+    assert "--export-failed-nets" in out
+
+
+def test_retry_argv_keeps_end_of_options_delimiter():
+    """Finding 4: appended flags precede ``--``; the tail stays verbatim."""
+    out = _budget_retry_argv(["--", "in.kicad_pcb"], 0.2, Path("d/s.kicad_pcb"))
+    assert out[-2:] == ["--", "in.kicad_pcb"]
+    assert "--grid" in out[: out.index("--")]
+    assert "-o" in out[: out.index("--")]
+
+
+def test_complete_exclude_nets_does_not_suppress_grid_retry(board, monkeypatch):
+    """Finding 5: the grid retry is judged on the nets the batch attempted."""
+    seen_excluded = []
+
+    def fake_open(board_path, **kwargs):
+        seen_excluded.append(kwargs["excluded_nets"])
+        return ["VCP"] if len(seen_excluded) == 1 else []
+
+    monkeypatch.setattr(
+        "kicad_tools.router.partial_rescue.partially_connected_signal_nets", fake_open
+    )
+    monkeypatch.setattr(route_cmd, "_main_impl", _fake_retry({}))
+    _published(monkeypatch, board)
+    args = _args(board, complete_exclude_nets="VCP,/B")
+    assert _chain_budget_coarser_pass(args, None, 2) == 0
+    assert all("VCP" not in e for e in seen_excluded)
+
+
+def test_promoted_routing_plan_names_published_board(board, monkeypatch):
+    """Finding 6: ``source.pcb`` is rewritten inside the published sidecar."""
+
+    def fake_main(argv):
+        staged = Path(argv[argv.index("-o") + 1])
+        staged.write_text("coarser")
+        (staged.parent / "out.routing_plan.json").write_text(
+            json.dumps({"source": {"pcb": str(staged)}})
+        )
+        return 0
+
+    _stub_open(monkeypatch, [["VCP"], []])
+    monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    _published(monkeypatch, board)
+    assert _chain_budget_coarser_pass(_args(board), None, 2) == 0
+    plan = json.loads(board.with_name("out.routing_plan.json").read_text())
+    assert plan["source"]["pcb"] == str(board)

@@ -22755,22 +22755,166 @@ def _fresh_staging_dir(output: Path, kind: str) -> Path:
     return Path(tempfile.mkdtemp(prefix=prefix, dir=str(output.parent)))
 
 
-def _promote_staging_dir(stage_dir: Path, output: Path, staged: Path) -> None:
-    """Promote a staged board and its sidecars over ``output`` (Issue #9620 review).
+def _promotion_protected_inputs(args) -> list[Path]:
+    """Authored input files a promoted run must never overwrite (Issue #9620).
 
-    Everything the inner run wrote into *stage_dir* moves next to ``output``
-    under its own (already final) name, except the receipt / constraint
-    companions (``.route.json``, ``.kicad_pro`` / ``.kicad_dru`` /
-    ``.kicad_prl``), which the outer run re-derives.  The board moves last so
-    ``-o`` only changes once the rest is in place.
+    The staged run derives its sidecars from its staged output, so a sidecar
+    named like the operator's own ``--net-class-map`` / ``--current-paths``
+    input (``<stem>.net_class_map.json``, ``current_paths.json``) is a
+    different file in the staging directory and the same file once promoted
+    beside ``-o``.  The collision has to be resolved at the FINAL destination.
     """
+    paths: list[Path] = []
+    for name in ("pcb", "net_class_map", "current_paths", "voltage_map"):
+        value = getattr(args, name, None) if args is not None else None
+        if isinstance(value, (str, os.PathLike)) and str(value):
+            paths.append(Path(value))
+    return paths
+
+
+def _staged_artifact_moves(
+    stage_dir: Path,
+    output: Path,
+    staged: Path,
+    protected: list[Path],
+) -> list[tuple[Path, Path]]:
+    """``(destination, staged source)`` pairs for everything the inner run wrote.
+
+    The receipt (``.route.json``) and the ``.kicad_prl`` view state are
+    re-derived by the outer run; every other artifact -- the KiCad project and
+    design-rule files included (Issue #9620 review: the winning board must
+    keep the rules it was checked against) -- travels with the board.  A
+    destination that is one of the operator's authored inputs is diverted to
+    the ``.effective.json`` name the first pass uses for the same collision
+    (or dropped when it has none), never overwritten.
+    """
+    from kicad_tools.router.current_paths import CURRENT_PATHS_SIDECAR_BASENAME
+
+    def _collides(dest: Path) -> bool:
+        return any(_sidecar_collides_with_input(p, dest) for p in protected)
+
+    moves: list[tuple[Path, Path]] = []
     for f in sorted(stage_dir.iterdir()):
         if f == staged:
             continue
-        if f.suffix in {".kicad_pro", ".kicad_dru", ".kicad_prl"} or f.name.endswith(".route.json"):
+        if f.suffix == ".kicad_prl" or f.name.endswith(".route.json"):
             continue
-        os.replace(f, output.with_name(f.name))
-    os.replace(staged, output)
+        dest = output.with_name(f.name)
+        if _collides(dest):
+            if f.name == f"{output.stem}.{NET_CLASS_MAP_SIDECAR_BASENAME}":
+                dest = output.with_name(f"{output.stem}.net_class_map.effective.json")
+            elif f.name == CURRENT_PATHS_SIDECAR_BASENAME:
+                dest = output.with_name("current_paths.effective.json")
+            else:
+                continue
+            if _collides(dest):
+                continue
+        moves.append((dest, f))
+    return moves
+
+
+def _retarget_routing_plan(stage_dir: Path, output: Path, staged: Path) -> None:
+    """Point a staged routing plan's ``source.pcb`` at the published board."""
+    import json as _json
+
+    for f in stage_dir.glob("*.routing_plan.json"):
+        try:
+            data = _json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        source = data.get("source") if isinstance(data, dict) else None
+        if isinstance(source, dict) and isinstance(source.get("pcb"), str):
+            if source["pcb"] in {str(staged), str(staged.absolute())}:
+                source["pcb"] = str(output)
+                f.write_text(_json.dumps(data, indent=2))
+
+
+def _publish_transaction(moves: list[tuple[Path, Path | None]]) -> None:
+    """Publish ``(destination, source)`` pairs all-or-nothing (Issue #9620 review).
+
+    ``source=None`` removes the destination.  Every destination is checked
+    up front (an existing non-file, e.g. a directory, refuses before anything
+    moves); each existing destination is preserved by a same-directory backup
+    link before it is touched, and a failure part-way restores every
+    destination -- the first board, its reports and its verdict stay together.
+    Raises :class:`OSError` on failure, after rolling back.
+    """
+    for dest, _src in moves:
+        if dest.is_symlink() or (dest.exists() and not dest.is_file()):
+            raise IsADirectoryError(f"refusing to replace non-file artifact {dest}")
+    backups: dict[Path, Path | None] = {}
+    done: list[Path] = []
+    try:
+        for dest, src in moves:
+            if dest not in backups:
+                if dest.exists():
+                    bak = dest.with_name(f".{dest.name}.bak-{uuid.uuid4().hex[:8]}")
+                    try:
+                        os.link(dest, bak)
+                    except OSError:
+                        shutil.copy2(dest, bak)
+                    backups[dest] = bak
+                else:
+                    backups[dest] = None
+            if src is None:
+                dest.unlink(missing_ok=True)
+            else:
+                os.replace(src, dest)
+            done.append(dest)
+    except BaseException:
+        for dest in reversed(done):
+            bak = backups.get(dest)
+            with contextlib.suppress(OSError):
+                if bak is not None:
+                    os.replace(bak, dest)
+                else:
+                    dest.unlink(missing_ok=True)
+        for bak in backups.values():
+            if bak is not None:
+                with contextlib.suppress(OSError):
+                    bak.unlink(missing_ok=True)
+        raise
+    for bak in backups.values():
+        if bak is not None:
+            with contextlib.suppress(OSError):
+                bak.unlink(missing_ok=True)
+
+
+def _promote_staging_dir(
+    stage_dir: Path,
+    output: Path,
+    staged: Path,
+    args=None,
+    extra_moves: list[tuple[Path, Path | None]] | None = None,
+) -> None:
+    """Promote a staged board and its artifacts over ``output`` (Issue #9620 review).
+
+    Publication is one transaction (:func:`_publish_transaction`): *extra_moves*
+    (report publications / removals) first, then the staged artifacts, the
+    board last so ``-o`` only changes once the rest is in place.  Collisions
+    with the operator's authored inputs resolve at the final destination, and
+    the published routing plan names the published board.  Raises
+    :class:`OSError` with everything restored.
+    """
+    _retarget_routing_plan(stage_dir, output, staged)
+    moves: list[tuple[Path, Path | None]] = list(extra_moves or [])
+    moves.extend(
+        _staged_artifact_moves(stage_dir, output, staged, _promotion_protected_inputs(args))
+    )
+    moves.append((output, staged))
+    _publish_transaction(moves)
+
+
+def _adopt_constraint_receipt(output: Path, staged: Path, inner, outer) -> None:
+    """Bind the promoted board to the constraints the retry propagated.
+
+    The receipt is derived from the invocation's records: the first pass may
+    never have written effective constraint files, while the winning run did.
+    """
+    if inner is None or outer is None:
+        return
+    if staged.absolute() in inner.propagated:
+        outer.propagated.add(output.absolute())
 
 
 def _discard_staging_dir(stage_dir: Path) -> None:
@@ -23227,6 +23371,7 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
     outer_invocation = route_receipt._current.get()
 
     chain_rc: int | None = None
+    inner_invocation = None
     after: list[str] | None = before
     try:
         try:
@@ -23243,6 +23388,7 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
             print(f"  Chained completion pass failed ({exc}); keeping negotiated output")
             chain_rc, after = None, before
         finally:
+            inner_invocation = route_receipt._current.get()
             route_receipt._current.set(outer_invocation)
             if control and control_snapshot is not None:
                 _restore_supervisor_control(control, control_snapshot)
@@ -23330,7 +23476,15 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
         # sidecars (.kicad_pro/.kicad_dru/.kicad_prl) are not promoted -- the
         # outer run republishes the receipt for -o, and the constraints are
         # derived from the same rules it already wrote.
-        _promote_staging_dir(stage_dir, output, staged)
+        try:
+            _promote_staging_dir(stage_dir, output, staged, args)
+        except OSError as exc:
+            print(
+                "  Chained completion pass could not publish its artifacts "
+                f"({exc}); negotiated output kept"
+            )
+            return result
+        _adopt_constraint_receipt(output, staged, inner_invocation, outer_invocation)
     finally:
         # Also runs on RouteDeadlineExpired / KeyboardInterrupt (BaseException):
         # -o was never written before promotion, so only staging needs removing.
@@ -23394,68 +23548,101 @@ def _budget_retry_argv(
       leaves the caller's report describing the board that is still at ``-o``.
     """
     base = list(sys.argv[1:]) if argv is None else list(argv)
+    parser = _route_parser()
+    actions = parser._option_string_actions  # argparse's own option table
+    long_opts = [o for o in actions if o.startswith("--")]
+
+    def _resolve(tok: str):
+        """(dest, takes_value, inline_value, short_cluster_rest) for an option token.
+
+        Resolution mirrors argparse: exact match, a unique ``--long`` prefix
+        (``--export-failed`` is ``--export-failed-nets``), ``--opt=value`` and
+        an attached short value (``-oout.kicad_pcb``).  ``None`` for anything
+        that is not a recognised option (positional, value, unknown flag).
+        """
+        if tok.startswith("--"):
+            name, eq, val = tok.partition("=")
+            action = actions.get(name)
+            if action is None:
+                hits = {actions[o] for o in long_opts if o.startswith(name)}
+                action = hits.pop() if len(hits) == 1 else None
+            if action is None:
+                return None
+            return action.dest, action.nargs != 0, (val if eq else None), None
+        if tok.startswith("-") and len(tok) > 1:
+            action = actions.get(tok[:2])
+            if action is None:
+                return None
+            if action.nargs == 0:
+                return None if len(tok) > 2 else (action.dest, False, None, None)
+            return action.dest, True, (tok[2:] if len(tok) > 2 else None), None
+        return None
+
+    delimiter = base.index("--") if "--" in base else len(base)
+    head, tail = base[:delimiter], base[delimiter:]
+
+    # The effective --export-failed-nets occurrence: the LAST one by action
+    # (argparse last-wins for a plain path argument), however it is spelled.
+    effective_report_idx: int | None = None
+    j = 0
+    while j < len(head):
+        res = _resolve(head[j])
+        if res is not None and res[0] == "export_failed_nets":
+            effective_report_idx = j
+        j += 2 if (res is not None and res[1] and res[2] is None) else 1
+
     out: list[str] = []
     grid_set = False
     output_set = False
     i = 0
-
-    # The effective --export-failed-nets occurrence: the LAST one (argparse
-    # last-wins for a plain path argument).
-    effective_report_idx: int | None = None
-    for j, tok in enumerate(base):
-        if tok == "--export-failed-nets" or tok.startswith("--export-failed-nets="):
-            effective_report_idx = j
-
-    while i < len(base):
-        tok = base[i]
-        if tok == "--grid":
-            out.extend(["--grid", f"{grid_mm:g}"])
-            grid_set = True
-            i += 2
-        elif tok.startswith("--grid="):
-            out.append(f"--grid={grid_mm:g}")
-            grid_set = True
-            i += 1
-        elif tok in ("-o", "--output"):
-            out.extend([tok, str(staged)])
-            output_set = True
-            i += 2
-        elif tok.startswith("--output="):
-            out.append(f"--output={staged}")
-            output_set = True
-            i += 1
-        elif tok == "--export-failed-nets" or tok.startswith("--export-failed-nets="):
-            tok_idx = i
-            if tok == "--export-failed-nets":
-                original = base[i + 1] if i + 1 < len(base) else ""
-                i += 2
-            else:
-                original = tok.split("=", 1)[1]
-                i += 1
-            if tok_idx != effective_report_idx:
-                # An earlier, inert occurrence: argparse never reads it, so it
-                # is dropped -- not staged, not recorded, never touched.
-                continue
-            if not original:
-                continue
-            staged_report = _staged_export_report_path(original)
-            if report_map is not None:
-                report_map[original] = staged_report
-            out.extend(["--export-failed-nets", str(staged_report)])
-        elif tok in ("--lint-gate", "--lint-gate-strict"):
-            i += 1
-        elif tok == "--lint-gate-waivers":
-            i += 2
-        elif tok.startswith("--lint-gate-waivers="):
-            i += 1
-        else:
+    while i < len(head):
+        tok = head[i]
+        res = _resolve(tok)
+        if res is None:
             out.append(tok)
             i += 1
+            continue
+        dest, takes_value, inline, _ = res
+        consumed = 1
+        value = inline
+        if takes_value and inline is None:
+            value = head[i + 1] if i + 1 < len(head) else ""
+            consumed = 2
+
+        def _respell(new_value: str) -> list[str]:
+            """The operator's own spelling of this option, value swapped."""
+            if inline is None:
+                return [tok, new_value]
+            if tok.startswith("--"):
+                return [f"{tok.partition('=')[0]}={new_value}"]
+            return [f"{tok[:2]}{new_value}"]
+
+        if dest == "grid":
+            out.extend(_respell(f"{grid_mm:g}"))
+            grid_set = True
+        elif dest == "output":
+            out.extend(_respell(str(staged)))
+            output_set = True
+        elif dest == "export_failed_nets":
+            if i == effective_report_idx and value:
+                staged_report = _staged_export_report_path(value)
+                if report_map is not None:
+                    report_map[value] = staged_report
+                out.extend(["--export-failed-nets", str(staged_report)])
+            # An earlier, inert occurrence is dropped: argparse never reads it,
+            # so it is not staged, not recorded, never touched.
+        elif dest in ("lint_gate", "lint_gate_strict", "lint_gate_waivers"):
+            pass
+        else:
+            out.extend(head[i : i + consumed])
+        i += consumed
     if not grid_set:
         out.extend(["--grid", f"{grid_mm:g}"])
     if not output_set:
         out.extend(["-o", str(staged)])
-    return out
+    # Appended BEFORE any end-of-options delimiter, which (with everything
+    # after it) is preserved verbatim.
+    return out + tail
 
 
 def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int:
@@ -23539,14 +23726,12 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
     from .route_deadline import CONTROL_ENV, DEADLINE_ENV
 
     manufacturer = getattr(args, "manufacturer", "jlcpcb") or "jlcpcb"
-    excluded = frozenset(
-        n.strip()
-        for n in (getattr(args, "complete_exclude_nets", "") or "").split(",")
-        if n.strip()
-    )
-    # Issue #7922, as for the chained completion pass: a placement-invalid net
-    # is open by design and was never attempted, so it must not veto (or gate)
-    # the retry.
+    # Issue #9620 review: the retry is judged against the nets THIS batch
+    # attempted.  ``--complete-exclude-nets`` only scopes the completion pass
+    # (the retry re-runs the batch, not the completion), so it must not shrink
+    # the open-net set.  A placement-invalid net (Issue #7922) was never
+    # attempted: it is open by design and must not veto (or gate) the retry.
+    excluded: frozenset[str] = frozenset()
     disposition = getattr(args, "_initial_placement_disposition", None) or getattr(
         args, "_placement_disposition", None
     )
@@ -23644,6 +23829,7 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
     json_format = getattr(args, "format", "text") == "json"
     json_capture: list[str] | None = [] if json_format else None
     retry_rc: int | None = None
+    inner_invocation = None
     after: list[str] | None = before
     try:
         try:
@@ -23672,6 +23858,7 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
         finally:
             if json_capture is not None:
                 _route_json_capture = None
+            inner_invocation = route_receipt._current.get()
             route_receipt._current.set(outer_invocation)
             if control and control_snapshot is not None:
                 _restore_supervisor_control(control, control_snapshot)
@@ -23692,45 +23879,29 @@ def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int
                     f"(exit {retry_rc}, {why}); first result kept"
                 )
             return result
-        # Promotion: the retry's diagnostics travel with its board.  The
-        # effective --export-failed-nets report publishes FIRST (Issue #9620
-        # review): it stages in its destination filesystem, and a publication
-        # failure here keeps the first result whole -- board, report and exit
-        # agree, instead of a promoted board beside a report that cannot move.
-        # Sidecars follow, the board last (same exclusions as the chained
-        # completion pass: the receipt and constraint sidecars are re-derived
-        # by the outer run).
-        # Reconcile presence: a first-pass sidecar whose staged twin the retry
-        # did not write describes a board no longer at -o (an empty failure map
-        # removes the sidecar by contract) -- remove it.
+        # Promotion: the retry's diagnostics travel with its board, as ONE
+        # transaction (Issue #9620 review): the effective --export-failed-nets
+        # reports, the sidecars and the board publish together, and any
+        # failure restores everything -- the first board, its reports and its
+        # verdict stay together.  A first-pass sidecar or report whose staged
+        # twin the retry did not write describes a board no longer at -o (an
+        # empty failure map removes the sidecar by contract) -- it is removed
+        # inside the same transaction.
+        extra_moves: list[tuple[Path, Path | None]] = []
         for original, staged_report in staged_reports.items():
-            target = Path(original)
-            try:
-                if staged_report.is_file():
-                    os.replace(staged_report, target)
-                else:
-                    # The retry produced no report (e.g. it routed everything);
-                    # the first pass's report would describe the discarded board.
-                    target.unlink(missing_ok=True)
-            except OSError as exc:
-                if not quiet:
-                    print(
-                        "  Coarser-grid retry could not publish the failed-nets "
-                        f"report at {target} ({exc}); first result kept"
-                    )
-                return result
-        had_staged_sidecar = _search_failures_sidecar_path(staged).is_file()
-        for f in sorted(stage_dir.iterdir()):
-            if f == staged:
-                continue
-            if f.suffix in {".kicad_pro", ".kicad_dru", ".kicad_prl"} or f.name.endswith(
-                ".route.json"
-            ):
-                continue
-            os.replace(f, output.with_name(f.name))
-        if not had_staged_sidecar:
-            _search_failures_sidecar_path(output).unlink(missing_ok=True)
-        os.replace(staged, output)
+            extra_moves.append((Path(original), staged_report if staged_report.is_file() else None))
+        if not _search_failures_sidecar_path(staged).is_file():
+            extra_moves.append((_search_failures_sidecar_path(output), None))
+        try:
+            _promote_staging_dir(stage_dir, output, staged, args, extra_moves)
+        except OSError as exc:
+            if not quiet:
+                print(
+                    f"  Coarser-grid retry could not publish its artifacts ({exc}); "
+                    "first result kept"
+                )
+            return result
+        _adopt_constraint_receipt(output, staged, inner_invocation, outer_invocation)
         if json_capture:
             # _main_impl publishes exactly one JSON document describing the
             # selected result -- here, the promoted retry's own document, with
