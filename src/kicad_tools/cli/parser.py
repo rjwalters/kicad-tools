@@ -3034,7 +3034,18 @@ def _add_pcb_parser(subparsers) -> None:
         "loops (including loops closed through vias) by removing each loop's "
         "narrowest segment below --wide, so 'pcb reinforce' can anchor the run. "
         "Loops whose segments are all >= --wide are reported, not cut, as is any "
-        "loop the current-path audit still sees afterwards (with its witness).",
+        "loop the current-path audit still sees afterwards (with its witness). "
+        "Without this flag a current_paths.json sidecar next to the board is "
+        "auto-discovered, exactly as 'kct check' auto-loads it (Issue #9747); "
+        "use --no-current-paths to suppress that.",
+    )
+    pcb_prune.add_argument(
+        "--no-current-paths",
+        dest="no_current_paths",
+        action="store_true",
+        help="Suppress current-paths sidecar auto-discovery for 'pcb prune', "
+        "restoring the pre-#9747 behaviour of ignoring a sidecar unless "
+        "--current-paths names one. Cannot be combined with --current-paths.",
     )
     pcb_prune.add_argument(
         "--wide",

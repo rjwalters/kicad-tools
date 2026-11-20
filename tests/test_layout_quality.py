@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib.util
 import math
+import random
 import sys
 from pathlib import Path
 
@@ -1064,3 +1065,232 @@ def test_compare_fingerprints_ignores_layout_quality(tmp_path, bench):
     # The comparison still guards the invariants beside it.
     after["pad_nets"]["TP1:1"] = "Hijacked"
     assert bench.compare_fingerprints(before, after) != []
+
+
+# ---------------------------------------------------------------------------
+# _count_corners candidate bucketing (issue #9658)
+# ---------------------------------------------------------------------------
+
+
+def _count_corners_pairwise_reference(pcb: PCB):
+    """The pre-#9658 all-pairs junction search, verbatim, as an oracle."""
+    from kicad_tools.analysis.layout_quality import (
+        _CORNER_CLASSES,
+        _VERTEX_DECIMALS,
+        _classify_angle,
+        _net_display_name,
+        _net_raw_name,
+    )
+    from kicad_tools.explain.checks.acid_trap import AcidTrapCheck
+    from kicad_tools.validate.rules.sharp_trace_corner import _copper_discs, _is_buried
+
+    check = AcidTrapCheck()
+    discs = _copper_discs(pcb)
+    groups: dict[tuple[int, str, str], list] = {}
+    for seg in pcb.segments:
+        groups.setdefault((seg.net_number, seg.net_name, seg.layer), []).append(seg)
+    vertices: dict[tuple, tuple[tuple[float, float], list]] = {}
+    for key, segments in groups.items():
+        for i, seg1 in enumerate(segments):
+            for seg2 in segments[i + 1 :]:
+                junction = check._find_junction(seg1, seg2)
+                if junction is None:
+                    continue
+                vkey = (
+                    key,
+                    round(junction[0], _VERTEX_DECIMALS),
+                    round(junction[1], _VERTEX_DECIMALS),
+                )
+                entry = vertices.setdefault(vkey, (junction, []))
+                legs = entry[1]
+                if seg1 not in legs:
+                    legs.append(seg1)
+                if seg2 not in legs:
+                    legs.append(seg2)
+    totals: dict[str, int] = dict.fromkeys(_CORNER_CLASSES, 0)
+    per_net: dict[str, dict[str, int]] = {}
+    for vkey, (junction, legs) in vertices.items():
+        net_number, seg_net_name, layer = vkey[0]
+        raw_name = _net_raw_name(pcb, net_number, seg_net_name)
+        if _is_buried(discs, raw_name, layer, junction):
+            continue
+        distinct: list = []
+        seen_edges: set = set()
+        for seg in legs:
+            pa = (round(seg.start[0], _VERTEX_DECIMALS), round(seg.start[1], _VERTEX_DECIMALS))
+            pb = (round(seg.end[0], _VERTEX_DECIMALS), round(seg.end[1], _VERTEX_DECIMALS))
+            edge = (pa, pb) if pa <= pb else (pb, pa)
+            if edge not in seen_edges:
+                seen_edges.add(edge)
+                distinct.append(seg)
+        if len(distinct) < 2:
+            continue
+        display = _net_display_name(pcb, net_number, raw_name)
+        for i, seg1 in enumerate(distinct):
+            for seg2 in distinct[i + 1 :]:
+                cls = _classify_angle(check._calculate_angle(seg1, seg2, junction))
+                if cls is None:
+                    continue
+                totals[cls] += 1
+                per_net.setdefault(display, dict.fromkeys(_CORNER_CLASSES, 0))[cls] += 1
+    return totals, per_net
+
+
+def _jittered_endpoint(rng: random.Random, point: tuple[float, float]) -> tuple[float, float]:
+    # Per-axis offset inside _find_junction's 0.01 mm tolerance, fine
+    # enough to straddle the 2-decimal vertex-rounding boundary.
+    return (
+        point[0] + rng.uniform(-0.0049, 0.0049),
+        point[1] + rng.uniform(-0.0049, 0.0049),
+    )
+
+
+def _random_corner_pcb_text(rng: random.Random) -> str:
+    """Chains and T-junctions on mixed nets/layers with every corner class."""
+    lines = [
+        '(kicad_pcb (version 20240108) (generator "test")',
+        '  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))',
+        '  (net 0 "") (net 1 "RA") (net 2 "RB")',
+        '  (gr_rect (start 0 0) (end 500 500) (stroke (width 0.1)) (layer "Edge.Cuts"))',
+    ]
+    declared: set[str] = set()
+
+    def emit(seg, net_field: str) -> None:
+        if net_field.startswith('(net "'):
+            declared.add(net_field.split('"')[1])
+        lines.append(
+            f"  (segment (start {seg[0][0]:.6f} {seg[0][1]:.6f}) "
+            f"(end {seg[1][0]:.6f} {seg[1][1]:.6f}) (width 0.2) "
+            f'(layer "{seg[2]}") {net_field})'
+        )
+
+    net_fields = ['(net 1 "RA")', '(net 2 "RB")', '(net "NLX")']
+    chains: list[tuple[float, float]] = [(5.0, 5.0), (100.0, 5.0), (200.0, 5.0), (300.0, 5.0)]
+    for chain_idx, (x, y) in enumerate(chains):
+        net = net_fields[chain_idx % 3]
+        layer = "F.Cu" if chain_idx % 2 == 0 else "B.Cu"
+        nominal = [(x, y)]
+        for _ in range(rng.randint(6, 14)):
+            turn = math.radians(rng.choice([0, 5, 45, 90, 135, 175, -90, -45]))
+            length = rng.uniform(0.5, 3.0)
+            nominal.append(
+                (
+                    nominal[-1][0] + length * math.cos(turn),
+                    nominal[-1][1] + length * math.sin(turn),
+                )
+            )
+        jittered = [_jittered_endpoint(rng, p) for p in nominal]
+        for a, b in zip(jittered, jittered[1:], strict=False):
+            emit((a, b, layer), net)
+            if rng.random() < 0.1:  # stacked duplicate (art artifact)
+                emit((a, b, layer), net)
+            if rng.random() < 0.1:  # zero-length segment at the vertex
+                emit(((b[0], b[1]), (b[0], b[1]), layer), net)
+            if rng.random() < 0.25:  # T-junction: extra leg off the vertex
+                ang = rng.uniform(0, 2 * math.pi)
+                far = (
+                    b[0] + rng.uniform(0.5, 2.0) * math.cos(ang),
+                    b[1] + rng.uniform(0.5, 2.0) * math.sin(ang),
+                )
+                emit((_jittered_endpoint(rng, b), far, layer), net)
+            if rng.random() < 0.2:  # guaranteed near miss: per-axis gap > tolerance
+                emit(
+                    (
+                        (b[0] + rng.uniform(0.02, 0.03), b[1] + rng.uniform(-0.05, 0.05)),
+                        (b[0] + rng.uniform(0.5, 1.0), b[1] + rng.uniform(0.5, 1.0)),
+                        layer,
+                    ),
+                    net,
+                )
+    # The first chain duplicated onto another net and layer: same geometry,
+    # separate groups.
+    x, y = chains[0]
+    nominal = [(x, y)]
+    for _ in range(8):
+        turn = math.radians(rng.choice([0, 90, -90]))
+        nominal.append(
+            (nominal[-1][0] + 2.0 * math.cos(turn), nominal[-1][1] + 2.0 * math.sin(turn))
+        )
+    jittered = [_jittered_endpoint(rng, p) for p in nominal]
+    for a, b in zip(jittered, jittered[1:], strict=False):
+        emit((a, b, "B.Cu"), '(net 2 "RB")')
+
+    header_nets = ['  (net 0 "")', '  (net 1 "RA")', '  (net 2 "RB")']
+    if "NLX" in declared:
+        header_nets.append('  (net 3 "NLX")')
+    return lines[0] + "\n" + "\n".join(header_nets) + "\n" + "\n".join(lines[1:]) + "\n)\n"
+
+
+# Endpoints that share a junction yet straddle the 2-decimal rounding
+# boundary (1.0149 -> 1.01, 1.0151 -> 1.02), plus a T-junction and a
+# zero-length leg at the same vertex.
+BOUNDARY_STRADDLING_PCB = """(kicad_pcb (version 20240108) (generator "test")
+  (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))
+  (net 0 "") (net 1 "STR")
+
+  (gr_rect (start 0 0) (end 50 50) (stroke (width 0.1)) (layer "Edge.Cuts"))
+
+  (segment (start 5 5) (end 1.0149 5) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 1.0151 5) (end 1.0148 9) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 1.0150 5.0001) (end 5 9) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 1.0151 4.9999) (end 1.0151 4.9999) (width 0.2) (layer "F.Cu") (net 1))
+)
+"""
+
+
+def _corner_equivalence_cases() -> list[tuple[str, str]]:
+    import random as _random
+
+    cases = [("straddling-boundary", BOUNDARY_STRADDLING_PCB)]
+    for seed in range(5):
+        cases.append((f"random-seed-{seed}", _random_corner_pcb_text(_random.Random(seed))))
+    return cases
+
+
+@pytest.mark.parametrize(
+    "name,text", _corner_equivalence_cases(), ids=[c[0] for c in _corner_equivalence_cases()]
+)
+def test_count_corners_matches_pairwise_reference(name, text):
+    from kicad_tools.analysis.layout_quality import _count_corners
+
+    pcb = _load_pcb(text)
+    assert _count_corners(pcb) == _count_corners_pairwise_reference(pcb)
+
+
+def _serpentine_pcb_text(n: int) -> str:
+    pts = [(0.0, 0.0)]
+    x, y = 0.0, 0.0
+    for i in range(n):
+        if i % 2 == 0:
+            x += 1.0
+        else:
+            y += 0.5 if (i // 2) % 2 == 0 else -0.5
+        pts.append((x, y))
+    segs = "\n".join(
+        f'  (segment (start {a[0]} {a[1]}) (end {b[0]} {b[1]}) (width 0.2) (layer "F.Cu") (net 1))'
+        for a, b in zip(pts, pts[1:], strict=False)
+    )
+    return (
+        '(kicad_pcb (version 20240108) (generator "test")\n'
+        '  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))\n'
+        '  (net 0 "") (net 1 "SERP")\n'
+        '  (gr_rect (start 0 0) (end 500 500) (stroke (width 0.1)) (layer "Edge.Cuts"))\n'
+        f"{segs}\n)\n"
+    )
+
+
+def test_count_corners_serpentine_4000_under_budget():
+    # Issue #9658: the all-pairs junction search cost ~3 s (and ~x4 per
+    # doubling) at n=4000 same-net/same-layer segments; the bucketed
+    # candidate search must stay well under a second.
+    import time
+
+    from kicad_tools.analysis.layout_quality import _count_corners
+
+    pcb = _load_pcb(_serpentine_pcb_text(4000))
+    assert len(pcb.segments) == 4000
+    t0 = time.perf_counter()
+    totals, per_net = _count_corners(pcb)
+    elapsed = time.perf_counter() - t0
+    assert totals["right_angle"] == 3999  # every serpentine vertex is a 90 deg bend
+    assert elapsed < 1.0, f"_count_corners took {elapsed:.3f}s at n=4000"
