@@ -714,3 +714,34 @@ class TestWriterAudit:
         fill = node.find("fill")
         assert fill is not None
         assert fill.get_string(0) == "none"
+
+
+# ---------------------------------------------------------------------------
+# Footprint closed-shape reader: arcs and rounded corners (review of #9721)
+# ---------------------------------------------------------------------------
+
+
+def _fp_shapes(shape: str):
+    from kicad_tools.core.board_outline import footprint_outline_closed_shapes
+    from kicad_tools.sexp import parse_sexp
+
+    root = parse_sexp('(kicad_pcb (footprint "F" (layer "F.Cu") (at 0 0) ' + shape + "))")
+    return list(footprint_outline_closed_shapes(root))
+
+
+def test_fp_poly_arc_is_preserved_in_ring():
+    (shape,) = _fp_shapes(
+        "(fp_poly (pts (xy -20 -15) (xy 20 -15) (xy 20 15) "
+        "(arc (start 15 15) (mid 0 30) (end -15 15)) (xy -20 15)) "
+        '(fill yes) (layer "Edge.Cuts"))'
+    )
+    assert max(y for _x, y in shape.ring) == pytest.approx(30.0, abs=0.01)
+    assert len(shape.ring) > 5
+
+
+def test_fp_rect_radius_rounds_corners():
+    (shape,) = _fp_shapes(
+        '(fp_rect (start -20 -20) (end 20 20) (radius 12) (fill yes) (layer "Edge.Cuts"))'
+    )
+    assert (-20.0, -20.0) not in shape.ring
+    assert min(math.hypot(x + 20, y + 20) for x, y in shape.ring) > 3.0

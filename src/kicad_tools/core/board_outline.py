@@ -531,6 +531,57 @@ def _closed_shape_fill_and_stroke(node: SExp) -> tuple[str, float]:
     return fill, width
 
 
+def _fp_poly_chain(node: SExp) -> list[Point]:
+    """Ordered vertex chain of an ``fp_poly``, arcs tessellated in place.
+
+    ``(pts ...)`` may interleave ``(xy x y)`` vertices with
+    ``(arc (start) (mid) (end))`` segments (KiCad 9+).  The arc's start joins
+    the previous vertex by a straight edge, then the arc is followed through
+    its authored midpoint to its end, preserving authored order and sweep.
+    """
+    pts = node.find_child("pts")
+    chain: list[Point] = []
+    if pts is None:
+        return chain
+    for child in pts.iter_children():
+        tag = child.tag or ""
+        if tag == "xy":
+            chain.append(_coordinate(child, "fp_poly xy"))
+        elif tag == "arc":
+            start, mid, end = (_point(child, name) for name in ("start", "mid", "end"))
+            chain.extend(tessellate_arc(start, mid, end))
+    return chain
+
+
+def _fp_rect_ring(node: SExp, p1: Point, p2: Point) -> list[Point]:
+    """Four corners of an ``fp_rect``, or its rounded outline when ``(radius r)``.
+
+    The radius is clamped to half the shorter side; each corner becomes a
+    quarter-circle arc, so the removed corner material is not part of the
+    filled region.
+    """
+    (x1, y1), (x2, y2) = p1, p2
+    radius_node = node.find_child("radius")
+    radius = (radius_node.get_float(0) or 0.0) if radius_node is not None else 0.0
+    left, right = min(x1, x2), max(x1, x2)
+    top, bottom = min(y1, y2), max(y1, y2)
+    radius = min(radius, (right - left) / 2.0, (bottom - top) / 2.0)
+    if not math.isfinite(radius) or radius <= 0.0:
+        return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+    k = radius * (1.0 - math.sqrt(0.5))  # offset of the arc midpoint from the corner
+    corners = [
+        # (arc start, arc mid, arc end) walking the outline clockwise on screen
+        ((left, top + radius), (left + k, top + k), (left + radius, top)),
+        ((right - radius, top), (right - k, top + k), (right, top + radius)),
+        ((right, bottom - radius), (right - k, bottom - k), (right - radius, bottom)),
+        ((left + radius, bottom), (left + k, bottom - k), (left, bottom - radius)),
+    ]
+    ring: list[Point] = []
+    for start, mid, end in corners:
+        ring.extend(tessellate_arc(start, mid, end))
+    return ring
+
+
 def footprint_outline_closed_shapes(root: SExp) -> Iterator[FootprintClosedShape]:
     """Yield footprint-local closed Edge.Cuts shapes with fill state.
 
@@ -578,7 +629,7 @@ def footprint_outline_closed_shapes(root: SExp) -> Iterator[FootprintClosedShape
                 )
             elif tag == "fp_rect":
                 (x1, y1), (x2, y2) = _point(node, "start"), _point(node, "end")
-                corners = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+                corners = _fp_rect_ring(node, (x1, y1), (x2, y2))
                 yield FootprintClosedShape(
                     shape_type="rect",
                     ring=tuple(_to_board_frame(corner, anchor, angle) for corner in corners),
@@ -586,10 +637,7 @@ def footprint_outline_closed_shapes(root: SExp) -> Iterator[FootprintClosedShape
                     stroke_width=stroke_width,
                 )
             else:  # fp_poly
-                pts = node.find_child("pts")
-                chain = (
-                    [_coordinate(xy, "fp_poly xy") for xy in pts.find_children("xy")] if pts else []
-                )
+                chain = _fp_poly_chain(node)
                 if len(chain) < 3:
                     raise ValueError("Malformed Edge.Cuts fp_poly: missing points")
                 yield FootprintClosedShape(

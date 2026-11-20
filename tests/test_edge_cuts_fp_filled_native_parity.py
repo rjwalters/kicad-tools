@@ -108,6 +108,37 @@ CASES: dict[str, tuple[str, str, dict, bool]] = {
         _ALIGNED_PROBES,
         False,
     ),
+    # Outward polygon arc (review of #9721): the semicircle bulges below the
+    # box, so a track at y=72 (board) sits inside the filled region.
+    "fp_poly_arc_outward_filled": (
+        "60 50 0",
+        "(fp_poly (pts (xy -20 -15) (xy 20 -15) (xy 20 15) "
+        "(arc (start 15 15) (mid 0 30) (end -15 15)) (xy -20 15)) "
+        '(stroke (width 0.05) (type solid)) (fill yes) (layer "Edge.Cuts"))',
+        {"in_arc": ((60.0, 72.0), (61.0, 72.0)), "exterior": ((20.0, 10.0), (22.0, 10.0))},
+        True,
+    ),
+    # Same arc reversed into a notch: the track at y=58 is in the notch, clear.
+    "fp_poly_arc_inward_filled": (
+        "60 50 0",
+        "(fp_poly (pts (xy -20 -15) (xy 20 -15) (xy 20 15) "
+        "(arc (start 15 15) (mid 0 0) (end -15 15)) (xy -20 15)) "
+        '(stroke (width 0.05) (type solid)) (fill yes) (layer "Edge.Cuts"))',
+        {"in_notch": ((60.0, 58.0), (61.0, 58.0)), "exterior": ((20.0, 10.0), (22.0, 10.0))},
+        True,
+    ),
+    # Rounded rect: a track well inside the removed (12 mm) corner stays clear.
+    "fp_rect_rounded_filled": (
+        "60 50 0",
+        "(fp_rect (start -20 -20) (end 20 20) (radius 12) "
+        '(stroke (width 0.05) (type solid)) (fill yes) (layer "Edge.Cuts"))',
+        {
+            "removed_corner": ((41.0, 31.0), (42.0, 31.0)),
+            "interior": ((60.0, 50.0), (62.0, 50.0)),
+            "exterior": ((20.0, 10.0), (22.0, 10.0)),
+        },
+        True,
+    ),
 }
 
 _BOARD_TMPL = """(kicad_pcb (version 20241229) (generator pcbnew)
