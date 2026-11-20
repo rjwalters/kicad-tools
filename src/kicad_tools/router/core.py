@@ -5995,8 +5995,13 @@ class Autorouter:
                     [seg for r in kept for seg in r.segments],
                     [via for r in kept for via in r.vias],
                 )
-                for seq, (a, b) in enumerate(island_bridges(pads, labels)):
+                bridges = island_bridges(pads, labels)
+                for seq, (a, b) in enumerate(bridges):
                     connections.append(((net, seq), a, b, net_class))
+                if not bridges:
+                    # Issue #9636 (review): a fully-joined net has no link a
+                    # kept-copper start could serve -- skip the anchor build.
+                    continue
                 # Issue #9636: a link may start from the kept copper already
                 # on its pad instead of re-escaping the pad at class width.
                 from .lattice.own_copper import kept_copper_anchors

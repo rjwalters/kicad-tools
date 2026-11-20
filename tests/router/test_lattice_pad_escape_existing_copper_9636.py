@@ -22,7 +22,7 @@ import pytest
 from kicad_tools.router.lattice.own_copper import KeptAnchor, kept_copper_anchors, pad_key
 from kicad_tools.router.lattice.pathfinder import LatticePathfinder
 from kicad_tools.router.layers import Layer, LayerStack
-from kicad_tools.router.primitives import Pad, Route, Segment
+from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules, NetClassRouting
 
 _OUTLINE = [(0.0, 0.0), (12.0, 0.0), (12.0, 8.0), (0.0, 8.0)]
@@ -94,8 +94,14 @@ def test_link_starts_from_kept_copper_not_the_pad() -> None:
     assert any(abs(x - far.x) < 1e-6 and abs(y - far.y) < 1e-6 for x, y in ends)
 
 
-def test_pad_that_can_escape_is_not_rerouted_from_anchors() -> None:
-    """A pad whose own escape has egress keeps its pre-#9636 stubs."""
+def test_pad_without_anchors_keeps_its_own_stubs() -> None:
+    """A pad with no kept copper on it keeps its pre-#9636 stubs.
+
+    (The #9636 review renamed this from "can escape": the far pad of the old
+    name had no anchors at all, so it never exercised the pad-with-egress
+    case -- that is ``test_pad_with_egress_still_starts_from_kept_copper``
+    below.)
+    """
     pf, pin, far = _board()
     pf.kept_anchors = kept_copper_anchors([pin, far], [_kept_route()], lambda layer: 0)
     # ``far`` has no kept copper -> no anchors -> identical to the plain escape.
@@ -144,6 +150,158 @@ def test_anchors_follow_copper_across_a_via_and_skip_the_pad_itself() -> None:
     ]
     # ``other`` has no copper on it.
     assert pad_key(other) not in got
+
+
+# -- (review) contact is measured against the pad's copper outline ----------
+
+
+def _circle_pin_board():
+    """The corridor fixture with a 0.30 mm CIRCLE pin at (2, 4)."""
+    pin = Pad(
+        x=2.0,
+        y=4.0,
+        width=0.3,
+        height=0.3,
+        net=1,
+        net_name="N1",
+        layer=Layer.F_CU,
+        ref="U1",
+        pin="1",
+        shape="circle",
+    )
+    wall_a = _pad(3.5, 3.4, 2, "W1", w=4.0, h=0.6)
+    wall_b = _pad(3.5, 4.6, 3, "W2", w=4.0, h=0.6)
+    far = _pad(10.0, 4.0, 1, "R2")
+    pads = [pin, wall_a, wall_b, far]
+    pf = LatticePathfinder(
+        _OUTLINE,
+        pads,
+        DesignRules(trace_width=0.25, trace_clearance=0.2),
+        layer_stack=LayerStack.two_layer(),
+    )
+    return pf, pin, far
+
+
+def _air_gap_route() -> Route:
+    """A 0.10 mm track starting at (2.149, 4.149).
+
+    The start is INSIDE the 0.30 mm circle pin's bounding box but 0.0107 mm
+    of air away from the copper itself (the #9636 review probe).
+    """
+    route = Route(net=1, net_name="N1")
+    route.segments.append(
+        Segment(x1=2.149, y1=4.149, x2=6.5, y2=4.149, width=_NARROW, layer=Layer.F_CU, net=1)
+    )
+    return route
+
+
+def test_bounding_box_corner_is_not_copper_contact() -> None:
+    """A track in the pad's bounding-box corner is not attached to the pad."""
+    pf, pin, far = _circle_pin_board()
+    layers = {Layer.F_CU: 0, Layer.B_CU: 1}
+    assert kept_copper_anchors([pin, far], [_air_gap_route()], layers.get) == {}
+
+
+def test_pin_with_air_gap_track_stays_open() -> None:
+    """The router does not report a link done from copper the pin never touches."""
+    pf, pin, far = _circle_pin_board()
+    pf.kept_anchors = kept_copper_anchors([pin, far], [_air_gap_route()], lambda l: 0)
+    assert pf.kept_anchors == {}
+    assert pf.route(pin, far, net_class=_CLASS) is None
+
+
+def test_pin_routes_once_the_track_actually_touches_it() -> None:
+    """Control: the same shape with the track edge on the circle is attached."""
+    pf, pin, far = _circle_pin_board()
+    route = Route(net=1, net_name="N1")
+    route.segments.append(
+        Segment(x1=2.15, y1=4.0, x2=6.5, y2=4.0, width=_NARROW, layer=Layer.F_CU, net=1)
+    )
+    layers = {Layer.F_CU: 0, Layer.B_CU: 1}
+    anchors = kept_copper_anchors([pin, far], [route], layers.get)
+    assert [a.point for a in anchors[pad_key(pin)]] == [(6.5, 4.0)]
+    pf.kept_anchors = anchors
+    assert pf.route(pin, far, net_class=_CLASS) is not None
+
+
+# -- (review) a via hops layers only over its drilled span -------------------
+
+_FOUR_LAYER_INDEX = {
+    Layer.F_CU: 0,
+    Layer.IN1_CU: 1,
+    Layer.IN2_CU: 2,
+    Layer.B_CU: 3,
+}
+
+
+def _span_route(span_type, span) -> Route:
+    """Pin --F.Cu--> (2.5, 4) --via--> independent B.Cu track to (6.5, 4)."""
+    route = Route(net=1, net_name="N1")
+    route.segments.append(
+        Segment(x1=2.0, y1=4.0, x2=2.5, y2=4.0, width=0.1, layer=Layer.F_CU, net=1)
+    )
+    route.segments.append(
+        Segment(x1=2.5, y1=4.0, x2=6.5, y2=4.0, width=0.2, layer=Layer.B_CU, net=1)
+    )
+    route.vias.append(Via(2.5, 4.0, 0.2, 0.4, span, net=1, span_type=span_type))
+    return route
+
+
+def test_through_via_hops_layers_for_anchors() -> None:
+    pin = _pad(2.0, 4.0, 1, "U1")
+    got = kept_copper_anchors(
+        [pin], [_span_route(None, (Layer.F_CU, Layer.B_CU))], _FOUR_LAYER_INDEX.get
+    )
+    assert [(a.layer, a.point) for a in got[pad_key(pin)]] == [
+        (0, (2.5, 4.0)),
+        (3, (2.5, 4.0)),
+        (3, (6.5, 4.0)),
+    ]
+
+
+def test_blind_via_does_not_reach_the_back_layer() -> None:
+    """A blind F.Cu..In1.Cu via cannot join the B.Cu island (review probe)."""
+    pin = _pad(2.0, 4.0, 1, "U1")
+    got = kept_copper_anchors(
+        [pin], [_span_route("blind", (Layer.F_CU, Layer.IN1_CU))], _FOUR_LAYER_INDEX.get
+    )
+    assert [(a.layer, a.point) for a in got[pad_key(pin)]] == [(0, (2.5, 4.0))]
+
+
+def test_buried_via_does_not_reach_either_outer_layer() -> None:
+    pin = _pad(2.0, 4.0, 1, "U1")
+    got = kept_copper_anchors(
+        [pin], [_span_route("buried", (Layer.IN1_CU, Layer.IN2_CU))], _FOUR_LAYER_INDEX.get
+    )
+    assert [(a.layer, a.point) for a in got[pad_key(pin)]] == [(0, (2.5, 4.0))]
+
+
+# -- (review) a verified kept-copper start wins even when the pad can escape --
+
+
+def test_pad_with_egress_still_starts_from_kept_copper() -> None:
+    """Corridor walls removed: the pad CAN escape at class width, but the
+    verified kept-copper start is preferred -- the pin keeps the 0.10 mm
+    escape it already has instead of being overlaid at 0.40 mm."""
+    pin = _pad(2.0, 4.0, 1, "U1")
+    far = _pad(10.0, 4.0, 1, "R2")
+    pf = LatticePathfinder(
+        _OUTLINE,
+        [pin, far],
+        DesignRules(trace_width=0.25, trace_clearance=0.2),
+        layer_stack=LayerStack.two_layer(),
+    )
+    # Sanity: without kept copper the pad escapes at class width.
+    assert pf.route(pin, far, net_class=_CLASS) is not None
+    pf.kept_anchors = kept_copper_anchors([pin, far], [_kept_route()], lambda l: 0)
+    route = pf.route(pin, far, net_class=_CLASS)
+    assert route is not None
+    # Nothing is emitted over the pin or the kept track: the new copper
+    # starts out at the kept track's far end.
+    assert min(min(s.x1, s.x2) for s in route.segments) >= 6.0
+    ends = [(s.x2, s.y2) for s in route.segments] + [(s.x1, s.y1) for s in route.segments]
+    assert any(abs(x - far.x) < 1e-6 and abs(y - far.y) < 1e-6 for x, y in ends)
+    assert any(abs(s.width - 0.4) < 1e-9 for s in route.segments)
 
 
 # -- (b) a two-pad part whose pads sit in classes with different clearances ----
@@ -364,13 +522,33 @@ def test_foreign_track_past_the_pad_is_still_a_blocker(tmp_path) -> None:
     assert d.classification is StuckClass.CONGESTION_SATURATED
 
 
-def test_geometric_refusal_names_width_tried_and_width_that_fits(tmp_path) -> None:
-    """A refusal for trace width reports both numbers (issue #9636)."""
-    from kicad_tools.router.stuck_classifier import StuckClass
+def _width_refusal_board(*, four_layer: bool = False, extra_segment: str = "") -> str:
+    """A stranded 0.3 mm F.Cu pad in a corridor: at 0.2 mm clearance the widest
+    escape is 0.2 mm (0.3 mm from the pin centre to each wall edge).
 
-    text = (
-        _PCB_HEADER
-        + '  (net 0 "")\n  (net 1 "TGT")\n  (net 2 "A")\n  (net 3 "B")\n'
+    ``four_layer`` declares In1/In2/B.Cu as well (same front copper);
+    ``extra_segment`` is appended verbatim (a foreign track somewhere else in
+    the stack, for the layer-aware width measurement).
+    """
+    header = (
+        '(kicad_pcb\n  (version 20240108)\n  (generator "test")\n  (general (thickness 1.6))\n'
+        "  (layers\n"
+        '    (0 "F.Cu" signal)\n'
+        '    (44 "Edge.Cuts" user)\n'
+        "  )\n"
+        if not four_layer
+        else '(kicad_pcb\n  (version 20240108)\n  (generator "test")\n  (general (thickness 1.6))\n'
+        "  (layers\n"
+        '    (0 "F.Cu" signal)\n'
+        '    (1 "In1.Cu" signal)\n'
+        '    (2 "In2.Cu" signal)\n'
+        '    (31 "B.Cu" signal)\n'
+        '    (44 "Edge.Cuts" user)\n'
+        "  )\n"
+    )
+    return (
+        header
+        + '  (net 0 "")\n  (net 1 "TGT")\n  (net 2 "A")\n  (net 3 "B")\n  (net 4 "DEEP")\n'
         + '  (footprint "R_0402" (layer "F.Cu") (at 10 10)\n'
         '    (property "Reference" "R1")\n'
         '    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "TGT"))\n'
@@ -384,11 +562,24 @@ def test_geometric_refusal_names_width_tried_and_width_that_fits(tmp_path) -> No
         '    (pad "1" smd rect (at 0 0) (size 0.3 0.3) (layers "F.Cu") (net 1 "TGT"))\n'
         '    (pad "2" smd rect (at 0 -0.6) (size 8.0 0.6) (layers "F.Cu") (net 2 "A"))\n'
         '    (pad "3" smd rect (at 0 0.6) (size 8.0 0.6) (layers "F.Cu") (net 3 "B"))\n'
-        "  )\n" + '  (segment (start 9.5 10) (end 10.5 10) (width 0.25) (layer "F.Cu") (net 1))\n'
-        ")\n"
+        "  )\n"
+        + '  (segment (start 9.5 10) (end 10.5 10) (width 0.25) (layer "F.Cu") (net 1))\n'
+        + extra_segment
+        + ")\n"
     )
+
+
+def test_geometric_refusal_names_width_tried_and_width_that_fits(tmp_path) -> None:
+    """A refusal for trace width reports both numbers (issue #9636)."""
+    from kicad_tools.router.stuck_classifier import StuckClass
+
     klass = NetClassRouting(name="SENSE", trace_width=0.4, clearance=0.2)
-    d = _classify(text, tmp_path, net_class_map={"TGT": klass}, search_failures={"TGT": "no_path"})
+    d = _classify(
+        _width_refusal_board(),
+        tmp_path,
+        net_class_map={"TGT": klass},
+        search_failures={"TGT": "no_path"},
+    )
     assert d.classification is StuckClass.ESCAPE_BLOCKED
     assert "width tried 0.400 mm" in d.evidence
     assert "widest trace that leaves the pad" in d.evidence
@@ -397,3 +588,87 @@ def test_geometric_refusal_names_width_tried_and_width_that_fits(tmp_path) -> No
     fits = float(re.search(r"leaves the pad ([0-9.]+) mm", d.evidence).group(1))
     assert fits == pytest.approx(0.2, abs=0.01)
     assert fits < 0.4, "the width that fits is narrower than the width that was tried"
+
+
+# -- (review) the escape width is measured on the pad's routing layer --------
+
+
+def _fits_mm(text: str, tmp_path, **kwargs) -> float:
+    import re
+
+    d = _classify(text, tmp_path, **kwargs)
+    m = re.search(r"widest trace that leaves the pad ([0-9.]+) mm", d.evidence)
+    assert m, d.evidence
+    return float(m.group(1))
+
+
+def test_back_layer_track_is_not_an_escape_wall(tmp_path) -> None:
+    """A B.Cu track under the F.Cu pad leaves the measured escape unchanged.
+
+    Adding one foreign track directly beneath the width fixture's F.Cu SMD
+    pad used to drop the reported maximum from 0.200 mm to 0.000 mm with the
+    front copper identical (issue #9636 review): obstacles are filtered to
+    the pad's candidate layer before the sweep.
+    """
+    deep = '  (segment (start 46 50) (end 54 50) (width 0.25) (layer "B.Cu") (net 4))\n'
+    klass = NetClassRouting(name="SENSE", trace_width=0.4, clearance=0.2)
+    common = {"net_class_map": {"TGT": klass}, "search_failures": {"TGT": "no_path"}}
+    plain = _fits_mm(_width_refusal_board(four_layer=True), tmp_path, **common)
+    buried = _fits_mm(_width_refusal_board(four_layer=True, extra_segment=deep), tmp_path, **common)
+    assert plain == pytest.approx(0.2, abs=0.01)
+    assert buried == pytest.approx(plain, abs=0.01)
+
+
+def test_front_layer_track_still_walls_the_pad_in(tmp_path) -> None:
+    """The same track ON the pad's layer is a real wall (control for the above)."""
+    front = '  (segment (start 46 50) (end 54 50) (width 0.25) (layer "F.Cu") (net 4))\n'
+    klass = NetClassRouting(name="SENSE", trace_width=0.4, clearance=0.2)
+    fits = _fits_mm(
+        _width_refusal_board(extra_segment=front),
+        tmp_path,
+        net_class_map={"TGT": klass},
+        search_failures={"TGT": "no_path"},
+    )
+    assert fits < 0.05
+
+
+# -- (review) the completion report names the rules the pass enforced --------
+
+
+def _report_router(tmp_path, net_class_map):
+    from kicad_tools.cli.route_cmd import _build_complete_link_report
+
+    path = tmp_path / "b.kicad_pcb"
+    path.write_text(_width_refusal_board())
+    router = SimpleNamespace(
+        net_names={1: "TGT"},
+        rules=SimpleNamespace(manufacturer=None, trace_clearance=0.2, trace_width=0.25),
+        net_class_map=net_class_map,
+        _lattice_failure_reasons={(1, 0): "no_path"},
+        _lattice_connection_endpoints={},
+        _lattice_negotiation_stats=SimpleNamespace(
+            elapsed_s=1.0, budget_s=None, deadline_hit=False
+        ),
+    )
+    return _build_complete_link_report(router, path)
+
+
+def test_complete_report_names_the_class_rules(tmp_path) -> None:
+    """The report passes the router's class map through (#9636 review).
+
+    The width note used to drop the class map and read the bare-file defaults:
+    no width tried, and the widest fit measured at the 0.25 mm probe
+    clearance instead of the class's 0.20 mm.
+    """
+    report = _report_router(tmp_path, {"TGT": _CLASS})
+    (entry,) = report["unroutable_links"]
+    assert "width tried 0.400 mm" in entry["stuck_evidence"]
+    assert "0.200 mm clearance" in entry["stuck_evidence"]
+
+
+def test_complete_report_names_the_board_defaults_for_an_unclassed_net(tmp_path) -> None:
+    """Without a class entry the note names the board's own width/clearance."""
+    report = _report_router(tmp_path, {"OTHER": NetClassRouting(name="X")})
+    (entry,) = report["unroutable_links"]
+    assert "width tried 0.250 mm" in entry["stuck_evidence"]
+    assert "0.200 mm clearance" in entry["stuck_evidence"]

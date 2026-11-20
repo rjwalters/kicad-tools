@@ -1858,16 +1858,19 @@ class LatticePathfinder:
         allow_vias: bool = True,
         via_in_pad_override: bool | None = None,
     ) -> tuple[list[tuple[NodeKey, int, list[Pt], float]], float]:
-        """Escape stubs for one pad; a pad already carrying kept copper may
-        start from that copper instead (issue #9636).
+        """Escape stubs for one pad; a pad already carrying kept copper starts
+        from that copper instead (issue #9636).
 
-        The pad's own escape (:meth:`_escape_stubs_at_pad`) is tried first and
-        returned unchanged whenever it has egress.  Only when it does not --
-        no stub, or only dead-end stubs -- and the net already has copper on
-        this pad (``kept_anchors``, ``--complete``) are stubs scanned from
-        the far points of that copper, at the width the copper already has
-        there, instead of re-escaping the pin at class width.  Without kept
-        copper this is exactly :meth:`_escape_stubs_at_pad`.
+        A **verified** kept-copper start is preferred whenever the net has
+        copper attached to this pad (``kept_anchors``, ``--complete``):
+        :meth:`_anchor_stubs` scans stubs from the copper's far points, at the
+        width the copper already has there, and accepts only a landing node
+        the class-width body can leave.  This wins even when the pad's own
+        escape has egress -- the pin keeps the (narrower) copper it already
+        carries instead of being re-escaped at class width.  Without a
+        verified anchor start the pad's own escape
+        (:meth:`_escape_stubs_at_pad`) is returned exactly as before,
+        including its sibling-relaxed retry.
         """
         kwargs: dict[str, Any] = {
             "kmax": kmax,
@@ -1901,6 +1904,24 @@ class LatticePathfinder:
                 for stub in found
             )
 
+        # Issue #9636 (review): the kept-copper start is tried FIRST and wins
+        # whenever it verifies, so a pad that can also escape on its own does
+        # not get its existing (narrower) copper overlaid at class width.
+        if anchors:
+            anchored = self._anchor_stubs(
+                pad,
+                anchors,
+                net,
+                committed,
+                kmax=kmax,
+                layers=layers,
+                exempt_pads=exempt_pads,
+                net_class=net_class,
+                allow_vias=allow_vias,
+                via_in_pad_override=via_in_pad_override,
+            )
+            if anchored is not None:
+                return anchored
         if (not stubs or not has_egress(stubs)) and self.obstacles.footprint_sibling_floors(
             pad, net, half, max(0.0, half + clr - self._agent_radius)
         ):
@@ -1935,35 +1956,7 @@ class LatticePathfinder:
                     if per_layer[stub[1]] <= _SIBLING_STUBS_PER_LAYER:
                         capped.append(stub)
                 return capped, rwidth
-        if not anchors:
-            return stubs, width
-        if any(
-            self._stub_has_egress(
-                stub,
-                net,
-                committed,
-                half,
-                clr,
-                net_class=net_class,
-                allow_vias=allow_vias,
-                via_in_pad_override=via_in_pad_override,
-            )
-            for stub in stubs
-        ):
-            return stubs, width
-        anchored = self._anchor_stubs(
-            pad,
-            anchors,
-            net,
-            committed,
-            kmax=kmax,
-            layers=layers,
-            exempt_pads=exempt_pads,
-            net_class=net_class,
-            allow_vias=allow_vias,
-            via_in_pad_override=via_in_pad_override,
-        )
-        return anchored if anchored is not None else (stubs, width)
+        return stubs, width
 
     def _sibling_search_radius(self, pad: Pad) -> float:
         """Stub fan radius for the sibling-relaxed escape (issue #9636).

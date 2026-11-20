@@ -66,6 +66,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools.core.geometry import point_to_segment_distance as _point_to_segment_distance
+from kicad_tools.core.layers import via_spans_layer
 from kicad_tools.router import wall_deadline as _wall_deadline
 from kicad_tools.router.failure_analysis import FailureCause
 from kicad_tools.schema.physical_identity import footprint_keys
@@ -632,7 +633,7 @@ def _rect_distance(px: float, py: float, rect: _PadRect) -> float:
 def _widest_escape_width_mm(
     pcb: PCB,
     target_net: int,
-    pad_points: list[tuple[float, float]],
+    pad_layers: list[tuple[tuple[float, float], list[str]]],
     clearance_mm: float,
 ) -> float | None:
     """Widest straight trace that leaves EVERY stranded pad at *clearance_mm*.
@@ -642,9 +643,26 @@ def _widest_escape_width_mm(
     the width a direction allows is twice the smallest gap from that centreline
     to any foreign pad, track or via, less the clearance.  The best direction
     is the pad's answer and the narrowest pad is the net's.  Pads and copper of
-    the net itself are not obstacles.  ``None`` when nothing could be measured.
+    the net itself are not obstacles.
+
+    Obstacles are measured **per candidate layer** (issue #9636 review): each
+    stranded pad escapes on the copper layers it lives on (``*.Cu`` is the
+    whole stack), a foreign shape counts only on a layer it exists on, and a
+    via only where its barrel passes.  A pad's answer is the best of its
+    candidate layers, so a B.Cu track directly beneath an F.Cu SMD pad no
+    longer reads as a wall.  A pad with no resolvable copper layer keeps the
+    pre-layer-aware pooled reading.  ``None`` when nothing could be measured.
     """
-    foreign_pads: list[_PadRect] = []
+    board_cu = [layer.name for layer in pcb.copper_layers]
+    board_cu_set = frozenset(board_cu)
+
+    def _candidates(names: list[str]) -> list[str] | None:
+        if "*.Cu" in names:
+            return board_cu
+        hit = [name for name in names if name in board_cu_set]
+        return hit or None
+
+    foreign_pads: list[tuple[_PadRect, frozenset[str]]] = []
     for fp in pcb.footprints:
         fp_x, fp_y = fp.position
         angle = math.radians(-fp.rotation)
@@ -654,42 +672,67 @@ def _widest_escape_width_mm(
                 continue
             px, py = pad.position
             hw, hh = _pad_half_extents(pad.size, getattr(pad, "rotation", 0.0) or 0.0)
+            on = board_cu_set if "*.Cu" in pad.layers else frozenset(pad.layers)
             foreign_pads.append(
-                (fp_x + (px * cos_a - py * sin_a), fp_y + (px * sin_a + py * cos_a), hw, hh)
+                (
+                    (fp_x + (px * cos_a - py * sin_a), fp_y + (px * sin_a + py * cos_a), hw, hh),
+                    on,
+                )
             )
-    segs = [(s.start, s.end, s.width / 2.0) for s in pcb.segments if s.net_number != target_net]
-    vias = [(v.position, v.size / 2.0) for v in pcb.vias if v.net_number != target_net]
+    segs = [
+        (s.start, s.end, s.width / 2.0, s.layer) for s in pcb.segments if s.net_number != target_net
+    ]
+    vias = [(v.position, v.size / 2.0, v.layers) for v in pcb.vias if v.net_number != target_net]
 
     steps = int(_WIDTH_PROBE_LENGTH_MM / _WIDTH_PROBE_STEP_MM)
     narrowest = math.inf
-    for px, py in pad_points:
-        near_pads = [r for r in foreign_pads if math.hypot(r[0] - px, r[1] - py) <= 4.0]
+    for (px, py), pad_layer_names in pad_layers:
+        near_pads = [(r, on) for r, on in foreign_pads if math.hypot(r[0] - px, r[1] - py) <= 4.0]
         near_segs = [
             g
             for g in segs
             if _point_to_segment_distance(px, py, g[0][0], g[0][1], g[1][0], g[1][1]) <= 4.0
         ]
         near_vias = [v for v in vias if math.hypot(v[0][0] - px, v[0][1] - py) <= 4.0]
+        candidates: list[str | None] = list(_candidates(list(pad_layer_names or [])) or [])
+        if not candidates:
+            # No resolvable layer: the legacy pooled reading.
+            candidates = [None]
         best = 0.0
-        for k in range(_WIDTH_PROBE_DIRECTIONS):
-            theta = 2.0 * math.pi * k / _WIDTH_PROBE_DIRECTIONS
-            ux, uy = math.cos(theta), math.sin(theta)
-            gap = math.inf
-            for i in range(steps + 1):
-                qx = px + ux * i * _WIDTH_PROBE_STEP_MM
-                qy = py + uy * i * _WIDTH_PROBE_STEP_MM
-                for r in near_pads:
-                    gap = min(gap, _rect_distance(qx, qy, r))
-                for sa, sb, half in near_segs:
-                    gap = min(
-                        gap, _point_to_segment_distance(qx, qy, sa[0], sa[1], sb[0], sb[1]) - half
-                    )
-                for vp, vr in near_vias:
-                    gap = min(gap, math.hypot(qx - vp[0], qy - vp[1]) - vr)
-            if gap is not math.inf:
-                best = max(best, 2.0 * (gap - clearance_mm))
-            else:
-                best = max(best, math.inf)
+        for candidate in candidates:
+            pool_pads = (
+                [r for r, _on in near_pads]
+                if candidate is None
+                else [r for r, on in near_pads if candidate in on]
+            )
+            pool_segs = (
+                near_segs if candidate is None else [g for g in near_segs if g[3] == candidate]
+            )
+            pool_vias = (
+                near_vias
+                if candidate is None
+                else [v for v in near_vias if via_spans_layer(v[2], candidate)]
+            )
+            for k in range(_WIDTH_PROBE_DIRECTIONS):
+                theta = 2.0 * math.pi * k / _WIDTH_PROBE_DIRECTIONS
+                ux, uy = math.cos(theta), math.sin(theta)
+                gap = math.inf
+                for i in range(steps + 1):
+                    qx = px + ux * i * _WIDTH_PROBE_STEP_MM
+                    qy = py + uy * i * _WIDTH_PROBE_STEP_MM
+                    for r in pool_pads:
+                        gap = min(gap, _rect_distance(qx, qy, r))
+                    for sa, sb, half, _l in pool_segs:
+                        gap = min(
+                            gap,
+                            _point_to_segment_distance(qx, qy, sa[0], sa[1], sb[0], sb[1]) - half,
+                        )
+                    for vp, vr, _vl in pool_vias:
+                        gap = min(gap, math.hypot(qx - vp[0], qy - vp[1]) - vr)
+                if gap is not math.inf:
+                    best = max(best, 2.0 * (gap - clearance_mm))
+                else:
+                    best = max(best, math.inf)
         narrowest = min(narrowest, best)
     if narrowest is math.inf:
         return None
@@ -1344,6 +1387,7 @@ def classify_stuck_nets_from_pcb(
     net_class_map: dict[str, NetClassRouting] | None = None,
     access_witness: AccessWitness | None = None,
     search_failures: Mapping[str, str | int] | None = None,
+    default_trace_width_mm: float | None = None,
 ) -> StuckClassifierResult:
     """Classify every unfinished signal net on *pcb* (already-loaded PCB).
 
@@ -1364,6 +1408,11 @@ def classify_stuck_nets_from_pcb(
     :data:`ORIENT_REVERSED` whose nets declare a ``swap_group`` on >= 2
     members gets a computed :class:`SwapProposal` (see
     :func:`_build_swap_proposal`).
+
+    ``default_trace_width_mm`` (issue #9636 review): the board-default trace
+    width a net with NO class entry was routed at.  The width-tried note names
+    it instead of omitting the width; ``None`` (the default) keeps the
+    pre-review note that only names the width that fits.
 
     ``access_witness`` (issue #5517, Epic #5508 Phase 1b): the replay-derived
     witness loaded from a ``<stem>.access_witness.json`` sidecar.  Each
@@ -1496,11 +1545,16 @@ def classify_stuck_nets_from_pcb(
             # Issue #9636: a refusal "for the net's real trace width" names the
             # width it tried and the widest one the pad can actually leave at.
             klass = net_class_map.get(net.net_name) if net_class_map else None
-            tried = getattr(klass, "trace_width", None)
+            tried = float(klass.trace_width) if klass is not None else default_trace_width_mm
             clearance = getattr(klass, "clearance", None) or escape_clearance_mm
             width_note = _width_note(
                 tried,
-                _widest_escape_width_mm(pcb, net_number, pad_points, clearance),
+                _widest_escape_width_mm(
+                    pcb,
+                    net_number,
+                    [(p.position, p.layers) for p in net.unconnected_pads],
+                    clearance,
+                ),
                 clearance,
             )
         diag = _decide(
@@ -2252,6 +2306,7 @@ def classify_stuck_nets(
     net_class_map: dict[str, NetClassRouting] | None = None,
     access_witness_path: str | Path | None = None,
     search_failures: Mapping[str, str | int] | None = None,
+    default_trace_width_mm: float | None = None,
 ) -> StuckClassifierResult:
     """Classify every unfinished signal net on the PCB at *pcb_path*.
 
@@ -2272,6 +2327,9 @@ def classify_stuck_nets(
     resolves to ``None`` and the output is byte-identical to pre-#5517.
 
     ``search_failures`` (issue #6315): forwarded unchanged to
+    :func:`classify_stuck_nets_from_pcb` -- see its docstring.
+
+    ``default_trace_width_mm`` (issue #9636 review): forwarded to
     :func:`classify_stuck_nets_from_pcb` -- see its docstring.
     """
     from kicad_tools.router.access_witness import load_access_witness_sidecar
@@ -2301,4 +2359,5 @@ def classify_stuck_nets(
         strict=strict,
         net_class_map=net_class_map,
         search_failures=search_failures,
+        default_trace_width_mm=default_trace_width_mm,
     )

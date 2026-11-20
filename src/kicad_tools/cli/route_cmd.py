@@ -19400,9 +19400,27 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
         # keeps a geometric reason over a budget one -- the same merge the
         # ``.search_failures.json`` sidecar uses (#7879).
         search_failures = _lattice_search_failures(router)
+        # Issue #9636 (review): the width-tried / width-that-fits note must
+        # state the rules the completion pass actually enforced -- the
+        # router's per-net class map, and the board's own default width and
+        # clearance for a net with no class entry -- not the bare-file
+        # defaults (0.25 mm probe clearance, no width named).
+        classify_kwargs: dict[str, Any] = {}
+        class_map = getattr(router, "net_class_map", None)
+        if isinstance(class_map, dict) and class_map:
+            classify_kwargs["net_class_map"] = dict(class_map)
+        report_rules = getattr(router, "rules", None)
+        board_clearance = getattr(report_rules, "trace_clearance", None)
+        if board_clearance:
+            classify_kwargs["escape_clearance_mm"] = float(board_clearance)
+        board_width = getattr(report_rules, "trace_width", None)
+        if board_width:
+            classify_kwargs["default_trace_width_mm"] = float(board_width)
         diag_by_net = {
             d.net_name: d
-            for d in classify_stuck_nets(pcb_path, search_failures=search_failures).diagnoses
+            for d in classify_stuck_nets(
+                pcb_path, search_failures=search_failures, **classify_kwargs
+            ).diagnoses
         }
     except Exception:
         diag_by_net = {}
