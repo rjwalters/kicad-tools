@@ -983,8 +983,8 @@ def _t_junction(
     J2 at (150, 50), with a branch dropping from the junction through
     y = 56 and 70 to J3 at (85 + ``branch_offset``, 80) at 2, 2 and
     6.5 mm. ``branch_offset`` skews the branch: its first segment leaves
-    the junction at 45 degrees to (85 + d, 50 + d) before running
-    straight down. Every leg of every spec is declared
+    the junction to (85 + d, 56) -- always the 6 mm stub, perpendicular
+    at d = 0 and 45 degrees at d = 6 -- before running straight down. Every leg of every spec is declared
     reinforcement-eligible, so ``reinforce_net`` wires both the trunk and
     the branch -- the first branch segment sits inside the trunk's
     corridor (its midpoint passes the trunk's distance test), the shape
@@ -994,8 +994,8 @@ def _t_junction(
     pcb = PCB.create(width=200, height=120, center=False)
     pcb.add_trace((20, 50), (85, 50), width=6.5, layer="F.Cu", net=_WIRE_NET)
     pcb.add_trace((85, 50), (150, 50), width=6.5, layer="F.Cu", net=_WIRE_NET)
-    pcb.add_trace((85, 50), (x, 50.0 + branch_offset), width=2.0, layer="F.Cu", net=_WIRE_NET)
-    pcb.add_trace((x, 50.0 + branch_offset), (x, 70), width=2.0, layer="F.Cu", net=_WIRE_NET)
+    pcb.add_trace((85, 50), (x, 56), width=2.0, layer="F.Cu", net=_WIRE_NET)
+    pcb.add_trace((x, 56), (x, 70), width=2.0, layer="F.Cu", net=_WIRE_NET)
     pcb.add_trace((x, 70), (x, 80), width=6.5, layer="F.Cu", net=_WIRE_NET)
     _add_th_pad_footprint(pcb, ref="J1", x=20.0, y=50.0, net=_WIRE_NET, drill=1.0, size=2.0)
     _add_th_pad_footprint(pcb, ref="J2", x=150.0, y=50.0, net=_WIRE_NET, drill=1.0, size=2.0)
@@ -1351,6 +1351,87 @@ class TestButtressWireAngledTJunction:
             for v in fused:
                 assert "2.000mm of 2.0oz copper" in v.message
                 assert "wire" not in v.message
+
+
+class TestButtressWireUnwiredBranch:
+    """An unwired branch must not inherit the wired trunk's credit (#9654).
+
+    Only the trunk is reinforcement-eligible, so the placer wires one leg,
+    entirely along y = 50. The branch's first segment diverges from the
+    trunk inside the 6.5 mm copper's corridor; its far endpoint still sits
+    inside the widest-copper half-width, so a corridor-only match would
+    grant it the trunk's wire. It must be judged at bare copper for both
+    the width and the fusing checks, while the trunk keeps its credit.
+    """
+
+    @staticmethod
+    def _board(bend_y: float) -> tuple[PCB, list[CurrentPathSpec], list[dict]]:
+        from kicad_tools.pcb.reinforcement_sidecar import build_wire_records
+
+        pcb = PCB.create(width=200, height=120, center=False)
+        for a, b, w in (
+            ((20, 50), (30, 50), 6.5),
+            ((30, 50), (85, 50), 2.0),
+            ((85, 50), (140, 50), 2.0),
+            ((140, 50), (150, 50), 6.5),
+        ):
+            pcb.add_trace(a, b, width=w, layer="F.Cu", net=_WIRE_NET)
+        pcb.add_trace((85, 50), (105, bend_y), width=2.0, layer="F.Cu", net=_WIRE_NET)
+        pcb.add_trace((105, bend_y), (105, 80), width=6.5, layer="F.Cu", net=_WIRE_NET)
+        _add_th_pad_footprint(pcb, ref="J1", x=20.0, y=50.0, net=_WIRE_NET, drill=1.0, size=2.0)
+        _add_th_pad_footprint(pcb, ref="J2", x=150.0, y=50.0, net=_WIRE_NET, drill=1.0, size=2.0)
+        _add_th_pad_footprint(pcb, ref="J3", x=105.0, y=80.0, net=_WIRE_NET, drill=1.0, size=2.0)
+        trunk = CurrentPathSpec(
+            name="TRUNK",
+            net_name=_WIRE_NET,
+            source=PathEndpoint("J1", "1"),
+            sink=PathEndpoint("J2", "1"),
+            continuous_a=15.0,
+            reinforcement_eligible=True,
+        )
+        branch = CurrentPathSpec(
+            name="BRANCH",
+            net_name=_WIRE_NET,
+            source=PathEndpoint("J1", "1"),
+            sink=PathEndpoint("J3", "1"),
+            continuous_a=15.0,
+            pulsed_a=100.0,
+            duty_cycle=0.001,
+            pulse_duration_s=1.0,
+            reinforcement_eligible=False,
+        )
+        specs = [trunk, branch]
+        outcome = reinforce_net(pcb, _WIRE_NET, current_paths=specs, all_runs=True)
+        return pcb, specs, build_wire_records(outcome, 0.0, 0.0)
+
+    @pytest.mark.parametrize("bend_y", [53.0, 54.0])
+    def test_unwired_branch_stub_fails_width_and_fusing(self, bend_y: float) -> None:
+        from kicad_tools.validate.checker import DRCChecker
+
+        pcb, specs, wires = self._board(bend_y)
+        assert len(wires) == 1  # only the trunk is wired
+        errors = (
+            DRCChecker(pcb, current_path_specs=specs, reinforcement_wires=wires)
+            .check_path_ampacity()
+            .errors
+        )
+        mid = (95.0, (50.0 + bend_y) / 2.0)
+        narrow = [v for v in errors if "too narrow" in v.message]
+        fused = [v for v in errors if "would fuse" in v.message]
+        assert [v.location for v in narrow if v.location[1] > 50.5 and v.location[0] < 100] == [
+            pytest.approx(mid)
+        ]
+        assert [v.location for v in fused if v.location[1] > 50.5 and v.location[0] < 100] == [
+            pytest.approx(mid)
+        ]
+        for v in errors:
+            if v.location[1] > 50.5 and v.location[0] < 100:
+                assert "wire" not in v.message.replace("not covered by a wire leg", "")
+        # The eligible trunk keeps its wire credit: nothing fails on y = 50
+        # between the anchors.
+        assert not [
+            v for v in errors if abs(v.location[1] - 50.0) < 0.5 and 31.5 < v.location[0] < 138.5
+        ]
 
 
 class TestButtressWireCreditThroughChecker:

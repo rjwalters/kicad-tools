@@ -592,7 +592,13 @@ class PathAmpacityRule(DRCRule):
             if leg.net != spec.net_name or leg.layer != layer:
                 continue
             deviation_mm = max(_dist_to_polyline(leg.points, p) for p in (start, midpoint, end))
-            if deviation_mm > (leg.width / 2.0 + ANCHOR_ON_LEG_SLACK_MM):
+            # The segment must lie on the leg's polyline itself (the wire
+            # runs along trace centrelines), not merely inside the widest
+            # copper's half-width: a narrow branch segment diverging inside
+            # a wide trunk's corridor belongs to the branch, and an unwired
+            # branch must never inherit the trunk's credit.
+            seg_width = float(getattr(segment, "width", 0.0) or leg.width)
+            if deviation_mm > min(leg.width, seg_width) / 2.0 + ANCHOR_ON_LEG_SLACK_MM:
                 continue
             if leg.anchor_arc is not None and seg_len > 1e-9:
                 cum = _cumulative_arc(leg.points)
