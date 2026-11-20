@@ -496,6 +496,50 @@ class LatticeObstacleModel:
                 return True
         return False
 
+    def same_net_pad_band_point_clear(
+        self,
+        point: Pt,
+        layer: int,
+        net: int,
+        half: float,
+        edge_mm: float,
+    ) -> bool:
+        """True when ``point`` keeps the detection edge from every own-net SMD pad.
+
+        The point form of :meth:`same_net_pad_band_blocked`'s CLEAR region
+        only -- a point that sits inside or unions an own-net pad (the
+        degenerate probe's other acceptance) is NOT clear here.  Issue #9708:
+        the escape scan uses this to recognise a pad whose whole near node
+        cloud sits inside the ``(union, band)`` shell of its own pads and to
+        hunt landing nodes a straight exit can thread out through.  Pads with
+        a drill, on other layers, or of other nets never make a point unclear.
+        ``edge_mm <= 0`` keeps the guard off (everything is clear).
+        """
+        if edge_mm <= 0.0:
+            return True
+        reach = half + edge_mm + 0.5
+        eps = ka.LATTICE_CLEARANCE_EPSILON_MM
+        for idx in self.pads_near(
+            point[0] - reach, point[1] - reach, point[0] + reach, point[1] + reach
+        ):
+            pad = self.pads[idx]
+            if pad.net != net or pad.through_hole or pad.drill > 0:
+                continue
+            if layer not in self.pad_layer_indices[idx]:
+                continue
+            hw, hh = pad_half_extents(pad)
+            sep = max(
+                pad.x - hw - point[0],
+                point[0] - (pad.x + hw),
+                pad.y - hh - point[1],
+                point[1] - (pad.y + hh),
+            )
+            if sep - half > edge_mm + eps:
+                continue
+            if self.pad_centerline_gap(idx, point, point) - half < edge_mm - eps:
+                return False
+        return True
+
     def _band_continuation_exempt(
         self,
         idx: int,
