@@ -1703,6 +1703,13 @@ class Footprint:
     exclude_from_bom: bool = False
     locked: bool = False
     dnp: bool = False
+    # Footprint-level default zone connection from ``(zone_connect N)``
+    # (0 = none, 1 = thermal reliefs, 2 = solid, 3 = thermal reliefs for THT
+    # only): the connection mode for pads whose own ``(zone_connect ...)`` is
+    # absent (KiCad S-expression file format, footprint token).  ``None`` when
+    # absent.  Read-only; ``thermal_asymmetry`` resolves the effective mode
+    # (#9796).
+    zone_connect: int | None = None
     properties: dict[str, str] = field(default_factory=dict)
     _sexp_node: SExp | None = field(default=None, repr=False, compare=False)
     _board_origin: tuple[float, float] = field(
@@ -2045,6 +2052,11 @@ class Footprint:
             fp.description = descr.get_string(0) or ""
         if tags := sexp.find_child("tags"):
             fp.tags = tags.get_string(0) or ""
+
+        # Footprint-level zone connection default (issue #9796).  Direct
+        # children only: pads carry their own ``(zone_connect ...)`` tokens.
+        if zone_connect := sexp.find_child("zone_connect"):
+            fp.zone_connect = zone_connect.get_int(0)
 
         # Modern lock form: a top-level ``(locked yes)`` child (KiCad 9/10).
         # KiCad 10's kicad-cli REJECTS the legacy ``locked`` token inside
