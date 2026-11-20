@@ -9539,8 +9539,8 @@ def _preload_voltage_map(args) -> int:
     when ``--voltage-map`` was not supplied) plus the per-net ``[lo, hi]``
     intervals on ``args._pairwise_intervals`` (#9602) and the parsed
     ``_pair_bounds`` caps on ``args._pairwise_pair_bounds`` (#8043, consumed by
-    the sub-threshold advisory).  Returns 0, or 1 after
-    printing the error to stderr.
+    the sub-threshold advisory, and #9644, for ``route-link``'s omitted-net
+    fallback).  Returns 0, or 1 after printing the error to stderr.
     """
     args._pairwise_voltages = None
     args._pairwise_required = None

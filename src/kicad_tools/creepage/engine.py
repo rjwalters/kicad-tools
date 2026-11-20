@@ -21,7 +21,7 @@ reinventing them:
 * zone fills     -> :meth:`ConnectivityValidator._fill_solid_region`
 
 and derives slot/cutout obstacles from the ``Edge.Cuts`` outline
-(:meth:`PCB.get_board_outline_segments` + :meth:`PCB._edge_cuts_poly_chains_sexp`).
+(:meth:`PCB.get_board_outline_segments`).
 
 The MVP surface-path model is an honest approximation: if the straight
 nearest-points segment between two conductors does NOT cross an interior
@@ -290,8 +290,11 @@ def merge_voltage_scenarios(
         ValueError: if fewer than two maps are given, ``names`` length
             mismatches, a scenario carries ``_pair_bounds`` (merge takes raw
             scenario maps; add device-bounded caps to the merged output by
-            hand if needed), the scenarios disagree on ``_edge_voltage``, or a
-            scenario is malformed.
+            hand if needed), one scenario spells a single net two ways that
+            normalise together (``/VCC`` and ``VCC``; there is no silent
+            last-wins -- keep one spelling per net per scenario, issue #9665),
+            the scenarios disagree on ``_edge_voltage``, or a scenario is
+            malformed.
 
     Note:
         A net present in only one scenario is treated as 0 V in the others --
@@ -332,11 +335,27 @@ def merge_voltage_scenarios(
     edge_voltage = edges.pop()
 
     # Effective per-scenario intervals keyed by the normalised net name; a net
-    # absent from a scenario sits at that scenario's 0 V default.
+    # absent from a scenario sits at that scenario's 0 V default.  Two distinct
+    # authored spellings that normalise onto one key inside a single scenario
+    # would otherwise silently drop one declared potential (last one wins,
+    # issue #9665), so the collision is refused loudly -- the lookup of
+    # first-seen spellings is reset per scenario.
     zero = VoltageInterval(0.0, 0.0)
-    eff: list[dict[str, VoltageInterval]] = [
-        {_norm_net_key(net): iv for net, iv in intervals.items()} for intervals, _ in parsed
-    ]
+    eff: list[dict[str, VoltageInterval]] = []
+    for i, (intervals, _) in enumerate(parsed):
+        first_seen: dict[str, str] = {}
+        e: dict[str, VoltageInterval] = {}
+        for net, iv in intervals.items():
+            key = _norm_net_key(net)
+            if key in first_seen:
+                raise ValueError(
+                    f"scenario {names[i]!r} spells one net two ways: {first_seen[key]!r} "
+                    f"and {net!r} both normalise to {key!r}; keep one spelling per net "
+                    "within a scenario (declare differing potentials in separate scenarios)"
+                )
+            first_seen[key] = net
+            e[key] = iv
+        eff.append(e)
     all_nets: set[str] = set()
     for e in eff:
         all_nets.update(e)
@@ -1586,26 +1605,13 @@ def _witness_in_attach_zone(
 def _edge_line_segments(pcb: PCB) -> list[tuple[tuple[float, float], tuple[float, float]]]:
     """All Edge.Cuts segments (outer boundary + interior slots/cutouts).
 
-    Combines the parsed ``gr_line``/``gr_arc``/``gr_rect`` segments
-    (:meth:`PCB.get_board_outline_segments`) with any ``gr_poly``/``gr_curve``
-    vertex chains (:meth:`PCB._edge_cuts_poly_chains_sexp`, closed into
-    segments and shifted into the board frame).
+    :meth:`PCB.get_board_outline_segments` is the single owner: it already
+    carries the ``gr_poly`` boundaries (closed into rings) and the
+    tessellated ``gr_curve`` chains alongside the parsed
+    ``gr_line``/``gr_arc``/``gr_rect`` segments -- re-deriving the poly
+    chains here would duplicate every edge.
     """
-    segments = list(pcb.get_board_outline_segments())
-
-    chains = pcb._edge_cuts_poly_chains_sexp()
-    if chains:
-        ox, oy = pcb._board_origin
-        for chain in chains:
-            if len(chain) < 2:
-                continue
-            pts = [(x - ox, y - oy) for x, y in chain]
-            # Close the ring so a polygon can be recovered from it.
-            if pts[0] != pts[-1]:
-                pts.append(pts[0])
-            for a, b in zip(pts, pts[1:], strict=False):
-                segments.append((a, b))
-    return segments
+    return list(pcb.get_board_outline_segments())
 
 
 def board_slot_obstacles(pcb: PCB) -> list[Any]:

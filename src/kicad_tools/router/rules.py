@@ -356,6 +356,14 @@ class DesignRules:
     congestion_threshold: float = 0.3  # Density above which region is congested
     congestion_grid_size: int = 10  # Cells per congestion region
 
+    # Under-body surcharge (Issue #9622, audit row 9): per-cell cost
+    # multiplier on ``cost_straight`` charged to a net with NO pad on a
+    # fine-pitch component for each A* step inside that component's body
+    # bbox on an outer layer (see ``router.body_surcharge``).  Soft and
+    # additive -- it steers non-local trunks around the body while a board
+    # whose only path runs under the body still routes.  0.0 disables.
+    cost_under_body: float = 2.0
+
     # Layer utilization balancing (Issue #2275)
     # Penalizes routing on heavily-utilized layers to encourage spreading traces
     # across all available layers.  The cost added per same-layer move or via
