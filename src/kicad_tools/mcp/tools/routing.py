@@ -558,6 +558,20 @@ def _detect_stub_terminals_for_pcb(pcb: PCB, region_box: tuple[float, float, flo
         return {}
 
 
+def _stat_signature(path: Path) -> tuple[int, int, int] | None:
+    """File identity for the #9599 row-4 stale-write guard.
+
+    ``(ino, size, mtime_ns)`` of *path*, or ``None`` when it does not exist.
+    A changed signature between a run's load and its save means another
+    writer touched the board in between.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
 def route_net_auto(
     pcb_path: str,
     net_name: str,
@@ -667,6 +681,20 @@ def route_net_auto(
 
     if path.suffix != ".kicad_pcb":
         raise ParseError(f"Invalid file extension: {path.suffix} (expected .kicad_pcb)")
+
+    # Issue #9599 row 4 / #9663 (stale-write guard): snapshot the output
+    # file's identity BEFORE the board file is read, so the save below can
+    # refuse to overwrite content this run never read.  ``route_net_auto``
+    # rewrites the board wholesale from its in-memory copy, so an external
+    # edit landing between this load and the save would otherwise be silently
+    # clobbered ("a killed router process finished later and rewrote the
+    # board").  Stat-before-read, not after the load (#9663): a write that
+    # preceded the stat is in both the signature and the content this run
+    # reads (no false reject); a write between the stat and the read only
+    # false-rejects -- the safe direction -- whereas a stat taken after the
+    # read misses a write that landed in the read-to-stat window and lets
+    # the save clobber it.
+    _output_sig_at_load = _stat_signature(Path(output_path)) if output_path else None
 
     try:
         pcb = PCB.load(pcb_path)
@@ -930,6 +958,46 @@ def route_net_auto(
     if clearance_warnings:
         result_dict["warnings"] = list(clearance_warnings) + list(result_dict.get("warnings", []))
 
+    # Issue #9600 (audit row 3): never silent about necked copper on the
+    # route-auto path either.  The orchestrator's strategies can emit
+    # sub-class-width copper (e.g. the global corridor at the board default
+    # width for a HIGH_CURRENT-class net); measure the produced segments
+    # against the net's class width -- same census, same class-width rule
+    # as ``kct route`` -- and attach the structured entries so both the
+    # JSON document and the CLI text report (which renders them) carry it.
+    # Absent (not empty) when the copper is entirely at class width.
+    from kicad_tools.router.neck_report import (
+        class_width_lookup,
+        collect_necked_copper,
+        necked_net_to_dict,
+    )
+    from kicad_tools.router.primitives import Route
+
+    if result.segments:
+        produced = Route(net=net_number, net_name=net_name)
+        produced.segments.extend(result.segments)
+        produced.vias.extend(getattr(result, "vias", []) or [])
+        # #9600 row 3 review: an authored ``.kicad_pro`` netclass assignment
+        # (or pattern) is the designer's explicit width for this net and wins
+        # over the name-classification map above.
+        from kicad_tools.router.io import authored_net_widths
+
+        authored = authored_net_widths(pcb_path, [net_name])
+        necked = collect_necked_copper(
+            [produced],
+            class_width_lookup(net_class_map, design_rules.trace_width, authored),
+        )
+        if necked:
+            result_dict["necked_copper"] = [
+                necked_net_to_dict(
+                    info,
+                    long_threshold_mm=(
+                        design_rules.neck_down_distance + design_rules.grid_resolution
+                    ),
+                )
+                for _, info in sorted(necked.items())
+            ]
+
     # Issue #6001: why is the net (still) unrouted -- congested or blocked?
     if diagnose_unrouted_budget and diagnose_unrouted_budget > 0 and not result.success:
         _attach_unrouted_diagnosis(
@@ -963,6 +1031,24 @@ def route_net_auto(
     # before saving, and surface a clear failure when the orchestrator
     # reports success but produced no physical segments.
     if output_path and should_persist:
+        # Issue #9599 row 4 (stale-write guard): refuse the wholesale rewrite
+        # when the output file changed since the load this run's copy came
+        # from.  ``pcb.save`` replaces the whole board with the in-memory
+        # state, so saving now would silently undo the other writer's edit.
+        _stale_error: str | None = None
+        _sig_now = _stat_signature(Path(output_path))
+        if _sig_now != _output_sig_at_load:
+            _stale_error = (
+                "Output file changed since this run loaded the board "
+                f"({output_path}); refusing to save over it with this run's "
+                "in-memory copy (stale-write guard, issue #9599 row 4). "
+                "Re-run the command against the current file."
+            )
+        if _stale_error is not None:
+            result_dict["success"] = False
+            result_dict["error_message"] = _stale_error
+            result_dict["warnings"] = result_dict.get("warnings", []) + [_stale_error]
+            return result_dict
         (
             segments_written,
             vias_written,

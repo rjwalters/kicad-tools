@@ -31,14 +31,14 @@ uv run kct route boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb \
 ```
 
 At present the requested timeout is not reliable as a whole-process deadline;
-see [#5035](https://github.com/rjwalters/kicad-tools/issues/5035).
-[Rule propagation #5032](https://github.com/rjwalters/kicad-tools/issues/5032)
+see [#5035](https://github.com/2AMLogic/kicad-tools/issues/5035).
+[Rule propagation #5032](https://github.com/2AMLogic/kicad-tools/issues/5032)
 means a fresh renamed destination also needs an explicit source-rule audit
 before interpreting any native DRC pass. Reproducing the bug intentionally
 leaves the destination untouched; a future release recipe must preserve rules.
 
-Added reproductions to [escape geometry #4991](https://github.com/rjwalters/kicad-tools/issues/4991)
-and [branch-current modeling #4980](https://github.com/rjwalters/kicad-tools/issues/4980).
+Added reproductions to [escape geometry #4991](https://github.com/2AMLogic/kicad-tools/issues/4991)
+and [branch-current modeling #4980](https://github.com/2AMLogic/kicad-tools/issues/4980).
 
 ## Known artifact: SENSE_P track on pad U3.9 (#6484)
 

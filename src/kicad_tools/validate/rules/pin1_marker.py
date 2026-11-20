@@ -67,7 +67,12 @@ from kicad_tools.geometry.package_body import footprint_side, package_body_polyg
 
 from ..violations import DRCResults, DRCViolation
 from .base import DRCRule
-from .silkscreen import _footprint_text_drawn_angle, _silk_side, _text_bbox_geometry
+from .silkscreen import (
+    _board_frame_shift,
+    _footprint_text_drawn_angle,
+    _silk_side,
+    _text_bbox_geometry,
+)
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers import DesignRules
@@ -299,13 +304,14 @@ class Pin1MarkerRule(DRCRule):
     def check(
         self,
         pcb: PCB,
-        design_rules: DesignRules,
+        design_rules: DesignRules | None = None,
     ) -> DRCResults:
         """Check every selected footprint for a visible pin-1 marker.
 
         Args:
             pcb: The PCB to check.
-            design_rules: Unused; the rule is geometric only.
+            design_rules: Unused; the rule is geometric only.  Optional for
+                callers that have no manufacturer profile (Issue #9707).
 
         Returns:
             DRCResults with at most one violation per footprint.
@@ -321,11 +327,15 @@ class Pin1MarkerRule(DRCRule):
 
         board_silk: dict[str, list[Any]] = {"F": [], "B": []}
         if self.include_board_silk:
+            # Footprints are board-relative; gr_* keep file coordinates (#9642).
+            board_xf = (
+                _board_frame_shift(pcb) if any(getattr(pcb, "_board_origin", (0.0, 0.0))) else None
+            )
             for graphic in pcb.graphics:
                 side = _silk_side(graphic.layer)
                 if side is None:
                     continue
-                geom = _graphic_geometry(graphic, None)
+                geom = _graphic_geometry(graphic, board_xf)
                 if geom is not None and not geom.is_empty:
                     board_silk[side].append(geom)
 

@@ -48,7 +48,7 @@ import heapq
 import math
 import os
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -303,6 +303,35 @@ class PadGrowthRound:
     kept: bool
 
 
+@dataclass
+class _LinkSearchHistory:
+    """Evidence from every pass and retry in one route_netset call."""
+
+    attempted: set[object] = field(default_factory=set)
+    declines: dict[object, str] = field(default_factory=dict)
+    deadline_hit: bool = False
+    started: float = field(default_factory=lambda: time.monotonic())
+    elapsed_s: float = 0.0
+
+    def record_cut(
+        self,
+        items: list[tuple[float, int, Any]],
+        reasons: dict[object, str],
+        pair_outcomes: SegmentOutcomes,
+    ) -> None:
+        """Keep the latest real decline for each skipped link, including fallback legs."""
+        for _, kind, item in items:
+            key = item.key if kind == 1 else item[0]
+            if kind == 1:
+                pair_outcomes[key] = SegmentOutcome("deadline-exceeded")
+                legs = ((key, "P"), (key, "N"))
+                if any(leg in self.attempted for leg in legs):
+                    for leg in legs:
+                        reasons[leg] = self.declines.get(leg, "deadline-exceeded")
+                    continue
+            reasons[key] = self.declines.get(key, "deadline-exceeded")
+
+
 @dataclass(frozen=True)
 class LatticeNegotiationStats:
     """Outcome of a :meth:`LatticePathfinder.route_netset` negotiation run."""
@@ -321,6 +350,13 @@ class LatticeNegotiationStats:
     deadline_hit: bool = False
     elapsed_s: float = 0.0
     budget_s: float | None = None
+    # Issue #9581: the keys whose search actually started in ANY pass of
+    # this negotiation run -- the honest per-link ``attempted`` signal.  A
+    # ``"deadline-exceeded"`` decline reason cannot carry it alone: that
+    # stamp is per-PASS, so a link attempted (and declined on its own
+    # merits) in an early pass can carry it in a later truncated pass that
+    # became the best pass (see :meth:`_route_netset_once`).
+    attempted_keys: frozenset[object] = frozenset()
 
     @property
     def completion(self) -> float:
@@ -1565,7 +1601,15 @@ class LatticePathfinder:
 
     # -- own-net pad slit band (issue #9018) -----------------------------------
 
-    def _own_net_pad_band_ok(self, a: Pt, b: Pt, layer: int, net: int, half: float = 0.0) -> bool:
+    def _own_net_pad_band_ok(
+        self,
+        a: Pt,
+        b: Pt,
+        layer: int,
+        net: int,
+        half: float = 0.0,
+        attached: Sequence[tuple[Pt, Pt, float]] = (),
+    ) -> bool:
         """True when leg ``a-b`` keeps the fab slit band clear of own-net SMD pads.
 
         Issue #9018: same-net copper is exempt from every other leg-legality
@@ -1579,12 +1623,20 @@ class LatticePathfinder:
         in place between rungs); ``None``/0 keeps the guard off.  ``half <= 0``
         measures the board-default copper, matching the legacy board-default
         probe width the same callers fall back to.
+
+        ``attached`` (issue #9517) carries the connection's own pad-attached
+        stub legs ``(c, d, half_width)``: a band-interior leg riding one
+        collinearly is the validator's covered-connector shape, not a slit,
+        and is accepted -- without it a stub ending inside the band can emit
+        no leg at all and the connection deadlocks ``no-path``.
         """
         edge_mm = float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
         if edge_mm <= 0.0:
             return True
         eff_half = half if half > 0.0 else self._trace_half
-        return not self.obstacles.same_net_pad_band_blocked(a, b, layer, net, eff_half, edge_mm)
+        return not self.obstacles.same_net_pad_band_blocked(
+            a, b, layer, net, eff_half, edge_mm, attached=attached
+        )
 
     # -- pad stubs ------------------------------------------------------------
 
@@ -1885,6 +1937,7 @@ class LatticePathfinder:
                     net_class=net_class,
                     allow_vias=allow_vias,
                     via_in_pad_override=via_in_pad_override,
+                    stub_half=body_w / 2.0,
                 )
                 for stub in stubs
             ):
@@ -2018,6 +2071,7 @@ class LatticePathfinder:
         extra: float,
         pw: Any,
         ko: Any,
+        attached: Sequence[tuple[Pt, Pt, float]] = (),
     ) -> tuple[bool, bool]:
         """Single-ended full-width legality of one lattice edge on ``layer``.
 
@@ -2025,6 +2079,12 @@ class LatticePathfinder:
         A* in :meth:`_route_search` expands with (issue #6381 factored it out
         so the escape-egress check cannot drift from the search); the
         Edge.Cuts boundary test is applied by the caller.
+
+        ``attached`` (issue #9517) is the pad-attached stub copper the
+        path emits at this edge's own end -- the SELECTED escape's legs, on
+        this layer, at their emitted half-width -- letting the band guard
+        accept the collinear continuation out of a stub that ends inside
+        the band.
         """
         lattice = self.build()
         ea = lattice.node_point(edge[0])
@@ -2044,7 +2104,7 @@ class LatticePathfinder:
             # OWN-net pad, so A* freely picked band-interior parallels; hold
             # them to the two-region rule.  Cheap when the guard is off
             # (unresolvable stackup) -- one getattr, no pad query.
-            and self._own_net_pad_band_ok(ea, eb, layer, net, half)
+            and self._own_net_pad_band_ok(ea, eb, layer, net, half, attached=attached)
         )
         return ok, ko_hit
 
@@ -2091,6 +2151,7 @@ class LatticePathfinder:
         net_class: object | None = None,
         allow_vias: bool = True,
         via_in_pad_override: bool | None = None,
+        stub_half: float | None = None,
     ) -> bool:
         """Whether a full-width stub's landing node can be LEFT (issue #6381).
 
@@ -2099,6 +2160,15 @@ class LatticePathfinder:
         predicates and Edge.Cuts test the A* applies), or -- when vias are
         allowed -- a through via at the node is legal.  A stub without egress
         is a dead end the search can only pop and drop.
+
+        ``stub_half`` (#9538 review) is the half-width the stub's own legs
+        are EMITTED at -- the neck, when the escape tapered (#4293).  The
+        band exemption's ride copper must be measured at that emitted
+        radius, not the body radius: a neck stub's attachment to its pad
+        (and the copper a continuation leg may ride) is narrower than the
+        body, and grading it at the body radius accepted validator slits a
+        neck-width ride rejects.  ``None`` keeps ``half`` (the full-width
+        scan's own legs, emitted at the body width).
         """
         lattice = self.build()
         if committed is None:
@@ -2107,10 +2177,16 @@ class LatticePathfinder:
         extra = max(0.0, half + clr - self._agent_radius)
         pw, ko = self._pairwise, self._keepouts
         boundary = self._escape_boundary
+        # Issue #9517: the stub's own legs are pad-attached copper -- the
+        # straight continuation out of its landing node must count as riding
+        # them, or a stub ending inside the band is graded a dead end here
+        # exactly the way it deadlocks the A* it seeds.
+        ride_half = half if stub_half is None else stub_half
+        attached = tuple((c, d, ride_half) for c, d in zip(stub[2], stub[2][1:], strict=False))
         for nbr, _elen in lattice.adj.get(key, ()):
             edge = (min(key, nbr), max(key, nbr))
             if not self._body_edge_legal(
-                edge, layer, net, half, clr, committed, extra=extra, pw=pw, ko=ko
+                edge, layer, net, half, clr, committed, extra=extra, pw=pw, ko=ko, attached=attached
             )[0]:
                 continue
             if not boundary.segment_clear(
@@ -2859,6 +2935,42 @@ class LatticePathfinder:
 
         g_score: dict[_State, float] = {}
         came: dict[_State, tuple[_State, str]] = {}
+
+        # Issue #9517 (#9538 review): a band-interior leg may ride only the
+        # pad-attached stub copper the EMITTED path uses at that end of the
+        # leg -- never an unselected candidate's.  The first cut pooled every
+        # start and goal stub's legs into one ride set, so a stub the router
+        # does NOT emit legalised the selected escape's first body leg (and a
+        # collinear stub on ANOTHER layer did the same across layers): the
+        # validator then measured the slit the search never saw.  The search
+        # seeds exactly one stub per ``(node, layer)`` state -- ``start_stub``
+        # below and ``goal`` above each keep their best candidate -- and a
+        # path joins a stub only at its landing node, so the rides an edge
+        # may claim are precisely:
+        #
+        # * the start stub seeded at the expansion's FROM node, when that
+        #   state is a seed (no ``came`` predecessor): the edge is the first
+        #   body leg out of the escape a path through it actually emits; and
+        # * the goal stub landing at the expansion's TO node: the edge is
+        #   the arrival leg into the escape a path ending there emits.
+        #
+        # Both are keyed on the edge's own layer, so foreign-layer stub
+        # copper never exempts anything.  Rides carry the stub's EMITTED
+        # half-width (``width_a``/``width_b`` -- the neck, when the escape
+        # tapered, #4293), never the body radius.
+        def _start_rides(key: NodeKey, layer: int) -> tuple[tuple[Pt, Pt, float], ...]:
+            poly = start_stub.get((key, layer))
+            if poly is None:
+                return ()
+            return tuple((c, d, width_a / 2.0) for c, d in zip(poly, poly[1:], strict=False))
+
+        def _goal_rides(key: NodeKey, layer: int) -> tuple[tuple[Pt, Pt, float], ...]:
+            landed = goal.get((key, layer))
+            if landed is None:
+                return ()
+            poly = landed[1]
+            return tuple((c, d, width_b / 2.0) for c, d in zip(poly, poly[1:], strict=False))
+
         # Issue #6957: the via sites already on each state's best path, as a
         # persistent linked list ``(site, rest)`` (newest first).  Kept in step
         # with ``came`` so a via expansion can be checked against its OWN
@@ -2928,7 +3040,7 @@ class LatticePathfinder:
         # only those can already lie on a path (cheap pre-filter for the loop
         # check below).
         reached: set[_State] = {state[:2] for state in g_score} if turn_aware else set()
-        edge_ok: dict[tuple[EdgeKey, int], bool] = {}
+        edge_ok: dict[tuple, bool] = {}
         node_ok: dict[_State, bool] = {}
         via_ok: dict[NodeKey, bool] = {}
         end_state: _State | None = None
@@ -2966,7 +3078,7 @@ class LatticePathfinder:
         def fat_edge_legal(edge: EdgeKey, lyr: int) -> bool:
             """The fat branch of the planar edge check, sharing its memo (#7932)."""
             nonlocal ko_pruned
-            ek = (edge, lyr)
+            ek = (edge, lyr, ())
             ok = edge_ok.get(ek)
             if ok is None:
                 pa = lattice.node_point(edge[0])
@@ -3164,7 +3276,20 @@ class LatticePathfinder:
                         # launder the winding count.
                         continue
                 edge = (min(key, nbr), max(key, nbr))
-                ek = (edge, layer)
+                # #9538 review: the rides this edge may claim (see the
+                # _start_rides comment above) ride along in the memo key.
+                # The memo is per UNORDERED edge, but a verdict earned with
+                # one end's stub copper must never be replayed for the
+                # reverse direction or a mid-path pass through the same
+                # edge -- only the expansion contexts below are ones whose
+                # path actually emits that copper.  The fat branch shares
+                # the dict with empty-ride keys and never consults rides.
+                rides: tuple[tuple[Pt, Pt, float], ...] = ()
+                if not fat:
+                    if state not in came:
+                        rides += _start_rides(key, layer)
+                    rides += _goal_rides(nbr, layer)
+                ek = (edge, layer, rides)
                 ok = edge_ok.get(ek)
                 if ok is None:
                     if fat:
@@ -3184,7 +3309,16 @@ class LatticePathfinder:
                             ko_pruned = True
                     else:
                         ok, ko_hit = self._body_edge_legal(
-                            edge, layer, net, half, clr, committed, extra=extra, pw=pw, ko=ko
+                            edge,
+                            layer,
+                            net,
+                            half,
+                            clr,
+                            committed,
+                            extra=extra,
+                            pw=pw,
+                            ko=ko,
+                            attached=rides,
                         )
                         if ko_hit:
                             ko_pruned = True
@@ -3200,6 +3334,7 @@ class LatticePathfinder:
                                     extra=extra,
                                     pw=None,
                                     ko=ko,
+                                    attached=rides,
                                 )[0]
                     ok = ok and boundary.segment_clear(
                         lattice.node_point(edge[0]),
@@ -3524,7 +3659,12 @@ class LatticePathfinder:
             # failure was U2.8's in-pad dead-end stubs).
             if not fat:
 
-                def no_egress(stubs: list) -> bool:
+                def no_egress(stubs: list, stub_half: float) -> bool:
+                    # Rides at the stub's EMITTED half-width (#9538 review):
+                    # these stubs may be the neck fallback's, whose copper is
+                    # narrower than the body -- an egress verdict graded at
+                    # the body radius would accept rides the emitted neck
+                    # does not cover.
                     return not any(
                         self._stub_has_egress(
                             stub,
@@ -3535,13 +3675,14 @@ class LatticePathfinder:
                             net_class=net_class,
                             allow_vias=allow_vias,
                             via_in_pad_override=via_in_pad_override,
+                            stub_half=stub_half,
                         )
                         for stub in stubs
                     )
 
-                if no_egress(stubs_a):
+                if no_egress(stubs_a, width_a / 2.0):
                     return None, "no-egress-start"
-                if no_egress(stubs_b):
+                if no_egress(stubs_b, width_b / 2.0):
                     return None, "no-egress-end"
             # Issue #4979: same honesty contract for a hard layer constraint.
             # ``layer_pruned`` is set when the net's hard-avoided set actually
@@ -8138,15 +8279,25 @@ class LatticePathfinder:
         self._hybrid_parity_ctx = []
         self.hybrid_parity_log = {}
         self.extra_parity_log = {}
-        result = self._route_netset_gateways(connections, **kwargs)
+        link_history = _LinkSearchHistory()
+        routes, stats = self._route_netset_gateways(
+            connections, link_history=link_history, **kwargs
+        )
+        # The selected copper may predate a rejected retry that hit the deadline.
+        stats = replace(
+            stats,
+            elapsed_s=link_history.elapsed_s,
+            attempted_keys=frozenset(link_history.attempted),
+            deadline_hit=stats.deadline_hit or link_history.deadline_hit,
+        )
         deadline = kwargs.get("deadline")
         coupled = list(kwargs.get("coupled") or [])
-        if not result[1].deadline_hit and (deadline is None or time.monotonic() < deadline):
-            self._hybrid_parity_pass(result[0], connections, coupled)
-        if not result[1].deadline_hit and (deadline is None or time.monotonic() < deadline):
-            self._extra_parity_pass(result[0], connections, coupled, deadline=deadline)
+        if not stats.deadline_hit and (deadline is None or time.monotonic() < deadline):
+            self._hybrid_parity_pass(routes, connections, coupled)
+        if not stats.deadline_hit and (deadline is None or time.monotonic() < deadline):
+            self._extra_parity_pass(routes, connections, coupled, deadline=deadline)
         self._hybrid_parity_ctx = []
-        return result
+        return routes, stats
 
     def _route_netset_gateways(
         self,
@@ -8375,6 +8526,7 @@ class LatticePathfinder:
         self,
         connections: list[Connection],
         *,
+        link_history: _LinkSearchHistory | None = None,
         coupled: list[CoupledConnection] | None = None,
         fixed_copper: list[Route] | None = None,
         fixed_clearance: dict[int, float] | None = None,
@@ -8434,7 +8586,14 @@ class LatticePathfinder:
         whole negotiation); rip-up resets only the committed-copper model.
         Returns ``(routes_by_key, stats)`` for the best pass seen;
         :attr:`failure_reasons` carries the per-connection decline diagnosis
-        for that pass.
+        for that pass.  Issue #9581: when the best pass is a deadline-
+        truncated one, a key some EARLIER pass attempted and declined keeps
+        its real decline reason only while that decline is still the key's
+        most recent outcome -- a pass that ROUTES the key clears it, so
+        ``"deadline-exceeded"`` then means the run was cut before the key
+        reached any decline (never attempted in any pass, or last routed),
+        and ``stats.attempted_keys`` records every key whose search started
+        in any pass.
 
         Issue #6437: ``pair_nets`` maps every detected diff-pair net id,
         engaged or not, to its partner's.  The post-negotiation pad-class repair
@@ -8480,7 +8639,8 @@ class LatticePathfinder:
         # Issue #4477: wall-clock the WHOLE negotiation (not just the
         # deadline check) so a report can honestly say "elapsed Xs of a Ys
         # budget" even on a run that never hits the deadline.
-        start_time = time.monotonic()
+        if link_history is None:
+            link_history = _LinkSearchHistory()
         self._set_fixed_copper(fixed_copper, fixed_clearance)
         self.build()
         self.pair_straightened = {}
@@ -8532,6 +8692,22 @@ class LatticePathfinder:
         converged = False
         iterations_run = 0
         present = present_cost_initial
+        # Issue #9581: the ``"deadline-exceeded"`` stamp is per-PASS -- the
+        # mid-pass cut below stamps every item from the cut onward of THIS
+        # pass, including items attempted (and declined on their own merits)
+        # in an earlier pass.  When the truncated pass becomes the best
+        # pass, its ``reasons`` must not relabel those links as never
+        # attempted, so track per key whether its search ever started, and
+        # its most recent OUTCOME -- a real decline is kept on record, but
+        # a later pass ROUTING the key clears that record, so the cut's
+        # restore can only ever revive a decline that is still the key's
+        # most recent outcome.
+        attempted_keys = link_history.attempted
+        prior_decline_reasons = link_history.declines
+        # The same two signals scoped to the pass in flight: which keys this
+        # pass reached (below) is what lets the fold tell "no entry in this
+        # pass's ``reasons`` because it routed" apart from "never reached".
+        pass_attempted: set[object] = set()
 
         deadline_hit = False
         for it in range(max_iterations):
@@ -8540,23 +8716,19 @@ class LatticePathfinder:
             if deadline is not None and time.monotonic() >= deadline:
                 deadline_hit = True
                 # Issue #4477: if NO pass ever ran (the budget was already
-                # spent before the first attempt -- e.g. an extremely tight
+                # spent before this negotiation -- e.g. an extremely tight
                 # budget on a large cohort), ``best_reasons`` would otherwise
                 # stay empty and the caller could not report WHY every link
-                # is unroutable.  Synthesize an honest "never attempted"
-                # decline for each connection so the report is never blank.
+                # is unroutable. Include any searches from earlier retries.
                 if best_count < 0:
                     best_count = 0
-                    for _length, kind, item in items:
-                        key = item.key if kind == 1 else item[0]
-                        best_reasons[key] = "deadline-exceeded"
-                        if kind == 1:
-                            best_pair_outcomes[key] = SegmentOutcome("deadline-exceeded")
+                    link_history.record_cut(items, best_reasons, best_pair_outcomes)
                 break
             iterations_run = it + 1
             committed = self._fresh_committed()
             routes: dict[object, Route] = {}
             reasons: dict[object, str] = {}
+            pass_attempted.clear()
             pair_outcomes = SegmentOutcomes()
             routed_items = 0
             failed: list[tuple[int, Any]] = []
@@ -8731,6 +8903,20 @@ class LatticePathfinder:
                     legs_ok = 0
                     for pol in ("P", "N"):
                         leg_item, leg_reason = legs[pol]
+                        # Issue #9581 (PR #9603 review): each leg is its own
+                        # report link -- the decline below lands under the LEG
+                        # key ``leg_item[0]``, which the attempted-set write in
+                        # the items loop (the parent pair key) never covers,
+                        # so the completion report called a searched leg "not
+                        # attempted".  Every leg of a flushed pair WAS
+                        # searched (the partner-blind baseline computes all
+                        # legs before any deadline check), so record each leg
+                        # in both the cross-pass attempted set and this
+                        # pass's reached set -- the latter also lets the
+                        # prior-decline fold below clear a leg's stale
+                        # earlier decline once a later pass routes it.
+                        attempted_keys.add(leg_item[0])
+                        pass_attempted.add(leg_item[0])
                         if leg_reason is None:
                             legs_ok += 1
                         else:
@@ -8746,17 +8932,15 @@ class LatticePathfinder:
                 # slow search inside one pass cannot overrun the budget.
                 if deadline is not None and time.monotonic() >= deadline:
                     deadline_hit = True
-                    # Issue #4477: every connection from here to the end of
-                    # this pass was never attempted -- stamp them honestly as
-                    # "deadline-exceeded" rather than silently omitting them
-                    # from ``reasons`` (which would make an unroutable link
-                    # undiagnosable in the completion report).
-                    for _length2, kind2, item2 in items[_idx:]:
-                        key2 = item2.key if kind2 == 1 else item2[0]
-                        reasons[key2] = "deadline-exceeded"
-                        if kind2 == 1:
-                            pair_outcomes[key2] = SegmentOutcome("deadline-exceeded")
+                    link_history.record_cut(items[_idx:], reasons, pair_outcomes)
                     break
+                # Issue #9581: reaching the item here means its search starts
+                # this pass (the deadline check above is the only gate
+                # between it and the search calls) -- record the key as
+                # attempted in this run, and as reached in THIS pass.
+                key0 = item.key if kind == 1 else item[0]
+                attempted_keys.add(key0)
+                pass_attempted.add(key0)
                 if kind == 1:
                     # Issue #6883: a class that prefers a layer none of the
                     # pads share (opted in via ``allow_plane_layers``) gets
@@ -8879,6 +9063,32 @@ class LatticePathfinder:
                 routed_items += 1
 
             flush_fallbacks()
+
+            # Issue #9581: fold this pass's real decline reasons into the
+            # cross-pass record -- a later truncated pass that becomes the
+            # best pass restores them instead of stamping "deadline-exceeded"
+            # over a link this run already tried and declined.  The record is
+            # of each key's most recent OUTCOME, success included: a key this
+            # pass reached whose search SUCCEEDED has no entry in ``reasons``,
+            # and clearing it here is what keeps a later cut from reviving a
+            # decline a later pass already routed away (PR #9603 review: F
+            # declined in pass 1, routed in pass 2, cut in pass 3 must read
+            # "deadline-exceeded", not its stale pass-1 decline).
+            for _dk, _dr in reasons.items():
+                if _dr != "deadline-exceeded":
+                    prior_decline_reasons[_dk] = _dr
+            for _vk in pass_attempted:
+                if _vk not in reasons:
+                    prior_decline_reasons.pop(_vk, None)
+            # Issue #9581 (PR #9603 review): a key with a route this pass
+            # succeeded -- a single net, a flushed fallback leg, or a coupled
+            # pair's leg (``commit_pair``; the items loop records only the
+            # PARENT pair key in ``pass_attempted``).  Popping those keeps
+            # the record at "most recent outcome": a pair that couples after
+            # its legs declined must not leave the legs' decline restorable
+            # by a later truncated pass that skips the pair.
+            for _rk in routes:
+                prior_decline_reasons.pop(_rk, None)
 
             score = (
                 (routed_items, coupled_count, hybrid_count, fallback_legs)
@@ -9034,7 +9244,7 @@ class LatticePathfinder:
         # remaining time between the deadline and this call's start -- an
         # honest "elapsed of a Ys budget" figure even when the deadline was
         # never reached.  ``None`` when the negotiation ran unbudgeted.
-        budget_s = max(0.0, deadline - start_time) if deadline is not None else None
+        budget_s = max(0.0, deadline - link_history.started) if deadline is not None else None
         # Issue #6373: a fallback pair is two single-ended legs, so it counts
         # as two units in both ``routed`` and ``total``.  ``best_count`` counts
         # a fully-routed fallback pair once; add its second leg, plus every
@@ -9054,6 +9264,8 @@ class LatticePathfinder:
         # for a hybrid must not read as a lost connection to the callers that
         # compare ``routed`` (the #6489 pad-growth rounds, the gateway rollback).
         routed_units += best_hybrid_pairs
+        link_history.elapsed_s = time.monotonic() - link_history.started
+        link_history.deadline_hit |= deadline_hit
         stats = LatticeNegotiationStats(
             iterations=iterations_run,
             converged=converged,
@@ -9061,8 +9273,9 @@ class LatticePathfinder:
             total=len(connections) + len(pairs) + best_fallback_pairs + best_hybrid_pairs,
             lattice_builds=self.lattice_builds,
             deadline_hit=deadline_hit,
-            elapsed_s=time.monotonic() - start_time,
+            elapsed_s=link_history.elapsed_s,
             budget_s=budget_s,
+            attempted_keys=frozenset(attempted_keys),
         )
         return best_routes, stats
 

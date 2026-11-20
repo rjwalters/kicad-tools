@@ -56,6 +56,8 @@ if TYPE_CHECKING:
         analyze_buses,
         detect_bus_signals,
         group_buses,
+        group_by_length_window,
+        order_group_by_escape,
     )
     from .cache import (
         CachedNetRoute,
@@ -346,6 +348,8 @@ _EXPORT_MODULES: dict[str, str] = {
     "analyze_buses": ".bus",
     "detect_bus_signals": ".bus",
     "group_buses": ".bus",
+    "group_by_length_window": ".bus",
+    "order_group_by_escape": ".bus",
     "CachedNetRoute": ".cache",
     "CachedRoutingResult": ".cache",
     "CachedSubProblem": ".cache",
@@ -600,6 +604,8 @@ __all__ = [
     "analyze_buses",
     "detect_bus_signals",
     "group_buses",
+    "group_by_length_window",
+    "order_group_by_escape",
     # Differential pair routing
     "DifferentialPair",
     "DifferentialPairConfig",

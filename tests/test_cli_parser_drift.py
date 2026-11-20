@@ -302,6 +302,75 @@ def test_fix_drc_threads_manufacturer_into_drc_checker():
 
 
 # ---------------------------------------------------------------------------
+# ``fix-drc`` --only choice parity (#9332, PR #9396)
+# ---------------------------------------------------------------------------
+#
+# The flag-name guards above (``_flags_from_parser`` collects
+# ``option_strings`` only) cannot catch a drifted *choice value*: #9332
+# added ``copper-gap`` to ``fix_drc_cmd.py``'s own ``--only`` choices but
+# not to the ``parser.py`` fix-drc subparser, so the documented command
+# ``kct fix-drc board.kicad_pcb --only copper-gap`` failed with
+# ``error: argument --only: invalid choice`` (exit 2) while the module
+# entry point accepted it -- the same shape as the ``--refill-zones``
+# drift (#4113) cited in the module docstring, one level deeper.
+
+
+def _inner_fix_drc_only_choices() -> list[str]:
+    """Declared ``--only`` choices on the inner ``fix_drc_cmd`` parser."""
+    from kicad_tools.cli.fix_drc_cmd import main as fix_drc_main
+
+    captured: dict[str, list[str]] = {}
+    real_parse_args = argparse.ArgumentParser.parse_args
+
+    def fake_parse_args(self, *args, **kwargs):
+        if getattr(self, "prog", "") == "kicad-tools fix-drc":
+            for action in self._actions:
+                if "--only" in action.option_strings:
+                    captured["choices"] = list(action.choices or [])
+            raise SystemExit(0)
+        return real_parse_args(self, *args, **kwargs)
+
+    with patch.object(argparse.ArgumentParser, "parse_args", fake_parse_args):
+        with pytest.raises(SystemExit):
+            fix_drc_main(["board.kicad_pcb", "--only", "copper-gap"])
+
+    assert "choices" in captured, (
+        "failed to capture the inner fix-drc --only action -- "
+        "fix_drc_cmd.main's prog string ('kicad-tools fix-drc') has "
+        "changed; update _inner_fix_drc_only_choices"
+    )
+    return captured["choices"]
+
+
+def _flag_choices(parser: argparse.ArgumentParser, flag: str) -> list[str] | None:
+    """Return the declared ``choices`` of ``flag`` on ``parser``, if any."""
+    for action in parser._actions:
+        if flag in action.option_strings:
+            return list(action.choices or [])
+    return None
+
+
+def test_fix_drc_only_choices_match_inner_parser():
+    """``--only`` must accept the same values on both fix-drc parsers.
+
+    ``--only copper-gap`` was declared on ``fix_drc_cmd.py``'s parser
+    only, so ``kct fix-drc --only copper-gap`` (the documented command
+    in ``docs/reference/cli.md``) failed with exit 2 while the module
+    entry point accepted it.  Assert full choice parity so a drifted
+    choice value is caught, not just a drifted flag name.
+    """
+    outer_choices = _flag_choices(_outer_subparser("fix-drc"), "--only")
+    inner_choices = _inner_fix_drc_only_choices()
+    assert outer_choices is not None, "--only is missing from the outer parser.py fix-drc subparser"
+    assert outer_choices == inner_choices, (
+        "kct fix-drc --only and fix_drc_cmd's inner --only accept different "
+        f"values (outer={outer_choices}, inner={inner_choices}); a value "
+        "reachable only through the module entry point is unreachable via "
+        "kct (regresses the #9332 review finding)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # ``check`` parser pair (#4633)
 # ---------------------------------------------------------------------------
 #

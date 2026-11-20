@@ -5,8 +5,8 @@ and ``pcb.segment_count`` always reflect the actual S-expression tree
 content, even after in-memory list modifications.
 
 Addresses:
-    https://github.com/rjwalters/kicad-tools/issues/1943
-    https://github.com/rjwalters/kicad-tools/issues/2064
+    https://github.com/2AMLogic/kicad-tools/issues/1943
+    https://github.com/2AMLogic/kicad-tools/issues/2064
 """
 
 import json
@@ -313,7 +313,7 @@ class TestCountsAfterSaveReload:
 
 # ---------------------------------------------------------------------------
 # Fixture: KiCad 9-style PCB with zone_connect, net_class, groups but no zones
-# Regression test for https://github.com/rjwalters/kicad-tools/issues/2064
+# Regression test for https://github.com/2AMLogic/kicad-tools/issues/2064
 # ---------------------------------------------------------------------------
 
 PCB_KICAD9_NO_ZONES = """(kicad_pcb
@@ -453,7 +453,7 @@ def pcb_kicad9_no_zones(tmp_path: Path) -> Path:
 class TestZoneCountZeroRegression:
     """Regression tests for zone_count accuracy on zone-less boards.
 
-    Addresses: https://github.com/rjwalters/kicad-tools/issues/2064
+    Addresses: https://github.com/2AMLogic/kicad-tools/issues/2064
     """
 
     def test_zone_count_zero_kicad9_board(self, pcb_kicad9_no_zones: Path):

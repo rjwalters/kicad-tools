@@ -205,6 +205,7 @@ def check_silkscreen_line_width(
     min_width = design_rules.min_silkscreen_width_mm
 
     # Check board-level graphics (never suppressed -- no footprint context)
+    to_board = _board_frame_shift(pcb)
     for graphic in pcb.graphics:
         if not is_silkscreen_layer(graphic.layer):
             continue
@@ -217,7 +218,7 @@ def check_silkscreen_line_width(
                         f"Silkscreen line width {graphic.stroke_width:.2f}mm "
                         f"< minimum {min_width:.2f}mm"
                     ),
-                    location=graphic.start,
+                    location=to_board(_graphic_anchor(graphic)),
                     layer=graphic.layer,
                     actual_value=graphic.stroke_width,
                     required_value=min_width,
@@ -817,6 +818,37 @@ def _arc_geometry(
     return LineString(points).buffer(width / 2.0)
 
 
+def _board_frame_shift(pcb: PCB) -> Callable[[tuple[float, float]], tuple[float, float]]:
+    """Return a function mapping board-level (``gr_*``) file coordinates to the board frame.
+
+    ``PCB.load`` shifts footprints (and so pads) into the board-relative
+    frame and records the shift in ``pcb._board_origin``; board-level
+    graphics keep the file's sheet-absolute coordinates (Issues #8561,
+    #9642).  Rules that compare board-level silk against pads, or report its
+    location, must apply this shift.  Identity on zero-origin boards.
+    """
+    ox, oy = getattr(pcb, "_board_origin", (0.0, 0.0))
+
+    def to_board(p: tuple[float, float]) -> tuple[float, float]:
+        return (p[0] - ox, p[1] - oy)
+
+    return to_board
+
+
+def _graphic_anchor(graphic: FootprintGraphic | BoardGraphic) -> tuple[float, float]:
+    """One representative file-frame point per silk shape, for reported locations.
+
+    A parsed ``gr_circle`` / ``fp_circle`` carries its centre in ``center``
+    and leaves ``start`` at the parse default ``(0, 0)``, so reporting
+    ``graphic.start`` sends users to the file origin instead of the shape
+    (Issue #9642).  Every other shape has a real ``start`` -- a poly's is
+    seeded from its first vertex at parse time.
+    """
+    if graphic.graphic_type == "circle" and graphic.center is not None:
+        return graphic.center
+    return graphic.start
+
+
 def _stroke_geometry(
     graphic: FootprintGraphic | BoardGraphic,
     transform: _Transform | None,
@@ -1121,7 +1153,7 @@ def _iter_silk_elements(
             side,
             geom,
             label,
-            to_board(board_graphic.start),
+            to_board(_graphic_anchor(board_graphic)),
             board_graphic.layer,
             board_graphic.uuid,
             _graphic_descriptor("gr", board_graphic),
@@ -1159,6 +1191,7 @@ def iter_unmodeled_silk_graphics(
                 graphic.uuid,
             )
 
+    to_board = _board_frame_shift(pcb)
     for board_graphic in pcb.graphics:
         if _silk_side(board_graphic.layer) is None:
             continue
@@ -1167,7 +1200,7 @@ def iter_unmodeled_silk_graphics(
         yield (
             f"gr_{board_graphic.graphic_type}",
             board_graphic.graphic_type,
-            board_graphic.start,
+            to_board(_graphic_anchor(board_graphic)),
             board_graphic.layer,
             board_graphic.uuid,
         )
@@ -1492,9 +1525,13 @@ def silk_hits_hole(silk: _Geometry, hole: _Geometry, clearance_mm: float) -> boo
 
 def check_silk_hole_overlap(
     pcb: PCB,
-    design_rules: DesignRules,
+    design_rules: DesignRules | None = None,
 ) -> DRCResults:
     """Silkscreen over a drilled hole (via, PTH or NPTH).
+
+    ``design_rules`` is unused (the threshold is the shared
+    :data:`SILK_HOLE_CLEARANCE_MM` constant) and may be omitted by callers
+    that have no manufacturer profile (Issue #9707).
 
     Unlike :func:`check_silk_over_copper` this tests the **drill** circle, not
     the mask aperture, so silk over a *tented* via hole is reported (Issue

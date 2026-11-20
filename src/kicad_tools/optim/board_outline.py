@@ -14,6 +14,7 @@ import math
 from typing import TYPE_CHECKING
 
 from kicad_tools.core.arcs import arc_sweep
+from kicad_tools.core.board_outline import outline_graphics
 from kicad_tools.optim.geometry import Polygon, Vector2D
 
 if TYPE_CHECKING:
@@ -58,11 +59,13 @@ def extract_board_outline(pcb: PCB) -> Polygon | None:
 
     # Gather every closed contour, then return the largest: internal cutouts
     # drawn as gr_rect/gr_poly must not shadow a gr_line/gr_arc outer outline
-    # (issue #7155).
+    # (issue #7155).  The shared reader also re-emits footprint-local
+    # Edge.Cuts graphics as board-frame gr_* nodes, so an outline drawn
+    # inside a footprint (KiCad treats it as board outline) participates.
     candidates: list[Polygon] = []
 
     # gr_rect on Edge.Cuts (simple rectangular boards)
-    for child in sexp.iter_children():
+    for child in outline_graphics(sexp):
         if child.tag == "gr_rect":
             layer = child.find("layer")
             if layer and layer.get_string(0) == "Edge.Cuts":
@@ -85,7 +88,7 @@ def extract_board_outline(pcb: PCB) -> Polygon | None:
                     )
 
     # gr_poly on Edge.Cuts (explicit vertex list)
-    for child in sexp.iter_children():
+    for child in outline_graphics(sexp):
         if child.tag == "gr_poly":
             layer = child.find("layer")
             if layer and layer.get_string(0) == "Edge.Cuts":
@@ -101,7 +104,7 @@ def extract_board_outline(pcb: PCB) -> Polygon | None:
 
     # Collect gr_line / gr_arc elements on Edge.Cuts
     edge_lines: list[tuple[tuple[float, float], tuple[float, float]]] = []
-    for child in sexp.iter_children():
+    for child in outline_graphics(sexp):
         if child.tag == "gr_line":
             layer = child.find("layer")
             if layer and layer.get_string(0) == "Edge.Cuts":
@@ -114,7 +117,7 @@ def extract_board_outline(pcb: PCB) -> Polygon | None:
                     y2 = end.get_float(1) or 0.0
                     edge_lines.append(((x1, y1), (x2, y2)))
 
-    for child in sexp.iter_children():
+    for child in outline_graphics(sexp):
         if child.tag == "gr_arc":
             layer = child.find("layer")
             if layer and layer.get_string(0) == "Edge.Cuts":

@@ -43,7 +43,7 @@ SHA pin. Run `./scripts/install-kct.sh --help` for every option.
 ### From Source (Development)
 
 ```bash
-git clone https://github.com/rjwalters/kicad-tools.git
+git clone https://github.com/2AMLogic/kicad-tools.git
 cd kicad-tools
 pip install -e ".[dev]"
 ```
@@ -214,4 +214,4 @@ kct symbols --help
 kct drc --help
 ```
 
-For issues and feature requests, visit the [GitHub repository](https://github.com/rjwalters/kicad-tools).
+For issues and feature requests, visit the [GitHub repository](https://github.com/2AMLogic/kicad-tools).
