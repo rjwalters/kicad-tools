@@ -4851,6 +4851,20 @@ def _add_route_auto_parser(subparsers) -> None:
             "the board's net-class via constraints."
         ),
     )
+    route_auto_parser.add_argument(
+        "--grid",
+        default="auto",
+        metavar="AUTO|MM",
+        help=(
+            "Routing grid pitch in mm, or 'auto' (default; Issue #9620). "
+            "'auto' reuses the 'kct route --grid auto' selector: a "
+            "pad-aligned pitch under the memory cap (500k cells), chosen from "
+            "the board's pads and declared clearance, instead of the legacy "
+            "fixed clearance/2 lattice that could time out long nets on big "
+            "boards. An explicit value (e.g. --grid 0.2) is honoured as given; "
+            "pass the board's clearance/2 to restore the legacy pitch."
+        ),
+    )
     route_auto_parser.add_argument("-o", "--output", help="Output PCB file path")
     route_auto_parser.add_argument(
         "--checkpoint",
