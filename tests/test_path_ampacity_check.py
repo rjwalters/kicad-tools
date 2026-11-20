@@ -1349,7 +1349,9 @@ class TestButtressWireCreditFromReinforceNet:
         # F.Cu (20,50)->(70,50) 2.4 mm, via at (70,50), B.Cu
         # (70,50)->(120,50) 2.4 mm, one declared 13.42 A eligible path.
         # reinforce_net anchors the F.Cu leg only, so path_ampacity credits
-        # F.Cu and must judge the B.Cu stretch at bare copper width.
+        # the F.Cu span between that leg's anchors and must judge both the
+        # B.Cu stretch and the F.Cu hole-to-pad stubs at bare copper width
+        # (Issue #9654).
         pcb = PCB.create(width=200, height=100, center=False)
         pcb.add_trace((20, 50), (70, 50), width=2.4, layer="F.Cu", net=_WIRE_NET)
         pcb.add_via(70, 50, size=0.6, drill=0.3, net=_WIRE_NET)
@@ -1368,8 +1370,16 @@ class TestButtressWireCreditFromReinforceNet:
         ]
         results = PathAmpacityRule(specs=[spec], wired_legs=legs).check(pcb, _design_rules_2oz())
         underwidth = [v for v in results.errors if "too narrow" in v.message]
-        assert len(underwidth) == 1
-        assert "trace on B.Cu too narrow" in underwidth[0].message
-        assert "not covered by a wire leg" in underwidth[0].message
-        assert "width 2.400mm" in underwidth[0].message
-        assert not any("trace on F.Cu" in v.message for v in results.errors)
+        # The B.Cu stretch fails at bare copper, and so do the two F.Cu
+        # hole-to-pad stubs outside the leg's anchors; only the anchored
+        # F.Cu span between them rides the wire (Issue #9654).
+        assert len(underwidth) == 3
+        for v in underwidth:
+            assert "width 2.400mm" in v.message
+            assert "not covered by a wire leg" in v.message
+        (bcu,) = [v for v in underwidth if v.layer == "B.Cu"]
+        assert "trace on B.Cu too narrow" in bcu.message
+        assert bcu.location == pytest.approx((95.0, 50.0))
+        assert sorted(v.location[0] for v in underwidth if v.layer == "F.Cu") == (
+            pytest.approx([21.479, 68.871], abs=0.01)
+        )
