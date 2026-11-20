@@ -20614,8 +20614,8 @@ def _route_parser() -> argparse.ArgumentParser:
         help=(
             "Issue #4477 (epic #4465, Phase 4): write the structured, "
             "machine-readable --complete unroutable-link report to PATH as "
-            "JSON (net, link pad endpoints, elapsed vs the per-link "
-            "deadline, and blocking copper reusing the 'kct net-status "
+            "JSON (run elapsed time and budget, plus each link's net, pad "
+            "endpoints, attempted and deadline_hit flags, and blocking copper from 'kct net-status "
             "--why' obstruction enumeration). Only written when --complete "
             "left one or more links unroutable; a human-readable summary is "
             "always printed regardless of this flag. Ignored without "

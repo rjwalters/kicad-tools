@@ -303,6 +303,35 @@ class PadGrowthRound:
     kept: bool
 
 
+@dataclass
+class _LinkSearchHistory:
+    """Evidence from every pass and retry in one route_netset call."""
+
+    attempted: set[object] = field(default_factory=set)
+    declines: dict[object, str] = field(default_factory=dict)
+    deadline_hit: bool = False
+    started: float = field(default_factory=lambda: time.monotonic())
+    elapsed_s: float = 0.0
+
+    def record_cut(
+        self,
+        items: list[tuple[float, int, Any]],
+        reasons: dict[object, str],
+        pair_outcomes: SegmentOutcomes,
+    ) -> None:
+        """Keep the latest real decline for each skipped link, including fallback legs."""
+        for _, kind, item in items:
+            key = item.key if kind == 1 else item[0]
+            if kind == 1:
+                pair_outcomes[key] = SegmentOutcome("deadline-exceeded")
+                legs = ((key, "P"), (key, "N"))
+                if any(leg in self.attempted for leg in legs):
+                    for leg in legs:
+                        reasons[leg] = self.declines.get(leg, "deadline-exceeded")
+                    continue
+            reasons[key] = self.declines.get(key, "deadline-exceeded")
+
+
 @dataclass(frozen=True)
 class LatticeNegotiationStats:
     """Outcome of a :meth:`LatticePathfinder.route_netset` negotiation run."""
@@ -8250,15 +8279,25 @@ class LatticePathfinder:
         self._hybrid_parity_ctx = []
         self.hybrid_parity_log = {}
         self.extra_parity_log = {}
-        result = self._route_netset_gateways(connections, **kwargs)
+        link_history = _LinkSearchHistory()
+        routes, stats = self._route_netset_gateways(
+            connections, link_history=link_history, **kwargs
+        )
+        # The selected copper may predate a rejected retry that hit the deadline.
+        stats = replace(
+            stats,
+            elapsed_s=link_history.elapsed_s,
+            attempted_keys=frozenset(link_history.attempted),
+            deadline_hit=stats.deadline_hit or link_history.deadline_hit,
+        )
         deadline = kwargs.get("deadline")
         coupled = list(kwargs.get("coupled") or [])
-        if not result[1].deadline_hit and (deadline is None or time.monotonic() < deadline):
-            self._hybrid_parity_pass(result[0], connections, coupled)
-        if not result[1].deadline_hit and (deadline is None or time.monotonic() < deadline):
-            self._extra_parity_pass(result[0], connections, coupled, deadline=deadline)
+        if not stats.deadline_hit and (deadline is None or time.monotonic() < deadline):
+            self._hybrid_parity_pass(routes, connections, coupled)
+        if not stats.deadline_hit and (deadline is None or time.monotonic() < deadline):
+            self._extra_parity_pass(routes, connections, coupled, deadline=deadline)
         self._hybrid_parity_ctx = []
-        return result
+        return routes, stats
 
     def _route_netset_gateways(
         self,
@@ -8487,6 +8526,7 @@ class LatticePathfinder:
         self,
         connections: list[Connection],
         *,
+        link_history: _LinkSearchHistory | None = None,
         coupled: list[CoupledConnection] | None = None,
         fixed_copper: list[Route] | None = None,
         fixed_clearance: dict[int, float] | None = None,
@@ -8599,7 +8639,8 @@ class LatticePathfinder:
         # Issue #4477: wall-clock the WHOLE negotiation (not just the
         # deadline check) so a report can honestly say "elapsed Xs of a Ys
         # budget" even on a run that never hits the deadline.
-        start_time = time.monotonic()
+        if link_history is None:
+            link_history = _LinkSearchHistory()
         self._set_fixed_copper(fixed_copper, fixed_clearance)
         self.build()
         self.pair_straightened = {}
@@ -8661,8 +8702,8 @@ class LatticePathfinder:
         # a later pass ROUTING the key clears that record, so the cut's
         # restore can only ever revive a decline that is still the key's
         # most recent outcome.
-        attempted_keys: set[object] = set()
-        prior_decline_reasons: dict[object, str] = {}
+        attempted_keys = link_history.attempted
+        prior_decline_reasons = link_history.declines
         # The same two signals scoped to the pass in flight: which keys this
         # pass reached (below) is what lets the fold tell "no entry in this
         # pass's ``reasons`` because it routed" apart from "never reached".
@@ -8675,18 +8716,13 @@ class LatticePathfinder:
             if deadline is not None and time.monotonic() >= deadline:
                 deadline_hit = True
                 # Issue #4477: if NO pass ever ran (the budget was already
-                # spent before the first attempt -- e.g. an extremely tight
+                # spent before this negotiation -- e.g. an extremely tight
                 # budget on a large cohort), ``best_reasons`` would otherwise
                 # stay empty and the caller could not report WHY every link
-                # is unroutable.  Synthesize an honest "never attempted"
-                # decline for each connection so the report is never blank.
+                # is unroutable. Include any searches from earlier retries.
                 if best_count < 0:
                     best_count = 0
-                    for _length, kind, item in items:
-                        key = item.key if kind == 1 else item[0]
-                        best_reasons[key] = "deadline-exceeded"
-                        if kind == 1:
-                            best_pair_outcomes[key] = SegmentOutcome("deadline-exceeded")
+                    link_history.record_cut(items, best_reasons, best_pair_outcomes)
                 break
             iterations_run = it + 1
             committed = self._fresh_committed()
@@ -8896,46 +8932,7 @@ class LatticePathfinder:
                 # slow search inside one pass cannot overrun the budget.
                 if deadline is not None and time.monotonic() >= deadline:
                     deadline_hit = True
-                    # Issue #4477: every connection from here to the end of
-                    # this pass was never attempted -- stamp them honestly as
-                    # "deadline-exceeded" rather than silently omitting them
-                    # from ``reasons`` (which would make an unroutable link
-                    # undiagnosable in the completion report).
-                    for _length2, kind2, item2 in items[_idx:]:
-                        if kind2 == 1 and any(
-                            (item2.key, _pol2) in attempted_keys for _pol2 in ("P", "N")
-                        ):
-                            # Issue #9581 (PR #9603 review): a pair whose
-                            # fallback ever flushed reports per LEG -- the
-                            # flush records each decline under its leg key,
-                            # so stamping the parent pair key here hides the
-                            # legs' latest real outcome behind one
-                            # pair-shaped deadline row.  Stamp each leg: one
-                            # whose most recent outcome is still a decline
-                            # keeps that reason; one last routed successfully
-                            # (the fold below cleared it) takes the deadline
-                            # stamp, exactly like a single net.
-                            for _pol2 in ("P", "N"):
-                                _leg_key2 = (item2.key, _pol2)
-                                reasons[_leg_key2] = prior_decline_reasons.get(
-                                    _leg_key2, "deadline-exceeded"
-                                )
-                            pair_outcomes[item2.key] = SegmentOutcome("deadline-exceeded")
-                            continue
-                        key2 = item2.key if kind2 == 1 else item2[0]
-                        # Issue #9581: a key the search already reached in
-                        # an earlier pass WAS attempted -- keep its most
-                        # recent real decline reason instead of the deadline
-                        # stamp.  ``prior_decline_reasons`` holds a key only
-                        # while its most recent outcome was a decline (the
-                        # fold below clears it the moment a later pass
-                        # routes the key), so a key that routed in an
-                        # earlier pass keeps the stamp: the deadline cutting
-                        # this pass before re-reaching it is then exactly
-                        # why it is missing from the best pass.
-                        reasons[key2] = prior_decline_reasons.get(key2, "deadline-exceeded")
-                        if kind2 == 1:
-                            pair_outcomes[key2] = SegmentOutcome("deadline-exceeded")
+                    link_history.record_cut(items[_idx:], reasons, pair_outcomes)
                     break
                 # Issue #9581: reaching the item here means its search starts
                 # this pass (the deadline check above is the only gate
@@ -9247,7 +9244,7 @@ class LatticePathfinder:
         # remaining time between the deadline and this call's start -- an
         # honest "elapsed of a Ys budget" figure even when the deadline was
         # never reached.  ``None`` when the negotiation ran unbudgeted.
-        budget_s = max(0.0, deadline - start_time) if deadline is not None else None
+        budget_s = max(0.0, deadline - link_history.started) if deadline is not None else None
         # Issue #6373: a fallback pair is two single-ended legs, so it counts
         # as two units in both ``routed`` and ``total``.  ``best_count`` counts
         # a fully-routed fallback pair once; add its second leg, plus every
@@ -9267,6 +9264,8 @@ class LatticePathfinder:
         # for a hybrid must not read as a lost connection to the callers that
         # compare ``routed`` (the #6489 pad-growth rounds, the gateway rollback).
         routed_units += best_hybrid_pairs
+        link_history.elapsed_s = time.monotonic() - link_history.started
+        link_history.deadline_hit |= deadline_hit
         stats = LatticeNegotiationStats(
             iterations=iterations_run,
             converged=converged,
@@ -9274,7 +9273,7 @@ class LatticePathfinder:
             total=len(connections) + len(pairs) + best_fallback_pairs + best_hybrid_pairs,
             lattice_builds=self.lattice_builds,
             deadline_hit=deadline_hit,
-            elapsed_s=time.monotonic() - start_time,
+            elapsed_s=link_history.elapsed_s,
             budget_s=budget_s,
             attempted_keys=frozenset(attempted_keys),
         )
