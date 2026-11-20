@@ -56,6 +56,7 @@ from kicad_tools.router.clearance_kernel import (
     hole_gap,
     make_pad,
     pad_outline,
+    ring_edge_crosses_ray,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -84,6 +85,7 @@ __all__ = [
     "pad_center",
     "pad_outline",
     "pad_shape",
+    "ring_edge_crosses_ray",
     "segment_shape",
     "via_shape",
     "zone_shape",
