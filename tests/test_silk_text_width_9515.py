@@ -5,7 +5,7 @@ plotted stroke-font ink -- badly for wide glyphs and digit runs -- so a pad or
 silk item inside KiCad's ink but outside the box was silently missed by
 ``silk_over_copper`` / ``silk_overlap`` / ``silk_hole_overlap``.  The measured
 advance table in ``silkscreen.py`` replaced it; this file pins the table to the
-measured ink widths.
+measured widths and anchor-relative horizontal ink extents.
 
 Measured numbers come from plotting each probe ``gr_text`` on F.SilkS with
 kicad-cli 10.0.6 (the pinned CI image) and scanning the gerber stroke vertices
@@ -41,11 +41,6 @@ MEASURED_INK = [
     ("A A", 1.0, 0.15, 2.4357),
     # the exactly-tight measured case: '_' ink equals its advance
     ("___", 1.0, 0.15, 2.4357),
-    # trim-decision boundary glyphs as string enders: the trim set is decided
-    # by the last glyph's measured ink (see _MEASURED_SINGLE_GLYPH_INK), so
-    # each boundary glyph is pinned here as a string ender too.  't' (-0.0405)
-    # and 'e' (-0.2310) are the pair whose trim decision the frozenset
-    # originally got backwards (Issue #9515 review).
     ("tttt", 1.0, 0.15, 2.2452),
     ("Test", 1.0, 0.15, 2.9595),
     ("Reset", 1.0, 0.15, 3.9119),
@@ -68,9 +63,7 @@ MEASURED_INK = [
 
 #: Measured plotted ink of each glyph as a single-character string at the
 #: 1.0 mm / 0.15 mm probe (same gerber-scan method as MEASURED_INK).  This is
-#: the raw data the end-trim decision is derived from: with
-#: ``b = ink - advance`` (advance = size * quanta / 21), a glyph is trimmed
-#: iff ``b < -0.10 mm``.  Space is absent -- a lone space plots no ink.
+#: a separate check on aperture and bearing measurements.
 _MEASURED_SINGLE_GLYPH_INK = {
     "A": 0.8167,
     "B": 0.7214,
@@ -166,45 +159,42 @@ def test_box_covers_measured_ink(text, size, thickness, ink):
 
 @pytest.mark.parametrize(("text", "size", "thickness", "ink"), MEASURED_INK)
 def test_box_over_coverage_is_bounded(text, size, thickness, ink):
-    """Guard against the table silently ballooning: box stays within
-    +0.90 mm of the measured ink -- the measured worst case is +0.8624 mm
-    ('MMMM' at 2.0 mm / 0.30 mm) plus 0.04 mm headroom."""
+    """Limit excess box width over the measured horizontal ink span."""
     width = _model_width(text, size, thickness)
-    assert width <= ink + 0.90, (
+    assert width <= ink + 0.011, (
         f"{text!r} box {width:.4f} over-covers measured ink {ink:.4f} "
         "by more than the measured worst case"
     )
 
 
 def test_single_glyph_boxes_cover_measured_ink():
-    """Every measured glyph, plotted alone, sits inside its box: coverage
-    reduces to the last glyph, so this is the per-glyph form of
-    ``test_box_covers_measured_ink``."""
+    """Check model width against every plotted single-glyph width."""
     for glyph, ink in _MEASURED_SINGLE_GLYPH_INK.items():
         width = _model_width(glyph, 1.0, 0.15)
         assert width >= ink - 1e-9, f"{glyph!r} box {width:.4f} < measured ink {ink:.4f}"
 
 
-def test_trim_set_matches_measured_end_ink():
-    """Pin the end-trim set by measurement instead of by prose: a glyph is
-    trimmed iff its measured plotted ink ends more than 0.10 mm short of its
-    advance.  't' (b = -0.0405, untrimmed) and 'e' (b = -0.2310, trimmed)
-    are the boundary pair the set originally got backwards (#9515 review);
-    the shallowest trimmed glyph is -0.1357 and the shallowest untrimmed one
-    is -0.0881, so the -0.10 threshold separates the measured sets with
-    margin on both sides."""
-    for glyph, ink in _MEASURED_SINGLE_GLYPH_INK.items():
-        advance = silk._TEXT_CHAR_ADVANCE_QUANTA[glyph] / 21.0
-        end_gap = ink - advance
-        trimmed = glyph in silk._TEXT_SHORT_INK_END
-        if trimmed:
-            assert end_gap < -0.10, (
-                f"{glyph!r} is trimmed but its ink ends only {end_gap:.4f} short of its advance"
-            )
-        else:
-            assert end_gap >= -0.10, (
-                f"{glyph!r} is untrimmed but its ink ends {end_gap:.4f} short of its advance"
-            )
+@pytest.mark.parametrize(
+    ("text", "size", "thickness", "justify", "ink_left", "ink_right"),
+    [
+        ("L", 1, 0.15, "left", 0.261779, 0.887969),
+        ("_", 1, 0.15, "left", 0.023684, 0.935588),
+        ("_x", 1, 0.15, "right", -1.745113, -0.166542),
+        ("_W", 1, 0.15, "", -1.027381, 0.884524),
+        ("Filter", 0.8, 0.12, "left", 0.209423, 3.186565),
+        ("VBUS", 0.8, 0.12, "right", -3.148471, -0.171329),
+    ],
+)
+def test_placed_box_contains_plotted_horizontal_extent(
+    text, size, thickness, justify, ink_left, ink_right
+):
+    anchor = (50.0, 25.0)
+    box = silk._text_bbox_geometry(
+        text, (size, size), thickness, anchor, justify=(justify,) if justify else ()
+    )
+    assert box is not None
+    assert box.bounds[0] <= anchor[0] + ink_left
+    assert box.bounds[2] >= anchor[0] + ink_right
 
 
 def test_underscore_tight_case_keeps_a_positive_margin():

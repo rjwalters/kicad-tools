@@ -76,11 +76,8 @@ def test_gr_text_bbox_extents_follow_rotation(tmp_path, angle):
     minx, miny, maxx, maxy = geom.bounds
     w, h = maxx - minx, maxy - miny
     long_ = (
-        sum(silk._TEXT_CHAR_ADVANCE_QUANTA[c] for c in "ABCD") / 21.0
-        + 0.15
-        + silk._TEXT_WIDTH_GUARD_MM
-        + silk._TEXT_END_TRIM_MM  # 'ABCD' ends in 'D', a short-ink-end glyph
-    )
+        (81 - 2 - 4) / 21 + 0.15 + 0.01
+    )  # ABCD advance minus end bearings, plus stroke and guard
     short = 1.15
     if angle in (90, 270):
         assert (w, h) == pytest.approx((short, long_))

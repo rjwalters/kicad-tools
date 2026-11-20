@@ -84,21 +84,10 @@ _EPSILON_MM = 1e-4
 #: (Issue #8628; the value the reporter's post-pass used).
 ASSOCIATION_MARGIN_MM = 0.4
 
-#: Extra spacing (mm) the planner adds to pad/silk clearance so a placed
-#: reference clears KiCad's clearance-inflated silk extents, not just plotted
-#: ink.  Measured against ``kicad-cli pcb drc`` on a probe board (10.0.x,
-#: 1 mm / 0.15 mm text beside a 1 mm pad, no clearance): "C22" and "LED4"
-#: both needed 0.225 mm more gap than the *pre-#9515* box model, independent
-#: of text length (Issue #8628).  Since #9515 the box itself covers plotted
-#: ink (measured advance table, 10.0.6 gerber scan), so the slack now
-#: compensates only the DRC extent inflation: re-derived from the same
-#: ``pcb drc`` probe-board measurements -- the 0.120 mm is a DRC-extent gap,
-#: not a gerber-ink gap, and comes from the DRC probes rather than the
-#: plotted-ink scan that measured the advance table -- "C22" still needs
-#: 0.120 mm over the new box and "LED4" needs none, so 0.13 mm keeps the
-#: measured worst case with margin.  Planner-only;
-#: ``kct check`` semantics are unchanged (Issues #8628, #9515).
-KICAD_TEXT_EXTENT_SLACK_MM = 0.13
+#: Planner allowance for KiCad DRC's clearance-inflated text extents. Retain
+#: the 0.225 mm margin established by the C22/LED4 pad probes (#8628).
+#: The Gerber measurements in #9515 calibrate ink extents only.
+KICAD_TEXT_EXTENT_SLACK_MM = 0.225
 
 
 def _iter_npth_apertures(pcb: PCB, mask_clearance_mm: float):

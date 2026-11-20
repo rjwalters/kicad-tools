@@ -97,34 +97,10 @@ from kicad_tools.silkscreen._silk_defaults import (  # noqa: E402
 # F.SilkS with kicad-cli 10.0.6 (the pinned CI image) and scanning the gerber
 # stroke vertices plus the round aperture diameter: for every probed glyph the
 # plotted ink width of a repeated-glyph string is exactly
-# ``(n - 1) * advance + ink``, and all advances are integer quanta.  A
-# string's coverage therefore reduces to its LAST glyph's ``b = ink_1 -
-# advance``, which the single-glyph probes in
-# ``tests/test_silk_text_width_9515.py`` pin for all 74 ink-bearing glyphs
-# (space has no ink of its own).  Against those measured values the model
-# below -- advance sum, plus aperture/guard terms, minus the capped end trim
-# -- covers every glyph at every probed size (0.8/1.0/2.0 mm) with zero
-# violations, including the original 178 probe strings (A-Z, a-z, 0-9,
-# 12 symbols, space; lengths 1-10; thicknesses 0.12/0.15/0.3;
-# centred/left/right, 0/90 deg): it is an over-approximation of plotted
-# ink, which is the direction the box-based silk rules need (over-coverage
-# can only cost a hairline intersection, suppressed by the
-# ``_MIN_*_OVERLAP_AREA*`` gates; under-coverage drops real findings).
-#
-# Tolerance assumptions a future reviewer should know:
-# * ``+ font_thickness`` below models the round aperture that stamps the
-#   stroke endpoints (the box must include the stroke half-width, not just
-#   centerline vertices); ``_TEXT_WIDTH_GUARD_MM`` covers the exactly tight
-#   measured case ('_' ink reaches its full advance plus the aperture) and
-#   KiCad's nanometre rounding of stroke coordinates.
-# * Glyphs outside the measured set (accents, ``@ # $ & * = [ ]`` ...) take
-#   the widest measured advance (``m``) and no end trim; any KiCad-side
-#   widening we did not model (bold double-stroking, italic skew) also widens
-#   real ink, so the defaults err loose, never tight.
-# * Justified text: KiCad starts the ink of a ``(justify left)`` string at or
-#   right of its anchor (measured lead-in +0.26..+0.45 mm), so the box edge at
-#   the anchor and the advance-table width cover both ends of left/right-
-#   justified labels.
+# ``(n - 1) * advance + ink``, and all advances are integer quanta.
+# Advance measures pen travel. The first and last glyphs' side bearings
+# locate the horizontal stroke endpoints inside that travel. The tables
+# describe ordinary single-line stroke text; other fonts/styles are unmeasured.
 _TEXT_CHAR_ADVANCE_QUANTA: dict[str, int] = {
     # uppercase (advance quanta; 'M'/'W' widest at 24)
     "A": 18,
@@ -207,54 +183,31 @@ _TEXT_CHAR_ADVANCE_QUANTA: dict[str, int] = {
     " ": 16,
 }
 #: Advance for glyphs not in the measured set: the widest measured advance
-#: (lowercase ``m``), so unknown/symbol ink stays over-covered.
+#: (lowercase ``m``).
 _TEXT_ADVANCE_DEFAULT_QUANTA = 28
 
-#: Minimum slack the box keeps over plotted ink ('_' ink equals its advance
-#: exactly, so without this guard the box would sit hairline-tight on
-#: underscore-ending strings; it also absorbs KiCad's nanometre rounding of
-#: stroke coordinates).
+# Side bearings (left, right) in size/21 units, from centred single-glyph
+# Gerber extrema after subtracting the round aperture. Unmeasured glyphs
+# keep their entire advance. Allow 0.005 mm at each edge for rounding.
+_TEXT_BEARINGS = {
+    glyph: bearings
+    for bearings, glyphs in (
+        ((4, 5), "adgq"),
+        ((5, 4), "bkpBDEKPR"),
+        ((4, 4), "ceiosCGOS015689!%'.:?"),
+        ((2, 2), "ftATVY/"),
+        ((5, 5), "hmnuHIMNU+-"),
+        ((1, 4), "j"),
+        ((5, 3), "lF("),
+        ((5, 2), "rL"),
+        ((3, 3), "vwxyzWXZ7"),
+        ((3, 5), "J)"),
+        ((4, 3), "Q4"),
+        ((3, 4), "23"),
+    )
+    for glyph in glyphs
+}
 _TEXT_WIDTH_GUARD_MM = 0.01
-
-#: End trim applied when the string's last glyph is one whose measured plotted
-#: ink ends well short of its advance.  Summing full advances over-shoots the
-#: far end of a string by the last glyph's (advance - ink): a box that reaches
-#: pads the real ink clears would raise false ``silk_over_copper`` findings --
-#: the kicad-cli parity fixtures pin this (e.g. "U3"'s reference ink clears its
-#: own end pads by ~0.14 mm, but an untrimmed advance-sum box reached them,
-#: Issue #9515).  The trim is capped at 0.10 mm: deeper trims would spend the
-#: coverage headroom (``font_thickness`` + guard must absorb the <=0.15 mm
-#: string-position wander measured across mixed strings).
-#:
-#: The trim decision is pinned per glyph by measurement, not by prose: the
-#: single-glyph gerber probes in ``tests/test_silk_text_width_9515.py``
-#: measure each glyph's plotted ink ``b = ink_1 - advance`` (at the 1.0 mm /
-#: 0.15 mm probe size), and a glyph is trimmed iff ``b < -0.10 mm`` -- i.e.
-#: its ink ends more than 0.10 mm short of its advance.  Measured ``b`` sits
-#: on the 1/21 mm grid: -0.1357 mm or deeper for every trimmed glyph
-#: (shallowest: ``W X Z v w x y z``) and -0.0881 mm or shallower for every
-#: untrimmed one (shallowest: ``j``), so the -0.10 mm threshold separates the
-#: sets with margin on both sides.  ``t`` (-0.0405) and ``e`` (-0.2310) are
-#: the pair that exposed the original defect: the frozenset exempted ``e``
-#: where ``t`` was meant (Issue #9515 review), trimming ``t`` ink that ends
-#: within 0.04 mm of its advance.  The untrimmed set is exactly the measured
-#: one -- '/' 'A' 'T' 'V' 'Y' 'f' 't' 'j' '_' and space -- underscore ink
-#: reaches its full advance plus the aperture, so trimming it would
-#: under-cover; ``_TEXT_SHORT_INK_END`` below holds the complement (the
-#: trimmed glyphs, whose ink ends *short* of the advance).
-#:
-#: Small-size limit: the trim is a fixed -0.10 mm, but a glyph's
-#: (advance - ink) gap scales with font size.  A single-glyph string's
-#: coverage margin is ``-b_model * size + guard + trim`` (``b_model`` = ``b``
-#: minus the aperture term; ``font_thickness`` cancels), which stays positive
-#: at every probed size (0.8 / 1.0 / 2.0 mm) but reaches break-even around
-#: ~0.32 mm font size for the shallowest trimmed glyph -- unverified below
-#: the smallest pinned probe (0.8 mm).  (KiCad also clamps the plotted
-#: stroke aperture -- a size 1.0 / 0.30 mm thickness probe plots with a
-#: 0.25 mm aperture -- so the ``+ font_thickness`` term can only over-cover
-#: clamped text, never under.)
-_TEXT_END_TRIM_MM = -0.10
-_TEXT_SHORT_INK_END = frozenset("BCDEFGHIJKLMNOPQRSUWXZ0123456789abcdeghiklmnopqrsuvwxyz!%'()+-.:?")
 
 # Floating-point tolerance for clearance comparisons (0.1 micron), matching
 # ``edge.py``'s ``_CLEARANCE_EPSILON_MM``.
@@ -827,16 +780,9 @@ def _text_bbox_geometry(
 ) -> _Geometry | None:
     """Build a shapely box approximating a stroked-text bounding box.
 
-    ``center`` is the text *anchor* in board coordinates -- the box centre for
-    the default (centred) justification.  ``justify`` is the text's
-    ``(justify ...)`` tokens (Issue #9433): ``left`` starts the box at the
-    anchor and extends it along the text direction, ``right`` ends it at the
-    anchor, ``top`` hangs it below the anchor and ``bottom`` stands it above.
-    The offset is applied in the text's own (unrotated) frame and the box is
-    then rotated about the anchor, so rotated justified text lands correctly.
-    ``mirror`` (back-side text) reverses the horizontal direction -- verified
-    against KiCad's plotted output: ``left`` behaves as unmirrored ``right``
-    and vice versa.  ``top``/``bottom`` are unaffected.  ``angle`` is the absolute
+    ``center`` is the board-coordinate text anchor. Side bearings place the
+    ink within the justified run. Mirroring reflects the horizontal interval
+    about the anchor before rotation. ``angle`` is the absolute
     board-frame text angle in KiCad degrees (positive turns toward negative
     board y); the default ``0`` yields the axis-aligned box.  Returns ``None``
     for empty text.
@@ -844,27 +790,27 @@ def _text_bbox_geometry(
     from shapely.affinity import rotate  # type: ignore[import-untyped]
     from shapely.geometry import box
 
-    n = len(text)
-    if n == 0:
+    if not text:
         return None
-    width = (
-        font_size[0]
-        * sum(_TEXT_CHAR_ADVANCE_QUANTA.get(c, _TEXT_ADVANCE_DEFAULT_QUANTA) for c in text)
-        / 21.0
-        + font_thickness
-        + _TEXT_WIDTH_GUARD_MM
-        + (_TEXT_END_TRIM_MM if text[-1] in _TEXT_SHORT_INK_END else 0.0)
+    quantum = font_size[0] / 21.0
+    advance = quantum * sum(
+        _TEXT_CHAR_ADVANCE_QUANTA.get(c, _TEXT_ADVANCE_DEFAULT_QUANTA) for c in text
     )
+    left = quantum * _TEXT_BEARINGS.get(text[0], (0, 0))[0]
+    right = quantum * _TEXT_BEARINGS.get(text[-1], (0, 0))[1]
+    aperture = min(font_thickness, min(font_size) / 4)
+    width = advance - left - right + aperture + _TEXT_WIDTH_GUARD_MM
     height = font_size[1] + font_thickness
     cx, cy = center
-    # Mirrored text swaps left/right (verified against KiCad plots).
-    h_left, h_right = "left", "right"
-    if "mirror" in justify:
-        h_left, h_right = h_right, h_left
-    if h_left in justify:
-        cx += width / 2.0
-    elif h_right in justify:
-        cx -= width / 2.0
+    offset = (left - right) / 2
+    # Plotted left/right strings shift from their centred positions by half
+    # the advance plus 0.6579 aperture diameters (0.098684 mm at 0.15 mm).
+    shift = advance / 2 + 0.6579 * aperture
+    if "left" in justify:
+        offset += shift
+    elif "right" in justify:
+        offset -= shift
+    cx += -offset if "mirror" in justify else offset
     # Board y grows downward: ``top`` anchors the top edge, box extends +y.
     if "top" in justify:
         cy += height / 2.0
