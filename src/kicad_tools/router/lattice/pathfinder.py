@@ -1068,6 +1068,9 @@ class LatticePathfinder:
         self.pair_exempt_added: dict[str, frozenset[int]] = {}
         # Issue #6935: why the last ``_pair_attach`` found no dogleg.
         self._attach_blocker = ""
+        # Issue #9708: landings the last ``_escape_stubs`` call added past the
+        # near scan; declared here so every read/write site shares one type.
+        self._last_far_landings: frozenset[tuple[NodeKey, int]] = frozenset()
         from ..fixed_copper import FixedFillObstacles
 
         self.fixed_fills = FixedFillObstacles()
@@ -2192,7 +2195,7 @@ class LatticePathfinder:
         fat = extra_clearance > 0.0 or partner_net is not None
         # Issue #9708: the landings this call added past the near scan, read
         # back by :meth:`_route_search` to vet their emitted join.
-        self._last_far_landings: frozenset[tuple[NodeKey, int]] = frozenset()
+        self._last_far_landings = frozenset()
 
         stubs = self.pad_stubs(
             pad,
