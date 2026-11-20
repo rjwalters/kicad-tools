@@ -48,16 +48,12 @@ from kicad_tools.router.core import Autorouter
 from kicad_tools.router.cpp_backend import (
     CppGrid,
     CppPathfinder,
-    is_cpp_available,
 )
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import LayerStack
 from kicad_tools.router.rules import DesignRules
 
-requires_cpp = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ router backend not available",
-)
+requires_cpp = pytest.mark.requires_router_cpp
 
 
 def _make_grid_and_rules() -> tuple[RoutingGrid, DesignRules]:

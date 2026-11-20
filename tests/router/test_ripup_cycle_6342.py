@@ -42,7 +42,6 @@ from kicad_tools.router.algorithms.negotiated import (
     TargetedRipupOutcome,
 )
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Route, Segment
 from tests.router.test_negotiated_ripup import (
@@ -375,7 +374,7 @@ def _seal_probe(router: Autorouter) -> tuple[int, int, int]:
     return gx, gy, router.grid.layer_to_index(Layer.B_CU.value)
 
 
-@pytest.mark.skipif(not is_cpp_available(), reason="C++ backend not built")
+@pytest.mark.requires_router_cpp
 @pytest.mark.parametrize("transaction", ["targeted_ripup", "_targeted_ripup_txn"])
 def test_victim_is_retried_with_the_ripped_copper_freed_on_the_cpp_grid(transaction, monkeypatch):
     """The board-05 mechanism: the rip-up must free the copper it rips.
@@ -455,7 +454,7 @@ def test_no_retry_without_an_open_reservation_window():
     assert calls == [1]
 
 
-@pytest.mark.skipif(not is_cpp_available(), reason="C++ backend not built")
+@pytest.mark.requires_router_cpp
 def test_negotiated_run_recovers_when_the_first_net_seals_the_second():
     """AC: two nets that fail in one order and route in the other both land.
 

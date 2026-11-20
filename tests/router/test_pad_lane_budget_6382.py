@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.cpp_backend import CppPathfinder, is_cpp_available, router_cpp
+from kicad_tools.router.cpp_backend import CppPathfinder, router_cpp
 from kicad_tools.router.fine_pitch_escape import detect_fine_pitch_regions
 from kicad_tools.router.pad_lanes import (
     DISABLE_ENV,
@@ -31,7 +31,7 @@ from kicad_tools.router.pad_lanes import (
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules, NetClassRouting
 
-requires_cpp = pytest.mark.skipif(not is_cpp_available(), reason="C++ router backend not available")
+requires_cpp = pytest.mark.requires_router_cpp
 
 # Board 05 U2 geometry: 1.575 x 0.4 mm pads at 0.65 mm pitch.
 PITCH = 0.65

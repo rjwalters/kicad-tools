@@ -56,10 +56,7 @@ from tests.conformance.generator import (
     generate_case,
 )
 
-requires_cpp = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ router backend not available",
-)
+requires_cpp = pytest.mark.requires_router_cpp
 
 # Parity bound on the gap itself.  Pure arithmetic in float64 on both sides,
 # so the only expected difference is last-bit rounding from FMA contraction in

@@ -13,7 +13,10 @@ Covers the emitter (``kicad_tools.creepage.export_rules``) and the
   and re-emit is byte-idempotent;
 * emitted rules parse back via the DRU importer (``mfr_dru``);
 * the emitted board is clean under ``kicad-cli pcb drc`` when available
-  (skipped otherwise), and an intentionally-close pair is flagged.
+  (skipped otherwise), and an intentionally-close pair is flagged;
+* on the pinned kicad-cli (required -- a missing one fails), a swinging
+  domain's same-netclass rule flags two distinct nets inside it and never a
+  net against its own copper (#9712).
 """
 
 from __future__ import annotations
@@ -677,3 +680,148 @@ def _load_board(PCB, source):
         return PCB.load(path)
     finally:
         path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# kicad-cli referee: the same-netclass clause of a swinging domain (#9712)
+# ---------------------------------------------------------------------------
+
+#: Name of the clause #9659 emits for a domain whose own interval spans
+#: >= hv_threshold: both sides are the same netclass.
+_SELF_RULE = "kct_creepage_kct_m150Vto150V_vs_kct_m150Vto150V"
+
+#: ``_HEADER`` with the net table swapped for the two swinging nets.
+_SWING_HEADER = _HEADER[: _HEADER.index("  (net 1 ")] + '  (net 1 "LINE")\n  (net 2 "F1")\n'
+
+
+def _swinging_domain_board(f1_y: float) -> str:
+    """LINE and F1, both swinging [-150, +150] V, on separate footprints.
+
+    ``P1`` carries two LINE pads at 2 mm pitch (1 mm copper gap) joined by a
+    LINE track, plus a LINE stub track running up past pad 2 (1.375 mm
+    track-to-pad gap): every LINE-LINE spacing is far below the 3.2 mm the
+    domain's self-rule demands, so any same-net enforcement would show here.
+    ``P2`` carries the lone F1 pad directly below LINE pad 1; *f1_y* sets the
+    LINE-F1 copper gap (``f1_y - 110 - 1``).  The two nets never share a
+    footprint, so no bridging-footprint exemption applies.
+    """
+    parts = [_SWING_HEADER, _OUTLINE]
+    parts.append(_footprint("P1", 110, 110, [("1", 1, "LINE", 0, 0), ("2", 1, "LINE", 2, 0)]))
+    parts.append(_footprint("P2", 110, f1_y, [("1", 2, "F1", 0, 0)]))
+    parts.append('  (segment (start 110 110) (end 112 110) (width 0.25) (layer "F.Cu") (net 1))\n')
+    parts.append('  (segment (start 110 110) (end 110 104) (width 0.25) (layer "F.Cu") (net 1))\n')
+    parts.append(")\n")
+    return "".join(parts)
+
+
+def _pinned_kicad_cli() -> str:
+    """The pinned kicad-cli; a hard failure (never a skip) when it is absent.
+
+    CI's Test job runs inside the pinned image (native 10.0.6); locally
+    ``KCT_KICAD_DOCKER=1`` makes the session fixture route ``find_kicad_cli``
+    through that image.  Any other answer fails: the question this test
+    answers is what *that* release's DRC does with the emitted rule.
+    """
+    from kicad_tools.cli.kicad_toolchain import PINNED_KICAD_VERSION
+
+    binary = find_kicad_cli()
+    if binary is None:
+        pytest.fail(
+            f"pinned kicad-cli {PINNED_KICAD_VERSION} not found (CI's Test job has it "
+            "natively; locally set KCT_KICAD_DOCKER=1 to route through the pinned image)"
+        )
+    try:
+        answer = subprocess.run(
+            [str(binary), "--version"], capture_output=True, text=True, timeout=600
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        pytest.fail(f"pinned kicad-cli at {binary} is unusable: {exc!r}")
+    if answer.returncode != 0 or PINNED_KICAD_VERSION not in answer.stdout:
+        pytest.fail(
+            f"kicad-cli at {binary} is not the pinned {PINNED_KICAD_VERSION} "
+            f"(rc={answer.returncode}, stdout={answer.stdout.strip()!r}); set "
+            "KCT_KICAD_DOCKER=1 to route through the pinned image"
+        )
+    return str(binary)
+
+
+def _item_net(item: dict) -> str | None:
+    """The net a DRC report item names, from its ``[<net>]`` description tag."""
+    desc = item.get("description", "")
+    for net in ("LINE", "F1"):
+        if f"[{net}]" in desc:
+            return net
+    return None
+
+
+def _clearance_findings(report: dict) -> list[tuple[str, list[str | None], list[str]]]:
+    """``(description, item nets, item descriptions)`` per clearance finding."""
+    out = []
+    for violation in report.get("violations", []):
+        if violation.get("type") != "clearance":
+            continue
+        items = violation.get("items", [])
+        out.append(
+            (
+                violation.get("description", ""),
+                [_item_net(i) for i in items],
+                [i.get("description", "") for i in items],
+            )
+        )
+    return out
+
+
+@pytest.mark.pr_required
+def test_pinned_kicad_cli_enforces_self_rule_between_distinct_nets_only(tmp_path):
+    """#9712: the same-netclass clause gates LINE<->F1, never LINE<->LINE.
+
+    Both nets swing [-150, +150] V and share the ``kct_m150Vto150V`` domain,
+    so #9659 emits a clause whose two sides are that one netclass (3.2 mm).
+    KiCad's ``clearance`` constraint applies between items on different nets;
+    this pins that on the pinned kicad-cli instead of assuming it: a 1.5 mm
+    LINE-F1 gap is flagged *by that rule*, a 4.5 mm gap is not, and the
+    1 mm / 1.375 mm LINE-LINE spacings are never flagged in either layout.
+    """
+    from kicad_tools.cli.runner import run_drc
+
+    _pinned_kicad_cli()  # hard-fails unless the pinned binary answers
+
+    pro = tmp_path / "swing.kicad_pro"
+    save_project(create_minimal_project("swing.kicad_pro"), pro)
+    pcb = tmp_path / "swing.kicad_pcb"
+    pcb.write_text(_swinging_domain_board(f1_y=112.5))
+    vmap = tmp_path / "voltages.json"
+    vmap.write_text(
+        json.dumps({"LINE": {"min": -150, "max": 150}, "F1": {"min": -150, "max": 150}})
+    )
+    assert _run(["creepage-export-rules", str(pro), "--voltage-map", str(vmap)]) == 0
+    dru = (tmp_path / "swing.kicad_dru").read_text()
+    assert f'(rule "{_SELF_RULE}"' in dru
+    assert "(constraint clearance (min 3.2mm))" in dru
+
+    def _drc(name: str, f1_y: float) -> list[tuple[str, list[str | None], list[str]]]:
+        pcb.write_text(_swinging_domain_board(f1_y))
+        report = tmp_path / f"drc_{name}.json"
+        result = run_drc(
+            pcb, output_path=report, format="json", schematic_parity=False, refill_zones=True
+        )
+        assert report.exists(), f"kicad-cli wrote no report ({name}): {result.stderr}"
+        return _clearance_findings(json.loads(report.read_text()))
+
+    near = _drc("near", f1_y=112.5)  # LINE-F1 copper gap 1.5 mm: floor < 1.5 < 3.2
+    far = _drc("far", f1_y=115.5)  # LINE-F1 copper gap 4.5 mm: beyond 3.2
+
+    # Never a clearance finding between two LINE items (own pad/own track).
+    for name, findings in (("near", near), ("far", far)):
+        same_net = [f for f in findings if f[1] == ["LINE", "LINE"]]
+        assert not same_net, f"{name}: same-net clearance finding(s): {same_net}"
+
+    line_f1_near = [f for f in near if sorted(n or "" for n in f[1]) == ["F1", "LINE"]]
+    assert line_f1_near, f"near: no LINE<->F1 clearance finding; clearance findings: {near}"
+    assert all(_SELF_RULE in desc for desc, _nets, _items in line_f1_near), line_f1_near
+
+    line_f1_far = [f for f in far if sorted(n or "" for n in f[1]) == ["F1", "LINE"]]
+    assert not line_f1_far, f"far: LINE<->F1 still flagged beyond 3.2 mm: {line_f1_far}"
+    # Nothing else is a clearance finding on this board at all.
+    assert len(near) == len(line_f1_near), near
+    assert not far, far

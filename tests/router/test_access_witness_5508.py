@@ -33,7 +33,6 @@ from kicad_tools.router.access_witness import (
     CommitRecord,
 )
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
@@ -683,7 +682,7 @@ class TestSidecar:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not is_cpp_available(), reason="C++ backend not built")
+@pytest.mark.requires_router_cpp
 class TestBackendParity:
     def test_initial_pass_journal_order_matches_across_backends(self):
         """The journal is backend-agnostic: commits are Python-side either way.

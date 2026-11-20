@@ -14,7 +14,7 @@ import pytest
 from shapely.geometry import LineString, Point, Polygon, box
 from shapely.ops import unary_union
 
-from kicad_tools.router.cpp_backend import is_cpp_available
+from tests.conftest import require_router_cpp
 
 # Pad-local primitive extents (mm). The pad sits at board (108, 108) with a
 # 0.4 x 0.4 rect anchor, so board coverage is x 107.8..108.2 with a slot at
@@ -27,8 +27,8 @@ SLOT = (104.1, 105.5)
 @pytest.fixture(autouse=True)
 def optional_native(request):
     params = getattr(getattr(request.node, "callspec", None), "params", {})
-    if (params.get("native") or params.get("strategy") == "mesh") and not is_cpp_available():
-        pytest.skip("Native routing backend is optional")
+    if params.get("native") or params.get("strategy") == "mesh":
+        require_router_cpp()
 
 
 def poly(corners, *, width=0, fill="yes", tag="gr_poly"):
@@ -820,6 +820,7 @@ def test_pinned_board_custom_pad_is_fixed_copper():
     assert hashlib.sha256(PINNED_BOARD.read_bytes()).hexdigest() == before
 
 
+@pytest.mark.requires_router_cpp
 def test_concave_neighbour_space_survives_and_multipolygon_reaches_native(tmp_path):
     arm = poly((0.2, -2.5, 3.0, -2.1))
     path = write_board(
@@ -830,8 +831,6 @@ def test_concave_neighbour_space_survives_and_multipolygon_reaches_native(tmp_pa
     notch = Polygon([(108.4, 106.0), (111.0, 106.0), (111.0, 107.0), (108.4, 107.0)])
     assert fills[0].geometry.intersection(notch).area == 0
     assert router.grid.fixed_fills.segment_clear((108.6, 106.5), (110.8, 106.5), 0, 0.1, 0.2)
-    if not is_cpp_available():
-        return
     from kicad_tools.router.cpp_backend import CppGrid
 
     native = CppGrid.from_routing_grid(router.grid)._impl

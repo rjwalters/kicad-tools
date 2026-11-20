@@ -24,7 +24,6 @@ from pathlib import Path
 
 import pytest
 
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.io import load_pcb_for_routing
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.rules import DesignRules
@@ -34,7 +33,7 @@ BACKENDS = [
     pytest.param(
         False,
         id="cpp",
-        marks=pytest.mark.skipif(not is_cpp_available(), reason="C++ backend not built"),
+        marks=pytest.mark.requires_router_cpp,
     ),
 ]
 

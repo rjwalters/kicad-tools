@@ -28,7 +28,7 @@ from kicad_tools.cli.route_cmd import _normalize_deterministic_budget, _route_pa
 from kicad_tools.placement.route_check import deadline_fired
 from kicad_tools.router.algorithms.two_phase import TwoPhaseRouter
 from kicad_tools.router.core import DETERMINISTIC_BUDGET_STAGE_DEADLINE_LINE
-from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.pathfinder import Router
@@ -36,7 +36,7 @@ from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
 from tests.test_route_auto_mfr_tier_integration import _assert_deterministic
 
-requires_cpp = pytest.mark.skipif(not is_cpp_available(), reason="C++ router backend unavailable")
+requires_cpp = pytest.mark.requires_router_cpp
 
 
 def _rules() -> DesignRules:

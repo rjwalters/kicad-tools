@@ -37,15 +37,12 @@ import pytest
 
 from kicad_tools.core.types import CopperLayer as Layer
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.diffpair_routing import CoupledPathfinder, DiffPairRouter
 from kicad_tools.router.layers import LayerStack
 from kicad_tools.router.primitives import Route, Segment
 from kicad_tools.router.rules import DesignRules
 
-requires_cpp = pytest.mark.skipif(
-    not is_cpp_available(), reason="group 7 lives in the C++ extension (uv run kct build-native)"
-)
+requires_cpp = pytest.mark.requires_router_cpp
 
 # One rule set for both sides, so the two constructions below are the same
 # board seen from two languages.

@@ -21,7 +21,7 @@ import math
 
 import pytest
 
-from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
 from kicad_tools.router.diffpair_routing import CoupledPathfinder, CoupledState, GridPos
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
@@ -30,7 +30,7 @@ from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
 
-requires_cpp = pytest.mark.skipif(not is_cpp_available(), reason="C++ backend not available")
+requires_cpp = pytest.mark.requires_router_cpp
 
 #: Board 05 EN_A: centres 0.761 mm apart, 0.3 mm drills -> 0.461 mm edge gap.
 EN_A_VIA_1 = (147.74, 98.77)
