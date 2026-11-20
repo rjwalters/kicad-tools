@@ -15,6 +15,7 @@ project:
     programmatic schematic generation with kicad-tools.
   artifacts:
     schematic: "output/stm32_devboard.kicad_sch"
+    pcb_routed: "output/stm32_devboard_routed.kicad_pcb"
 
 intent:
   summary: |
