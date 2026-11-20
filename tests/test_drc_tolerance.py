@@ -115,6 +115,9 @@ class MockPCB:
     def segments_on_layer(self, layer_name):
         return [s for s in self.segments if s.layer == layer_name]
 
+    def arcs_on_layer(self, layer_name):
+        return []
+
     def get_net(self, number):
         return self._nets.get(number)
 

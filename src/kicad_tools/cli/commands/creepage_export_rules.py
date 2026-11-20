@@ -64,6 +64,7 @@ def run_creepage_export_rules_command(args) -> int:
     from kicad_tools.creepage.export_rules import (
         apply_netclass_assignments,
         build_export,
+        interval_json,
         merge_dru_block,
         render_dru_block_body,
     )
@@ -126,9 +127,11 @@ def run_creepage_export_rules_command(args) -> int:
     except (TypeError, ValueError) as e:
         return _fail(as_json, str(project_path), f"invalid voltage-map structure: {e}")
 
-    # Collapse each net's interval to its worst-case magnitude (the domain model
-    # is magnitude-only, matching placement's load_voltage_map).
-    voltage_map = {name: max(abs(iv.lo), abs(iv.hi)) for name, iv in intervals.items()}
+    # Pass each net's parsed closed interval through UNCOLLAPSED (#9659): the
+    # domain model differences intervals end-to-end, so opposite-polarity and
+    # swinging nets no longer share a magnitude domain (the pre-#9659
+    # ``max(|lo|, |hi|)`` collapse held those pairs at the DRU floor).
+    voltage_map = {name: (iv.lo, iv.hi) for name, iv in intervals.items()}
 
     if not pcb_path.exists():
         return _fail(
@@ -181,7 +184,7 @@ def run_creepage_export_rules_command(args) -> int:
             "material_group": getattr(args, "material_group", "IIIa") or "IIIa",
             "hv_threshold_v": getattr(args, "hv_threshold", 30.0),
             "dru_floor_mm": plan.dru_floor_mm,
-            "domains": dict(plan.domain_voltages),
+            "domains": {d: interval_json(*iv) for d, iv in plan.domain_voltages.items()},
             "nets_assigned": len(plan.net_domains),
             "net_domains": dict(plan.net_domains),
             "rules": [
@@ -250,6 +253,8 @@ def _project_min_clearance(project_data: dict) -> float:
 
 
 def _print_summary(plan, project_path: Path, pcb_path: Path, dru_path: Path) -> None:
+    from kicad_tools.creepage.export_rules import interval_label
+
     print("kct creepage-export-rules")
     print(f"  Project: {project_path}")
     print(f"  Board:   {pcb_path}")
@@ -257,7 +262,9 @@ def _print_summary(plan, project_path: Path, pcb_path: Path, dru_path: Path) -> 
     print(f"  DRU clearance floor: {plan.dru_floor_mm:g} mm")
     print(
         f"  Voltage domains ({len(plan.domain_voltages)}): "
-        + ", ".join(f"{d}={plan.domain_voltages[d]:g}V" for d in sorted(plan.domain_voltages))
+        + ", ".join(
+            f"{d}={interval_label(*plan.domain_voltages[d])}" for d in sorted(plan.domain_voltages)
+        )
     )
     print(f"  Nets assigned: {len(plan.net_domains)}")
     if plan.rules:
