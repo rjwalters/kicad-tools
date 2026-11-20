@@ -22,8 +22,8 @@ is the batch form for items the agent computed itself:
   layers); the report counts them separately
   (``items_written`` / ``items_skipped_as_duplicate``) instead of claiming
   every proposed item was written (issue #9674).  A via's size and drill
-  are outside its key, so a via proposed at a position held by a via of a
-  different size or drill is not a duplicate: it is not written, is counted
+  are outside its key, so a skipped via with no size and drill match at its
+  key is a conflict: it is not written, is counted
   under ``items_skipped_conflicting``, and the text output names the
   existing size/drill.  Arcs have no dedupe path; each successful apply
   appends them again.
@@ -406,9 +406,6 @@ def _append_for_check(pcb: Any, items: list[ProbeItem]) -> dict[str, set[int]]:
     return descriptors
 
 
-_VIA_DIM_QUANT = 3  # decimals compared for via size/drill; schema.pcb's dedupe quantum (~1 um)
-
-
 def _append_for_write(pcb: Any, items: list[ProbeItem]) -> tuple[int, int, list[str]]:
     """Append every item to *pcb* as real board nodes (segments, vias, arcs).
 
@@ -418,8 +415,8 @@ def _append_for_write(pcb: Any, items: list[ProbeItem]) -> tuple[int, int, list[
     segment; net, position and layers for a via -- is already on the board,
     and apply's report counts those separately from written items instead of
     claiming every proposed item was written.  A via's size and drill are
-    outside its key, so a via proposed at a position held by a via of a
-    different size or drill is not a duplicate: the copper the batch asked
+    outside its key, so a skipped via with no size and drill match at its
+    key is a conflict: the copper the batch asked
     for is not on the board, the item is not written, and *conflicting_vias*
     carries one line per such via naming the existing and requested
     size/drill.  Arcs have no dedupe path, so every successful apply appends
@@ -435,25 +432,25 @@ def _append_for_write(pcb: Any, items: list[ProbeItem]) -> tuple[int, int, list[
     conflicting: list[str] = []
     for item in items:
         if item.kind == "via":
-            existing = pcb.find_via(*rel(item.at), layers=item.layers, net=item.net)
-            if existing is not None and (
-                round(existing.size, _VIA_DIM_QUANT) != round(item.size, _VIA_DIM_QUANT)
-                or round(existing.drill, _VIA_DIM_QUANT) != round(item.drill, _VIA_DIM_QUANT)
-            ):
-                conflicting.append(
-                    f"via for net {item.net} at ({item.at[0]:.3f}, {item.at[1]:.3f}) "
-                    f"not written: board has size {existing.size:g} / drill "
-                    f"{existing.drill:g} there, batch asked size {item.size:g} / "
-                    f"drill {item.drill:g}"
-                )
-                continue
+            position = rel(item.at)
             via = pcb.add_via(
-                *rel(item.at), size=item.size, drill=item.drill, layers=item.layers, net=item.net
+                *position, size=item.size, drill=item.drill, layers=item.layers, net=item.net
             )
-            if via is None:
+            if via is not None:
+                written += 1
+                continue
+
+            candidates = pcb.find_vias(*position, layers=item.layers, net=item.net)
+            if any(v.size == item.size and v.drill == item.drill for v in candidates):
                 skipped += 1
             else:
-                written += 1
+                existing = candidates[0]
+                conflicting.append(
+                    f"via for net {item.net} at ({item.at[0]:.3f}, {item.at[1]:.3f}) "
+                    f"not written: board has size {existing.size} / drill "
+                    f"{existing.drill} there, batch asked size {item.size} / "
+                    f"drill {item.drill}"
+                )
         elif item.kind == "arc":
             assert item.mid is not None
             pcb.add_arc(
@@ -633,8 +630,8 @@ def apply_items_checked(
     nothing written either way).  On success the report carries
     ``items_written`` and ``items_skipped_as_duplicate`` (issue #9674): items
     whose dedupe key was already on the board are skipped by dedupe, and the
-    report says so instead of counting them as written.  A via proposed at a
-    position held by a via of a different size or drill is not a duplicate
+    report says so instead of counting them as written.  A skipped via conflicts if none of
+    the vias sharing its key has the requested size and drill
     (size and drill are outside the via dedupe key): it is not written, and
     is counted under ``items_skipped_conflicting`` with one explanatory line
     per via in ``conflicting_via_details``.

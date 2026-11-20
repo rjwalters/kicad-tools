@@ -785,8 +785,8 @@ or `null`), and `items_written` / `items_skipped_as_duplicate` — an item
 whose dedupe key is already on the board (net, layer, unordered endpoints and
 width for a segment; net, position and layers for a via) is skipped by dedupe
 and counted as skipped, never as written (Issue #9674). A via's size and
-drill are outside its key: a via proposed at a position held by a via of a
-different size or drill is not a duplicate, is not written, and is counted
+drill are outside its key: a skipped via counts as a duplicate if any via sharing the key
+has the requested size and drill. Otherwise the skipped via is counted
 under `items_skipped_conflicting` with one explanatory line per via in
 `conflicting_via_details`. Arcs have no dedupe path; each successful apply
 appends them again and counts each copy as written.

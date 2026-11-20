@@ -1985,10 +1985,9 @@ the batch asked for is there. The report distinguishes them:
 that says how many were skipped, so an all-duplicate batch reports `wrote 0
 item(s)` instead of claiming a write that did not happen (Issue #9674).
 
-A via's size and drill are **outside** its dedupe key. A via proposed at a
-position already held by a via of a different size or drill is therefore
-not a duplicate — the copper the batch asked for is *not* on the board.
-Such an item is not written, is counted separately under
+A via's size and drill are **outside** its dedupe key. A skipped via counts as a
+duplicate if any via sharing its key has the requested size and drill.
+Otherwise it is not written, is counted separately under
 `items_skipped_conflicting`, and the text output names the existing and
 requested size/drill, so an agent that (say) upsizes a via cannot read the
 report as success. Arcs have no deduplication path: each successful apply

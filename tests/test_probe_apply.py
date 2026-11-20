@@ -549,7 +549,10 @@ class TestApplyChecked:
         assert "wrote 0 item(s)" in captured.out
         assert "skipped 1 item(s) already on the board" in captured.out
 
-    def test_apply_via_size_mismatch_is_conflicting_not_duplicate(self, via_board, capsys):
+    @pytest.mark.parametrize(("size", "drill"), [(1.2, 0.6), (0.6004, 0.3), (0.6, 0.3004)])
+    def test_apply_via_size_mismatch_is_conflicting_not_duplicate(
+        self, via_board, capsys, size, drill
+    ):
         # Issue #9674 review: a via's dedupe key is net, position and layers
         # only -- size and drill are outside it -- so a 1.2/0.6 request at a
         # 0.6/0.3 via's position is a position collision, not a duplicate.
@@ -561,7 +564,7 @@ class TestApplyChecked:
             str(
                 _items_file(
                     via_board.parent,
-                    {"type": "via", "net": "FOE", "at": [120, 110], "size": 1.2, "drill": 0.6},
+                    {"type": "via", "net": "FOE", "at": [120, 110], "size": size, "drill": drill},
                 )
             ),
             "--checked",
@@ -573,7 +576,7 @@ class TestApplyChecked:
         assert doc["items_skipped_as_duplicate"] == 0
         assert doc["items_skipped_conflicting"] == 1
         (detail,) = doc["conflicting_via_details"]
-        assert "0.6" in detail and "1.2" in detail
+        assert f"batch asked size {size} / drill {drill}" in detail
         # The board keeps the original via: nothing was up-sized.
         reloaded = PCB.load(str(via_board))
         (via,) = reloaded.vias
@@ -601,6 +604,49 @@ class TestApplyChecked:
         assert doc["items_skipped_as_duplicate"] == 1
         assert doc["items_skipped_conflicting"] == 0
         assert doc["conflicting_via_details"] == []
+
+    @pytest.mark.parametrize("match_first", [False, True])
+    def test_apply_duplicate_among_colocated_vias(self, tmp_path, capsys, match_first):
+        small = next(line for line in VIA_BOARD.splitlines() if line.startswith("  (via "))
+        large = small.replace("(size 0.6) (drill 0.3)", "(size 1.2) (drill 0.6)").replace(
+            '020"))', '021"))'
+        )
+        vias = [large, small] if match_first else [small, large]
+        board = _write_board(tmp_path, VIA_BOARD.replace(small, "\n".join(vias)))
+        item = {"type": "via", "net": "FOE", "at": [120, 110], "size": 1.2, "drill": 0.6}
+        rc, doc = _run(
+            capsys,
+            "apply",
+            str(board),
+            str(_items_file(tmp_path, item)),
+            "--checked",
+            "--format",
+            "json",
+        )
+        assert rc == 0
+        assert doc["items_written"] == 0
+        assert doc["items_skipped_as_duplicate"] == 1
+        assert doc["items_skipped_conflicting"] == 0
+        assert len(PCB.load(str(board)).vias) == 2
+
+    def test_append_new_vias_computes_one_key_per_via(self, board, monkeypatch):
+        from unittest.mock import Mock
+
+        from kicad_tools.schema import pcb
+
+        loaded = PCB.load(str(board))
+        key = Mock(wraps=pcb._via_dedup_key)
+        monkeypatch.setattr(pcb, "_via_dedup_key", key)
+        items = parse_items(
+            {
+                "items": [
+                    {"type": "via", "net": "FOE", "at": [120, y], "size": 0.6, "drill": 0.3}
+                    for y in range(100, 200)
+                ]
+            }
+        )
+        assert _append_for_write(loaded, items) == (len(items), 0, [])
+        assert key.call_count == len(items)
 
     def test_apply_text_output_names_existing_via_size(self, via_board, capsys):
         rc = main(
