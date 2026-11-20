@@ -115,6 +115,14 @@ _ViaChain = tuple[Pt, Any] | None
 # widens the candidate set, never the copper.
 _OVERSIZE_STUB_KMAX = 4096
 
+# Issue #9708: state budget for :meth:`LatticePathfinder._pad_band_sealed`, the
+# bounded walk that decides whether a pad's stub landings are sealed inside the
+# own-net slit-band shell.  The walk only ever explores the shell (nodes clear
+# of every own-net pad's ``(half + edge)`` shell end it immediately), so a few
+# hundred states cover the tightest refined cloud; an exhausted budget reports
+# the pad unsealed (conservative -- the far-escape pass then never runs).
+_BAND_SEALED_ESCAPE_BUDGET = 512
+
 # Decline reasons ``_route_impl`` returns when its A* actually RAN and was
 # exhausted (issues #6373, #4605, #4979), and the pair-segment reasons that
 # earn one fan-via gateway retry (issue #6444).  Both now live with the rest
@@ -1671,6 +1679,7 @@ class LatticePathfinder:
         partner_net: int | None = None,
         layers: tuple[int, ...] | None = None,
         exempt_pads: frozenset[int] | None = None,
+        min_landing_gap_mm: float | None = None,
     ) -> list[tuple[NodeKey, int, list[Pt], float]]:
         """Candidate scan for :meth:`pad_stubs` at an EXPLICIT ``(half, clr)``.
 
@@ -1678,6 +1687,15 @@ class LatticePathfinder:
         re-run the identical clearance-checked dogleg search at a narrower
         neck half-width and a wider fan without duplicating the reject-and-
         retry body.
+
+        ``min_landing_gap_mm`` (issue #9708) filters the LANDING node, not
+        the legs: a candidate is accepted only when its landing point keeps
+        that detection edge from every own-net SMD pad
+        (:meth:`LatticeObstacleModel.same_net_pad_band_point_clear`).  The
+        band-sealed far-escape pass uses it to skip the near cloud that sits
+        inside the pad's own ``(union, band)`` shell and collect landings a
+        straight exit threads out through.  ``None`` (every existing caller)
+        keeps the scan byte-identical.
         """
         lattice = self.build()
         obstacles = self.obstacles
@@ -1754,6 +1772,15 @@ class LatticePathfinder:
                     if ko is not None and ko.segment_blocked(point, point, layer, net, half):
                         continue
                     if not committed.node_clear(point, layer, net, half, clr):
+                        continue
+                    # Issue #9708: the far-escape pass wants landings outside
+                    # every own-net pad's band shell, not the nearest cloud.
+                    if (
+                        min_landing_gap_mm is not None
+                        and not obstacles.same_net_pad_band_point_clear(
+                            point, layer, net, half, min_landing_gap_mm
+                        )
+                    ):
                         continue
                 accepted: list[Pt] | None = None
                 # Fat mode prefers the axis-first dogleg: its first leg is
@@ -1866,6 +1893,13 @@ class LatticePathfinder:
         are returned unchanged, so the outcome is never worse than before.
         Stub sets with egress (every connection that routed before) are
         returned byte-identically.
+
+        Issue #9708 extends the #6381 lesson one horizon out: a stub set with
+        one-edge egress whose every landing is nonetheless sealed inside the
+        own-net slit-band shell (see :meth:`_pad_band_sealed`) gains
+        supplementary far landings (:meth:`_band_sealed_far_stubs`) instead
+        of deadlocking the A* in the shell.  Unsealed pads are returned
+        byte-identically.
         """
         body_w = getattr(net_class, "trace_width", None) or self.rules.trace_width
         full_half, clr = self._conn_geometry(net_class, net)
@@ -1905,6 +1939,36 @@ class LatticePathfinder:
                 )
                 for stub in stubs
             ):
+                # Issue #9708: egress one edge out of the landing is not
+                # escape -- on a tight pad the whole near cloud sits inside
+                # the own-net ``(union, band)`` shell, every outgoing body
+                # edge is band-interior per-edge (a straight exit SUBDIVIDED
+                # into lattice edges changes the two-region verdict) and vias
+                # are via-in-pad, so the search deadlocks ``no-path`` on
+                # copper the validator accepts.  A pad whose stubs are so
+                # sealed gains far landings that thread out through the
+                # shell; unsealed pads keep their stub set byte-identical.
+                if self._pad_band_sealed(
+                    stubs,
+                    net,
+                    committed,
+                    full_half,
+                    clr,
+                    net_class=net_class,
+                    allow_vias=allow_vias,
+                    via_in_pad_override=via_in_pad_override,
+                ):
+                    stubs = self._band_sealed_far_stubs(
+                        pad,
+                        net,
+                        committed,
+                        stubs,
+                        full_half,
+                        clr,
+                        kmax=kmax,
+                        layers=layers,
+                        exempt_pads=exempt_pads,
+                    )
                 return stubs, body_w
             dead_end = stubs
         else:
@@ -2172,6 +2236,144 @@ class LatticePathfinder:
                 clearance=clr if net_class is not None else None,
             )
         )
+
+    def _pad_band_sealed(
+        self,
+        stubs: Sequence[tuple[NodeKey, int, list[Pt], float]],
+        net: int,
+        committed: CommittedCopper | None,
+        half: float,
+        clr: float,
+        *,
+        net_class: object | None = None,
+        allow_vias: bool = True,
+        via_in_pad_override: bool | None = None,
+    ) -> bool:
+        """True when no legal leg or via from any stub landing leaves the band shell.
+
+        Issue #9708: ``_stub_has_egress`` sees one edge out of the landing;
+        on a tight pad that edge only hops deeper into the refined node
+        cloud, whose every outgoing body edge sits in the open
+        ``(0, same_net_pad_gap_band_edge_mm)`` slit band of the pad's OWN
+        escape (a straight pad exit is validator-clean as one segment -- the
+        swept copper unions the pad -- but each lattice SUBDIVISION of it is
+        band-interior judged alone, and the #9517 collinear ride only covers
+        the first leg out of the stub).  This probe walks the same predicates
+        the A* expands with (:meth:`_body_edge_legal` / :meth:`_body_node_legal`
+        / :meth:`_via_ok`, the #6381 no-drift contract) from the accepted
+        stub landings and reports the pad SEALED when neither a node clear of
+        every own-net SMD pad's ``(half + edge)`` shell nor a legal via is
+        reachable.  The walk is bounded by ``_BAND_SEALED_ESCAPE_BUDGET``
+        states; an exhausted budget reports unsealed (conservative -- a big
+        reachable region is exactly the unsealed case).  ``edge_mm <= 0``
+        (guard off) is never sealed.
+        """
+        edge_mm = float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
+        if edge_mm <= 0.0:
+            return False
+        if committed is None:
+            committed = self._fresh_committed()
+        lattice = self.build()
+        obstacles = self.obstacles
+        extra = max(0.0, half + clr - self._agent_radius)
+        pw, ko = self._pairwise, self._keepouts
+        boundary = self._escape_boundary
+        seen: set[tuple[NodeKey, int]] = set()
+        frontier: list[tuple[NodeKey, int]] = []
+        for stub in stubs:
+            state = (stub[0], stub[1])
+            if state not in seen:
+                seen.add(state)
+                frontier.append(state)
+        while frontier:
+            if len(seen) > _BAND_SEALED_ESCAPE_BUDGET:
+                return False
+            key, layer = frontier.pop()
+            point = lattice.node_point(key)
+            if obstacles.same_net_pad_band_point_clear(point, layer, net, half, edge_mm):
+                return False
+            if (
+                allow_vias
+                and self.num_layers > 1
+                and self._via_ok(
+                    key,
+                    net,
+                    committed,
+                    via_in_pad_override=via_in_pad_override,
+                    clearance=clr if net_class is not None else None,
+                )
+            ):
+                return False
+            for nbr, _elen in lattice.adj.get(key, ()):
+                edge = (min(key, nbr), max(key, nbr))
+                if not self._body_edge_legal(
+                    edge, layer, net, half, clr, committed, extra=extra, pw=pw, ko=ko
+                )[0]:
+                    continue
+                if not boundary.segment_clear(
+                    lattice.node_point(edge[0]), lattice.node_point(edge[1]), half
+                ):
+                    continue
+                if not self._body_node_legal(
+                    nbr, layer, net, half, clr, committed, extra=extra, pw=pw, ko=ko
+                )[0]:
+                    continue
+                state = (nbr, layer)
+                if state not in seen:
+                    seen.add(state)
+                    frontier.append(state)
+        return True
+
+    def _band_sealed_far_stubs(
+        self,
+        pad: Pad,
+        net: int,
+        committed: CommittedCopper | None,
+        stubs: list[tuple[NodeKey, int, list[Pt], float]],
+        half: float,
+        clr: float,
+        *,
+        kmax: int,
+        layers: tuple[int, ...] | None,
+        exempt_pads: frozenset[int] | None,
+    ) -> list[tuple[NodeKey, int, list[Pt], float]]:
+        """Append far escape landings for a band-sealed pad (issue #9708).
+
+        Re-runs :meth:`_scan_stubs` at the full body width with
+        ``min_landing_gap_mm`` set, so the scan skips the sealed near cloud
+        and collects up to ``kmax`` landings per layer that keep the band
+        detection edge from every own-net SMD pad.  Every dogleg leg passes
+        the unchanged clearance checks: a straight landing stub unions the
+        pad (its first centreline point is inside the outline), so the shell
+        is crossed by CONNECTED copper and the validator sees no slit -- the
+        shape the per-edge band verdict could not express once the exit was
+        subdivided.  Existing landings are kept and the result is deduplicated;
+        the pass never replaces a landing, so the stub set only grows.
+        """
+        edge_mm = float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
+        if edge_mm <= 0.0:
+            return stubs
+        lattice = self.build()
+        radius = max(3.0 * lattice.fine + max(pad.width, pad.height), 2.0) + edge_mm
+        far = self._scan_stubs(
+            pad,
+            net,
+            committed,
+            half,
+            clr,
+            kmax=kmax,
+            search_radius=radius,
+            layers=layers,
+            exempt_pads=exempt_pads,
+            min_landing_gap_mm=edge_mm,
+        )
+        have = {(stub[0], stub[1]) for stub in stubs}
+        out = list(stubs)
+        for stub in far:
+            if (stub[0], stub[1]) not in have:
+                have.add((stub[0], stub[1]))
+                out.append(stub)
+        return out
 
     def _keepout_escape_reason(
         self,

@@ -585,6 +585,102 @@ def test_stub_egress_rides_attach_at_the_stubs_emitted_width() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Issue #9708: a pad sealed inside its own band shell gains far landings
+# ---------------------------------------------------------------------------
+
+
+def test_point_clear_form_of_the_band_guard() -> None:
+    # The point companion of the predicate's CLEAR region only: a node that
+    # unions the pad (inside it, or on its outline) is NOT clear -- the
+    # sealed-pad probe must not mistake a landing inside the pad's own
+    # copper for ground the search can escape to.
+    pf = _pf([_pad(0.0, 0.0)])
+    pf.build()
+    obs = pf.obstacles
+    assert not obs.same_net_pad_band_point_clear((0.0, 0.0), 0, 1, HALF, EDGE)
+    assert not obs.same_net_pad_band_point_clear((0.2, 0.0), 0, 1, HALF, EDGE)
+    assert not obs.same_net_pad_band_point_clear((0.0, -0.5), 0, 1, HALF, EDGE)
+    assert obs.same_net_pad_band_point_clear((0.0, -0.6), 0, 1, HALF, EDGE)
+    # The guard off keeps everything clear, exactly like the leg form.
+    assert obs.same_net_pad_band_point_clear((0.0, 0.0), 0, 1, HALF, 0.0)
+
+
+def test_sealed_pad_escape_gains_far_landings_and_routes() -> None:
+    # Two 0.4 mm same-net pads on a 0.1 mm lattice: the near escape stubs
+    # land inside the pad's own (union, band) shell and every outgoing body
+    # edge of the refined cloud is band-interior per-edge -- the straight
+    # pad exit a single segment would legalise (its swept copper unions the
+    # pad) subdivided into lattice edges changes the two-region verdict,
+    # and vias at the near landings are via-in-pad (#9708's tight_board).
+    # Pre-fix the connection declined ``no-path``; the sealed pad now gains
+    # far landings that thread out through the shell and the route ships.
+    a = _pad(0.0, 0.0, width=0.4, height=0.4)
+    b = _pad(8.0, 0.0, width=0.4, height=0.4, ref="J2")
+    pf = _pf([a, b], fine=0.1)
+    near = pf._scan_stubs(a, 1, None, HALF, 0.15, kmax=4)
+    assert near, "fixture must offer the near scan its closest landings"
+    assert pf._pad_band_sealed(near, 1, None, HALF, 0.15), "fixture premise: near cloud sealed"
+    stubs, width = pf._escape_stubs(
+        a,
+        1,
+        None,
+        kmax=4,
+        extra_clearance=0.0,
+        partner_net=None,
+        layers=None,
+        exempt_pads=None,
+        net_class=None,
+        allow_vias=True,
+    )
+    assert width == 2 * HALF
+    lattice = pf.build()
+    near_keys = {(stub[0], stub[1]) for stub in near}
+    far = [stub for stub in stubs if (stub[0], stub[1]) not in near_keys]
+    assert far, "a sealed pad must gain far landings"
+    # Every far landing clears the band detection edge from every own-net
+    # SMD pad -- the shell is crossed by the stub's own connected copper,
+    # never by a landing the body cannot leave.
+    for stub in far:
+        point = lattice.node_point(stub[0])
+        assert pf.obstacles.same_net_pad_band_point_clear(point, stub[1], 1, HALF, EDGE)
+    route = pf.route(a, b)
+    assert route is not None, "the sealed-pad connection must route (#9708 unlock)"
+    findings = [
+        (v.actual_value, v.items)
+        for v in gaps(board(*map(_pad_footprint, (a, b)), *_route_sexps(route)), EDGE)
+    ]
+    assert findings == [], findings
+
+
+def test_unsealed_pad_escape_stubs_are_unchanged() -> None:
+    # The far pass runs only for a sealed pad: on a coarse lattice whose
+    # corner diagonals already escape the shell (0.2 mm-scale cloud, gaps
+    # past the detection edge), _escape_stubs must return exactly what
+    # pad_stubs produced -- no far landings, no behaviour change for any
+    # connection that routed before #9708.
+    a = _pad(0.0, 0.0, width=0.4, height=0.4)
+    b = _pad(8.0, 0.0, width=0.4, height=0.4, ref="J2")
+    pf = _pf([a, b], fine=0.4)
+    near = pf._scan_stubs(a, 1, None, HALF, 0.15, kmax=4)
+    assert not pf._pad_band_sealed(near, 1, None, HALF, 0.15)
+    stubs, _width = pf._escape_stubs(
+        a,
+        1,
+        None,
+        kmax=4,
+        extra_clearance=0.0,
+        partner_net=None,
+        layers=None,
+        exempt_pads=None,
+        net_class=None,
+        allow_vias=True,
+    )
+    assert [(stub[0], stub[1], stub[2]) for stub in stubs] == [
+        (stub[0], stub[1], stub[2]) for stub in near
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Coupled attach doglegs (_pair_attach)
 # ---------------------------------------------------------------------------
 
