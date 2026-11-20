@@ -536,35 +536,19 @@ class StrategyApplicator:
 
         Custom-pad copper lives only in the pad's source node (``Pad`` has no
         Python-side primitives field), so ``Pad.__setattr__`` write-through
-        cannot reach it.  KiCad's left/right ``Flip`` negates the local ``y``
-        of every primitive point; the same helper ``flip_footprint_children_to_back``
-        uses for back-side placement (#8581) performs that transform.  No-ops
-        for pads without primitives and for test doubles without ``_sexp_node``.
+        cannot reach it.  The shared ``mirror_pad_primitives`` transform (also
+        used by ``flip_footprint_children_to_back``, #8581/#9752) mirrors every
+        nested per-layer padstack block, swaps three-point arc endpoints and
+        exchanges the front and back padstack blocks the way KiCad's ``Flip``
+        does.  No-ops for pads without primitives and for test doubles without
+        ``_sexp_node``.
         """
-        from kicad_tools.schema.pcb import _mirror_local_y
+        from kicad_tools.schema.pcb import mirror_pad_primitives
 
         pad_node = getattr(pad, "_sexp_node", None)
         if pad_node is None:
             return
-        # Layer-specific padstacks (``(padstack (layer "F.Cu" ... (primitives
-        # ...)))``) nest the blocks one level down, so walk the whole pad.
-        for primitives in StrategyApplicator._iter_primitives(pad_node):
-            _mirror_local_y(primitives)
-            # KiCad's Flip also reverses a three-point arc's endpoint order
-            # (start <-> end after the y negation); the arc is unchanged.
-            for arc in primitives.find_children("gr_arc"):
-                start, end = arc.find_child("start"), arc.find_child("end")
-                if start is not None and end is not None and arc.find_child("mid") is not None:
-                    start.children, end.children = end.children, start.children
-
-    @staticmethod
-    def _iter_primitives(node):
-        """Yield every ``(primitives ...)`` block under a pad node."""
-        for child in node.iter_children():
-            if child.tag == "primitives":
-                yield child
-            else:
-                yield from StrategyApplicator._iter_primitives(child)
+        mirror_pad_primitives(pad_node)
 
     @staticmethod
     def _mirror_cosmetic_node(node) -> None:

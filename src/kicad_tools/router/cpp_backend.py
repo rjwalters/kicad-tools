@@ -152,7 +152,15 @@ STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
 # v70 (Issues #9124 + #9208, merged): the first build carrying BOTH fixes -- a
 # v69 .so still seats the tangent wedge, a v68 .so lacks the trace-slit
 # refusal; both must be rejected.
-_REQUIRED_CPP_BUILD_VERSION = 70
+# v71 (Issue #9019): ``Pathfinder::set_search_own_net_band`` -- the A* refuses
+# a planar step whose swept copper parks in the fab ``pad_spacing`` slit band
+# beside an own-net SMD pad.  A v70 .so has no such gate.
+# v72 (Issue #9019 review): the band gate exempts the search's own start/end
+# pads (the leg is unioned with them through the path -- a v71 .so refused
+# every planar pad exit and pushed routes through pad-edge via pairs) and
+# ``own_net_band_rejects()`` counts refusals so the Python side retries only
+# gate-caused failures and logs every gate-off fallback.
+_REQUIRED_CPP_BUILD_VERSION = 72
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -2810,6 +2818,10 @@ class CppPathfinder:
             via_size=net_via_size,
         )
         fence_state = {"on": bool(escape_fences)}
+        # Issue #9019: the own-net slit-band gate is a hard step refusal; like
+        # the fence it must never lose a connection, so a failed gated search
+        # retries once with it off.
+        band_state = {"on": True}
 
         def _run_fresh_search(timeout_s: float, max_iters: int):
             self._sync_pairwise_domains_to_cpp()
@@ -2856,6 +2868,16 @@ class CppPathfinder:
                     gate_exclude,
                     gate_clamp,
                     self._narrowest_emit_width(start, end, net_trace_width),
+                )
+
+            if hasattr(self._impl, "set_search_own_net_band"):
+                # Issue #9019: own-net pad slit-band step gate -- the fab
+                # detection edge the caller resolved (0 = off; relief probes
+                # skip it, as the Python search does).
+                self._impl.set_search_own_net_band(
+                    0.0
+                    if self._relief_mode or not band_state["on"]
+                    else float(getattr(self._rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
                 )
 
             if self._grid._py_grid is not None:
@@ -2928,6 +2950,32 @@ class CppPathfinder:
                 saved_routable_layers = list(self._routable_layers)
                 self.set_routable_layers(pending_routable)
             result = _run_fresh_search(timeout_seconds, self._effective_search_iterations)
+            if (
+                not result.success
+                and not self._relief_mode
+                and float(getattr(self._rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0) > 0.0
+                and hasattr(self._impl, "own_net_band_rejects")
+                and self._impl.own_net_band_rejects() > 0
+            ):
+                # Issue #9019: a fence/band reshape must never lose a
+                # connection.  The retry fires ONLY when the gated search
+                # actually refused a step for the slit band (the counter is
+                # reset on every arming, i.e. every fresh search) -- a
+                # failure the gate never influenced (drained budget,
+                # unrelated blockage) is returned as-is instead of paying a
+                # second full search that would fail the same way (9019
+                # review).  The fallback is counted and logged, never silent.
+                band_rejects = self._impl.own_net_band_rejects()
+                self._own_net_band_fallbacks = getattr(self, "_own_net_band_fallbacks", 0) + 1
+                logger.info(
+                    "own-net pad slit-band gate suspended for one retry "
+                    "(fallback #%d, net=%d): gated search rejected %d step(s)",
+                    self._own_net_band_fallbacks,
+                    start.net,
+                    band_rejects,
+                )
+                band_state["on"] = False
+                result = _run_fresh_search(timeout_seconds, self._effective_search_iterations)
             if not result.success and fence_state["on"]:
                 # Issue #6761: a fence reshapes an escape, it must never lose
                 # a connection -- when the fenced search finds nothing (e.g.
@@ -3595,6 +3643,33 @@ class CppPathfinder:
                 )
             return min_width
 
+        # Issue #9019: the own-net pad slit-band edge (0 = guard off) and the
+        # net's own SMD pad boxes per layer (built lazily, once per route).
+        band_edge_mm = float(getattr(self._rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
+        _band_cache: dict[int, list[tuple[float, float, float, float]]] = {}
+
+        def _own_net_band_bboxes(
+            net: int, layer_value: int
+        ) -> list[tuple[float, float, float, float]]:
+            hit = _band_cache.get(layer_value)
+            if hit is None:
+                py_grid = getattr(self._grid, "_py_grid", None)
+                hit = [
+                    (
+                        p.x - p.width / 2.0,
+                        p.y - p.height / 2.0,
+                        p.x + p.width / 2.0,
+                        p.y + p.height / 2.0,
+                    )
+                    for p in (py_grid._pads if py_grid is not None else ())
+                    if p.net == net
+                    and not p.through_hole
+                    and not getattr(p, "drill", 0.0) > 0
+                    and p.layer.value == layer_value
+                ]
+                _band_cache[layer_value] = hit
+            return hit
+
         for cpp_seg in result.segments:
             layer_enum_value = self._grid.index_to_layer(cpp_seg.layer)
             # Issue #3532: the C++ ``reconstruct_path`` connects the
@@ -3610,7 +3685,7 @@ class CppPathfinder:
                 float(cpp_seg.x2),
                 float(cpp_seg.y2),
             )
-            from .neck_down import taper_points
+            from .neck_down import band_safe_width, taper_points
 
             centers = []
             if start_needs_neckdown:
@@ -3628,8 +3703,24 @@ class CppPathfinder:
                         self._rules.grid_resolution,
                     )[1:]
                 )
+            # Issue #9019: mirror ``PathFinder._convert_path_to_route`` -- a
+            # taper must not open an air gap beside the net's own pad.
+            band_bboxes = (
+                _own_net_band_bboxes(start.net, layer_enum_value)
+                if band_edge_mm > 0.0 and (start_needs_neckdown or end_needs_neckdown)
+                else None
+            )
             for (sx, sy), (ex, ey) in zip(split_points, split_points[1:], strict=False):
                 seg_width = _segment_width(sx, sy, ex, ey)
+                if band_bboxes:
+                    seg_width = band_safe_width(
+                        (sx, sy),
+                        (ex, ey),
+                        seg_width,
+                        base_trace_width,
+                        band_bboxes,
+                        band_edge_mm,
+                    )
                 if sx == ex and sy == ey:
                     continue
                 seg = Segment(
