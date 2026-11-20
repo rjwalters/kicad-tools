@@ -201,6 +201,38 @@ def test_normalised_net_names_are_merged_and_emitted():
     assert merged["LINE"] == {"min": 5.0, "max": 10.0}
 
 
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        {"/VCC": 48, "VCC": 5},
+        {"VCC": 5, "/VCC": 48},
+        {"/VCC": 5, "VCC": 5},
+    ],
+    ids=["slash-first", "bare-first", "equal-voltages"],
+)
+def test_within_scenario_normalisation_collision_raises(scenario):
+    """Two spellings of one net inside a single scenario fail loud (#9665).
+
+    The per-scenario dict comprehension this replaces kept whichever spelling
+    came last in insertion order, silently dropping the other declared
+    potential from the envelope -- with no error and no warning, unlike every
+    other malformed-input path in the function.
+    """
+    with pytest.raises(ValueError) as ei:
+        merge_voltage_scenarios([scenario, {"VCC": 5}])
+    msg = str(ei.value)
+    # The diagnostic quotes both authored spellings (either insertion order,
+    # even when the voltages agree).
+    assert "'/VCC'" in msg
+    assert "'VCC'" in msg
+
+
+def test_cross_scenario_spellings_still_merge():
+    """The collision guard is per scenario: spellings may differ ACROSS maps."""
+    merged = merge_voltage_scenarios([{"/VCC": 48}, {"VCC": 5}])
+    assert merged["VCC"] == {"min": 5.0, "max": 48.0}
+
+
 def test_cli_writes_envelope(tmp_path, capsys):
     a = tmp_path / "fwd.json"
     b = tmp_path / "rev.json"
@@ -233,6 +265,37 @@ def test_route_understated_pairs_flags_sign_flipping_pairs():
     for census_dv, route_dv in flagged.values():
         assert census_dv == pytest.approx(300.0)
         assert route_dv == 0.0
+
+
+def test_route_understated_pairs_slash_prefixed_map_honours_bounds():
+    """``/``-prefixed maps must key ``_pair_bounds`` and normalise results (#9608).
+
+    ``voltage_map_from_dict`` keeps as-authored keys while
+    ``pair_bounds_from_dict`` normalises them, so the detector's bounds lookup
+    missed on a KiCad-style map and a declared same-potential pair was falsely
+    reported as understated.
+    """
+    slashed = {
+        "/A": {"min": -170, "max": 170},
+        "/B": {"min": -170, "max": 170},
+        "_pair_bounds": [{"nets": ["/A", "/B"], "max_dv": 0, "why": "same potential"}],
+    }
+    assert route_understated_pairs(slashed) == {}
+
+    bare = {
+        "A": {"min": -170, "max": 170},
+        "B": {"min": -170, "max": 170},
+        "_pair_bounds": [{"nets": ["A", "B"], "max_dv": 0, "why": "same potential"}],
+    }
+    assert route_understated_pairs(bare) == {}
+
+    # Without the bound the pair is genuinely understated, and the returned
+    # keys are normalised (dropping the leading ``/``), per the docstring.
+    flagged = route_understated_pairs(
+        {"/A": {"min": -170, "max": 170}, "/B": {"min": -170, "max": 170}}
+    )
+    assert set(flagged) == {frozenset({"A", "B"})}
+    assert flagged[frozenset({"A", "B"})] == (pytest.approx(340.0), pytest.approx(0.0))
 
 
 def test_route_understated_pairs_clean_without_sign_spans():
