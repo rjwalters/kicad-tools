@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 from kicad_tools.core.arcs import arc_sweep
@@ -308,8 +308,14 @@ def outline_graphics(root: SExp) -> Iterator[SExp]:
 
     A footprint ``fp_rect`` is emitted as four ``gr_line`` nodes: a rotated
     rectangle is not axis-aligned, and every outline consumer already handles
-    straight segments. Malformed footprint graphics raise ``ValueError`` like
-    their top-level counterparts.
+    straight segments. A rounded ``fp_rect`` (``(radius r)``) is emitted as
+    one ``gr_arc`` per corner joined by ``gr_line`` sides, and an ``fp_poly``
+    whose ``(pts ...)`` carries ``(arc ...)`` pieces becomes its closed
+    ``gr_line``/``gr_arc`` boundary (Issue #9759) -- the same reading the
+    filled-region side (:func:`footprint_outline_closed_shapes`) uses; an
+    arc-free ``fp_poly`` stays one ``gr_poly``.
+    Malformed footprint graphics raise ``ValueError`` like their top-level
+    counterparts.
     """
     for node in root.iter_children():
         layer = node.find_child("layer")
@@ -428,37 +434,77 @@ def _footprint_outline_nodes(node: SExp, anchor: Point, angle_deg: float) -> lis
             )
         ]
 
-    if tag in ("fp_poly", "fp_curve"):
+    if tag == "fp_poly":
+        pieces = _fp_poly_pieces(node)
+        if sum(len(points) for _kind, points in pieces) < 3:
+            raise ValueError(f"Malformed Edge.Cuts {tag}: missing points")
+        if all(kind == "xy" for kind, _points in pieces):
+            return [
+                SExp.list(
+                    "gr_poly",
+                    _pts_node([board(points[0]) for _kind, points in pieces]),
+                    _layer_node(),
+                )
+            ]
+        # ``(arc ...)`` pieces inside ``(pts ...)`` (Issue #9759): emit the
+        # closed boundary as ``gr_line`` edges plus one ``gr_arc`` per arc
+        # piece, read through the same piece reader as the filled-region side
+        # (:func:`_fp_poly_chain`).  Arcs stay arcs, so every consumer's
+        # certified arc path -- and its ``max_error_mm`` accounting -- applies
+        # instead of a tessellation baked in here.
+        return _fp_poly_boundary_nodes(pieces, board)
+
+    if tag == "fp_curve":
         pts = node.find_child("pts")
         chain = [_coordinate(xy, f"{tag} xy") for xy in pts.find_children("xy")] if pts else []
-        if tag == "fp_poly" and len(chain) < 3:
-            raise ValueError(f"Malformed Edge.Cuts {tag}: missing points")
-        if tag == "fp_curve" and len(chain) != 4:
+        if len(chain) != 4:
             raise ValueError(f"Malformed Edge.Cuts {tag}: expected four cubic control points")
-        return [
-            SExp.list(
-                "gr_poly" if tag == "fp_poly" else "gr_curve",
-                _pts_node([board(point) for point in chain]),
-                _layer_node(),
-            )
-        ]
+        return [SExp.list("gr_curve", _pts_node([board(point) for point in chain]), _layer_node())]
 
     if tag == "fp_rect":
-        # Four straight edges; rotation/mirror make an axis-aligned (start, end)
+        # Straight edges (plus one ``gr_arc`` per corner when ``(radius r)``
+        # rounds it, #9759); rotation/mirror make an axis-aligned (start, end)
         # pair meaningless, and every outline consumer already handles plain
-        # segments. Left open (KiCad's own gr_poly convention): consumers close.
+        # segments and arcs. Left open (KiCad's own gr_poly convention):
+        # consumers close.
         (x1, y1), (x2, y2) = _point(node, "start"), _point(node, "end")
-        corners = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
-        board_corners = [board(corner) for corner in corners]
-        return [
-            SExp.list(
-                "gr_line",
-                SExp.list("start", *board_corners[i]),
-                SExp.list("end", *board_corners[(i + 1) % 4]),
-                _layer_node(),
+        arcs = _fp_rect_corner_arcs(node, (x1, y1), (x2, y2))
+        if arcs is None:
+            corners = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+            board_corners = [board(corner) for corner in corners]
+            return [
+                SExp.list(
+                    "gr_line",
+                    SExp.list("start", *board_corners[i]),
+                    SExp.list("end", *board_corners[(i + 1) % 4]),
+                    _layer_node(),
+                )
+                for i in range(4)
+            ]
+        nodes: list[SExp] = []
+        for i, (start, mid, end) in enumerate(arcs):
+            nodes.append(
+                SExp.list(
+                    "gr_arc",
+                    SExp.list("start", *board(start)),
+                    SExp.list("mid", *board(mid)),
+                    SExp.list("end", *board(end)),
+                    _layer_node(),
+                )
             )
-            for i in range(4)
-        ]
+            # Straight side to the next corner's arc; absent when the radius
+            # is clamped to half that side (the arcs then meet directly).
+            next_start = arcs[(i + 1) % 4][0]
+            if next_start != end:
+                nodes.append(
+                    SExp.list(
+                        "gr_line",
+                        SExp.list("start", *board(end)),
+                        SExp.list("end", *board(next_start)),
+                        _layer_node(),
+                    )
+                )
+        return nodes
 
     raise ValueError(f"Unsupported footprint Edge.Cuts geometry: {tag}")
 
@@ -531,34 +577,107 @@ def _closed_shape_fill_and_stroke(node: SExp) -> tuple[str, float]:
     return fill, width
 
 
-def _fp_poly_chain(node: SExp) -> list[Point]:
-    """Ordered vertex chain of an ``fp_poly``, arcs tessellated in place.
+#: Footprint poly/rect piece: ``("xy", (p,))`` for a vertex or
+#: ``("arc", (start, mid, end))`` for a circular arc, footprint-local.
+_FpPiece = tuple[str, tuple[Point, ...]]
+
+
+def _fp_poly_pieces(node: SExp) -> list[_FpPiece]:
+    """Authored pieces of an ``fp_poly``'s ``(pts ...)``, in authored order.
 
     ``(pts ...)`` may interleave ``(xy x y)`` vertices with
-    ``(arc (start) (mid) (end))`` segments (KiCad 9+).  The arc's start joins
-    the previous vertex by a straight edge, then the arc is followed through
-    its authored midpoint to its end, preserving authored order and sweep.
+    ``(arc (start) (mid) (end))`` segments (KiCad 9+).  This is the single
+    reading of that structure shared by the filled-region reader
+    (:func:`_fp_poly_chain`) and the stroke reader
+    (:func:`_footprint_outline_nodes`, Issue #9759), so the two cannot
+    disagree about which arcs a polygon has.
     """
     pts = node.find_child("pts")
-    chain: list[Point] = []
+    pieces: list[_FpPiece] = []
     if pts is None:
-        return chain
+        return pieces
     for child in pts.iter_children():
         tag = child.tag or ""
         if tag == "xy":
-            chain.append(_coordinate(child, "fp_poly xy"))
+            pieces.append(("xy", (_coordinate(child, "fp_poly xy"),)))
         elif tag == "arc":
-            start, mid, end = (_point(child, name) for name in ("start", "mid", "end"))
+            pieces.append(("arc", tuple(_point(child, name) for name in ("start", "mid", "end"))))
+    return pieces
+
+
+def _fp_poly_chain(node: SExp) -> list[Point]:
+    """Ordered vertex chain of an ``fp_poly``, arcs tessellated in place.
+
+    The arc's start joins the previous vertex by a straight edge, then the
+    arc is followed through its authored midpoint to its end, preserving
+    authored order and sweep.
+    """
+    chain: list[Point] = []
+    for kind, points in _fp_poly_pieces(node):
+        if kind == "xy":
+            chain.append(points[0])
+        else:
+            start, mid, end = points
             chain.extend(tessellate_arc(start, mid, end))
     return chain
 
 
-def _fp_rect_ring(node: SExp, p1: Point, p2: Point) -> list[Point]:
-    """Four corners of an ``fp_rect``, or its rounded outline when ``(radius r)``.
+def _fp_poly_boundary_nodes(pieces: list[_FpPiece], board: Callable[[Point], Point]) -> list[SExp]:
+    """Board-frame ``gr_line``/``gr_arc`` boundary of an arc-bearing ``fp_poly``.
 
-    The radius is clamped to half the shorter side; each corner becomes a
-    quarter-circle arc, so the removed corner material is not part of the
-    filled region.
+    The stroke counterpart of :func:`_fp_poly_chain`, over the same pieces
+    and with the same joins: each vertex or arc start is reached from the
+    previous point by a straight edge, each arc runs start -> mid -> end, and
+    the polygon closes back to its first point.  Zero-length edges (an arc
+    whose start repeats the previous vertex, a closing edge onto a shared
+    point) carry no boundary and are omitted.
+    """
+    nodes: list[SExp] = []
+    first: Point | None = None
+    current: Point | None = None
+
+    def line_to(point: Point) -> None:
+        if current is not None and current != point:
+            nodes.append(
+                SExp.list(
+                    "gr_line",
+                    SExp.list("start", *board(current)),
+                    SExp.list("end", *board(point)),
+                    _layer_node(),
+                )
+            )
+
+    for kind, points in pieces:
+        if first is None:
+            first = points[0]
+        line_to(points[0])
+        if kind == "arc":
+            start, mid, end = points
+            nodes.append(
+                SExp.list(
+                    "gr_arc",
+                    SExp.list("start", *board(start)),
+                    SExp.list("mid", *board(mid)),
+                    SExp.list("end", *board(end)),
+                    _layer_node(),
+                )
+            )
+        current = points[-1]
+    if first is not None:
+        line_to(first)
+    return nodes
+
+
+def _fp_rect_corner_arcs(
+    node: SExp, p1: Point, p2: Point
+) -> list[tuple[Point, Point, Point]] | None:
+    """Corner arcs of a rounded ``fp_rect``, or ``None`` for a square one.
+
+    ``(radius r)`` is clamped to half the shorter side; each corner becomes a
+    quarter-circle ``(start, mid, end)`` arc, the four walked clockwise on
+    screen so consecutive arcs are joined by the straight sides.  Shared by
+    the filled-region reader (:func:`_fp_rect_ring`) and the stroke reader
+    (Issue #9759) so both honour the same radius.
     """
     (x1, y1), (x2, y2) = p1, p2
     radius_node = node.find_child("radius")
@@ -567,17 +686,28 @@ def _fp_rect_ring(node: SExp, p1: Point, p2: Point) -> list[Point]:
     top, bottom = min(y1, y2), max(y1, y2)
     radius = min(radius, (right - left) / 2.0, (bottom - top) / 2.0)
     if not math.isfinite(radius) or radius <= 0.0:
-        return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+        return None
     k = radius * (1.0 - math.sqrt(0.5))  # offset of the arc midpoint from the corner
-    corners = [
-        # (arc start, arc mid, arc end) walking the outline clockwise on screen
+    return [
         ((left, top + radius), (left + k, top + k), (left + radius, top)),
         ((right - radius, top), (right - k, top + k), (right, top + radius)),
         ((right, bottom - radius), (right - k, bottom - k), (right - radius, bottom)),
         ((left + radius, bottom), (left + k, bottom - k), (left, bottom - radius)),
     ]
+
+
+def _fp_rect_ring(node: SExp, p1: Point, p2: Point) -> list[Point]:
+    """Four corners of an ``fp_rect``, or its rounded outline when ``(radius r)``.
+
+    The removed corner material of a rounded rect is not part of the filled
+    region.
+    """
+    arcs = _fp_rect_corner_arcs(node, p1, p2)
+    if arcs is None:
+        (x1, y1), (x2, y2) = p1, p2
+        return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
     ring: list[Point] = []
-    for start, mid, end in corners:
+    for start, mid, end in arcs:
         ring.extend(tessellate_arc(start, mid, end))
     return ring
 
