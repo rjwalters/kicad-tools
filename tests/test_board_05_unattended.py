@@ -149,6 +149,39 @@ def test_never_reads_routing_json(mod):
     assert "from routing import" not in code
 
 
+def test_post_route_prep_mirrors_the_recipe_8532(mod, monkeypatch, tmp_path):
+    """Grading follows the #8532 prep the shipping recipe applies (#9424)."""
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        "kicad_tools.cli.pcb_add_fiducials.run_add_fiducials",
+        lambda routed, sides: (calls.append(("fiducials", routed, sides)), 0)[1],
+    )
+    monkeypatch.setattr(
+        "kicad_tools.cli.pcb_add_board_info.run_add_board_info",
+        lambda routed, auto: (calls.append(("board_info", routed, auto)), 0)[1],
+    )
+    board = tmp_path / "routed.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    row = mod.prepare_for_grading(board)
+    assert row["prep"] == ["fiducials", "board_info"]
+    assert [c[0] for c in calls] == ["fiducials", "board_info"]
+    assert calls[0][2] == "populated"  # build.py's sides, verbatim
+    # run_seed wires the prep in before grading, and its failure is fatal.
+    code = SCRIPT.read_text()
+    assert "prepare_for_grading(artifact)" in code
+
+
+def test_post_route_prep_failure_is_fatal(mod, monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "kicad_tools.cli.pcb_add_fiducials.run_add_fiducials",
+        lambda routed, sides: 1,
+    )
+    board = tmp_path / "routed.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    with pytest.raises(RuntimeError, match="add-fiducials failed"):
+        mod.prepare_for_grading(board)
+
+
 def test_workflow_runs_the_script_at_three_seeds_and_is_not_per_pr():
     text = WORKFLOW.read_text()
     assert "scripts/ci/board_05_unattended.py" in text
