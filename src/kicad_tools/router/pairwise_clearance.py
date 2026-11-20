@@ -450,7 +450,10 @@ def route_understated_pairs(
     """
     from kicad_tools.creepage.engine import pair_bounds_from_dict, voltage_map_from_dict
 
-    intervals, _ = voltage_map_from_dict(data)
+    # ``voltage_map_from_dict`` keeps as-authored keys while
+    # ``pair_bounds_from_dict`` normalises them (#9608); normalise the interval
+    # keys so the bounds lookup below keys the same nets on either convention.
+    intervals = {_norm_net_key(name): iv for name, iv in voltage_map_from_dict(data)[0].items()}
     bounds = pair_bounds_from_dict(data)
     scalars = {name: _signed_endpoint(iv) for name, iv in intervals.items()}
     out: dict[frozenset[str], tuple[float, float]] = {}
