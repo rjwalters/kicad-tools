@@ -41,8 +41,8 @@
       "size": 8273
     },
     "design-source/check_manufacturing.py": {
-      "sha256": "f2067a354c634e60d6f8082dfa27f31211db10d29b2fa56dfe4636ecf3202309",
-      "size": 3394
+      "sha256": "adb726e9fb17542050f0f7448b9aeae3f734e48f79ed268d17326f161660168d",
+      "size": 3393
     },
     "design-source/generate_design.py": {
       "sha256": "efb3cdbeabc22894f68f8cd2bd263f7c0b4e0ad56919012551fbd3f6a33e2ddd",
