@@ -6468,9 +6468,7 @@ def load_pcb_for_routing(
             from .layer_advisories import mark_plane_zones_on_grid, plane_zone_outlines
 
             _zone_pcb = _ZoneSchemaPCB.load(pcb_path)
-            router.plane_zones = plane_zone_outlines(
-                _zone_pcb, _zone_stack, (origin_x, origin_y)
-            )
+            router.plane_zones = plane_zone_outlines(_zone_pcb, _zone_stack, (origin_x, origin_y))
             router._plane_zone_source_pcb = str(pcb_path)
             if router.plane_zones:
                 _marked = mark_plane_zones_on_grid(router.grid, router.plane_zones)

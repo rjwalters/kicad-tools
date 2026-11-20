@@ -386,6 +386,66 @@ def _zone_layer_names(zone: Any) -> list[str]:
     return out
 
 
+def _cells_inside_polygon(
+    grid: Any,
+    layer_index: int,
+    polygon: Any,
+    gx_range: range,
+    gy_range: range,
+) -> set[tuple[int, int]]:
+    """Free grid cells whose centre lies inside ``polygon`` (boundary inclusive).
+
+    Vectorised ray cast over the candidate block.  Cells within 1e-6 mm of
+    any polygon edge are re-decided by the scalar
+    :func:`kicad_tools.core.geometry.point_in_polygon` so boundary handling is
+    identical to the scalar rule; every other cell is unambiguous.
+    """
+    import numpy as np
+
+    from kicad_tools.core.geometry import point_in_polygon
+
+    if len(gx_range) == 0 or len(gy_range) == 0 or len(polygon) < 3:
+        return set()
+    gxs = np.arange(gx_range.start, gx_range.stop)
+    gys = np.arange(gy_range.start, gy_range.stop)
+    wx = np.round(grid.origin_x + gxs * grid.resolution, 4)[None, :]
+    wy = np.round(grid.origin_y + gys * grid.resolution, 4)[:, None]
+    wx, wy = np.broadcast_arrays(wx, wy)
+    free = ~(
+        grid._blocked[layer_index, gy_range.start : gy_range.stop, gx_range.start : gx_range.stop]
+        | grid._is_obstacle[
+            layer_index, gy_range.start : gy_range.stop, gx_range.start : gx_range.stop
+        ]
+    )
+    inside = np.zeros(wx.shape, dtype=bool)
+    near = np.zeros(wx.shape, dtype=bool)
+    n = len(polygon)
+    j = n - 1
+    for i in range(n):
+        xi, yi = polygon[i]
+        xj, yj = polygon[j]
+        straddle = (yi > wy) != (yj > wy)
+        if yj != yi:
+            xcross = (xj - xi) * (wy - yi) / (yj - yi) + xi
+            inside ^= straddle & (wx < xcross)
+        ex, ey = xj - xi, yj - yi
+        seg2 = ex * ex + ey * ey
+        if seg2 == 0.0:
+            d2 = (wx - xi) ** 2 + (wy - yi) ** 2
+        else:
+            t = np.clip(((wx - xi) * ex + (wy - yi) * ey) / seg2, 0.0, 1.0)
+            d2 = (wx - (xi + t * ex)) ** 2 + (wy - (yi + t * ey)) ** 2
+        near |= d2 <= 1e-12
+        j = i
+    keep = free & inside & ~near
+    cells = {(int(gxs[c]), int(gys[r])) for r, c in zip(*np.nonzero(keep), strict=True)}
+    for r, c in zip(*np.nonzero(free & near), strict=True):
+        x, y = float(wx[r, c]), float(wy[r, c])
+        if point_in_polygon(x, y, polygon, boundary_inside=True):
+            cells.add((int(gxs[c]), int(gys[r])))
+    return cells
+
+
 def mark_plane_zones_on_grid(grid: Any, outlines: tuple[PlaneZoneOutline, ...]) -> int:
     """Rasterize plane-zone outlines onto the routing grid as zone cells.
 
@@ -400,8 +460,6 @@ def mark_plane_zones_on_grid(grid: Any, outlines: tuple[PlaneZoneOutline, ...]) 
     """
     from types import SimpleNamespace
 
-    from kicad_tools.core.geometry import point_in_polygon
-
     marked = 0
     for outline in outlines:
         try:
@@ -412,14 +470,13 @@ def mark_plane_zones_on_grid(grid: Any, outlines: tuple[PlaneZoneOutline, ...]) 
         ys = [p[1] for p in outline.polygon]
         gx_min, gy_min = grid.world_to_grid(min(xs), min(ys))
         gx_max, gy_max = grid.world_to_grid(max(xs), max(ys))
-        cells: set[tuple[int, int]] = set()
-        for gy in range(max(0, gy_min), min(grid.rows, gy_max + 1)):
-            for gx in range(max(0, gx_min), min(grid.cols, gx_max + 1)):
-                if grid._blocked[layer_index, gy, gx] or grid._is_obstacle[layer_index, gy, gx]:
-                    continue
-                wx, wy = grid.grid_to_world(gx, gy)
-                if point_in_polygon(wx, wy, outline.polygon, boundary_inside=True):
-                    cells.add((gx, gy))
+        cells = _cells_inside_polygon(
+            grid,
+            layer_index,
+            outline.polygon,
+            range(max(0, gx_min), min(grid.cols, gx_max + 1)),
+            range(max(0, gy_min), min(grid.rows, gy_max + 1)),
+        )
         if not cells:
             continue
         grid.add_zone_cells(
