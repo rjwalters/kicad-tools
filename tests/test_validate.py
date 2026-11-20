@@ -1429,9 +1429,7 @@ class TestArcOutlineSegments:
                     signs.add(1 if cross > 0 else -1)
             assert signs <= {1} or signs <= {-1}
 
-    def test_malformed_board_arc_is_skipped_footprint_arc_is_fail_loud(self, tmp_path: Path):
-        # Board-level arcs keep the tolerant in-memory parsing contract: a
-        # collinear "arc" that cannot be certified is skipped, not fatal.
+    def test_degenerate_board_arc_keeps_chords_footprint_arc_is_fail_loud(self, tmp_path: Path):
         pcb = self._load(
             tmp_path,
             """(kicad_pcb
@@ -1444,7 +1442,11 @@ class TestArcOutlineSegments:
               (gr_arc (start 0 0) (mid 5 0) (end 10 0) (layer "Edge.Cuts"))
             )""",
         )
-        assert len(pcb.get_board_outline_segments()) == 2
+        ox, oy = pcb.board_origin
+        segments = pcb.get_board_outline_segments()
+        assert ((-ox, -oy), (5 - ox, -oy)) in segments
+        assert ((5 - ox, -oy), (10 - ox, -oy)) in segments
+        assert segments.max_error_mm == 0.0
 
         # Footprint graphics stay fail-loud (the #9593 contract).
         pcb = self._load(

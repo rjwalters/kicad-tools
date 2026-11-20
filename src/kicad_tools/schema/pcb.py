@@ -30,7 +30,7 @@ from ..core.board_outline import (
     outline_graphics,
     outline_node_points,
 )
-from ..core.outline_tessellation import tessellate_arc, tessellate_cubic
+from ..core.outline_tessellation import DegenerateArcError, tessellate_arc, tessellate_cubic
 from ..core.schematic_uuids import UuidMinter
 from ..core.sexp_file import load_footprint, load_pcb, save_pcb
 from ..core.version import KICAD_BOARD_FORMAT_VERSION, KICAD_GENERATOR_VERSION
@@ -5541,9 +5541,9 @@ class PCB:
         footprint graphics raise ``ValueError`` (fail-loud, like
         :attr:`board_size`); malformed board-level poly/curve/circle
         graphics are skipped, matching the tolerant in-memory parsing of
-        the board-level line/arc collections (a board-level arc whose
-        points cannot be certified -- collinear/coincident -- is skipped
-        the same way, never silently flattened).
+        the board-level line/arc collections. Board arcs with collinear or
+        coincident points retain their two authored chords. Other arc
+        certification failures raise ValueError.
 
         Returns:
             List of ((x1, y1), (x2, y2)) tuples representing line segments.
@@ -5569,14 +5569,10 @@ class PCB:
 
         for arc in self._graphic_arcs:
             if arc.layer == "Edge.Cuts":
-                # Certified tessellation preserving start, mid, end and
-                # sweep (Issue #9689).  A board-level arc that cannot be
-                # certified is skipped, matching the tolerant parsing of
-                # the other board-level graphics below.
                 try:
                     segments.extend(_tessellated_arc_edges(arc.start, arc.mid, arc.end))
-                except ValueError:
-                    continue
+                except DegenerateArcError:
+                    segments.extend(((arc.start, arc.mid), (arc.mid, arc.end)))
 
         for graphic in self._graphics:
             if graphic.layer == "Edge.Cuts" and graphic.graphic_type == "rect":

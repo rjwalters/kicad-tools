@@ -35,25 +35,11 @@ if TYPE_CHECKING:
 _CLEARANCE_EPSILON_MM = 1e-4
 
 
-def _outline_comparison_slack(
+def _outline_geometry_error(
     outline_segments: Sequence[tuple[tuple[float, float], tuple[float, float]]],
 ) -> float:
-    """Comparison slack for one outline: straight-edge epsilon plus curve error.
-
-    ``get_board_outline_segments`` tessellates curved Edge.Cuts elements
-    (arcs, cubics, circles) with a certified Hausdorff bound carried on
-    ``OutlineSegments.max_error_mm`` (Issue #9689).  The chord chain may
-    sit on either side of the true boundary -- inside it for an outer
-    boundary (measured clearance too small, conservative), outside it near
-    an arc's bulge (measured clearance too *large*, hiding a real
-    violation).  Charging the bound against the measured clearance keeps
-    the verdict conservative for either topology, mirroring the router's
-    post-route edge check; a plain ``list`` (no certified curves, and the
-    rule's mocked-PCB regression tests) certifies ``0.0`` so the
-    straight-edge tolerance below is preserved exactly.
-    """
-    geometry_error = float(getattr(outline_segments, "max_error_mm", 0.0) or 0.0)
-    return _CLEARANCE_EPSILON_MM + geometry_error
+    """Certified chord-chain error to subtract from measured copper clearances."""
+    return float(getattr(outline_segments, "max_error_mm", 0.0) or 0.0)
 
 
 def _pad_kernel_shape(pad: Pad, footprint: Footprint):
@@ -192,11 +178,11 @@ class EdgeClearanceRule(DRCRule):
         min_clearance = design_rules.min_copper_to_edge_mm
         del origin  # board-relative invariant: no per-call translation needed
 
-        slack = _outline_comparison_slack(outline_segments)
+        geometry_error = _outline_geometry_error(outline_segments)
         edges = outline_shapes(outline_segments)
 
         for segment in pcb.segments:
-            gap = min_gap_to_outline(_kernel_segment_shape(segment), edges)
+            gap = min_gap_to_outline(_kernel_segment_shape(segment), edges) - geometry_error
 
             # Reference points for the filled cut-out interior test: the
             # endpoints plus the midpoint, so a track that passes clean
@@ -217,7 +203,7 @@ class EdgeClearanceRule(DRCRule):
             if hit is not None:
                 gap = 0.0
 
-            if gap < min_clearance - slack:
+            if gap < min_clearance - _CLEARANCE_EPSILON_MM:
                 # Build the finding's witness only now that a finding is
                 # being raised: the two O(outline-edges) distance calls
                 # below are pure waste on the vast majority of segments
@@ -283,17 +269,17 @@ class EdgeClearanceRule(DRCRule):
         min_clearance = design_rules.min_hole_to_edge_mm
         del origin  # board-relative invariant: no per-call translation needed
 
-        slack = _outline_comparison_slack(outline_segments)
+        geometry_error = _outline_geometry_error(outline_segments)
         edges = outline_shapes(outline_segments)
 
         for via in pcb.vias:
-            gap = min_gap_to_outline(_kernel_via_shape(via), edges)
+            gap = min_gap_to_outline(_kernel_via_shape(via), edges) - geometry_error
             hit = _first_point_inside_region(filled_regions, (via.position,))
 
             if hit is not None:
                 gap = 0.0
 
-            if gap < min_clearance - slack:
+            if gap < min_clearance - _CLEARANCE_EPSILON_MM:
                 items: tuple[str, ...] = (f"Net {via.net_number}",)
                 if hit is not None:
                     items = (
@@ -347,7 +333,7 @@ class EdgeClearanceRule(DRCRule):
         min_copper_clearance = design_rules.min_copper_to_edge_mm
         min_hole_clearance = design_rules.min_hole_to_edge_mm
 
-        slack = _outline_comparison_slack(outline_segments)
+        geometry_error = _outline_geometry_error(outline_segments)
         edges = outline_shapes(outline_segments)
 
         for footprint in pcb.footprints:
@@ -369,7 +355,7 @@ class EdgeClearanceRule(DRCRule):
                 pad_y = fp_y + (pad_local_x * sin_rot + pad_local_y * cos_rot)
                 pad_pos = (pad_x, pad_y)
 
-                gap = min_gap_to_outline(_pad_kernel_shape(pad, footprint), edges)
+                gap = min_gap_to_outline(_pad_kernel_shape(pad, footprint), edges) - geometry_error
                 hit = _first_point_inside_region(filled_regions, (pad_pos,))
 
                 if hit is not None:
@@ -383,7 +369,7 @@ class EdgeClearanceRule(DRCRule):
                     min_clearance = min_copper_clearance
                     rule_id = "edge_clearance_pad"
 
-                if gap < min_clearance - slack:
+                if gap < min_clearance - _CLEARANCE_EPSILON_MM:
                     items: tuple[str, ...] = (footprint.reference, f"Pad {pad.number}")
                     if hit is not None:
                         items = (
@@ -431,7 +417,7 @@ class EdgeClearanceRule(DRCRule):
         min_clearance = design_rules.min_copper_to_edge_mm
         del origin  # board-relative invariant: no per-call translation needed
 
-        slack = _outline_comparison_slack(outline_segments)
+        geometry_error = _outline_geometry_error(outline_segments)
 
         for zone in pcb.zones:
             # Rule areas prohibit copper; their boundary is not copper, even
@@ -445,13 +431,16 @@ class EdgeClearanceRule(DRCRule):
                 for point in polygon:
                     # Zone polygon vertices are already in board-relative space.
                     board_point = point
-                    distance = self._min_distance_to_outline(board_point, outline_segments)
+                    distance = (
+                        self._min_distance_to_outline(board_point, outline_segments)
+                        - geometry_error
+                    )
                     hit = _first_point_inside_region(filled_regions, (board_point,))
 
                     if hit is not None:
                         distance = 0.0
 
-                    if distance < min_clearance - slack:
+                    if distance < min_clearance - _CLEARANCE_EPSILON_MM:
                         items: tuple[str, ...] = (zone.net_name or f"Net {zone.net_number}",)
                         if hit is not None:
                             items = (
