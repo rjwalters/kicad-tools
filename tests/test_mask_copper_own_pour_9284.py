@@ -287,15 +287,41 @@ def test_solid_declared_but_round_pad_fill_shows_spokes_stays_an_error():
     assert _severity(result) == "error"
 
 
-def test_solid_with_no_usable_spoke_width_fails_closed():
-    """A zero spoke width gives no bound; the declaration is not excused."""
+def test_solid_fill_ignores_declared_spoke_width():
+    """Issue #9436: a solid join is judged by its fill, not a spoke width it never uses."""
     result, m = _measure(
         _geometry(
-            thermal_fill(),
+            box(-3, -3, 4, 4),
             owner_conn=pad_connection(pad=SOLID),
             zone_conn=zone_connection(spoke=0.0),
         )
     )
+    assert m.disposition == "own_pour_solid"
+    assert _severity(result) == "info"
+
+
+@pytest.mark.parametrize("spoke,spokes", [(0.5, 4), (0.4, 2), (0.9, 4)])
+@pytest.mark.parametrize("declared_spoke", [0.1, 0.3])
+def test_solid_declared_relief_gap_with_wide_spokes_stays_an_error(spoke, spokes, declared_spoke):
+    """Issue #9436 review: spokes wider than declared are still a relief gap."""
+    result, m = _measure(
+        _geometry(
+            thermal_fill(gap=0.2, spoke=spoke, spokes=spokes),
+            owner_conn=pad_connection(pad=SOLID),
+            zone_conn=zone_connection(spoke=declared_spoke),
+        )
+    )
+    assert m.disposition == "violation"
+    assert _severity(result) == "error"
+
+
+def test_solid_join_plus_same_zone_island_beside_opening_stays_an_error():
+    """Issue #9436 review: a disconnected island of the joined zone is not the pad's pour."""
+    # Solid pour joined along the pad's bottom edge, an island 0.04 mm above it.
+    joined = box(-3, -3, 4, 0.0)
+    island = box(0.2, 1.04, 0.8, 1.3)
+    fill = unary_union([joined, island])
+    result, m = _measure(_geometry(fill, owner_conn=pad_connection(pad=SOLID)))
     assert m.disposition == "violation"
     assert _severity(result) == "error"
 

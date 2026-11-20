@@ -283,11 +283,14 @@ spoke band, which does not apply (a solid pour body lies inside it):
 - the *effective* connection is solid: the pad's override, else its footprint's,
   else the zone's; "thermal relief for through-hole pads only" counts as solid on
   an SMD pad;
-- the fill overlaps the pad by more than `u`, nothing is exposed beyond the pad,
-  and the fill's contact along the pad edge is longer than four thermal spokes
-  could make it (4 x 1.45 x the declared spoke width, the 1.45 allowing for a
-  spoke crossing a curved edge), so a declaration the fill does not bear out
-  keeps its verdict. A pour clipped by another net's clearance still counts.
+- the fill overlaps the pad by more than `u` and nothing is exposed beyond the pad;
+- every piece of the zone within the examined band touches the pad, so a
+  disconnected same-zone island beside the opening stays an error;
+- the fill shows no relief gap: no free pocket against the pad edge that fill of
+  the zone closes off within the probe (twice the thermal gap, at least 0.5 mm).
+  That is what spokes of any width look like, so a declaration the fill does not
+  bear out keeps its verdict. A cut running out to the probe's edge (another
+  net's clearance clipping the pour) still counts as solid.
 
 An unconnected same-net pour, a positive expansion with pour in the ring,
 different-net pour and unreadable connection data stay errors. The measurement
