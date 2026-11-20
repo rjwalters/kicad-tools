@@ -18,7 +18,7 @@
  * OUTSIDE kct check's whole-board gate (validate/rules/clearance.py,
  * group 18) entirely. Full rationale, including why there is no kicad-cli
  * oracle for this consumer to gate against:
- * https://github.com/rjwalters/kicad-tools/issues/5509#issuecomment-5930182050
+ * https://github.com/2AMLogic/kicad-tools/issues/5509#issuecomment-5930182050
  */
 
 #include "drc_clearance.hpp"

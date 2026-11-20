@@ -56,6 +56,7 @@ PLACEHOLDERS = {
     "<csv>": "F.Cu,B.Cu",
     "<hv-net>": "HV_BUS",
     "<net>": "GND",
+    "<items>": "items.json",
     "<V-rms>": "230",
     "<net_class_map.json>": "net_class_map.json",
     "<path/to/net_class_map.json>": "net_class_map.json",

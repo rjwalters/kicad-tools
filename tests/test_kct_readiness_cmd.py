@@ -1472,7 +1472,7 @@ def test_vcs_pin_provenance_wins_over_the_surrounding_consumer_repository(tmp_pa
     commit, dirty = readiness_cmd._engine_provenance_for(
         package_root,
         direct_url={
-            "url": "https://github.com/rjwalters/kicad-tools",
+            "url": "https://github.com/2AMLogic/kicad-tools",
             "vcs_info": {"vcs": "git", "requested_revision": "main", "commit_id": pinned},
         },
     )

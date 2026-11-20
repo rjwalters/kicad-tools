@@ -56,7 +56,7 @@ def write_consumer_pyproject_tag(root, version, name="my-board"):
         'dependencies = ["kicad-tools"]\n'
         "\n"
         "[tool.uv.sources]\n"
-        'kicad-tools = { git = "https://github.com/rjwalters/kicad-tools", '
+        'kicad-tools = { git = "https://github.com/2AMLogic/kicad-tools", '
         f'tag = "{version}" }}\n',
         encoding="utf-8",
     )
@@ -289,7 +289,7 @@ def test_sha_pin_is_informational_not_drift(tmp_path):
         'dependencies = ["kicad-tools"]\n'
         "\n"
         "[tool.uv.sources]\n"
-        'kicad-tools = { git = "https://github.com/rjwalters/kicad-tools", '
+        'kicad-tools = { git = "https://github.com/2AMLogic/kicad-tools", '
         'rev = "deadbeefcafe" }\n',
         encoding="utf-8",
     )
@@ -323,7 +323,7 @@ def test_inline_git_dependency_string_tag(tmp_path):
         'name = "my-board"\n'
         'version = "0.1.0"\n'
         "dependencies = [\n"
-        '  "kicad-tools @ git+https://github.com/rjwalters/kicad-tools@v0.16.0",\n'
+        '  "kicad-tools @ git+https://github.com/2AMLogic/kicad-tools@v0.16.0",\n'
         "]\n",
         encoding="utf-8",
     )
@@ -339,7 +339,7 @@ def test_inline_git_dependency_sha(tmp_path):
         'name = "my-board"\n'
         'version = "0.1.0"\n'
         "dependencies = [\n"
-        '  "kicad-tools @ git+https://github.com/rjwalters/kicad-tools@abc1234",\n'
+        '  "kicad-tools @ git+https://github.com/2AMLogic/kicad-tools@abc1234",\n'
         "]\n",
         encoding="utf-8",
     )
@@ -655,7 +655,7 @@ def test_cli_strict_exit_zero_on_informational_sha(tmp_path, monkeypatch):
         'dependencies = ["kicad-tools"]\n'
         "\n"
         "[tool.uv.sources]\n"
-        'kicad-tools = { git = "https://github.com/rjwalters/kicad-tools", '
+        'kicad-tools = { git = "https://github.com/2AMLogic/kicad-tools", '
         'rev = "deadbeef" }\n',
         encoding="utf-8",
     )

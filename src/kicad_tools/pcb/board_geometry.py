@@ -35,6 +35,8 @@ if TYPE_CHECKING:
 # Optional Shapely import
 # ---------------------------------------------------------------------------
 
+from ..core.board_outline import circle_tessellation_points
+
 _SHAPELY_AVAILABLE = False
 try:
     from shapely.geometry import LineString, Point  # noqa: F811
@@ -318,18 +320,59 @@ class BoardGeometry:
                 lines.append([(x1, y2), (x1, y1)])
 
             elif g.graphic_type == "circle":
-                cx_raw, cy_raw = g.start[0] - ox, g.start[1] - oy
-                ex_raw, ey_raw = g.end[0] - ox, g.end[1] - oy
-                radius = math.sqrt((ex_raw - cx_raw) ** 2 + (ey_raw - cy_raw) ** 2)
-                circle_poly = Point(cx_raw, cy_raw).buffer(radius, resolution=_DEFAULT_ARC_SEGMENTS)
-                return cls(polygon=circle_poly, origin=origin)
+                # A circle is a closed ring in the shared polygonization,
+                # not an early return: returning here discarded every other
+                # contour, so a circular cut-out shrank the board to just
+                # the disc (#9593).  The ring polygonizes like any other
+                # closed chain -- alone it yields the disc; inside an outer
+                # boundary it cuts a hole.  The in-memory graphic keeps the
+                # authored centre in ``center`` (``start`` is an unset
+                # default for circles).
+                cx, cy = g.center or g.start
+                cx, cy = cx - ox, cy - oy
+                ex, ey = g.end[0] - ox, g.end[1] - oy
+                radius = math.sqrt((ex - cx) ** 2 + (ey - cy) ** 2)
+                if radius > 0.0:
+                    ring = circle_tessellation_points((cx, cy), radius)
+                    lines.append([*ring, ring[0]])
 
             elif g.graphic_type == "bezier":
                 # gr_bezier stores control points in pts attribute
                 if hasattr(g, "pts") and g.pts:
                     ctrl = [(p[0] - ox, p[1] - oy) for p in g.pts]
-                    pts = _linearize_bezier(ctrl)
-                    lines.append(pts)
+                    lines.append(_linearize_bezier(ctrl))
+
+        # --- footprint-local Edge.Cuts (board outline per KiCad) ---
+        # The shared core reader re-emits fp_* Edge.Cuts graphics as
+        # board-frame gr_* nodes; an outline drawn inside a footprint (e.g.
+        # SparkFun's IoT RedBoard ESP32-P4) participates like any other.
+        from ..core.board_outline import footprint_outline_graphics, outline_node_points
+
+        for node in footprint_outline_graphics(pcb._sexp):
+            tag = node.tag or ""
+            if tag == "gr_line":
+                (sx, sy), (ex, ey) = outline_node_points(node)
+                lines.append([(sx - ox, sy - oy), (ex - ox, ey - oy)])
+            elif tag == "gr_arc":
+                (sx, sy), (mx, my), (ex, ey) = outline_node_points(node)
+                lines.append(_linearize_arc(sx - ox, sy - oy, mx - ox, my - oy, ex - ox, ey - oy))
+            elif tag in ("gr_poly", "gr_curve"):
+                chain = [(x - ox, y - oy) for x, y in outline_node_points(node)]
+                if tag == "gr_curve":
+                    lines.append(_linearize_bezier(chain))
+                else:
+                    lines.append([*chain, chain[0]])
+            elif tag == "gr_circle":
+                # Same ring treatment as the board-level circle branch: a
+                # lone circle polygonizes to its disc, and a circle inside
+                # an outer boundary cuts a hole instead of replacing the
+                # whole board (#9593).
+                (cx_raw, cy_raw), (ex_raw, ey_raw) = outline_node_points(node)
+                cx, cy = cx_raw - ox, cy_raw - oy
+                radius = math.sqrt((ex_raw - cx_raw) ** 2 + (ey_raw - cy_raw) ** 2)
+                if radius > 0.0:
+                    ring = circle_tessellation_points((cx, cy), radius)
+                    lines.append([*ring, ring[0]])
 
         if not lines:
             raise ValueError("No Edge.Cuts elements found -- cannot construct board outline.")

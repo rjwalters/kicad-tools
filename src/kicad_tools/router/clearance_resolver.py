@@ -62,12 +62,19 @@ the same "raise, never replace" footing as ``rules.min_clearance``
 a board that declares *less* than the router's target from being loosened.
 
 What is still deliberately **not** read: ``.kicad_dru`` rules carrying a
-``(condition …)`` (see :attr:`DeclaredClearanceRules.dru_mm`), with one
-narrow exception -- a condition that is purely a copper-*type* test naming a
-via (``A.Type == 'Via' || B.Type == 'Via'``) is recognised as a via-scoped
-rule and feeds ``via_clearance`` (:attr:`DeclaredClearanceRules.dru_via_mm`,
-#6280) -- and KiCad's ``physical_clearance`` constraint, which is a
-different rule family.
+``(condition …)`` per *pair* -- the #9578 change floors the run at the
+strictest conditional ``clearance`` minimum
+(:attr:`DeclaredClearanceRules.dru_conditional_mm`) whose condition can
+still select a track/via pair (the #9588 review scoped it: zone-only and
+pad-to-pad rules floor nothing), because KiCad enforces
+such a rule on every pair it selects and routing below it fails the board's
+own DRC -- but no per-pair resolution comes from a condition here: that is
+:class:`~kicad_tools.router.board_clearance_rules.BoardClearanceRules`' job
+(the kept-copper audit's evaluator).  One narrow exception recognises a
+condition that is purely a copper-*type* test naming a via
+(``A.Type == 'Via' || B.Type == 'Via'``) as a via-scoped rule and feeds
+``via_clearance`` (:attr:`DeclaredClearanceRules.dru_via_mm`, #6280); and
+KiCad's ``physical_clearance`` constraint is a different rule family.
 
 Precedence
 ----------
@@ -78,7 +85,11 @@ deterministic order.  ``target_mm`` is the router's own spacing target
 1. **Explicit operator target wins outright.**  An explicit ``--clearance``
    is authoritative and is never moved -- the operator opted in, exactly as
    #4875 defined it.  A warning is surfaced when it undercuts a declared
-   rule; the value is not changed.
+   rule; the value is not changed.  One exception (#9588 review): the #9578
+   conditional floor -- the strictest conditional ``.kicad_dru`` minimum
+   whose condition can select a routed pair -- floors even an explicit
+   target (with a warning), because copper committed below it fails the
+   board's own DRC; no other layer is waivable this way.
 2. A legacy ``.kicad_pcb`` top-level ``(net_class …)`` clearance **replaces**
    the target, in both directions.  This is #4875's rule, unchanged: a board
    that carries that node states the spacing it was designed at.  KiCad 6+
@@ -274,6 +285,10 @@ class RuleSource(Enum):
     PAIR_MATRIX = "pair-matrix"
     VIA_CLEARANCE = "via-clearance"
     TRACE_BASE = "trace-base"
+    #: The strictest conditional ``.kicad_dru`` ``clearance`` rule (#9578).
+    #: Appended last so exact ties keep provenance stable with pre-#9578
+    #: resolutions.
+    PROJECT_DRU_CONDITIONAL = "project-dru-conditional"
 
 
 #: Ordering used to break exact ties between equal-valued terms.
@@ -298,10 +313,11 @@ class DeclaredClearanceRules:
 
     Attributes:
         dru_mm: Strictest unconditional ``(constraint clearance (min …))``
-            in the board's ``.kicad_dru`` sidecar.  **Conditional** rules
-            (those carrying a ``(condition …)``) are deliberately ignored --
-            honouring them needs a DRC-expression evaluator this repo does
-            not have, and guessing would be worse than naming the gap.
+            in the board's ``.kicad_dru`` sidecar.  Conditional rules are
+            carried by :attr:`dru_via_mm` (via-scoped, #6280) and
+            :attr:`dru_conditional_mm` (everything else, #9578) instead.
+            ``(severity ignore)`` rules are skipped in all three DRU layers
+            (#9670) -- where one wins, KiCad checks nothing.
         project_min_clearance_mm: ``.kicad_pro``
             ``board.design_settings.rules.min_clearance`` (falling back to
             ``design_settings.defaults.clearance_min``) -- KiCad's hard board
@@ -328,6 +344,21 @@ class DeclaredClearanceRules:
             B.Type == 'Track'``, …).  It governs only pairs with a via on one
             side, so it feeds :meth:`via_requirement` and never the board-wide
             trace base (#6280).
+        dru_conditional_mm: Strictest **other conditional** ``(constraint
+            clearance (min …))`` in the ``.kicad_dru`` -- a net-class rule
+            (``A.NetClass == 'HV' || B.NetClass == 'HV'``), a footprint-scoped
+            one, anything else with a condition that can still select a
+            track/via pair (#9578; scoped by the #9588 review: a rule
+            provably false on every such pair -- a zone-only or pad-to-pad
+            rule -- floors nothing, because no pair the router commits can
+            select it).  KiCad enforces such a rule on every pair it
+            selects, so its minimum is a floor on
+            what the board can require of *some* pair: both
+            :meth:`project_requirement` and :meth:`via_requirement` carry it,
+            and a run routed below it can fail the board's own DRC even when
+            the unconditional rule, the board minimum and the netclass all
+            sit lower.  ``(severity ignore)`` rules contribute nothing --
+            where one wins, KiCad checks nothing.
     """
 
     dru_mm: float | None = None
@@ -337,6 +368,7 @@ class DeclaredClearanceRules:
     board_net_class_mm: float | None = None
     board_net_class_name: str | None = None
     dru_via_mm: float | None = None
+    dru_conditional_mm: float | None = None
 
     def via_requirement(self) -> tuple[float, RuleSource, str | None] | None:
         """The strictest declared rule that applies to a **via** pair (#6280).
@@ -361,6 +393,7 @@ class DeclaredClearanceRules:
         candidates: tuple[tuple[float | None, RuleSource, str | None], ...] = (
             (self.dru_mm, RuleSource.PROJECT_DRU, None),
             (self.dru_via_mm, RuleSource.PROJECT_DRU_VIA, None),
+            (self.dru_conditional_mm, RuleSource.PROJECT_DRU_CONDITIONAL, None),
             (self.board_net_class_mm, RuleSource.BOARD_NET_CLASS, self.board_net_class_name),
             (self.project_min_clearance_mm, RuleSource.PROJECT_MIN_CLEARANCE, None),
             (self.net_class_clearance_mm, RuleSource.PROJECT_NET_CLASS, self.net_class_name),
@@ -398,6 +431,7 @@ class DeclaredClearanceRules:
             winner = (self.dru_mm, RuleSource.PROJECT_DRU, None)
 
         candidates: tuple[tuple[float | None, RuleSource, str | None], ...] = (
+            (self.dru_conditional_mm, RuleSource.PROJECT_DRU_CONDITIONAL, None),
             (self.project_min_clearance_mm, RuleSource.PROJECT_MIN_CLEARANCE, None),
             (self.net_class_clearance_mm, RuleSource.PROJECT_NET_CLASS, self.net_class_name),
         )
@@ -829,11 +863,16 @@ def _project_net_class(data: dict) -> tuple[str, float] | None:
 def _read_dru_clearance(dru_path: Path) -> float | None:
     """Strictest **unconditional** ``clearance`` minimum in a ``.kicad_dru``.
 
-    A rule carrying a ``(condition …)`` is skipped: evaluating a KiCad DRC
-    expression is out of scope for this phase, and applying a conditional
-    rule board-wide would over-constrain every pair the condition excludes.
-    ``physical_clearance`` is a different KiCad constraint and is likewise
-    not read here.
+    A rule carrying a ``(condition …)`` is skipped here -- this helper feeds
+    the unconditional layer only.  Conditional rules reach the resolution
+    through :attr:`DeclaredClearanceRules.dru_conditional_mm` (#9578), which
+    floors the board-wide and via requirements at the strictest of them:
+    KiCad enforces every rule it can parse, so a conditional rule that
+    requires more than the board-wide floor was invisible to the run and let
+    newly committed copper undercut it.  ``physical_clearance`` is a
+    different KiCad constraint and is not read at all.  A rule with
+    ``(severity ignore)`` is skipped, as in every other layer (#9670):
+    where it wins, KiCad checks nothing.
 
     Never raises -- a malformed sidecar yields ``None``.
     """
@@ -960,38 +999,118 @@ def _is_via_scoped_condition(expression: str) -> bool:
     return bool(types) and "via" in types and all(kind in _VIA_PEER_TYPES for kind in types)
 
 
-def _read_dru_clearances(dru_path: Path) -> tuple[float | None, float | None]:
-    """Both ``.kicad_dru`` clearance layers, from one parse of the file.
+#: Pair shapes the board-wide conditional floor governs: the track/via pairs
+#: ``kct route`` commits (#9588 review), and those pairs against the board's
+#: existing pads -- new tracks and vias are placed next to pads too (#9588
+#: review, non-blocking).  Both orders of every mixed shape, since KiCad
+#: decides an ordered pair and the condition may name the types in either
+#: order.  No pad/pad pair: nothing routes between two pads as such a pair.
+_PROBE_PAIR_SHAPES: tuple[tuple[str, str], ...] = (
+    ("Track", "Track"),
+    ("Track", "Via"),
+    ("Via", "Track"),
+    ("Via", "Via"),
+    ("Track", "Pad"),
+    ("Pad", "Track"),
+    ("Via", "Pad"),
+    ("Pad", "Via"),
+)
 
-    Returns ``(unconditional_mm, via_scoped_mm)``: the strictest
-    unconditional ``(constraint clearance (min …))`` (see
-    :func:`_read_dru_clearance`) and the strictest one whose condition is
-    via-scoped (:func:`_is_via_scoped_condition`, #6280).  Never raises.
+
+def _condition_may_select_routed_pair(expression: str) -> bool:
+    """Whether a conditional rule's condition can still select routed copper.
+
+    The board-wide conditional floor governs the track/via pairs ``kct route``
+    commits -- and their pairs against the board's existing pads -- so a rule
+    whose condition is provably false on every such pair -- a zone-only rule
+    (``A.Type == 'Zone' …``), a pad-to-pad one -- must not raise it (#9588
+    review).  Each shape is probed with the kept-copper audit's own
+    evaluator: the copper type is known, everything else (net, class, layer,
+    footprint) is unknown, so type-only conditions resolve decisively while
+    net-class and footprint conditions stay undecided.  A condition that is
+    undecided on any shape -- or one the evaluator cannot run at all -- may
+    still select routed copper and keeps its floor, the same conservative
+    reading undecided conditions get everywhere else.  Never raises.
+    """
+    try:
+        from kicad_tools.router.board_clearance_rules import ItemProps, evaluate_condition
+
+        for a_type, b_type in _PROBE_PAIR_SHAPES:
+            verdict = evaluate_condition(
+                expression,
+                ItemProps(type=a_type, net_name=None),
+                ItemProps(type=b_type, net_name=None),
+            )
+            if verdict is not False:
+                return True
+        return False
+    except Exception:
+        return True
+
+
+def _read_dru_clearances(dru_path: Path) -> tuple[float | None, float | None, float | None]:
+    """The three ``.kicad_dru`` clearance layers, from one parse of the file.
+
+    Returns ``(unconditional_mm, via_scoped_mm, conditional_mm)``: the
+    strictest unconditional ``(constraint clearance (min …))`` (see
+    :func:`_read_dru_clearance`), the strictest one whose condition is
+    via-scoped (:func:`_is_via_scoped_condition`, #6280), and -- #9578 --
+    the strictest remaining conditional one **whose condition can still
+    select a track/via pair** -- or that pair against one of the board's
+    existing pads -- (:func:`_condition_may_select_routed_pair`,
+    #9588 review).  KiCad enforces a conditional rule on every pair its
+    condition selects, so the largest of those minima is a floor on what
+    the board can require of *some* routed pair; routing below it can fail
+    the board's own DRC even when the unconditional rule, the board minimum
+    and the netclass all sit lower.  A conditional rule that is provably
+    false on every such pair -- zone-only, pad-to-pad -- contributes to
+    no board-wide floor.  A rule with ``(severity ignore)`` is skipped
+    outright in **all three** layers (#9670): where it wins, KiCad checks
+    nothing.  Never raises.
     """
     try:
         text = dru_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return (None, None)
+        return (None, None, None)
     if "clearance" not in text:
-        return (None, None)
+        return (None, None, None)
 
     try:
         from kicad_tools.sexp import parse_string
 
         tree = parse_string("(rules " + text + ")")
     except Exception:
-        return (None, None)
+        return (None, None, None)
 
     best: float | None = None
     best_via: float | None = None
+    best_conditional: float | None = None
     for rule in tree.find_all("rule"):
         condition = rule.find_child("condition")
         via_scoped = False
+        conditional = False
         if condition is not None:
             expression = condition.get_first_atom()
-            if expression is None or not _is_via_scoped_condition(str(expression)):
-                continue
-            via_scoped = True
+            if expression is None:
+                conditional = True
+            elif _is_via_scoped_condition(str(expression)):
+                via_scoped = True
+            elif _condition_may_select_routed_pair(str(expression)):
+                conditional = True
+            # else: the condition is provably false on every pair the router
+            # commits, against its own copper or the board's pads (#9588
+            # review) -- a zone-only or pad-to-pad rule -- so it contributes
+            # to no board-wide floor.
+        unconditional = condition is None
+        severity_node = rule.find_child("severity")
+        ignored = (
+            severity_node is not None
+            and str(severity_node.get_first_atom() or "").casefold() == "ignore"
+        )
+        if ignored:
+            # Where an ignored rule wins, KiCad checks nothing -- so it
+            # floors no bucket, not just the conditional one (#9670).
+            continue
         for constraint in rule.find_all("constraint"):
             atoms = constraint.get_atoms()
             if not atoms or str(atoms[0]) != "clearance":
@@ -1005,29 +1124,31 @@ def _read_dru_clearances(dru_path: Path) -> tuple[float | None, float | None]:
             if via_scoped:
                 if best_via is None or value > best_via:
                     best_via = value
-            elif best is None or value > best:
-                best = value
-    return (best, best_via)
+            elif conditional:
+                if best_conditional is None or value > best_conditional:
+                    best_conditional = value
+            elif unconditional:
+                if best is None or value > best:
+                    best = value
+            # else: a conditional rule the #9588-review probe proved unable to
+            # select any routed pair -- counted nowhere, by design.
+    return (best, best_via, best_conditional)
 
 
 def _parse_length_mm(raw: object) -> float | None:
-    """Parse a KiCad DRC length literal (``0.2mm``, ``0.2``) into mm."""
-    if raw is None:
-        return None
-    if isinstance(raw, (int, float)):
-        return float(raw)
-    text = str(raw).strip().lower()
-    if text.endswith("mm"):
-        text = text[:-2]
-    elif text.endswith("in"):
-        try:
-            return float(text[:-2]) * 25.4
-        except ValueError:
-            return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
+    """Parse a KiCad length literal (``0.2mm``, ``0.2``, ``40mil``) into mm.
+
+    Delegates to the board-rule evaluator's parser (#9588 review): the
+    local copy handled ``mm`` / ``in`` / bare numbers and silently dropped
+    ``mil`` -- so a conditional ``(min 40mil)`` rule vanished from the
+    placement reader while :class:`BoardClearanceRules` measured its
+    1.016 mm, and new copper was placed below a rule the audit enforces.
+    """
+    from kicad_tools.router.board_clearance_rules import (
+        _parse_length_mm as _board_parse_length_mm,
+    )
+
+    return _board_parse_length_mm(raw)
 
 
 def read_declared_clearance_rules(
@@ -1057,7 +1178,7 @@ def read_declared_clearance_rules(
     path = Path(pcb_path)
 
     project_minimum, project_net_class = _read_project_clearances(path.with_suffix(".kicad_pro"))
-    dru_mm, dru_via_mm = _read_dru_clearances(path.with_suffix(".kicad_dru"))
+    dru_mm, dru_via_mm, dru_conditional_mm = _read_dru_clearances(path.with_suffix(".kicad_dru"))
 
     board_net_class = (
         strictest_net_class_clearance(board_net_classes) if board_net_classes else None
@@ -1071,6 +1192,7 @@ def read_declared_clearance_rules(
         board_net_class_mm=board_net_class[1] if board_net_class else None,
         board_net_class_name=board_net_class[0] if board_net_class else None,
         dru_via_mm=dru_via_mm,
+        dru_conditional_mm=dru_conditional_mm,
     )
 
 
@@ -1101,8 +1223,9 @@ def resolve_base_clearance(
             :func:`~kicad_tools.router.mfr_limits.resolve_clearance`.
             ``None`` when no manufacturer is configured.
         explicit_target: True when the operator passed ``--clearance``.  The
-            value is then authoritative and is never raised; a declared
-            requirement above it produces a warning instead.
+            value is then authoritative and is never raised -- except by
+            the #9578 conditional floor (see the docstring note below); a
+            declared requirement above it produces a warning instead.
         explicit_manufacturer: True when the operator passed
             ``--manufacturer`` / ``--mfr``.  Names the fab-floor term
             :attr:`RuleSource.MANUFACTURER_OVERRIDE` instead of
@@ -1112,7 +1235,12 @@ def resolve_base_clearance(
 
     Returns:
         The base requirement, its provenance, every term evaluated, and a
-        warning when a layer was deliberately not applied.
+        warning when a layer was deliberately not applied.  One layer is
+        never waivable (#9588 review): the strictest conditional
+        ``.kicad_dru`` minimum that can select a routed pair
+        (:attr:`DeclaredClearanceRules.dru_conditional_mm`) floors even an
+        explicit ``--clearance``, because copper committed below it fails
+        the board's own DRC (#9578 acceptance).
     """
     target = float(target_mm)
     target_source = RuleSource.EXPLICIT_TARGET if explicit_target else RuleSource.TARGET_DEFAULT
@@ -1125,8 +1253,29 @@ def resolve_base_clearance(
     )
 
     if explicit_target:
-        # The operator's value is authoritative -- say so when it undercuts a
-        # rule rather than silently overriding the board.
+        # The operator's value is authoritative against every board-wide
+        # layer (#5656) -- except the #9578 conditional floor: a
+        # ``.kicad_dru`` rule whose condition selects routed pairs is
+        # KiCad-enforced per pair, and copper placed below it fails the
+        # board's own DRC (#9588 review), so it floors even an explicit
+        # target instead of only warning about it.
+        conditional = declared.dru_conditional_mm
+        if conditional is not None and conditional > target + RESOLVER_TIE_EPSILON_MM:
+            raised = resolved.with_term(RuleSource.PROJECT_DRU_CONDITIONAL, conditional)
+            return ResolvedClearance(
+                raised.required_mm,
+                raised.source,
+                raised.terms,
+                (
+                    f"WARNING: explicit --clearance {target:.4g}mm is below the "
+                    f"{conditional:.4g}mm a conditional .kicad_dru rule requires "
+                    f"of some routed pairs; routing at {raised.required_mm:.4g}mm "
+                    f"so committed copper passes the board's own DRC."
+                ),
+            )
+        # Against every other declared layer the value stays the operator's
+        # -- say so when it undercuts a rule rather than silently
+        # overriding the board.
         strictest = declared.strictest_requirement()
         if strictest is not None and strictest[0] > target + RESOLVER_TIE_EPSILON_MM:
             where = strictest[2] or strictest[1].value
@@ -1223,7 +1372,9 @@ def resolve_via_clearance(
     Precedence, the via analogue of :func:`resolve_base_clearance`:
 
     1. **Explicit** ``--via-clearance`` wins outright and is never moved; a
-       warning names any declared via rule it undercuts.
+       warning names any declared via rule it undercuts -- except the #9578
+       conditional floor, which binds it like it binds ``--clearance``
+       (#9588 review).
     2. The board's strictest **declared** rule that applies to a via pair
        (:meth:`DeclaredClearanceRules.via_requirement`: the ``.kicad_pro``
        board minimum, a via-scoped or unconditional ``.kicad_dru`` clearance,
@@ -1271,6 +1422,24 @@ def resolve_via_clearance(
         resolved = ResolvedClearance(
             value, RuleSource.EXPLICIT_TARGET, ((RuleSource.EXPLICIT_TARGET, value),)
         )
+        # The #9578 conditional floor binds an explicit --via-clearance for
+        # the same reason it binds an explicit --clearance (#9588 review):
+        # a conditional rule that selects routed pairs is KiCad-enforced
+        # per pair, and copper placed below it fails the board's own DRC.
+        conditional = declared.dru_conditional_mm
+        if conditional is not None and conditional > value + RESOLVER_TIE_EPSILON_MM:
+            raised = resolved.with_term(RuleSource.PROJECT_DRU_CONDITIONAL, conditional)
+            return ResolvedClearance(
+                raised.required_mm,
+                raised.source,
+                raised.terms,
+                (
+                    f"WARNING: explicit --via-clearance {value:.4g}mm is below the "
+                    f"{conditional:.4g}mm a conditional .kicad_dru rule requires "
+                    f"of some routed pairs; routing at {raised.required_mm:.4g}mm "
+                    f"so committed copper passes the board's own DRC."
+                ),
+            )
         if requirement is not None and requirement[0] > value + RESOLVER_TIE_EPSILON_MM:
             where = requirement[2] or requirement[1].value
             return ResolvedClearance(

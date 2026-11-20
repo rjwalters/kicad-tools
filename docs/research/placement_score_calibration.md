@@ -1,11 +1,11 @@
 # Calibrating pre-route placement signals against routing outcomes
 
-**Issues**: [#5948](https://github.com/rjwalters/kicad-tools/issues/5948)
-(study), [#6233](https://github.com/rjwalters/kicad-tools/issues/6233)
+**Issues**: [#5948](https://github.com/2AMLogic/kicad-tools/issues/5948)
+(study), [#6233](https://github.com/2AMLogic/kicad-tools/issues/6233)
 (both corpora folded into this one note)
 **Status**: complete. **Decision: do not adopt** a calibrated pre-route score
 as the `optimize-placement` acceptance criterion. Use a bounded real route
-instead (`--route-check`, [#6234](https://github.com/rjwalters/kicad-tools/issues/6234)).
+instead (`--route-check`, [#6234](https://github.com/2AMLogic/kicad-tools/issues/6234)).
 See [Decision](#decision).
 **Script**: [`scripts/research/placement_score_calibration.py`](../../scripts/research/placement_score_calibration.py)
 **Data**: [`data/research/placement_score/`](../../data/research/placement_score/)
@@ -432,7 +432,7 @@ justifies one. No code in `optimize-placement` was changed.
 ### What to do instead
 
 - **For acceptance, measure routability directly: `--route-check`
-  ([#6234](https://github.com/rjwalters/kicad-tools/issues/6234)).** This is
+  ([#6234](https://github.com/2AMLogic/kicad-tools/issues/6234)).** This is
   the idea behind TraceMaker's `--route-check` (GPL-3.0, idea only): accept a
   candidate only if a short, bounded real `kct route` reaches at least the
   incumbent's completion with no more DRC errors. It is the only

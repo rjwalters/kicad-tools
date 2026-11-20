@@ -36,7 +36,7 @@ The heavyweight softstart rev B end-to-end reach test lives in
 ``tests/router/test_softstart_revb_fine_pitch_escape.py`` (already
 present from P_FP4; P_FP5 will tighten the floor there).
 
-Issue: https://github.com/rjwalters/kicad-tools/issues/3371
+Issue: https://github.com/2AMLogic/kicad-tools/issues/3371
 """
 
 from __future__ import annotations
