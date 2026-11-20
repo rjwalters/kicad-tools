@@ -1707,6 +1707,9 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 "required_mm": round(r.required_mm, 4),
                 "actual_mm": round(r.actual_mm, 4),
                 "obstacle_net": r.obstacle_net,
+                # Issue #9815: the courtyard an ``anchor_courtyard`` refusal names.
+                "obstacle_footprint": r.obstacle_footprint,
+                "obstacle_side": r.obstacle_side,
             }
             for r in outcome.refused
         ],
@@ -1937,6 +1940,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             detail = (
                 f" [{r.rule}: need {r.required_mm:.3f} mm, have {r.actual_mm:.3f} mm"
                 + (f", vs {r.obstacle_net}" if r.obstacle_net else "")
+                + (f", in {r.obstacle_footprint}" if r.obstacle_footprint else "")
                 + "]"
                 if r.rule
                 else ""
