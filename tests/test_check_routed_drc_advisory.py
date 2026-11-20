@@ -99,10 +99,14 @@ def _make_violation(
     }
 
 
-def _make_kct_json(violations: list[dict]) -> str:
+def _make_kct_json(violations: list[dict], summary_extra: dict | None = None) -> str:
     """Build a ``kct check --format json`` payload around a violation list.
 
     Mirrors ``src/kicad_tools/cli/drc_cmd.py::output_json``.
+    ``summary_extra`` merges extra ``summary`` keys into the payload -- the
+    Issue #9706 tests use it for ``coverage_blocking_unknown``, the only
+    incomplete-run signal that survives ``--errors-only`` (an info
+    ``<rule>_incomplete`` record does not).
     """
     payload = {
         "source": "synthetic.kicad_pcb",
@@ -110,6 +114,7 @@ def _make_kct_json(violations: list[dict]) -> str:
         "summary": {
             "errors": sum(1 for v in violations if v.get("severity") == "error"),
             "warnings": sum(1 for v in violations if v.get("severity") != "error"),
+            **(summary_extra or {}),
         },
         "violations": violations,
     }
@@ -586,6 +591,85 @@ class TestIdentityAllowance:
         assert "Stale identity allowance" in msg
         assert "REPAIRED_NET" in msg
         assert "delete its allowance entry" in msg
+
+    def test_incomplete_pass_fails_as_did_not_run_not_stale(self) -> None:
+        """Issue #9706: an incomplete ``mask_to_copper`` pass (info
+        ``mask_to_copper_incomplete`` record, zero findings -- the shape a
+        host without the qualified native toolchain produces, e.g. bare
+        ubuntu-latest CI) must fail the gate as "did not run", never as
+        stale: the old behaviour told authors to delete healthy allowance
+        entries off a pass that never executed."""
+        violations = [_make_violation("mask_to_copper_incomplete", severity="info")]
+        allowance = {("mask_to_copper", "GND"): 8858, ("mask_to_copper", "VOUT"): 8858}
+        with self._stub_kct(_make_kct_json(violations)):
+            passed, msg, _errors = self.helper.check_file(
+                Path("synthetic.kicad_pcb"), allowed=0, allowance=allowance
+            )
+        assert not passed
+        assert "did not run" in msg
+        assert "mask_to_copper_incomplete" in msg
+        assert "native KiCad toolchain required" in msg
+        assert "Stale identity allowance" not in msg
+
+    def test_incomplete_pass_keeps_stale_arm_for_completed_rules(self) -> None:
+        """The incomplete arm silences stale text only for the rule that
+        did not run; a COMPLETED rule's stale entry still surfaces (Issue
+        #9706: stale detection for rules that did complete is unchanged --
+        ``test_stale_entry_fails_the_gate`` above is the all-completed
+        control)."""
+        violations = [
+            _make_violation("mask_to_copper_incomplete", severity="info"),
+            _make_violation("physical_copper_gap", nets=["GND"]),
+        ]
+        allowance = {
+            ("mask_to_copper", "GND"): 8858,
+            ("physical_copper_gap", "GND"): 8858,
+            ("physical_copper_gap", "REPAIRED_NET"): 8858,
+        }
+        with self._stub_kct(_make_kct_json(violations)):
+            passed, msg, _errors = self.helper.check_file(
+                Path("synthetic.kicad_pcb"), allowed=0, allowance=allowance
+            )
+        assert not passed
+        assert "did not run" in msg
+        assert "Stale identity allowance" in msg
+        assert "REPAIRED_NET" in msg
+
+    def test_incomplete_marker_via_summary_fails_as_did_not_run(self) -> None:
+        """The ``--errors-only`` payload shape (Issue #9706): the info
+        ``mask_to_copper_incomplete`` record is filtered out, and the only
+        surviving signal is ``summary.coverage_blocking_unknown`` -- exactly
+        what the CI gate's own run produces on a host without the qualified
+        native toolchain."""
+        payload = _make_kct_json([], {"coverage_blocking_unknown": ["mask_to_copper"]})
+        allowance = {("mask_to_copper", "GND"): 8858, ("mask_to_copper", "VOUT"): 8858}
+        with self._stub_kct(payload):
+            passed, msg, _errors = self.helper.check_file(
+                Path("synthetic.kicad_pcb"), allowed=0, allowance=allowance
+            )
+        assert not passed
+        assert "did not run" in msg
+        assert "mask_to_copper" in msg
+        assert "native KiCad toolchain required" in msg
+        assert "Stale identity allowance" not in msg
+
+    def test_incomplete_marker_for_rule_without_allowance_ignored(self) -> None:
+        """An ``<rule>_incomplete`` record for a rule with NO allowance
+        entries (``physical_copper_gap_incomplete``, info) is not this
+        gate's business: the verdict is unchanged, because the incomplete
+        detection is scoped to the rules the board actually judges by
+        identity (Issue #9706)."""
+        violations = [
+            _make_violation("physical_copper_gap_incomplete", severity="info"),
+            _make_violation("mask_to_copper", nets=["GND"]),
+        ]
+        allowance = {("mask_to_copper", "GND"): 8858}
+        with self._stub_kct(_make_kct_json(violations)):
+            passed, _msg, errors = self.helper.check_file(
+                Path("synthetic.kicad_pcb"), allowed=0, allowance=allowance
+            )
+        assert passed
+        assert errors == 0
 
     def test_advisory_findings_are_never_unallowed(self) -> None:
         """Advisory connectivity records carry no identity judgment: they

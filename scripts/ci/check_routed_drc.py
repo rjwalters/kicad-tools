@@ -78,6 +78,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from identity_allowance import (  # noqa: E402
     error_identities,
     format_stale,
+    incomplete_rules,
     stale_entries,
     unallowed_findings,
 )
@@ -103,14 +104,19 @@ class IdentityOutcome(NamedTuple):
     ``raw_blocking`` is the advisory-filtered count before any allowance;
     ``unallowed`` the blocking findings no ``(rule, identity)`` entry covers
     (``identity_allowance.unallowed_findings`` shape); ``stale`` the entries
-    whose finding no longer occurs (``stale_entries`` shape).  All three are
-    trivially empty when no allowance applies to the board.
+    whose finding no longer occurs (``stale_entries`` shape); ``incomplete``
+    the allowance rules whose pass did NOT complete (Issue #9706 -- an
+    ``<rule>_incomplete`` record means the rule's findings, including their
+    absence, are not evidence, so its entries are neither stale nor clean
+    and the gate must fail loudly instead).  All four are trivially empty
+    when no allowance applies to the board.
     """
 
     raw_blocking: int
     applied: bool
     unallowed: list[tuple[str, str]]
     stale: list[tuple[str, str, int]]
+    incomplete: list[str] = []
 
 
 def identity_outcome(
@@ -119,11 +125,19 @@ def identity_outcome(
     """Apply *allowance* to a parsed ``kct check`` payload (#8858).
 
     Returns the raw advisory-filtered blocking count, whether the allowance
-    was actually applied, the blocking findings no entry covers, and the
-    entries whose finding no longer fires.  A payload without a
-    ``violations`` list (legacy summary-only reports) cannot be judged by
-    identity, so ``applied`` is False and the caller falls back to the raw
-    count -- failing closed, never silently excusing.
+    was actually applied, the blocking findings no entry covers, the
+    entries whose finding no longer fires, and the allowance rules that did
+    not run to completion (Issue #9706: either a severity-agnostic
+    ``<rule>_incomplete`` record or the rule's name in
+    ``summary.coverage_blocking_unknown`` -- the latter is the only shape
+    that survives this gate's own ``--errors-only`` filter -- means the
+    rule's findings, including their absence, are not evidence, so its
+    entries are neither stale nor clean, are dropped from ``stale``, and
+    are surfaced separately for :func:`check_file` to fail on; without this
+    an incomplete pass read as a clean one and every entry looked stale).
+    A payload without a ``violations`` list (legacy summary-only reports)
+    cannot be judged by identity, so ``applied`` is False and the caller
+    falls back to the raw count -- failing closed, never silently excusing.
     """
     blocking, _advisory = count_blocking_errors(data)
     if allowance is None:
@@ -132,8 +146,26 @@ def identity_outcome(
     if not isinstance(violations, list):
         return IdentityOutcome(blocking, False, [], [])
     unallowed = unallowed_findings(allowance, violations, advisory=_is_advisory)
-    stale = stale_entries(allowance, error_identities(violations))
-    return IdentityOutcome(blocking, True, unallowed, stale)
+    # Issue #9706: two payload shapes say "this rule did not run to
+    # completion".  A severity-agnostic ``<rule>_incomplete`` violation
+    # record (the info marker ``kct check`` emits without ``--errors-only``)
+    # and the ``summary.coverage_blocking_unknown`` list, which is what
+    # survives the gate's own ``--errors-only`` filter (an info record does
+    # not).  Union both, scoped to the rules this board has entries for.
+    summary = data.get("summary")
+    blocking_unknown = (
+        summary.get("coverage_blocking_unknown") if isinstance(summary, dict) else None
+    ) or []
+    incomplete = sorted(
+        (incomplete_rules(violations) | {str(r) for r in blocking_unknown})
+        & {rule for rule, _ident in allowance}
+    )
+    stale = [
+        entry
+        for entry in stale_entries(allowance, error_identities(violations))
+        if entry[0] not in incomplete
+    ]
+    return IdentityOutcome(blocking, True, unallowed, stale, incomplete)
 
 
 def load_allowlist(allowlist_path: Path) -> dict[str, int]:
@@ -561,6 +593,12 @@ def check_file(
     gates (#7367).  Without one, every blocking finding counts, exactly
     as before this mechanism existed.
 
+    Issue #9706: a report carrying an ``<rule>_incomplete`` record for a
+    rule with allowance entries fails FIRST with a "did not run / native
+    KiCad toolchain required" error -- an incomplete pass is neither
+    stale nor clean -- and no stale-allowance text is emitted for that
+    rule.
+
     Args:
         pcb_path: Path to a ``.kicad_pcb`` file.
         allowed: Maximum (blocking) error count this PCB may report before
@@ -583,6 +621,31 @@ def check_file(
     """
     errors, advisory_by_rule, outcome = count_errors(pcb_path, mfr=mfr, allowance=allowance)
     advisory_suffix = _format_advisory_suffix(advisory_by_rule)
+
+    if outcome.incomplete:
+        # Issue #9706: an <rule>_incomplete record means the rule never ran,
+        # so its zero findings are not evidence.  Judging that report as
+        # "stale" told authors to delete healthy allowance entries (the
+        # CI red on main this fixes); judging it clean would hide real
+        # drift.  Fail loudly instead, naming the toolchain requirement.
+        detail = "; ".join(
+            f"{rule} did not run ({rule}_incomplete): native KiCad toolchain required"
+            for rule in outcome.incomplete
+        )
+        msg = (
+            f"Incomplete identity-allowance pass: {detail}. Zero findings "
+            f"for the rule below mean the check did not run, not that the "
+            f"board is clean -- re-run on the pinned KiCad toolchain "
+            f"(KCT_KICAD_DOCKER=1) before judging this board's allowances."
+        )
+        if outcome.stale:
+            msg += (
+                f" Stale identity allowance: {format_stale(outcome.stale)}. "
+                f"Delete the entry from the identity_allowances block of "
+                f".github/routed-drc-tolerance.yml -- the repair it tracked "
+                f"landed."
+            )
+        return False, msg + advisory_suffix, errors
 
     if outcome.stale:
         msg = (
