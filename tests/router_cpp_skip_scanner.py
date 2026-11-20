@@ -167,11 +167,16 @@ def scan_source(source: str, path: str = "<source>") -> list[Violation]:
 
     * ``pytest.mark.skipif(not is_cpp_available(), ...)`` in any form --
       decorator, ``pytestmark``, ``marks=`` in a parametrization, or an
-      intermediate alias like ``requires_cpp = pytest.mark.skipif(...)``;
+      intermediate alias like ``requires_cpp = pytest.mark.skipif(...)`` --
+      and, since Issue #9804, any other ``skipif`` whose condition reads the
+      router backend's availability through ``get_backend_info()``;
     * ``pytest.importorskip("kicad_tools.router.router_cpp")``;
     * ``pytest.skip(...)`` inside a block guarded by ``not is_cpp_available()``
       (including ``if backend == "cpp" and not is_cpp_available():`` and
-      variables assigned from the probe).
+      variables assigned from the probe);
+    * an unconditional ``pytest.mark.skip`` (decorator, ``pytestmark``,
+      ``marks=`` in a parametrization, or an alias binding) in any module
+      that references the router backend at all (Issue #9804).
     """
     refs = router_probe_refs(source)
     info_refs = router_info_refs(source)
@@ -190,10 +195,15 @@ def scan_source(source: str, path: str = "<source>") -> list[Violation]:
                 return True
         return bool(module_ref and re.search(r"(?<![\w.])router_cpp\b", text))
 
+    def mentions_info_probe(text: str) -> bool:
+        # ``get_backend_info()["available"]`` / ``.get("available")`` reads
+        # the same availability through a different name (Issue #9804).
+        return any(re.search(rf"(?<![\w.]){re.escape(ref)}\s*\(\s*\)", text) for ref in info_refs)
+
     # 1. skipif(...) whose arguments reference the router probe.
     for match in re.finditer(r"skipif\s*\(", source):
         call = _balanced_call(source, match.end() - 1)
-        if mentions_probe(call):
+        if mentions_probe(call) or mentions_info_probe(call):
             violations.append(
                 Violation(
                     path,
@@ -258,7 +268,22 @@ def scan_source(source: str, path: str = "<source>") -> list[Violation]:
                             "require_router_cpp() instead (Issue #9705)",
                         )
                     )
-    # 4. ``try: from kicad_tools.router import router_cpp`` /
+    # 4. Unconditional ``pytest.mark.skip`` in a module that references the
+    #    router backend at all (the early return above already exempted
+    #    modules that do not): with no condition text to read, the skip
+    #    hides native cases as effectively as a probe-guarded ``skipif``
+    #    (Issue #9804).
+    for match in re.finditer(r"(?<![\w.])pytest\.mark\.skip\b", source):
+        violations.append(
+            Violation(
+                path,
+                line_of(match.start()),
+                "unconditional pytest.mark.skip in a module referencing the C++ "
+                "router backend: use the `requires_router_cpp` marker (fails with "
+                "the build hint), not a skip (Issue #9804)",
+            )
+        )
+    # 5. ``try: from kicad_tools.router import router_cpp`` /
     #    ``except ImportError: pytest.skip(...)``.
     for match in re.finditer(
         r"except\s+(?:\(?\s*)?(?:ImportError|ModuleNotFoundError)[^\n]*:[ \t]*\n", source
