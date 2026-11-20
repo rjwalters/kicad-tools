@@ -1637,9 +1637,15 @@ register_tool(
         "then write them to the board only when every item passes. The write "
         "is atomic, the previous bytes are backed up (default <pcb>.kicad_pcb.bak), "
         "and a board that changed on disk since it was read is refused with "
-        "nothing written. Items whose exact copper is already on the board "
-        "are skipped by dedupe and reported under items_skipped_as_duplicate, "
-        "not items_written."
+        "nothing written. Items whose dedupe key is already on the board "
+        "(segments: net, layer, unordered endpoints and width; vias: net, "
+        "position and layers -- size and drill are outside the key) are "
+        "skipped by dedupe and reported under items_skipped_as_duplicate, "
+        "not items_written. A via proposed at a position held by a via of a "
+        "different size or drill is not a duplicate: it is not written and "
+        "is reported under items_skipped_conflicting (conflicting_via_details "
+        "names the existing and requested size/drill). Arcs have no dedupe "
+        "path and are appended on every successful apply."
     ),
     parameters=_make_params(
         properties={

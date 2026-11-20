@@ -16,10 +16,17 @@ is the batch form for items the agent computed itself:
   kept at ``<pcb>.kicad_pcb.bak`` (override with ``--backup``), and a board
   that changed on disk between read and write is refused (exit 2, nothing
   written) by comparing ``st_mtime_ns`` and ``st_size`` immediately before
-  the replace.  Items whose exact copper is already on the board are skipped
-  by ``add_trace`` / ``add_via`` dedupe (issue #4175); the report counts
-  them separately (``items_written`` / ``items_skipped_as_duplicate``)
-  instead of claiming every proposed item was written (issue #9674).
+  the replace.  Items whose dedupe key is already on the board are skipped
+  by ``add_trace`` / ``add_via`` dedupe (issue #4175; a segment's key is
+  net, layer, unordered endpoints and width, a via's is net, position and
+  layers); the report counts them separately
+  (``items_written`` / ``items_skipped_as_duplicate``) instead of claiming
+  every proposed item was written (issue #9674).  A via's size and drill
+  are outside its key, so a via proposed at a position held by a via of a
+  different size or drill is not a duplicate: it is not written, is counted
+  under ``items_skipped_conflicting``, and the text output names the
+  existing size/drill.  Arcs have no dedupe path; each successful apply
+  appends them again.
 
 The items file is JSON with absolute board millimetres (the file's literal
 ``(at ...)`` / ``(start ...)`` sheet coordinates, as KiCad shows them)::
@@ -399,14 +406,24 @@ def _append_for_check(pcb: Any, items: list[ProbeItem]) -> dict[str, set[int]]:
     return descriptors
 
 
-def _append_for_write(pcb: Any, items: list[ProbeItem]) -> tuple[int, int]:
+_VIA_DIM_QUANT = 3  # decimals compared for via size/drill; schema.pcb's dedupe quantum (~1 um)
+
+
+def _append_for_write(pcb: Any, items: list[ProbeItem]) -> tuple[int, int, list[str]]:
     """Append every item to *pcb* as real board nodes (segments, vias, arcs).
 
-    Returns ``(items_written, items_skipped_as_duplicate)``: ``add_trace`` /
-    ``add_via`` dedupe (issue #4175) skip an item whose exact copper is
-    already on the board, and apply's report distinguishes those from written
-    items instead of claiming every proposed item was written (issue #9674).
-    Arcs have no dedupe path, so they always count as written.
+    Returns ``(items_written, items_skipped_as_duplicate, conflicting_vias)``
+    (issue #9674): ``add_trace`` / ``add_via`` dedupe (issue #4175) skips an
+    item whose dedupe key -- net, layer, unordered endpoints and width for a
+    segment; net, position and layers for a via -- is already on the board,
+    and apply's report counts those separately from written items instead of
+    claiming every proposed item was written.  A via's size and drill are
+    outside its key, so a via proposed at a position held by a via of a
+    different size or drill is not a duplicate: the copper the batch asked
+    for is not on the board, the item is not written, and *conflicting_vias*
+    carries one line per such via naming the existing and requested
+    size/drill.  Arcs have no dedupe path, so every successful apply appends
+    them and counts them as written.
     """
     ox, oy = pcb.board_origin
 
@@ -415,8 +432,21 @@ def _append_for_write(pcb: Any, items: list[ProbeItem]) -> tuple[int, int]:
 
     written = 0
     skipped = 0
+    conflicting: list[str] = []
     for item in items:
         if item.kind == "via":
+            existing = pcb.find_via(*rel(item.at), layers=item.layers, net=item.net)
+            if existing is not None and (
+                round(existing.size, _VIA_DIM_QUANT) != round(item.size, _VIA_DIM_QUANT)
+                or round(existing.drill, _VIA_DIM_QUANT) != round(item.drill, _VIA_DIM_QUANT)
+            ):
+                conflicting.append(
+                    f"via for net {item.net} at ({item.at[0]:.3f}, {item.at[1]:.3f}) "
+                    f"not written: board has size {existing.size:g} / drill "
+                    f"{existing.drill:g} there, batch asked size {item.size:g} / "
+                    f"drill {item.drill:g}"
+                )
+                continue
             via = pcb.add_via(
                 *rel(item.at), size=item.size, drill=item.drill, layers=item.layers, net=item.net
             )
@@ -443,7 +473,7 @@ def _append_for_write(pcb: Any, items: list[ProbeItem]) -> tuple[int, int]:
                 written += 1
             else:
                 skipped += 1
-    return written, skipped
+    return written, skipped, conflicting
 
 
 def _violation_dict(
@@ -602,8 +632,12 @@ def apply_items_checked(
     (board changed under us, or a KiCad lock under the ``error`` policy --
     nothing written either way).  On success the report carries
     ``items_written`` and ``items_skipped_as_duplicate`` (issue #9674): items
-    whose exact copper was already on the board are skipped by dedupe, and
-    the report says so instead of counting them as written.
+    whose dedupe key was already on the board are skipped by dedupe, and the
+    report says so instead of counting them as written.  A via proposed at a
+    position held by a via of a different size or drill is not a duplicate
+    (size and drill are outside the via dedupe key): it is not written, and
+    is counted under ``items_skipped_conflicting`` with one explanatory line
+    per via in ``conflicting_via_details``.
     """
     from kicad_tools.schema.pcb import PCB
 
@@ -624,6 +658,8 @@ def apply_items_checked(
     report["refused"] = None
     report["items_written"] = None
     report["items_skipped_as_duplicate"] = None
+    report["items_skipped_conflicting"] = None
+    report["conflicting_via_details"] = None
     if not report["ok"]:
         return report, 1
 
@@ -636,7 +672,7 @@ def apply_items_checked(
         return report, 2
 
     board = PCB.load(str(pcb_path))
-    items_written, items_skipped = _append_for_write(board, items)
+    items_written, items_skipped, conflicting = _append_for_write(board, items)
 
     backup = Path(backup_path) if backup_path else pcb_path.with_suffix(pcb_path.suffix + ".bak")
     tmp_path = pcb_path.with_suffix(pcb_path.suffix + ".probe-tmp")
@@ -659,6 +695,8 @@ def apply_items_checked(
     report["backup"] = str(backup)
     report["items_written"] = items_written
     report["items_skipped_as_duplicate"] = items_skipped
+    report["items_skipped_conflicting"] = len(conflicting)
+    report["conflicting_via_details"] = conflicting
     return report, 0
 
 
@@ -815,5 +853,12 @@ def run_apply_command(args: argparse.Namespace) -> int:
                 f"; skipped {report['items_skipped_as_duplicate']} item(s) already "
                 "on the board (duplicate)"
             )
+        if report["items_skipped_conflicting"]:
+            line += (
+                f"; skipped {report['items_skipped_conflicting']} item(s) at a position "
+                "held by a different via (not written)"
+            )
         print(line)
+        for detail in report["conflicting_via_details"] or []:
+            print(f"apply: {detail}")
     return code

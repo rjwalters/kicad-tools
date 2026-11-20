@@ -1977,13 +1977,22 @@ A failed probe never writes: the board stays byte-identical. Exit `0`
 written; `1` probe problems; `2` refused (concurrent modification, or a
 KiCad lock under the `error` policy) — nothing is written on `1` or `2`.
 
-An item whose exact copper is already on the board (same net, layer,
-unordered endpoints and width for a track; same net, position and layers
-for a via) is skipped by deduplication rather than written — the copper the
-batch asked for is there. The report distinguishes them: `items_written`
-and `items_skipped_as_duplicate` in JSON, and a text line that says how
-many were skipped, so an all-duplicate batch reports `wrote 0 item(s)`
-instead of claiming a write that did not happen (Issue #9674).
+An item whose dedupe key is already on the board (net, layer, unordered
+endpoints and width for a track; net, position and layers for a via) is
+skipped by deduplication rather than written — for those items the copper
+the batch asked for is there. The report distinguishes them:
+`items_written` and `items_skipped_as_duplicate` in JSON, and a text line
+that says how many were skipped, so an all-duplicate batch reports `wrote 0
+item(s)` instead of claiming a write that did not happen (Issue #9674).
+
+A via's size and drill are **outside** its dedupe key. A via proposed at a
+position already held by a via of a different size or drill is therefore
+not a duplicate — the copper the batch asked for is *not* on the board.
+Such an item is not written, is counted separately under
+`items_skipped_conflicting`, and the text output names the existing and
+requested size/drill, so an agent that (say) upsizes a via cannot read the
+report as success. Arcs have no deduplication path: each successful apply
+appends them again, and each copy counts as written.
 
 | Option | Description |
 |--------|-------------|

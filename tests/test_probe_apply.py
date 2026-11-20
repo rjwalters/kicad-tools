@@ -59,6 +59,19 @@ DIRTY_BOARD = BOARD.replace(
 """,
 )
 
+# The same board plus one FOE via (0.6 mm size / 0.3 mm drill) at (120, 110):
+# a via's dedupe key is net, position and layers only, so proposing a
+# different size or drill at that exact position is a position collision,
+# not a duplicate -- the requested copper is NOT on the board (Issue #9674
+# review).
+VIA_BOARD = BOARD.replace(
+    """  (segment (start 115 100.6) (end 115 119.4) (width 0.2) (layer "F.Cu") (net 2) (uuid "00000000-0000-0000-0000-000000000010"))
+""",
+    """  (segment (start 115 100.6) (end 115 119.4) (width 0.2) (layer "F.Cu") (net 2) (uuid "00000000-0000-0000-0000-000000000010"))
+  (via (at 120 110) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "00000000-0000-0000-0000-000000000020"))
+""",
+)
+
 COMMITTED = (
     Path(__file__).resolve().parent.parent
     / "boards"
@@ -71,6 +84,11 @@ COMMITTED = (
 @pytest.fixture
 def board(tmp_path: Path) -> Path:
     return _write_board(tmp_path, BOARD)
+
+
+@pytest.fixture
+def via_board(tmp_path: Path) -> Path:
+    return _write_board(tmp_path, VIA_BOARD)
 
 
 def _write_board(tmp_path: Path, text: str) -> Path:
@@ -530,6 +548,79 @@ class TestApplyChecked:
         assert rc == 0
         assert "wrote 0 item(s)" in captured.out
         assert "skipped 1 item(s) already on the board" in captured.out
+
+    def test_apply_via_size_mismatch_is_conflicting_not_duplicate(self, via_board, capsys):
+        # Issue #9674 review: a via's dedupe key is net, position and layers
+        # only -- size and drill are outside it -- so a 1.2/0.6 request at a
+        # 0.6/0.3 via's position is a position collision, not a duplicate.
+        # The report must not tell the agent the requested copper is there.
+        rc, doc = _run(
+            capsys,
+            "apply",
+            str(via_board),
+            str(
+                _items_file(
+                    via_board.parent,
+                    {"type": "via", "net": "FOE", "at": [120, 110], "size": 1.2, "drill": 0.6},
+                )
+            ),
+            "--checked",
+            "--format",
+            "json",
+        )
+        assert rc == 0 and doc["ok"] is True, doc["problems"]
+        assert doc["items_written"] == 0
+        assert doc["items_skipped_as_duplicate"] == 0
+        assert doc["items_skipped_conflicting"] == 1
+        (detail,) = doc["conflicting_via_details"]
+        assert "0.6" in detail and "1.2" in detail
+        # The board keeps the original via: nothing was up-sized.
+        reloaded = PCB.load(str(via_board))
+        (via,) = reloaded.vias
+        assert via.size == pytest.approx(0.6) and via.drill == pytest.approx(0.3)
+
+    def test_apply_exact_duplicate_via_is_skipped_as_duplicate(self, via_board, capsys):
+        # The matching half of the split: an exact 0.6/0.3 re-proposal is a
+        # true duplicate and stays in items_skipped_as_duplicate.
+        rc, doc = _run(
+            capsys,
+            "apply",
+            str(via_board),
+            str(
+                _items_file(
+                    via_board.parent,
+                    {"type": "via", "net": "FOE", "at": [120, 110], "size": 0.6, "drill": 0.3},
+                )
+            ),
+            "--checked",
+            "--format",
+            "json",
+        )
+        assert rc == 0 and doc["ok"] is True, doc["problems"]
+        assert doc["items_written"] == 0
+        assert doc["items_skipped_as_duplicate"] == 1
+        assert doc["items_skipped_conflicting"] == 0
+        assert doc["conflicting_via_details"] == []
+
+    def test_apply_text_output_names_existing_via_size(self, via_board, capsys):
+        rc = main(
+            [
+                "apply",
+                str(via_board),
+                str(
+                    _items_file(
+                        via_board.parent,
+                        {"type": "via", "net": "FOE", "at": [120, 110], "size": 1.2, "drill": 0.6},
+                    )
+                ),
+                "--checked",
+            ]
+        )
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "held by a different via (not written)" in captured.out
+        assert "board has size 0.6 / drill 0.3" in captured.out
+        assert "batch asked size 1.2 / drill 0.6" in captured.out
 
     def test_apply_arc_writes_arc_node_and_round_trips(self, board, capsys):
         # AC #9618: pin the deliberate check/write divergence -- the arc is

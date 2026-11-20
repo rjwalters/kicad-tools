@@ -7306,6 +7306,47 @@ class PCB:
 
         return via
 
+    def find_via(
+        self,
+        x: float,
+        y: float,
+        layers: tuple[str, ...] | list[str] = ("F.Cu", "B.Cu"),
+        net: str | int | None = None,
+    ) -> Via | None:
+        """Return the existing via at ``add_via``'s dedupe key, or ``None``.
+
+        The lookup applies ``add_via``'s own dedupe key (net, rounded
+        position, unordered resolved layers -- issue #4175), which does
+        **not** include size or drill: the via returned for a proposed
+        ``(x, y, layers, net)`` may differ from the proposal in size or
+        drill, and a caller that needs "the same via" must compare those
+        itself.  Unlike :meth:`add_via` this is a pure query -- a *net*
+        name that is not yet on the board returns ``None`` (a net that does
+        not exist cannot already carry a via) instead of creating the net.
+        """
+        from ..core.layers import resolve_via_type
+
+        _, resolved_layers = resolve_via_type(layers, None)
+        if not net:
+            net_number = 0
+        elif isinstance(net, int):
+            resolved_net = self.get_net(net)
+            if resolved_net is None:
+                return None
+            net_number = resolved_net.number
+        else:
+            net_number = next(
+                (number for number, board_net in self.nets.items() if board_net.name == net),
+                None,
+            )
+            if net_number is None:
+                return None
+        key = _via_dedup_key(net_number, x, y, resolved_layers)
+        for via in self._vias:
+            if _via_dedup_key(via.net_number, via.position[0], via.position[1], via.layers) == key:
+                return via
+        return None
+
     def add_arc(
         self,
         start: tuple[float, float],

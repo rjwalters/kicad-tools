@@ -782,8 +782,14 @@ Probe a batch of proposed copper, then write it to the board only when every ite
 **Response**: the `probe_items` report plus `written` (the board path, or
 `null` when nothing was written), `backup` and `refused` (the refusal reason,
 or `null`), and `items_written` / `items_skipped_as_duplicate` — an item
-whose exact copper is already on the board is skipped by dedupe and counted
-as skipped, never as written (Issue #9674).
+whose dedupe key is already on the board (net, layer, unordered endpoints and
+width for a segment; net, position and layers for a via) is skipped by dedupe
+and counted as skipped, never as written (Issue #9674). A via's size and
+drill are outside its key: a via proposed at a position held by a via of a
+different size or drill is not a duplicate, is not written, and is counted
+under `items_skipped_conflicting` with one explanatory line per via in
+`conflicting_via_details`. Arcs have no dedupe path; each successful apply
+appends them again and counts each copy as written.
 
 ---
 
