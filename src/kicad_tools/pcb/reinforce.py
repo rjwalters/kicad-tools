@@ -1478,15 +1478,23 @@ def _collect_other_net_copper(
     # Edge.Cuts is an unplated opening too (#9657): the creepage path can
     # run around the board edge or through a slot/cutout, so the opening
     # test re-admits far-face copper near it.
+    # ``PCB._detect_board_origin`` shifts footprints, segments, vias and zones
+    # to board-relative but leaves graphic items sheet-absolute, so convert
+    # every outline coordinate here to match the samples (#9657).
+    ox, oy = pcb.board_origin
+
+    def _rel(pt: tuple[float, float]) -> tuple[float, float]:
+        return (float(pt[0]) - ox, float(pt[1]) - oy)
+
     for item in pcb.graphic_items:
         if item.layer != "Edge.Cuts":
             continue
         if isinstance(item, GraphicArc):
-            other.opening_arcs.append((item.start, item.mid, item.end))
+            other.opening_arcs.append((_rel(item.start), _rel(item.mid), _rel(item.end)))
         elif isinstance(item, GraphicLine):
-            other.opening_segments.append((item.start, item.end))
+            other.opening_segments.append((_rel(item.start), _rel(item.end)))
         elif item.graphic_type == "rect":
-            (sx, sy), (ex, ey) = item.start, item.end
+            (sx, sy), (ex, ey) = _rel(item.start), _rel(item.end)
             other.opening_segments.extend(
                 (
                     ((sx, sy), (ex, sy)),
@@ -1498,9 +1506,10 @@ def _collect_other_net_copper(
         elif item.graphic_type == "circle" and item.center is not None:
             radius = math.dist(item.center, item.start)
             if radius > 0.0:
-                other.opening_circles.append((item.center[0], item.center[1], radius))
+                cx, cy = _rel(item.center)
+                other.opening_circles.append((cx, cy, radius))
         elif item.graphic_type == "poly" and len(item.points) >= 2:
-            pts = [(float(vx), float(vy)) for vx, vy in item.points]
+            pts = [_rel(pt) for pt in item.points]
             other.opening_segments.extend(zip(pts, pts[1:] + pts[:1], strict=False))
 
     return other

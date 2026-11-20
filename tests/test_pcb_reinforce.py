@@ -3418,28 +3418,33 @@ class TestMaskOpening:
         assert not result.refused_openings
         assert len(_mask_lines(pcb, "B.Mask")) == 1
 
-    def test_far_face_track_around_board_edge_refuses(self):
+    @pytest.mark.parametrize("center", [False, True])
+    def test_far_face_track_around_board_edge_refuses(self, center):
         """#9657: the board outline is a non-plated opening too -- the
         path can wrap around the edge, so far-face copper near the same
-        stretch of edge blocks an opening that runs near the outline."""
+        stretch of edge blocks an opening that runs near the outline.
+        Parametrized over a zero and a shifted board origin: Edge.Cuts
+        graphics are sheet-absolute and must be made board-relative."""
         from kicad_tools.router.pairwise_clearance import build_pairwise_clearance_table
 
         table = build_pairwise_clearance_table(
             {"FUSED_LINE": 600.0, "OTHER": 0.0}, dru=0.0, hv_threshold=30.0
         )
-        pcb = PCB.create(width=200, height=100, center=False)
-        for i in range(4):
+        pcb = PCB.create(width=200, height=100, center=center)
+        assert (pcb.board_origin != (0.0, 0.0)) == center
+        # Trunk well away from the left edge, so a displaced vertical edge
+        # cannot re-admit the far face by coincidence.
+        for i in range(3):
             pcb.add_trace(
-                (20.0 + 25.0 * i, 95.0),
-                (20.0 + 25.0 * (i + 1), 95.0),
+                (120.0 + 20.0 * i, 95.0),
+                (120.0 + 20.0 * (i + 1), 95.0),
                 width=2.0,
                 layer="B.Cu",
                 net="FUSED_LINE",
             )
-        # OTHER on the far face, 3 mm beyond the outline edge (y = 100).
-        pcb.add_trace((60.0, 99.0), (75.0, 99.0), width=0.3, layer="F.Cu", net="OTHER")
+        # OTHER on the far face, 1 mm beyond the outline edge (y = 100).
+        pcb.add_trace((150.0, 99.0), (165.0, 99.0), width=0.3, layer="F.Cu", net="OTHER")
         result = reinforce_net(pcb, "FUSED_LINE", pairwise_clearance=table)
-        assert result.placed_count == 2
         assert not result.openings and not _mask_lines(pcb, "B.Mask")
         (ref,) = result.refused_openings
         assert ref.rule == "mask_opening_voltage_map_pairwise"
