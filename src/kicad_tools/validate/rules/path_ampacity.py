@@ -74,7 +74,7 @@ than leaving the reader to infer it from the ambiguous-status error alone.
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from kicad_tools.physics.ampacity import (
     VIA_PLATING_THICKNESS_MM,
@@ -133,6 +133,62 @@ def _dist_to_polyline(points: Sequence[tuple[float, float]], p: tuple[float, flo
     return best
 
 
+def _cumulative_arc(points: Sequence[tuple[float, float]]) -> list[float]:
+    """Cumulative arc length at each vertex of a polyline.
+
+    Same math as :func:`kicad_tools.pcb.reinforce._cumulative_arc`, kept
+    local (like ``_dist_to_polyline`` above) so this module never imports
+    the placer at module scope.
+    """
+    cum: list[float] = [0.0]
+    for i in range(1, len(points)):
+        (x0, y0), (x1, y1) = points[i - 1], points[i]
+        cum.append(cum[-1] + math.hypot(x1 - x0, y1 - y0))
+    return cum
+
+
+def _arc_on_polyline(
+    points: Sequence[tuple[float, float]], cum: Sequence[float], p: tuple[float, float]
+) -> float:
+    """Arc length of the polyline point nearest ``p`` (clamped to the ends)."""
+    best_t, best_d = 0.0, float("inf")
+    for i in range(len(points) - 1):
+        (x0, y0), (x1, y1) = points[i], points[i + 1]
+        dx, dy = x1 - x0, y1 - y0
+        seg2 = dx * dx + dy * dy
+        u = 0.0
+        if seg2 > 1e-18:
+            u = max(0.0, min(1.0, ((p[0] - x0) * dx + (p[1] - y0) * dy) / seg2))
+        d = math.hypot(p[0] - (x0 + u * dx), p[1] - (y0 + u * dy))
+        if d < best_d:
+            best_d, best_t = d, cum[i] + u * math.sqrt(seg2)
+    return best_t
+
+
+def _segment_end(segment: Segment, index: int) -> tuple[float, float]:
+    """One endpoint of a segment (``0`` = start, ``1`` = end)."""
+    end = getattr(segment, "start" if index == 0 else "end", (0.0, 0.0))
+    return (float(end[0]), float(end[1]))
+
+
+def _segment_length(segment: Segment) -> float:
+    return math.dist(_segment_end(segment, 0), _segment_end(segment, 1))
+
+
+class _CreditSpan(NamedTuple):
+    """One judgement stretch of a segment along its own length (Issue #9654).
+
+    ``t0``/``t1`` are arc distances from the segment's start; ``leg`` is the
+    wired leg whose wire is credited over the stretch (``None`` = bare
+    copper) and ``credit_mm`` the extra width it adds there.
+    """
+
+    t0: float
+    t1: float
+    leg: WiredLeg | None
+    credit_mm: float
+
+
 class PathAmpacityRule(DRCRule):
     """DRC rule verifying declared per-branch current paths.
 
@@ -163,11 +219,13 @@ class PathAmpacityRule(DRCRule):
             wired_legs: Buttress-wire legs judged fully wired by
                 :meth:`~kicad_tools.validate.rules.reinforcement_incomplete
                 .ReinforcementIncompleteRule.fully_wired_legs` (Issue
-                #9648). A segment whose centreline lies on such a leg is
-                credited the wire's copper cross-section as extra trace
-                width in both the IPC-2221 and Onderdonk fusing checks.
-                ``None``/empty keeps every judgement at bare copper width
-                (the pre-#9648 behaviour).
+                #9648). A stretch of a segment whose centreline lies on
+                such a leg **between its two anchors** is credited the
+                wire's copper cross-section as extra trace width in both
+                the IPC-2221 and Onderdonk fusing checks; the unwired
+                hole-to-pad stubs outside the anchors stay at bare copper
+                width (Issue #9654). ``None``/empty keeps every judgement
+                at bare copper width (the pre-#9648 behaviour).
         """
         self.specs: list[CurrentPathSpec] = list(specs) if specs else []
         self.wired_legs: list[WiredLeg] = list(wired_legs) if wired_legs else []
@@ -279,7 +337,7 @@ class PathAmpacityRule(DRCRule):
                     )
                     required_cache[external] = required_width_mm
 
-                credit = self._segment_wire_credit(
+                credit_spans = self._segment_credit_spans(
                     spec,
                     segment,
                     layer,
@@ -287,40 +345,44 @@ class PathAmpacityRule(DRCRule):
                     design_rules=design_rules,
                     wire_areas=wire_areas,
                 )
-                credit_leg = credit[0] if credit is not None else None
-                credit_mm = credit[1] if credit is not None else 0.0
-                effective_width_mm = actual_width_mm + credit_mm
+                for span in credit_spans:
+                    credit_leg = span.leg
+                    credit_mm = span.credit_mm
+                    effective_width_mm = actual_width_mm + credit_mm
+                    location = self._span_midpoint(segment, span.t0, span.t1)
 
-                # Doubled copper is judged on its summed cross-section above,
-                # not branch by branch (issue #8790).
-                if effective_width_mm < required_width_mm and id(segment) not in grouped_ids:
-                    results.add(
-                        self._underwidth_violation(
-                            spec=spec,
-                            thermal=thermal,
-                            segment=segment,
-                            layer=layer,
-                            external=external,
-                            actual_width_mm=actual_width_mm,
-                            effective_width_mm=effective_width_mm,
-                            required_width_mm=required_width_mm,
-                            design_rules=design_rules,
-                            credit_leg=credit_leg,
-                            net_has_wired_leg=net_has_wired_leg,
+                    # Doubled copper is judged on its summed cross-section
+                    # above, not branch by branch (issue #8790).
+                    if effective_width_mm < required_width_mm and id(segment) not in grouped_ids:
+                        results.add(
+                            self._underwidth_violation(
+                                spec=spec,
+                                thermal=thermal,
+                                segment=segment,
+                                layer=layer,
+                                external=external,
+                                actual_width_mm=actual_width_mm,
+                                effective_width_mm=effective_width_mm,
+                                required_width_mm=required_width_mm,
+                                design_rules=design_rules,
+                                credit_leg=credit_leg,
+                                net_has_wired_leg=net_has_wired_leg,
+                                location=location,
+                            )
                         )
-                    )
 
-                fusing = self._fusing_violation(
-                    spec=spec,
-                    segment=segment,
-                    layer=layer,
-                    external=external,
-                    actual_width_mm=effective_width_mm,
-                    design_rules=design_rules,
-                    credit_leg=credit_leg,
-                )
-                if fusing is not None:
-                    results.add(fusing)
+                    fusing = self._fusing_violation(
+                        spec=spec,
+                        segment=segment,
+                        layer=layer,
+                        external=external,
+                        actual_width_mm=effective_width_mm,
+                        design_rules=design_rules,
+                        credit_leg=credit_leg,
+                        location=location,
+                    )
+                    if fusing is not None:
+                        results.add(fusing)
 
         for net_name, segments in audit.uncovered.items():
             for segment in segments:
@@ -464,7 +526,26 @@ class PathAmpacityRule(DRCRule):
             round((start[1] + end[1]) / 2.0, 3),
         )
 
-    def _segment_wire_credit(
+    @staticmethod
+    def _span_midpoint(segment: Segment, t0: float, t1: float) -> tuple[float, float]:
+        """Midpoint of the ``t0``..``t1`` arc stretch of ``segment``.
+
+        Identical to :meth:`_segment_midpoint` for a full-length stretch,
+        so findings that are not split keep their exact pre-#9654
+        locations.
+        """
+        seg_len = _segment_length(segment)
+        if t0 <= 1e-9 and t1 >= seg_len - 1e-9:
+            return PathAmpacityRule._segment_midpoint(segment)
+        start = _segment_end(segment, 0)
+        end = _segment_end(segment, 1)
+        f = (t0 + t1) / 2.0 / seg_len if seg_len > 1e-9 else 0.0
+        return (
+            round(start[0] + (end[0] - start[0]) * f, 3),
+            round(start[1] + (end[1] - start[1]) * f, 3),
+        )
+
+    def _segment_credit_spans(
         self,
         spec: CurrentPathSpec,
         segment: Segment,
@@ -473,32 +554,118 @@ class PathAmpacityRule(DRCRule):
         external: bool,
         design_rules: DesignRules,
         wire_areas: Sequence[tuple[WiredLeg, float]],
-    ) -> tuple[WiredLeg, float] | None:
-        """The wired leg covering ``segment`` and its width credit (Issue #9648).
+    ) -> list[_CreditSpan]:
+        """The judgement stretches of ``segment`` against the wired legs.
 
-        A segment is covered when its centreline midpoint lies within the
-        leg's polyline at the anchor-on-leg tolerance
+        A segment is covered by a leg when its whole centreline -- start,
+        midpoint and end alike -- lies within the leg's corridor
         (:data:`~kicad_tools.validate.rules.reinforcement_incomplete
         .ANCHOR_ON_LEG_SLACK_MM` beyond the leg's half-width) on the same
-        layer and net. The credit is the wire's copper cross-section
-        expressed as extra trace width at the layer's foil thickness, so
-        adding it to the copper width sums the two sections -- exactly how
-        ``width_for_current`` derives width from required area. ``None``
-        when no wired leg covers the segment.
+        layer and net **and** it follows that leg's polyline -- both of its
+        endpoints project onto distinct arc positions of it. A segment
+        that merely crosses the corridor (a perpendicular or angled branch
+        stub whose midpoint is inside the trunk's corridor while its far
+        endpoint leaves it) does not follow the trunk and is never
+        credited by the trunk's wire: of the legs that match, the one the
+        segment runs along -- the smallest off-corridor deviation,
+        whatever the order of ``wired_legs`` -- judges it, and bare copper
+        does when no leg does. But the wire is only soldered between the
+        leg's two anchors, so only the sub-span of the segment projected
+        inside the leg's :attr:`WiredLeg.anchor_arc` range is credited;
+        the hole-to-pad stubs outside it are judged at bare copper width
+        (Issue #9654). Each credited stretch gets the wire's copper
+        cross-section expressed as extra trace width at the layer's foil
+        thickness, so adding it to the copper width sums the two
+        sections -- exactly how ``width_for_current`` derives width from
+        required area. A single bare span when no wired leg covers the
+        segment.
         """
+        seg_len = _segment_length(segment)
+        bare = _CreditSpan(0.0, seg_len, None, 0.0)
+        start, end = _segment_end(segment, 0), _segment_end(segment, 1)
         midpoint = self._segment_midpoint(segment)
+        # Every leg whose corridor holds the segment's whole centreline
+        # and whose polyline it follows; the winner is picked below,
+        # never by the order of ``wired_legs``.
+        candidates: list[tuple[float, WiredLeg, float]] = []
         for leg, area_mm2 in wire_areas:
             if leg.net != spec.net_name or leg.layer != layer:
                 continue
-            if _dist_to_polyline(leg.points, midpoint) > (leg.width / 2.0 + ANCHOR_ON_LEG_SLACK_MM):
+            deviation_mm = max(_dist_to_polyline(leg.points, p) for p in (start, midpoint, end))
+            # The segment must lie on the leg's polyline itself (the wire
+            # runs along trace centrelines), not merely inside the widest
+            # copper's half-width: a narrow branch segment diverging inside
+            # a wide trunk's corridor belongs to the branch, and an unwired
+            # branch must never inherit the trunk's credit.
+            seg_width = float(getattr(segment, "width", 0.0) or leg.width)
+            if deviation_mm > min(leg.width, seg_width) / 2.0 + ANCHOR_ON_LEG_SLACK_MM:
                 continue
-            thickness_mm = copper_thickness_from_oz(
-                self._copper_weight_oz(design_rules, external=external)
-            )
-            if thickness_mm <= 0:
-                return None
-            return leg, area_mm2 / thickness_mm
-        return None
+            if leg.anchor_arc is not None and seg_len > 1e-9:
+                cum = _cumulative_arc(leg.points)
+                if (
+                    abs(
+                        _arc_on_polyline(leg.points, cum, end)
+                        - _arc_on_polyline(leg.points, cum, start)
+                    )
+                    <= 1e-6
+                ):
+                    # Degenerate projection: the segment meets this
+                    # polyline side-on (both endpoints project to one
+                    # polyline point), so it does not follow this leg --
+                    # a branch stub inside the trunk's corridor must be
+                    # judged by the leg it follows, never credited by the
+                    # trunk's wire.
+                    continue
+            candidates.append((deviation_mm, leg, area_mm2))
+        if not candidates:
+            return [bare]
+        # The leg the segment actually runs along has the smallest
+        # off-corridor deviation (about 0 when it follows the polyline);
+        # ties break on the leg's own geometry, so the pick -- and the
+        # verdict -- never depends on the order of ``wired_legs``.
+        _, leg, area_mm2 = min(
+            candidates,
+            key=lambda c: (
+                c[0],
+                c[1].points,
+                c[1].anchor_arc or (),
+                c[1].width,
+                c[1].gauge,
+            ),
+        )
+        thickness_mm = copper_thickness_from_oz(
+            self._copper_weight_oz(design_rules, external=external)
+        )
+        if thickness_mm <= 0:
+            return [bare]
+        credit_mm = area_mm2 / thickness_mm
+        full = _CreditSpan(0.0, seg_len, leg, credit_mm)
+        if leg.anchor_arc is None or seg_len <= 1e-9:
+            # No anchor range recorded: credit the whole segment, the
+            # pre-#9654 reading.
+            return [full]
+        a0, a1 = sorted(leg.anchor_arc)
+        cum = _cumulative_arc(leg.points)
+        t_start = _arc_on_polyline(leg.points, cum, start)
+        t_end = _arc_on_polyline(leg.points, cum, end)
+        lo, hi = (t_start, t_end) if t_start < t_end else (t_end, t_start)
+        c0, c1 = max(lo, a0), min(hi, a1)
+        if c1 - c0 <= 1e-6:  # no overlap with the wired span: bare copper
+            return [bare]
+        if lo >= a0 - 1e-6 and hi <= a1 + 1e-6:  # fully between the anchors
+            return [full]
+
+        def frac(u: float) -> float:
+            return min(1.0, max(0.0, (u - t_start) / (t_end - t_start)))
+
+        spans: list[_CreditSpan] = []
+        for u_from, u_to in ((lo, c0), (c1, hi)):
+            f0, f1 = sorted((frac(u_from), frac(u_to)))
+            if f1 - f0 > 1e-6:
+                spans.append(_CreditSpan(f0 * seg_len, f1 * seg_len, None, 0.0))
+        spans.append(_CreditSpan(frac(c0) * seg_len, frac(c1) * seg_len, leg, credit_mm))
+        spans.sort()
+        return spans
 
     @staticmethod
     def _copper_weight_oz(design_rules: DesignRules, *, external: bool) -> float:
@@ -518,10 +685,13 @@ class PathAmpacityRule(DRCRule):
         design_rules: DesignRules,
         credit_leg: WiredLeg | None = None,
         net_has_wired_leg: bool = False,
+        location: tuple[float, float] | None = None,
     ) -> DRCViolation:
         layer_class = "external" if external else "internal"
         copper_weight_oz = self._copper_weight_oz(design_rules, external=external)
-        loc_x, loc_y = self._segment_midpoint(segment)
+        if location is None:
+            location = self._segment_midpoint(segment)
+        loc_x, loc_y = location
 
         if credit_leg is not None:
             width_clause = (
@@ -563,6 +733,7 @@ class PathAmpacityRule(DRCRule):
         actual_width_mm: float,
         design_rules: DesignRules,
         credit_leg: WiredLeg | None = None,
+        location: tuple[float, float] | None = None,
     ) -> DRCViolation | None:
         """Onderdonk adiabatic fusing check for one segment of a pulsed path.
 
@@ -570,7 +741,7 @@ class PathAmpacityRule(DRCRule):
         check cannot be performed -- reported once per path by
         :meth:`_unchecked_fusing_violation` instead), or when the segment
         survives the declared pulse. ``actual_width_mm`` is the credited
-        effective width when a buttress wire covers the segment, so the
+        effective width when a buttress wire covers the stretch, so the
         fusing current is that of the combined section (Issue #9648).
         """
         if spec.pulsed_a is None or spec.pulse_duration_s is None:
@@ -595,7 +766,9 @@ class PathAmpacityRule(DRCRule):
         else:
             section_clause = f"{actual_width_mm:.3f}mm of {copper_weight_oz}oz copper"
 
-        loc_x, loc_y = self._segment_midpoint(segment)
+        if location is None:
+            location = self._segment_midpoint(segment)
+        loc_x, loc_y = location
         return DRCViolation(
             rule_id=self.rule_id,
             severity="error",

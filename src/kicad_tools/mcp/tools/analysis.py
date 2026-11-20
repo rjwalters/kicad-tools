@@ -40,7 +40,7 @@ from kicad_tools.validate.rules.clearance import CopperElement as _ValidatorCopp
 from kicad_tools.validate.rules.clearance import _calculate_clearance as _validator_clearance
 
 if TYPE_CHECKING:
-    from kicad_tools.schema.pcb import Footprint, Pad, Segment, Via
+    from kicad_tools.schema.pcb import Arc, Footprint, Pad, Segment, Via
 
 logger = logging.getLogger(__name__)
 
@@ -969,7 +969,7 @@ def get_drc_violations(
 class _CopperElement:
     """A copper element for clearance checking.
 
-    Provides a unified interface for segments, pads, and vias
+    Provides a unified interface for segments, arcs, pads, and vias
     to simplify distance calculations.
     """
 
@@ -1010,6 +1010,25 @@ class _CopperElement:
             geometry=copper.geometry,
             reference=f"Track-{seg.uuid[:8]}" if seg.uuid else "Track",
             net_name=seg.net_name if hasattr(seg, "net_name") else "",
+            copper=copper,
+        )
+
+    @classmethod
+    def from_arc(cls, arc: Arc) -> _CopperElement:
+        """Adapt an authored copper arc through the shared validator element.
+
+        The validator element (Issue #9678) carries the arc's covering
+        chord tessellation, so MCP and ``kct check`` measure the same
+        geometry on the same board.
+        """
+        copper = _ValidatorCopperElement.from_arc(arc)
+        return cls(
+            element_type="arc",
+            layer=arc.layer,
+            net_number=arc.net_number,
+            geometry=copper.geometry,
+            reference=f"Arc-{arc.uuid[:8]}" if arc.uuid else "Arc",
+            net_name=copper.net_name,
             copper=copper,
         )
 
@@ -1104,6 +1123,15 @@ def _collect_elements(pcb: PCB, layer: str | None = None) -> list[_CopperElement
         # Add segments
         for seg in pcb.segments_on_layer(layer_name):
             elem = _CopperElement.from_segment(seg)
+            elem.layer = layer_name
+            elements.append(elem)
+
+        # Add authored copper arcs (Issue #9684): one element per arc,
+        # adapted through the shared validator constructor so MCP and
+        # ``kct check`` measure the same covering-chord copper instead of
+        # MCP reporting a false gap (or no elements) where the CLI shorts.
+        for arc in pcb.arcs_on_layer(layer_name):
+            elem = _CopperElement.from_arc(arc)
             elem.layer = layer_name
             elements.append(elem)
 

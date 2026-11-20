@@ -504,6 +504,65 @@ def _hv_pad_case(*, projection: bool) -> tuple[LatticePathfinder, dict]:
     return pf, {(1, 0): Route(1, "SIG", segments=run)}
 
 
+def test_grown_pad_retry_keeps_decline_for_link_skipped_at_deadline(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from kicad_tools.cli.route_cmd import _build_complete_link_report
+    from kicad_tools.router.lattice import pathfinder
+
+    pf, _ = _hv_pad_case(projection=True)
+    long_pads = [
+        Pad(x=x, y=y, width=0.6, height=0.6, net=2, net_name="LONG", ref=ref, pin="1")
+        for x, y, ref in [(1, 1, "J2"), (18, 19, "J3")]
+    ]
+    walls = [
+        Pad(x=10, y=17, width=22, height=0.6, net=0, net_name="GND", ref="J4", pin="1", layer=layer)
+        for layer in (Layer.F_CU, Layer.B_CU)
+    ]
+    pf.pads.extend([*long_pads, *walls])
+    pf.set_pad_class_clearances([BASE, BASE, POWER, BASE] + [BASE] * 4)
+    now = 0.0
+    monkeypatch.setattr(pathfinder, "time", SimpleNamespace(monotonic=lambda: now))
+    search = pf._route_single_into
+    searches = []
+
+    def timed_search(item, *args, **kwargs):
+        nonlocal now
+        reason = search(item, *args, **kwargs)
+        searches.append((item[0], reason))
+        if item[0] == long:
+            now = 3.0
+        if pf._class_pad_growth:
+            now = 20.0
+        return reason
+
+    monkeypatch.setattr(pf, "_route_single_into", timed_search)
+    sig, long = (1, 0), (2, 0)
+    _, stats = pf.route_netset(
+        [(sig, pf.pads[0], pf.pads[1], None), (long, *long_pads, None)],
+        max_iterations=1,
+        deadline=10.0,
+    )
+    assert searches == [(sig, None), (long, "no-path"), (sig, None)]
+    assert pf.class_pad_growth_rounds[-1].kept
+    router = SimpleNamespace(
+        _lattice_negotiation_stats=stats,
+        _lattice_failure_reasons=pf.failure_reasons,
+        _lattice_attempted_keys=stats.attempted_keys,
+        net_names={2: "LONG"},
+    )
+    report = _build_complete_link_report(router, tmp_path / "absent.kicad_pcb")
+    assert report is not None
+    assert report["budget_s"] == 10.0
+    assert report["elapsed_s"] == 20.0
+    assert report["deadline_hit"] is True
+    (link,) = report["unroutable_links"]
+    assert link["net"] == "LONG"
+    assert link["reason"] == "no-path"
+    assert link["attempted"] is True
+    assert link["deadline_hit"] is False
+
+
 def test_repair_refuses_a_move_into_an_hv_pad_keepout() -> None:
     """Issue #7880: a class move must also pass the search's HV pad keep-out.
 

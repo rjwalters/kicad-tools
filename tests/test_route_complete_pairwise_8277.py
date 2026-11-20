@@ -276,3 +276,161 @@ def test_complete_route_then_census_agree(tmp_path, capsys):
         clearance, req_clearance, creep, req_creep = map(float, row[3:7])
         assert row[-1] == "PASS" and row[-2] == "board", census.stdout
         assert clearance >= req_clearance and creep >= req_creep, census.stdout
+
+
+def _three_pad_smd_board() -> str:
+    """Curator's #9717 repro board: /LINE must pass J1's own /NEUT pad.
+
+    Three circular F.Cu SMD pads in one footprint: J1.1 (/LINE, 0.6 mm) at
+    local (0, 1.5), J1.2 (/NEUT, 2.4 mm) at local (3.5, 0), J1.3 (/LINE,
+    0.6 mm) at local (7, 1.5).  The /LINE link from J1.1 to J1.3 can only
+    pass the /NEUT pad, and the whole approach sits inside J1's #4506
+    attach zone (pad bbox + margin), so the router's audit exempts it while
+    a census without --waive-attach-zone scores it.
+    """
+
+    def smd(number: str, x: float, y: float, d: float, net: int, name: str) -> str:
+        return (
+            f'(pad "{number}" smd circle (at {x} {y}) (size {d} {d}) '
+            f'(layers "F.Cu") (net {net} "{name}"))'
+        )
+
+    pads = (
+        smd("1", 0, 1.5, 0.6, 1, "/LINE")
+        + smd("2", 3.5, 0, 2.4, 2, "/NEUT")
+        + smd("3", 7, 1.5, 0.6, 1, "/LINE")
+    )
+    return f"""(kicad_pcb (version 20240108) (generator "test") (generator_version "8.0")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "") (net 1 "/LINE") (net 2 "/NEUT")
+  (gr_rect (start {OX} {OY}) (end {OX + 40} {OY + 30}) (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))
+  (footprint "Connector:J2" (layer "F.Cu") (uuid "00000000-0000-0000-0000-000000000010") (at {OX + 10} {OY + 10})
+    (property "Reference" "J1" (at 0 -3 0) (layer "F.SilkS")) (property "Value" "x" (at 0 3 0) (layer "F.Fab"))
+    {pads})
+)
+"""
+
+
+def _census(pcb: Path, vmap: Path, *extra: str):
+    """Run ``kct creepage`` with the #9717 reproduction's fixed arguments."""
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
+            "creepage",
+            str(pcb),
+            "--voltage-map",
+            str(vmap),
+            "--standard",
+            "iec60664",
+            "--pollution-degree",
+            "2",
+            "--material-group",
+            "IIIa",
+            "--waive-same-footprint",
+            *extra,
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+
+def _pair_rows(stdout: str) -> list[list[str]]:
+    """The /LINE vs /NEUT census rows (whitespace-split table cells)."""
+    return [
+        line.split()
+        for line in stdout.splitlines()
+        if line.startswith("/LINE") and line.split()[1] == "/NEUT"
+    ]
+
+
+def test_complete_route_names_the_attach_zone_policy_and_census_flag(tmp_path, capsys):
+    """The completion result must name the attach-zone policy its audit used (#9717).
+
+    The route gate applies the #4506 rated-footprint attach zones
+    unconditionally; ``kct creepage`` grants the same exemption only with
+    ``--waive-attach-zone``.  On this board the only HV proximity lives inside
+    J1's attach zone, so ``--complete`` exits 0 while the designer's census
+    without the flag fails the written board (#9685's H2 class).  The route
+    output must state the exemption was ENABLED and name the matching flag,
+    and the two censuses of the SAME written board must classify the SAME pair
+    ``board FAIL`` (flag omitted -- stricter) and ``attach-zn WAIVED`` (flag
+    given), with the board-edge row passing both times.  A run without a
+    voltage map omits the diagnostic.
+    """
+    from kicad_tools.cli.route_cmd import main as route_main
+
+    pcb = tmp_path / "in.kicad_pcb"
+    pcb.write_text(_three_pad_smd_board())
+    vmap = tmp_path / "vm.json"
+    vmap.write_text(json.dumps({"/LINE": 150.0, "/NEUT": 0.0}))
+    out = tmp_path / "out.kicad_pcb"
+
+    # Clean input: the census passes the unrouted board on its own merits.
+    assert _census(pcb, vmap).returncode == 0
+
+    rc = route_main(
+        [
+            str(pcb),
+            "-o",
+            str(out),
+            "--voltage-map",
+            str(vmap),
+            "--creepage-standard",
+            "iec60664",
+            "--pollution-degree",
+            "2",
+            "--material-group",
+            "IIIa",
+            "--hv-threshold",
+            "0",
+            "--skip-drc",
+            "--complete",
+            "--no-auto-pour",
+        ]
+    )
+    routed = capsys.readouterr().out
+    assert rc == 0, routed
+    assert "SUCCESS" in routed
+    assert "pairwise HV clearance violations" not in routed
+    # The diagnostic: policy named as enabled, census flag named, no per-pair
+    # waiver claim (the audit keeps no per-pair telemetry).
+    assert "Attach-zone exemption: ENABLED" in routed
+    assert "--waive-attach-zone" in routed
+    assert "WAIVED" not in routed
+
+    # Stricter census (flag omitted): the written board FAILs on the same pair
+    # the audit exempted; copper outside the zones (board edge) still passes.
+    strict = _census(out, vmap)
+    assert strict.returncode == 1, strict.stdout + strict.stderr
+    strict_rows = _pair_rows(strict.stdout)
+    assert len(strict_rows) == 1, strict.stdout
+    # HV net, Against, Layer, Clnce, ReqCl, Creep, ReqCr, Margin, Govern, Rel, Result
+    assert strict_rows[0][-2:] == ["board", "FAIL"], strict.stdout
+    assert float(strict_rows[0][5]) < float(strict_rows[0][6]), strict.stdout
+    assert "<board edge>" in strict.stdout
+    assert all(
+        line.split()[-1] == "PASS" for line in strict.stdout.splitlines() if "<board edge>" in line
+    ), strict.stdout
+
+    # Matching census (flag given): the SAME pair on the SAME board is waived,
+    # and the board passes the gate.
+    waived = _census(out, vmap, "--waive-attach-zone")
+    assert waived.returncode == 0, waived.stdout + waived.stderr
+    waived_rows = _pair_rows(waived.stdout)
+    assert len(waived_rows) == 1, waived.stdout
+    assert waived_rows[0][-2:] == ["attach-zn", "WAIVED"], waived.stdout
+    assert all(
+        line.split()[-1] == "PASS" for line in waived.stdout.splitlines() if "<board edge>" in line
+    ), waived.stdout
+
+    # Without a voltage map the audit never ran, so there is no policy to name.
+    out_novm = tmp_path / "out-novm.kicad_pcb"
+    rc = route_main([str(pcb), "-o", str(out_novm), "--skip-drc", "--complete", "--no-auto-pour"])
+    novm = capsys.readouterr().out
+    assert rc == 0, novm
+    assert "Attach-zone exemption" not in novm
+    assert "--waive-attach-zone" not in novm
