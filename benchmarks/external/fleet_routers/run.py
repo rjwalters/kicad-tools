@@ -398,7 +398,19 @@ def fingerprint(pcb_path: Path, net_class_map_path: Path | None = None) -> dict[
     # One read feeds the parse and the sidecar's stack resolution alike:
     # passing pcb_path would reopen the PCB inside the loader.
     pcb_text = pcb_path.read_bytes().decode("utf-8")
-    pcb = PCB(parse_string(pcb_text), pcb_path)
+    sexp = parse_string(pcb_text)
+    if sexp.tag != "kicad_pcb":
+        # Direct construction replaced PCB.load, which had refused a
+        # different KiCad file type saved as .kicad_pcb; without this
+        # check such a file fingerprinted as an empty board and sent the
+        # case down the placement-violation branch instead of the
+        # fingerprint-error path (review finding on #9614).
+        from kicad_tools.exceptions import FileFormatError
+
+        raise FileFormatError(
+            "Not a KiCad PCB file", context={"file": str(pcb_path), "got": sexp.tag}
+        )
+    pcb = PCB(sexp, pcb_path)
     seen: Counter[str] = Counter()
     footprints: dict[str, list[Any]] = {}
     pad_nets: dict[str, str] = {}

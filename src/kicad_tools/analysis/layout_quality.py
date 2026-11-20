@@ -80,6 +80,7 @@ here (recorded decision on issue #9594).
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -246,7 +247,10 @@ def _outline_area_mm2(pcb: PCB) -> float | None:
     Every Edge.Cuts contour is measured -- top-level graphics *and*
     footprint-owned ones (a board-edge cutout often lives as ``fp_rect``
     graphics inside a connector footprint). Straight elements (lines,
-    rects, polys) contribute exact segments; curved ones are tessellated
+    rects, polys) contribute exact segments -- a radius-bearing rect or a
+    poly whose ``pts`` mixes in ``arc`` entries keeps its curves through
+    the same certified tessellators; other curved elements are
+    tessellated
     to the certified accuracy of :mod:`kicad_tools.core.board_outline` /
     :mod:`kicad_tools.core.outline_tessellation` (arcs/cubics within
     ``DEFAULT_MAX_ERROR_MM`` chords, circles within ~1e-5 mm), so the
@@ -304,6 +308,134 @@ def _outline_area_mm2(pcb: PCB) -> float | None:
         return None
 
 
+def _authored_radius_mm(node: Any) -> float:
+    """A ``gr_rect``/``fp_rect`` ``(radius ...)`` token; 0.0 when absent.
+
+    Absent, non-numeric or non-positive tokens mean square corners, the
+    same lenience ``panel.outline``'s rect parsing applies.
+    """
+    child = node.find_child("radius")
+    if child is None:
+        return 0.0
+    value = child.get_float(0)
+    if value is None or not math.isfinite(value) or value <= 0:
+        return 0.0
+    return float(value)
+
+
+def _pts_contains_arc(node: Any) -> bool:
+    """Whether a ``gr_poly``/``fp_poly`` ``pts`` mixes in ``arc`` entries."""
+    pts = node.find_child("pts")
+    return pts is not None and any(child.name == "arc" for child in pts.iter_children())
+
+
+def _node_point(node: Any, tag: str) -> tuple[float, float]:
+    """An authored ``(tag x y)`` coordinate pair of a graphic node."""
+    child = node.find_child(tag)
+    if child is None:
+        raise ValueError(f"Malformed Edge.Cuts {node.tag}: missing {tag} coordinate")
+    x, y = child.get_float(0), child.get_float(1)
+    if x is None or y is None or not math.isfinite(x) or not math.isfinite(y):
+        raise ValueError(f"Malformed Edge.Cuts {node.tag}: invalid {tag} coordinate")
+    return (x, y)
+
+
+def _rounded_rect_boundary(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    radius: float,
+    map_point: Callable[[tuple[float, float]], tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """Tessellated closed boundary of a radius-bearing rectangle.
+
+    Each corner is a 90-degree arc given the 45-degree midpoint form
+    ``k = r * (1 - sqrt(0.5))`` -- the same corner split
+    ``panel.outline._rect_primitives`` emits for the fab outline -- so a
+    rounded rectangle measures here exactly what the panel flow routes.
+    The radius is clamped to half the shorter side like the panel flow
+    (a larger authored radius is a stadium, not an error), and a
+    non-positive one falls back to square corners. ``map_point`` places
+    the authored sheet/footprint coordinates into board space; being a
+    rigid transform it preserves every circle, so tessellating after it
+    is exact.
+    """
+    from kicad_tools.core.outline_tessellation import tessellate_arc
+
+    x0, x1 = sorted((start[0], end[0]))
+    y0, y1 = sorted((start[1], end[1]))
+    r = max(0.0, min(radius, (x1 - x0) / 2.0, (y1 - y0) / 2.0))
+    chain: list[tuple[float, float]] = []
+
+    def extend(points: list[tuple[float, float]]) -> None:
+        for point in points:
+            if not chain or math.dist(chain[-1], point) > 1e-9:
+                chain.append(point)
+
+    if r <= 1e-9:
+        extend([map_point(corner) for corner in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))])
+        return chain
+    k = r * (1.0 - math.sqrt(0.5))
+    pieces: list[tuple[bool, tuple[tuple[float, float], ...]]] = [
+        (False, ((x0 + r, y0), (x1 - r, y0))),
+        (True, ((x1 - r, y0), (x1 - k, y0 + k), (x1, y0 + r))),
+        (False, ((x1, y0 + r), (x1, y1 - r))),
+        (True, ((x1, y1 - r), (x1 - k, y1 - k), (x1 - r, y1))),
+        (False, ((x1 - r, y1), (x0 + r, y1))),
+        (True, ((x0 + r, y1), (x0 + k, y1 - k), (x0, y1 - r))),
+        (False, ((x0, y1 - r), (x0, y0 + r))),
+        (True, ((x0, y0 + r), (x0 + k, y0 + k), (x0 + r, y0))),
+    ]
+    for is_arc, authored in pieces:
+        mapped = [map_point(point) for point in authored]
+        extend(tessellate_arc(mapped[0], mapped[1], mapped[2]) if is_arc else mapped)
+    if math.dist(chain[0], chain[-1]) <= 1e-9:
+        chain.pop()  # explicit closure: the caller's wraparound re-adds it
+    return chain
+
+
+def _poly_boundary_chain(
+    node: Any,
+    map_point: Callable[[tuple[float, float]], tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """Tessellated closed boundary of a ``gr_poly``/``fp_poly``.
+
+    ``pts`` may mix ``xy`` vertices with three-point ``arc`` entries (the
+    KiCad 8 polygon encoding); the footprint model keeps only the ``xy``
+    run, which silently squares every arc off. Entries are joined in
+    authored order, arcs tessellated with the certified tessellator, and
+    any gap bridged straight -- the joining rule
+    ``panel.outline._poly_primitives`` applies.
+    """
+    from kicad_tools.core.outline_tessellation import tessellate_arc
+
+    pts = node.find_child("pts")
+    if pts is None:
+        raise ValueError(f"Malformed Edge.Cuts {node.tag}: missing points")
+    chain: list[tuple[float, float]] = []
+    for child in pts.iter_children():
+        points: list[tuple[float, float]]
+        if child.name == "xy":
+            x, y = child.get_float(0), child.get_float(1)
+            if x is None or y is None or not math.isfinite(x) or not math.isfinite(y):
+                raise ValueError(f"Malformed Edge.Cuts {node.tag}: invalid xy coordinate")
+            points = [map_point((x, y))]
+        elif child.name == "arc":
+            mapped = [_node_point(child, tag) for tag in ("start", "mid", "end")]
+            points = tessellate_arc(
+                map_point(mapped[0]), map_point(mapped[1]), map_point(mapped[2])
+            )
+        else:
+            continue
+        for point in points:
+            if not chain or math.dist(chain[-1], point) > 1e-9:
+                chain.append(point)
+    if len(chain) < 3:
+        raise ValueError(f"Malformed Edge.Cuts {node.tag}: missing points")
+    if math.dist(chain[0], chain[-1]) <= 1e-9:
+        chain.pop()  # explicit closure: the caller's wraparound re-adds it
+    return chain
+
+
 def _edge_cuts_segments(pcb: PCB) -> list[tuple[tuple[float, float], tuple[float, float]]]:
     """Straight-segment chains for every Edge.Cuts contour, board-relative.
 
@@ -314,17 +446,58 @@ def _edge_cuts_segments(pcb: PCB) -> list[tuple[tuple[float, float], tuple[float
     from kicad_tools.core.board_outline import board_outline_segments
     from kicad_tools.core.geometry import rotate_pad_offset
     from kicad_tools.core.outline_tessellation import tessellate_arc
+    from kicad_tools.sexp import SExp
 
     # Top-level graphics: the certified routing-outline builder measures
     # every gr_* kind (straight elements exactly, arcs/cubics/circles to
-    # a certified Hausdorff bound) and refuses what it cannot certify.
-    # Coordinates arrive sheet-absolute; footprints below are already
-    # board-relative, so shift by the detected board origin to match.
+    # a certified Hausdorff bound) and refuses what it cannot certify --
+    # except the two curved encodings it flattens: a radius-bearing
+    # gr_rect loses its rounded corners and a gr_poly whose pts mixes in
+    # arc entries loses every arc to the xy run alone, so both used to
+    # publish the square-corner area (review finding on #9614). Those two
+    # kinds are measured below with the same certified tessellators;
+    # every other kind stays delegated. Coordinates arrive
+    # sheet-absolute; footprints below are already board-relative, so
+    # shift by the detected board origin to match.
     ox, oy = getattr(pcb, "_board_origin", (0.0, 0.0))
+
+    def sheet_to_board(point: tuple[float, float]) -> tuple[float, float]:
+        return (point[0] - ox, point[1] - oy)
+
+    def is_edge_cuts(node: Any) -> bool:
+        layer = node.find_child("layer")
+        return layer is not None and layer.get_string(0) == "Edge.Cuts"
+
+    deferred: list[Any] = []
+    rest: list[Any] = []
+    for node in pcb._sexp.iter_children():
+        if (
+            not node.is_atom
+            and node.tag in ("gr_rect", "gr_poly")
+            and is_edge_cuts(node)
+            and (
+                (node.tag == "gr_rect" and _authored_radius_mm(node) > 0.0)
+                or (node.tag == "gr_poly" and _pts_contains_arc(node))
+            )
+        ):
+            deferred.append(node)
+        else:
+            rest.append(node)
     segments = [
-        ((x1 - ox, y1 - oy), (x2 - ox, y2 - oy))
-        for (x1, y1), (x2, y2) in board_outline_segments(pcb._sexp)
+        (sheet_to_board(a), sheet_to_board(b))
+        for a, b in board_outline_segments(SExp(children=rest))
     ]
+    for node in deferred:
+        if node.tag == "gr_rect":
+            chain = _rounded_rect_boundary(
+                _node_point(node, "start"),
+                _node_point(node, "end"),
+                _authored_radius_mm(node),
+                sheet_to_board,
+            )
+        else:
+            chain = _poly_boundary_chain(node, sheet_to_board)
+        segments.extend(zip(chain, chain[1:] + chain[:1], strict=True))
 
     def fp_point(fp: Any, local: tuple[float, float] | None) -> tuple[float, float]:
         if local is None:
@@ -343,20 +516,35 @@ def _edge_cuts_segments(pcb: PCB) -> list[tuple[tuple[float, float], tuple[float
         # production parse path goes through; without the link the guard
         # is skipped and an fp_curve cutout would vanish instead of
         # forcing None.
-        node = getattr(fp, "_sexp_node", None)
-        if node is not None:
-            for child in node.iter_children():
-                layer = child.find_child("layer")
-                if (
-                    child.tag == "fp_curve"
-                    and layer is not None
-                    and layer.get_string(0) == "Edge.Cuts"
-                ):
+        fp_node = getattr(fp, "_sexp_node", None)
+        raw_rects: list[Any] = []
+        raw_polys: list[Any] = []
+        if fp_node is not None:
+            for child in fp_node.iter_children():
+                if child.tag == "fp_curve" and is_edge_cuts(child):
                     raise ValueError("Edge.Cuts fp_curve is not modelled")
+            # Rect corner radii and pts arc entries are not parsed into
+            # the footprint model either, so rects and polys are measured
+            # from the authored node to keep their curves (the model
+            # branch below would square them off). find_all matches the
+            # model's own collection exactly.
+            for child in fp_node.find_all("fp_rect"):
+                if is_edge_cuts(child):
+                    raw_rects.append(child)
+            for child in fp_node.find_all("fp_poly"):
+                if is_edge_cuts(child):
+                    raw_polys.append(child)
+
+        def fp_map(point: tuple[float, float]) -> tuple[float, float]:
+            return fp_point(fp, point)
+
         for graphic in fp.graphics:
             if graphic.layer != "Edge.Cuts":
                 continue
             kind = graphic.graphic_type
+            if kind in ("rect", "poly") and fp_node is not None:
+                # Measured from the authored node above/below instead.
+                continue
             if kind == "line":
                 start, end = fp_point(fp, graphic.start), fp_point(fp, graphic.end)
                 segments.append((start, end))
@@ -396,6 +584,17 @@ def _edge_cuts_segments(pcb: PCB) -> list[tuple[tuple[float, float], tuple[float
                 add_chain(circle_tessellation_points(fp_point(fp, graphic.center), graphic.radius))
             else:  # pragma: no cover - the parser only yields the kinds above
                 raise ValueError(f"Edge.Cuts footprint graphic not modelled: {kind}")
+        for child in raw_rects:
+            add_chain(
+                _rounded_rect_boundary(
+                    _node_point(child, "start"),
+                    _node_point(child, "end"),
+                    _authored_radius_mm(child),
+                    fp_map,
+                )
+            )
+        for child in raw_polys:
+            add_chain(_poly_boundary_chain(child, fp_map))
     return segments
 
 

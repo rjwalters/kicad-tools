@@ -365,6 +365,142 @@ FP_ARC_PAIR_CUTOUT_PCB = """(kicad_pcb
 )
 """
 
+# A 10x10 gr_rect with a 2 mm corner radius as the whole board: the
+# corners are arcs, so the area is the rectangle minus four
+# r*r*(1 - pi/4) corners = 84 + 4*pi ~= 96.566 mm^2 (review finding on
+# #9614: the routing-outline helper the area delegated to squared the
+# corners off and published the gross 100).
+ROUNDED_GR_RECT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+
+  (gr_rect (start 0 0) (end 10 10) (radius 2) (stroke (width 0.1)) (layer "Edge.Cuts"))
+)
+"""
+
+# The same rounded rectangle as a cutout inside the 100x50 board, so the
+# footprint twin can be compared against the gr_rect representation.
+ROUNDED_GR_RECT_CUTOUT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+
+  (gr_rect (start 0 0) (end 100 50) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_rect (start 20 10) (end 30 20) (radius 2) (stroke (width 0.1)) (layer "Edge.Cuts"))
+)
+"""
+
+# A footprint-owned rounded-rect cutout at the same place: must subtract
+# what its gr_rect twin subtracts at any footprint orientation.
+ROUNDED_FP_RECT_CUTOUT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+
+  (gr_rect (start 0 0) (end 100 50) (stroke (width 0.1)) (layer "Edge.Cuts"))
+
+  (footprint "Mech:BoardCutout"
+    (layer "F.Cu")
+    (at 25 15 {rot})
+    (property "Reference" "J9")
+    (fp_rect (start -5 -5) (end 5 5) (radius 2) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  )
+)
+"""
+
+# A 10x10 gr_poly whose right edge bulges out as a 5 mm semicircle arc
+# entry inside pts: 100 + 12.5*pi ~= 139.270 mm^2 (review finding on
+# #9614: only the xy run was read and the arc vanished into the 100).
+GR_POLY_SEMICIRCLE_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+
+  (gr_poly
+    (pts
+      (xy 0 0) (xy 10 0)
+      (arc (start 10 0) (mid 15 5) (end 10 10))
+      (xy 10 10) (xy 0 10)
+    )
+    (stroke (width 0.1)) (layer "Edge.Cuts")
+  )
+)
+"""
+
+# The same shape as a gr_poly cutout inside the 100x50 board.
+GR_POLY_SEMICIRCLE_CUTOUT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+
+  (gr_rect (start 0 0) (end 100 50) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (gr_poly
+    (pts
+      (xy 20 10) (xy 30 10)
+      (arc (start 30 10) (mid 35 15) (end 30 20))
+      (xy 30 20) (xy 20 20)
+    )
+    (stroke (width 0.1)) (layer "Edge.Cuts")
+  )
+)
+"""
+
+# The footprint twin of the semicircle poly cutout: identical local pts
+# inside a (possibly rotated) footprint at the same board position.
+FP_POLY_SEMICIRCLE_CUTOUT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+
+  (gr_rect (start 0 0) (end 100 50) (stroke (width 0.1)) (layer "Edge.Cuts"))
+
+  (footprint "Mech:BoardCutout"
+    (layer "F.Cu")
+    (at 25 15 {rot})
+    (property "Reference" "J9")
+    (fp_poly
+      (pts
+        (xy -5 -5) (xy 5 -5)
+        (arc (start 5 -5) (mid 10 0) (end 5 5))
+        (xy 5 5) (xy -5 5)
+      )
+      (stroke (width 0.1)) (layer "Edge.Cuts")
+    )
+  )
+)
+"""
+
 # Two length-matched nets with a known length difference: with a
 # net-class map declaring the match group, the block reports its skew.
 MATCH_GROUP_PCB = """(kicad_pcb
@@ -565,6 +701,58 @@ def test_footprint_arc_pair_cutout_matches_gr_arc_representation(rot):
     assert fp == pytest.approx(100 * 50 - math.pi * 25, abs=0.01)
 
 
+def test_rounded_gr_rect_area_measured():
+    # A 10x10 rectangle with 2 mm corner radius: 84 + 4*pi ~= 96.566,
+    # not the gross 100 the square-corner flattening published (the
+    # corner arcs are tessellated to the certified 1e-4 mm chord bound).
+    area = analyze_layout_quality(_load_pcb(ROUNDED_GR_RECT_PCB)).outline_area_mm2
+    assert area == pytest.approx(84.0 + 4.0 * math.pi, abs=0.01)
+
+
+def test_rounded_gr_rect_cutout_subtracts():
+    area = analyze_layout_quality(_load_pcb(ROUNDED_GR_RECT_CUTOUT_PCB)).outline_area_mm2
+    assert area == pytest.approx(100 * 50 - (84.0 + 4.0 * math.pi), abs=0.01)
+
+
+@pytest.mark.parametrize("rot", [0, 30, 90])
+def test_rounded_fp_rect_cutout_matches_gr_rect_representation(rot):
+    # The rounded fp_rect keeps its corner arcs from the authored node
+    # (the model parses only start/end), so it subtracts what its gr_rect
+    # twin subtracts at any footprint orientation.
+    gr = analyze_layout_quality(_load_pcb(ROUNDED_GR_RECT_CUTOUT_PCB)).outline_area_mm2
+    fp = analyze_layout_quality(
+        _load_pcb(ROUNDED_FP_RECT_CUTOUT_PCB.format(rot=rot))
+    ).outline_area_mm2
+    assert fp == pytest.approx(gr, abs=1e-6)
+    assert fp == pytest.approx(100 * 50 - (84.0 + 4.0 * math.pi), abs=0.01)
+
+
+def test_gr_poly_semicircle_area_measured():
+    # A 10x10 square whose right edge is a 5 mm semicircle arc entry:
+    # 100 + 12.5*pi ~= 139.270, not the 100 the xy-only reading
+    # published.
+    area = analyze_layout_quality(_load_pcb(GR_POLY_SEMICIRCLE_PCB)).outline_area_mm2
+    assert area == pytest.approx(100.0 + 12.5 * math.pi, abs=0.01)
+
+
+def test_gr_poly_semicircle_cutout_subtracts():
+    area = analyze_layout_quality(_load_pcb(GR_POLY_SEMICIRCLE_CUTOUT_PCB)).outline_area_mm2
+    assert area == pytest.approx(100 * 50 - (100.0 + 12.5 * math.pi), abs=0.01)
+
+
+@pytest.mark.parametrize("rot", [0, 30, 90])
+def test_fp_poly_semicircle_cutout_matches_gr_poly_representation(rot):
+    # The fp_poly's pts arc entries are read from the authored node (the
+    # model keeps only the xy run), so the bulge survives any footprint
+    # rotation and subtracts what its gr_poly twin subtracts.
+    gr = analyze_layout_quality(_load_pcb(GR_POLY_SEMICIRCLE_CUTOUT_PCB)).outline_area_mm2
+    fp = analyze_layout_quality(
+        _load_pcb(FP_POLY_SEMICIRCLE_CUTOUT_PCB.format(rot=rot))
+    ).outline_area_mm2
+    assert fp == pytest.approx(gr, abs=1e-6)
+    assert fp == pytest.approx(100 * 50 - (100.0 + 12.5 * math.pi), abs=0.01)
+
+
 def test_match_group_skew_reported_with_net_class_map():
     from kicad_tools.router.rules import NetClassRouting
 
@@ -689,6 +877,20 @@ def test_fingerprint_resolves_layer_sidecar_without_reopening_the_pcb(tmp_path, 
     with_map = bench.fingerprint(path, sidecar)
     assert with_map["layout_quality"]["match_group_skew"] == {"GRP": 2.5}
     assert opens.count("bench.kicad_pcb") == 1
+
+
+def test_fingerprint_rejects_non_pcb_root(tmp_path, bench):
+    # A different KiCad file type saved as .kicad_pcb must raise, not
+    # fingerprint as an empty board: replacing PCB.load with direct
+    # construction had dropped the root-tag check, and the empty result
+    # sent the case down the placement-violation branch instead of the
+    # fingerprint-error path (review finding on #9614).
+    from kicad_tools.exceptions import FileFormatError
+
+    path = tmp_path / "bad.kicad_pcb"
+    path.write_text('(kicad_sch (version 20250114) (generator "test"))\n')
+    with pytest.raises(FileFormatError):
+        bench.fingerprint(path)
 
 
 def test_compare_fingerprints_ignores_layout_quality(tmp_path, bench):
