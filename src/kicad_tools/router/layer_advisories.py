@@ -486,6 +486,43 @@ def mark_plane_zones_on_grid(grid: Any, outlines: tuple[PlaneZoneOutline, ...]) 
     return marked
 
 
+def grid_plane_layer_indices(grid: Any) -> list[int]:
+    """Grid-layer indices ``grid.layer_stack`` types as ``PLANE`` (Issue #9826).
+
+    The same set the Python pathfinder's ``_plane_layer_indices`` computes:
+    a foreign zone there is costed (``cost_zone_foreign_plane``), anywhere
+    else it is blocked.  :class:`CppGrid` installs it on the native grid so
+    both A* backends split plane/non-plane zones identically.  Empty when the
+    grid has no stack.
+    """
+    stack = getattr(grid, "layer_stack", None)
+    if stack is None:
+        return []
+    return sorted(
+        {
+            int(layer.index)
+            for layer in getattr(stack, "layers", [])
+            if getattr(layer, "layer_type", None) == LayerType.PLANE
+        }
+    )
+
+
+def remark_plane_zones(router: Any, grid: Any) -> int:
+    """Re-mark ``router.plane_zones`` on a freshly built grid (Issue #9826).
+
+    The load path marks plane zones once, on the grid it built.  A grid
+    rebuilt afterwards (Monte Carlo / evolutionary trial reset, fine-grid
+    pass) starts with no zone marks, so both backends would cross foreign
+    plane zones for free.  Call this after the fixed baseline (pads, keepouts,
+    rule areas) is restamped so pad copper keeps its net, as on load.
+    Returns the number of cells marked; 0 when the router has no outlines.
+    """
+    outlines = getattr(router, "plane_zones", ()) or ()
+    if not outlines:
+        return 0
+    return mark_plane_zones_on_grid(grid, tuple(outlines))
+
+
 def plane_layer_names(layer_stack: LayerStack) -> list[str]:
     """Return the KiCad names of the stack's ``LayerType.PLANE`` layers.
 

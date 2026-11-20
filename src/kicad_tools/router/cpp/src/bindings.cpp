@@ -359,7 +359,10 @@ NB_MODULE(router_cpp, m) {
         // Issue #9597: zone (copper pour) marking verbs (see grid.hpp).
         .def("mark_zone_cells", &Grid3D::mark_zone_cells,
              "xs"_a, "ys"_a, "layers"_a, "nets"_a)
-        .def("clear_zone_cells", &Grid3D::clear_zone_cells)
+        .def("clear_zone_cells", &Grid3D::clear_zone_cells, "layer"_a = -1)
+        // Issue #9826: per-layer PLANE mask for the zone cost/block split.
+        .def("set_plane_layers", &Grid3D::set_plane_layers, "layers"_a)
+        .def("is_plane_layer", &Grid3D::is_plane_layer, "layer"_a)
         // Congestion
         .def("get_congestion", &Grid3D::get_congestion, "x"_a, "y"_a, "layer"_a)
         .def("update_congestion", &Grid3D::update_congestion,

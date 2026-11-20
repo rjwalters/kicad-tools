@@ -390,7 +390,12 @@ namespace router {
 // has neither the rules field nor the verbs, so the Python grid's zone
 // marks would be invisible to the native search (cost parity breaks
 // silently); it must be rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 73;
+// v74 (Issue #9826): ``Grid3D::set_plane_layers`` (per-layer PLANE mask) so the
+// A* charges ``cost_zone_foreign_plane`` only on plane layers and blocks a
+// foreign zone elsewhere (Python parity), and a layer-scoped
+// ``clear_zone_cells(layer)`` that resets ``net`` on former zone cells.  A v73
+// .so charges every foreign zone and its clear leaves stale zone nets.
+constexpr int ROUTER_CPP_BUILD_VERSION = 74;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor

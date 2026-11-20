@@ -2223,17 +2223,26 @@ RouteResult Pathfinder::route(
 
             float avoidance = grid_.at(nx, ny, nlayer).avoidance_cost;
 
-            // Issue #9597: soft foreign plane-zone crossing cost.  Zone
-            // cells are never blocked in the native search (the Python grid
-            // marks only plane-layer pour outlines); a foreign one costs
-            // ``cost_zone_foreign_plane`` per cell so the search prefers an
-            // around-path but may still cross when nothing else exists --
-            // exactly the Python ``zone_cost_arr`` term.
+            // Issue #9597: soft foreign plane-zone crossing cost.  A foreign
+            // zone cell on a PLANE layer costs ``cost_zone_foreign_plane``
+            // per cell so the search prefers an around-path but may still
+            // cross when nothing else exists -- exactly the Python
+            // ``zone_cost_arr`` term.  Issue #9826: on any other layer a
+            // foreign zone is blocked, as the Python ``zone_blocked_arr``
+            // does (``Grid3D::set_plane_layers`` carries the PLANE mask).
             const GridCell& step_cell = grid_.at(nx, ny, nlayer);
-            const float zone_cost =
-                (step_cell.is_zone && step_cell.net != 0 && step_cell.net != net)
-                    ? rules_.cost_zone_foreign_plane
-                    : 0.0f;
+            const bool foreign_zone =
+                step_cell.is_zone && step_cell.net != 0 && step_cell.net != net;
+            if (foreign_zone && !grid_.is_plane_layer(nlayer)) {
+                if (astar_trace_enabled()) {
+                    std::fprintf(stderr,
+                        "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                        "REJECT reason=zone_blocked\n",
+                        current.x, current.y, current.layer, nx, ny, nlayer);
+                }
+                continue;
+            }
+            const float zone_cost = foreign_zone ? rules_.cost_zone_foreign_plane : 0.0f;
 
             // Issue #3143: per-pad channel budget cost.  Returns 0.0 when
             // the budget list is empty (the default) or when the candidate
@@ -3030,11 +3039,21 @@ RouteResult Pathfinder::run_astar_loop() {
 
             // Issue #9597: soft foreign plane-zone crossing cost (mirrors
             // the one-shot loop and the Python ``zone_cost_arr`` term).
+            // Issue #9826: cost on PLANE layers only; blocked elsewhere.
             const GridCell& step_cell = grid_.at(nx, ny, nlayer);
-            const float zone_cost =
-                (step_cell.is_zone && step_cell.net != 0 && step_cell.net != search_net_)
-                    ? rules_.cost_zone_foreign_plane
-                    : 0.0f;
+            const bool foreign_zone =
+                step_cell.is_zone && step_cell.net != 0 && step_cell.net != search_net_;
+            if (foreign_zone && !grid_.is_plane_layer(nlayer)) {
+                if (astar_trace_enabled()) {
+                    std::fprintf(stderr,
+                        "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                        "reason=zone_blocked net=%d\n",
+                        current.x, current.y, current.layer, nx, ny, nlayer,
+                        search_net_);
+                }
+                continue;
+            }
+            const float zone_cost = foreign_zone ? rules_.cost_zone_foreign_plane : 0.0f;
 
             // Issue #3143: per-pad channel budget cost.  Mirrors the
             // one-shot ``route()`` cost contribution above; consults the

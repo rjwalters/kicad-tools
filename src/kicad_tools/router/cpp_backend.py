@@ -165,7 +165,11 @@ STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
 # foreign plane-zone crossing cost both A* step-cost loops charge.  A v70
 # .so has neither, so the native search would cross plane zones for free
 # while the Python pathfinder pays the cost (silent parity break); reject.
-_REQUIRED_CPP_BUILD_VERSION = 73
+# v74 (Issue #9826): ``Grid3D::set_plane_layers`` -- the zone cost applies on
+# PLANE layers only and a foreign zone on any other layer is blocked (Python
+# parity) -- plus a layer-scoped ``clear_zone_cells(layer)`` that zeroes the
+# net of unblocked former zone cells like ``RoutingGrid.clear_zones``.
+_REQUIRED_CPP_BUILD_VERSION = 74
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -1042,6 +1046,34 @@ class CppGrid:
         # Issue #6243: what ``sync_authored_floors`` last installed.
         self._authored_key: tuple | None = None
 
+    def sync_zone_marks_from(self, grid: RoutingGrid) -> int:
+        """Mirror ``grid``'s PLANE-layer mask and zone marks (Issue #9826).
+
+        Installs the per-layer PLANE mask (foreign zones are costed there and
+        blocked elsewhere, like the Python pathfinder), clears any zone marks
+        already on this grid, then bulk-writes every ``_is_zone`` cell with its
+        net.  Returns the number of zone cells written.
+        """
+        import numpy as np
+
+        from ..acceleration.backend import to_numpy
+        from .layer_advisories import grid_plane_layer_indices
+
+        impl = self._impl
+        if hasattr(impl, "set_plane_layers"):
+            impl.set_plane_layers(grid_plane_layer_indices(grid))
+        if hasattr(impl, "clear_zone_cells"):
+            impl.clear_zone_cells()
+        is_zone_np = to_numpy(grid._is_zone)
+        if not is_zone_np.size or not hasattr(impl, "mark_zone_cells"):
+            return 0
+        zl, zy, zx = np.nonzero(is_zone_np)
+        if not zx.shape[0]:
+            return 0
+        nets = to_numpy(grid._net)[zl, zy, zx]
+        impl.mark_zone_cells(zx.tolist(), zy.tolist(), zl.tolist(), nets.tolist())
+        return int(zx.shape[0])
+
     def install_fixed_fills(self, fills) -> None:
         if not hasattr(self._impl, "add_fixed_fill"):
             if fills:
@@ -1164,6 +1196,15 @@ class CppGrid:
                     strict=True,
                 ):
                     mark_blocked(x, y, layer, net, is_obstacle, pad_blocked)
+
+        # Issue #9826: install the PLANE-layer mask and copy the zone marks.
+        # ``RoutingGrid.add_zone_cells`` mirrors marks only onto the CppGrid
+        # paired at marking time, so a CppGrid built later (relaxed-clearance
+        # retry, fine-grid pass, trial reset, diff-pair pre-phase) would
+        # otherwise route across foreign plane zones for free while a Python
+        # router on the same grid pays ``cost_zone_foreign_plane``.  Sparse
+        # over zone cells only (#5240): no zones => one ``nonzero`` and done.
+        cpp_grid.sync_zone_marks_from(grid)
 
         # Issue #4071: marshal corridor reservations into the C++ grid.
         # ``RoutingGrid._reserved_for_nets`` maps ``(layer, y, x)`` -> owner
