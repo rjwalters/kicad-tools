@@ -45,7 +45,13 @@ gate passes.  Stages, in order:
    ``gerbers.zip`` (copper and F.Silkscreen; every other member keeps its bytes)
    instead of a whole ``kct export``, and writes ``output/drc_report.json`` from
    its recipe's ``run_drc`` once the bundle is final.  Its check report comes
-   from the board-local ``check_manufacturing.py``, not ``kct check``.
+   from the board-local ``check_manufacturing.py``, not ``kct check``.  Its
+   assembly PDFs are re-plotted from the published routed PCB, and its whole
+   ``output/manufacturing`` bundle (report, README, manifest) is regenerated
+   through the recipe's ``generate_manufacturing`` under the reviewed paid
+   process with ``SOURCE_DATE_EPOCH`` anchored to ``--checked-at``, so the
+   drawings follow the copper and two publishes write identical evidence
+   (Issue #9536).
 5. ``refresh_readiness.py``'s pipeline: native ERC, deterministic archive
    rebuilds, manifest re-hash (only ``files`` may change), its gates
    (refilled native DRC, ``kct check``, ``net-status``, ``validate --sync``),
@@ -77,6 +83,7 @@ import tempfile
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -141,6 +148,12 @@ class BundleConfig:
     #: Board-relative recipe whose ``run_drc(routed_pcb)`` writes
     #: ``output/drc_report.json`` against the final bundle (board 04).
     recipe_drc: str | None = None
+    #: Board-relative recipe whose ``generate_manufacturing(routed_pcb,
+    #: output_dir)`` regenerates the whole ``output/manufacturing`` bundle
+    #: from the published routed PCB (board 04, Issue #9536: the report,
+    #: README and manifest must follow the copper, under the board's
+    #: reviewed paid process).
+    recipe_manufacturing: str | None = None
     #: Board-specific evidence stage (a key of ``EVIDENCE_STAGES``).
     evidence: str | None = None
     #: Board-relative evidence PCB that must equal the published routed PCB.
@@ -154,7 +167,13 @@ BUNDLES: dict[str, BundleConfig] = {
     "04-stm32-devboard": BundleConfig(
         manufacturer="jlcpcb-tier1",
         export_members=(),
-        assembly_pdfs=(),
+        # Issue #9536: the assembly drawings are plotted from the published
+        # routed PCB like every other bundle member -- skipping them re-pinned
+        # the pre-#9455 copper drawings against the new manifest hashes.
+        assembly_pdfs=(
+            ("assembly-front.pdf", ("F.Cu", "F.SilkS", "Edge.Cuts")),
+            ("assembly-back.pdf", ("B.Cu", "B.SilkS", "Edge.Cuts")),
+        ),
         schematic_pdfs=(),
         renders=None,
         parity_drc_reports=(
@@ -171,6 +190,7 @@ BUNDLES: dict[str, BundleConfig] = {
         ),
         gerber_members=(COPPER_MEMBER, SILK_MEMBER),
         recipe_drc="generate_design.py",
+        recipe_manufacturing="generate_design.py",
     ),
     # Board 06 (Issue #8404): the routed board is the one
     # ``assembled-demo/build.py`` emits; the bundle follows it via a plain
@@ -565,6 +585,29 @@ def check_fresh_cpl(committed: bytes, fresh: bytes, routed_pcb: Path) -> None:
     log("  CPL: coordinate-frame refresh only (columns other than Mid X/Mid Y unchanged)")
 
 
+def _normalize_pdf_timestamps(pdf: Path) -> None:
+    """Anchor a plotted PDF's ``/CreationDate`` to ``SOURCE_DATE_EPOCH`` (#9536).
+
+    kicad-cli stamps the wall clock into the document info dictionary at
+    second resolution; left alone, two publishes of the same PCB write
+    different bytes.  With ``SOURCE_DATE_EPOCH`` anchored the stamp becomes a
+    pure function of the environment; without it the PDF is untouched.
+    """
+
+    epoch = os.environ.get("SOURCE_DATE_EPOCH", "").strip()
+    if not epoch.isdigit():
+        return
+    stamp = datetime.fromtimestamp(int(epoch), tz=timezone.utc).strftime("%Y:%m:%d:%H:%M:%S")
+    data = pdf.read_bytes()
+    anchored = re.sub(
+        rb"/(CreationDate|ModDate) \(D:\d{4}:\d{2}:\d{2}:\d{2}:\d{2}:\d{2}[^)]*\)",
+        rf"/\1 (D:{stamp})".encode(),
+        data,
+    )
+    if anchored != data:
+        pdf.write_bytes(anchored)
+
+
 def stage_replot(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) -> list[str]:
     """Re-plot every artifact drawn from the routed PCB's copper or the schematic."""
     from kicad_tools.cli.readiness_cmd import _export_assembly_pdf, _export_schematic_pdf
@@ -582,6 +625,23 @@ def stage_replot(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) -> lis
                 for name in copper_gerbers.refresh_copper_gerbers(routed, archive, pattern)
             )
         log(f"  re-plot: {len(written)} Gerber member(s) from the published routed PCB")
+        # Issue #9536: the assembly drawings are drawn from the routed PCB's
+        # copper like the Gerbers; a bundle that skips them re-pins the
+        # previous copper's drawings under the new manifest hashes.
+        if bundle.assembly_pdfs:
+            from kicad_tools.cli.readiness_cmd import _export_assembly_pdf
+
+            for name, layers in bundle.assembly_pdfs:
+                if not (mfg / name).is_file():
+                    raise GateFailure(
+                        f"{name}: not part of the committed bundle; refusing to add it"
+                    )
+                result = _export_assembly_pdf(routed, layers, mfg / name)
+                if not result.ok:
+                    raise GateFailure(f"{name}: {result.detail}")
+                _normalize_pdf_timestamps(mfg / name)
+                written.append(f"output/manufacturing/{name}")
+            log(f"  re-plot: {len(bundle.assembly_pdfs)} assembly drawing(s) re-plotted")
         return written
     with tempfile.TemporaryDirectory(prefix="refresh-bundles-plot-") as tmp:
         project = Path(tmp) / "output"
@@ -731,6 +791,42 @@ def stage_recipe_drc(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) ->
     log(f"  recipe {proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else 'run_drc'}")
 
 
+def stage_recipe_manufacturing(staged: Path, cfg: rr.BoardConfig, bundle: BundleConfig) -> None:
+    """Regenerate ``output/manufacturing`` through the recipe (board 04, #9536).
+
+    The report, README and manifest are drawn from the routed PCB under the
+    board's reviewed paid process (the recipe passes its own
+    ``process_rules()`` to the exporter), so a copper change re-generates them
+    instead of re-hashing stale artifacts.  Runs before the re-plot so the
+    Gerber-member and assembly-drawing refresh lands on the final bundle.
+    """
+    assert bundle.recipe_manufacturing is not None
+    snippet = (
+        "import runpy, sys; from pathlib import Path; "
+        "recipe = runpy.run_path(sys.argv[1], run_name='refresh_bundles_recipe'); "
+        "ok = recipe['generate_manufacturing'](Path(sys.argv[2]), Path(sys.argv[3])); "
+        "sys.exit(0 if ok else 1)"
+    )
+    proc = run(
+        [
+            sys.executable,
+            "-c",
+            snippet,
+            str(staged / bundle.recipe_manufacturing),
+            str(staged / cfg.routed_pcb),
+            str(staged / "output"),
+        ],
+        cwd=staged,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(staged)},
+    )
+    if proc.returncode != 0:
+        raise GateFailure(
+            f"{bundle.recipe_manufacturing} generate_manufacturing failed: "
+            f"{proc.stdout[-2000:]}{proc.stderr[-2000:]}"
+        )
+    log("  recipe generate_manufacturing: bundle regenerated under the reviewed process")
+
+
 # --------------------------------------------------------------------------- driver
 def refresh_bundle(
     board: Path,
@@ -766,6 +862,8 @@ def refresh_bundle(
 
         stale = force_replot or bundle_is_stale(staged, cfg)
         if stale:
+            if bundle.recipe_manufacturing is not None:
+                stage_recipe_manufacturing(staged, cfg, bundle)
             stage_replot(staged, cfg, bundle)
             _write_targets(staged, bundle.saved_drc_reports, saved_drc)
             _write_targets(staged, bundle.fill_consistency, _json_bytes(refill["deltas_mm2"]))
@@ -830,7 +928,34 @@ def main(argv: list[str] | None = None) -> int:
         "--force-replot", action="store_true", help="re-plot even if the bundle is current"
     )
     parser.add_argument("--dry-run", action="store_true", help="run every gate, publish nothing")
+    parser.add_argument(
+        "--known-issue",
+        action="append",
+        default=[],
+        metavar="N:SUMMARY[:KIND[:!rule@x/y,...]]",
+        help="record a known issue (repeatable; same syntax as `kct readiness`, Issue #7323)",
+    )
+    parser.add_argument(
+        "--resolve-known-issue",
+        action="append",
+        default=[],
+        metavar="N",
+        help="drop a recorded known issue by number (repeatable, Issue #7323)",
+    )
     args = parser.parse_args(argv)
+    # Issue #9536: anchor every exporter wall-clock stamp (manifest
+    # ``generated_at``, README ``Generated at``, report date -- and weasyprint
+    # PDF metadata) to ``--checked-at`` via the reproducible-builds
+    # ``SOURCE_DATE_EPOCH`` convention, so a repeated publish with the same
+    # inputs writes byte-identical evidence.  ``setdefault`` keeps an explicit
+    # caller override.
+    try:
+        from datetime import datetime as _dt
+
+        _anchored = str(int(_dt.fromisoformat(args.checked_at).timestamp()))
+        os.environ.setdefault("SOURCE_DATE_EPOCH", _anchored)
+    except ValueError:
+        parser.error(f"--checked-at is not an ISO timestamp: {args.checked_at}")
     status = 0
     for board in args.boards:
         board = board.resolve()
@@ -846,6 +971,8 @@ def main(argv: list[str] | None = None) -> int:
                 build_dir=args.build_dir.resolve() if args.build_dir else None,
                 force_replot=args.force_replot,
                 dry_run=args.dry_run,
+                known_issue=args.known_issue,
+                resolve_known_issue=args.resolve_known_issue,
             ):
                 log(f"    {name}")
         except GateFailure as exc:
