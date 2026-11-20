@@ -672,3 +672,67 @@ def test_complete_report_names_the_board_defaults_for_an_unclassed_net(tmp_path)
     (entry,) = report["unroutable_links"]
     assert "width tried 0.250 mm" in entry["stuck_evidence"]
     assert "0.200 mm clearance" in entry["stuck_evidence"]
+
+
+# -- _last_far_landings describes the stub set _escape_stubs returns (#9708) ----
+
+
+def _escape_kwargs() -> dict:
+    return {
+        "kmax": 4,
+        "extra_clearance": 0.0,
+        "partner_net": None,
+        "layers": None,
+        "exempt_pads": None,
+        "net_class": _CLASS,
+    }
+
+
+def test_anchored_escape_does_not_inherit_stale_far_landings(monkeypatch) -> None:
+    """The kept-copper anchor path returns anchor stubs, so it must not leave
+    the pad-escape call's band-sealed far landings behind for the caller."""
+    pin = _pad(2.0, 4.0, 1, "U1")
+    far = _pad(10.0, 4.0, 1, "R2")
+    pf = LatticePathfinder(
+        _OUTLINE,
+        [pin, far],
+        DesignRules(trace_width=0.25, trace_clearance=0.2),
+        layer_stack=LayerStack.two_layer(),
+    )
+    pf.kept_anchors = kept_copper_anchors([pin, far], [_kept_route()], lambda l: 0)
+    real = pf._escape_stubs_at_pad
+    sentinel = frozenset({(("stale", 0, 0), 0)})
+
+    def fake(*args, **kwargs):
+        result = real(*args, **kwargs)
+        pf._last_far_landings = sentinel
+        return result
+
+    monkeypatch.setattr(pf, "_escape_stubs_at_pad", fake)
+    stubs, _ = pf._escape_stubs(pin, 1, None, **_escape_kwargs())
+    assert stubs
+    assert pf._last_far_landings == frozenset()
+
+
+def test_pad_escape_far_landings_survive_without_anchors(monkeypatch) -> None:
+    """With no anchor and no sibling retry the pad-escape call's far landings
+    are exactly what the caller reads back."""
+    pin = _pad(2.0, 4.0, 1, "U1")
+    far = _pad(10.0, 4.0, 1, "R2")
+    pf = LatticePathfinder(
+        _OUTLINE,
+        [pin, far],
+        DesignRules(trace_width=0.25, trace_clearance=0.2),
+        layer_stack=LayerStack.two_layer(),
+    )
+    real = pf._escape_stubs_at_pad
+    sentinel = frozenset({(("far", 0, 0), 0)})
+
+    def fake(*args, **kwargs):
+        result = real(*args, **kwargs)
+        pf._last_far_landings = sentinel
+        return result
+
+    monkeypatch.setattr(pf, "_escape_stubs_at_pad", fake)
+    pf._escape_stubs(pin, 1, None, **_escape_kwargs())
+    assert pf._last_far_landings == sentinel

@@ -118,6 +118,14 @@ _OVERSIZE_STUB_KMAX = 4096
 # Issue #9636: landing stubs kept per layer from the sibling-relaxed escape.
 _SIBLING_STUBS_PER_LAYER = 16
 
+# Issue #9708: state budget for :meth:`LatticePathfinder._pad_band_sealed`, the
+# bounded walk that decides whether a pad's stub landings are sealed inside the
+# own-net slit-band shell.  The walk only ever explores the shell (nodes clear
+# of every own-net pad's ``(half + edge)`` shell end it immediately), so a few
+# hundred states cover the tightest refined cloud; an exhausted budget reports
+# the pad unsealed (conservative -- the far-escape pass then never runs).
+_BAND_SEALED_ESCAPE_BUDGET = 512
+
 # Decline reasons ``_route_impl`` returns when its A* actually RAN and was
 # exhausted (issues #6373, #4605, #4979), and the pair-segment reasons that
 # earn one fan-via gateway retry (issue #6444).  Both now live with the rest
@@ -381,6 +389,13 @@ class _RouteResult:
     # mid-trunk via-pair move, in path order.  ``runs`` then has one more
     # entry than this list (the run before each via pair, plus the last).
     via_pairs: list[ViaPair] = field(default_factory=list)
+    # Issue #9708: far (band-sealed escape) landings whose emitted stub leaves
+    # a same-net slit against the route body, as ``(end, node, layer)`` with
+    # ``end`` ``"a"`` (start pad) / ``"b"`` (end pad).  Non-empty only on the
+    # result :meth:`LatticePathfinder._route_search` hands to
+    # :meth:`LatticePathfinder._route_search_checked`, which bans them and
+    # searches again; callers never see a non-empty value.
+    far_ban: tuple[tuple[str, NodeKey, int], ...] = ()
 
 
 @dataclass
@@ -1717,6 +1732,7 @@ class LatticePathfinder:
         partner_net: int | None = None,
         layers: tuple[int, ...] | None = None,
         exempt_pads: frozenset[int] | None = None,
+        min_landing_gap_mm: float | None = None,
         relax_siblings: bool = False,
     ) -> list[tuple[NodeKey, int, list[Pt], float]]:
         """Candidate scan for :meth:`pad_stubs` at an EXPLICIT ``(half, clr)``.
@@ -1725,6 +1741,15 @@ class LatticePathfinder:
         re-run the identical clearance-checked dogleg search at a narrower
         neck half-width and a wider fan without duplicating the reject-and-
         retry body.
+
+        ``min_landing_gap_mm`` (issue #9708) filters the LANDING node, not
+        the legs: a candidate is accepted only when its landing point keeps
+        that detection edge from every own-net SMD pad
+        (:meth:`LatticeObstacleModel.same_net_pad_band_point_clear`).  The
+        band-sealed far-escape pass uses it to skip the near cloud that sits
+        inside the pad's own ``(union, band)`` shell and collect landings a
+        straight exit threads out through.  ``None`` (every existing caller)
+        keeps the scan byte-identical.
         """
         lattice = self.build()
         obstacles = self.obstacles
@@ -1812,6 +1837,15 @@ class LatticePathfinder:
                     if ko is not None and ko.segment_blocked(point, point, layer, net, half):
                         continue
                     if not committed.node_clear(point, layer, net, half, clr):
+                        continue
+                    # Issue #9708: the far-escape pass wants landings outside
+                    # every own-net pad's band shell, not the nearest cloud.
+                    if (
+                        min_landing_gap_mm is not None
+                        and not obstacles.same_net_pad_band_point_clear(
+                            point, layer, net, half, min_landing_gap_mm
+                        )
+                    ):
                         continue
                 accepted: list[Pt] | None = None
                 # Fat mode prefers the axis-first dogleg: its first leg is
@@ -1919,6 +1953,11 @@ class LatticePathfinder:
             "via_in_pad_override": via_in_pad_override,
         }
         stubs, width = self._escape_stubs_at_pad(pad, net, committed, **kwargs)
+        # Issue #9708 contract: ``_last_far_landings`` must describe the stub
+        # set RETURNED from here (the caller reads it right after).  The
+        # pad-escape call above set it for ``stubs``; every other return path
+        # below re-assigns it explicitly rather than inheriting a stale set.
+        pad_far = self._last_far_landings
         anchors = self.kept_anchors.get(pad_key(pad)) if self.kept_anchors else None
         fat = extra_clearance > 0.0 or partner_net is not None
         if fat:
@@ -1957,6 +1996,9 @@ class LatticePathfinder:
                 via_in_pad_override=via_in_pad_override,
             )
             if anchored is not None:
+                # Anchored stubs start on kept copper and carry no band-sealed
+                # far landings; do not inherit the pad-escape call's set.
+                self._last_far_landings = frozenset()
                 return anchored
         if (not stubs or not has_egress(stubs)) and self.obstacles.footprint_sibling_floors(
             pad, net, half, max(0.0, half + clr - self._agent_radius)
@@ -1991,7 +2033,19 @@ class LatticePathfinder:
                     per_layer[stub[1]] = per_layer.get(stub[1], 0) + 1
                     if per_layer[stub[1]] <= _SIBLING_STUBS_PER_LAYER:
                         capped.append(stub)
+                # The relaxed call reset ``_last_far_landings`` for ITS stub
+                # set; keep only far landings that survived the usable/cap
+                # filtering.  (Its band-sealed far scan keeps the caller's
+                # ``kmax`` on purpose: far landings are a separate mechanism
+                # from the widened sibling fan.)
+                kept_states = {(stub[0], stub[1]) for stub in capped}
+                self._last_far_landings = frozenset(
+                    st for st in self._last_far_landings if st in kept_states
+                )
                 return capped, rwidth
+        # Falling back to the pad-escape set: restore ITS far landings, which
+        # the relaxed retry (if it ran) has since reset.
+        self._last_far_landings = pad_far
         return stubs, width
 
     def _sibling_search_radius(self, pad: Pad) -> float:
@@ -2125,10 +2179,20 @@ class LatticePathfinder:
         are returned unchanged, so the outcome is never worse than before.
         Stub sets with egress (every connection that routed before) are
         returned byte-identically.
+
+        Issue #9708 extends the #6381 lesson one horizon out: a stub set with
+        one-edge egress whose every landing is nonetheless sealed inside the
+        own-net slit-band shell (see :meth:`_pad_band_sealed`) gains
+        supplementary far landings (:meth:`_band_sealed_far_stubs`) instead
+        of deadlocking the A* in the shell.  Unsealed pads are returned
+        byte-identically.
         """
         body_w = getattr(net_class, "trace_width", None) or self.rules.trace_width
         full_half, clr = self._conn_geometry(net_class, net)
         fat = extra_clearance > 0.0 or partner_net is not None
+        # Issue #9708: the landings this call added past the near scan, read
+        # back by :meth:`_route_search` to vet their emitted join.
+        self._last_far_landings: frozenset[tuple[NodeKey, int]] = frozenset()
 
         stubs = self.pad_stubs(
             pad,
@@ -2166,6 +2230,42 @@ class LatticePathfinder:
                 )
                 for stub in stubs
             ):
+                # Issue #9708: egress one edge out of the landing is not
+                # escape -- on a tight pad the whole near cloud sits inside
+                # the own-net ``(union, band)`` shell, every outgoing body
+                # edge is band-interior per-edge (a straight exit SUBDIVIDED
+                # into lattice edges changes the two-region verdict) and vias
+                # are via-in-pad, so the search deadlocks ``no-path`` on
+                # copper the validator accepts.  A pad whose stubs are so
+                # sealed gains far landings that thread out through the
+                # shell; unsealed pads keep their stub set byte-identical.
+                if self._pad_band_sealed(
+                    stubs,
+                    net,
+                    committed,
+                    full_half,
+                    clr,
+                    net_class=net_class,
+                    allow_vias=allow_vias,
+                    via_in_pad_override=via_in_pad_override,
+                ):
+                    near_states = {(stub[0], stub[1]) for stub in stubs}
+                    stubs = self._band_sealed_far_stubs(
+                        pad,
+                        net,
+                        committed,
+                        stubs,
+                        full_half,
+                        clr,
+                        kmax=kmax,
+                        layers=layers,
+                        exempt_pads=exempt_pads,
+                    )
+                    self._last_far_landings = frozenset(
+                        (stub[0], stub[1])
+                        for stub in stubs
+                        if (stub[0], stub[1]) not in near_states
+                    )
                 return stubs, body_w
             dead_end = stubs
         else:
@@ -2436,6 +2536,162 @@ class LatticePathfinder:
                 clearance=clr if net_class is not None else None,
             )
         )
+
+    def _pad_band_sealed(
+        self,
+        stubs: Sequence[tuple[NodeKey, int, list[Pt], float]],
+        net: int,
+        committed: CommittedCopper | None,
+        half: float,
+        clr: float,
+        *,
+        net_class: object | None = None,
+        allow_vias: bool = True,
+        via_in_pad_override: bool | None = None,
+    ) -> bool:
+        """True when no legal leg or via from any stub landing leaves the band shell.
+
+        Issue #9708: ``_stub_has_egress`` sees one edge out of the landing;
+        on a tight pad that edge only hops deeper into the refined node
+        cloud, whose every outgoing body edge sits in the open
+        ``(0, same_net_pad_gap_band_edge_mm)`` slit band of the pad's OWN
+        escape (a straight pad exit is validator-clean as one segment -- the
+        swept copper unions the pad -- but each lattice SUBDIVISION of it is
+        band-interior judged alone, and the #9517 collinear ride only covers
+        the first leg out of the stub).  This probe walks the same predicates
+        the A* expands with (:meth:`_body_edge_legal` / :meth:`_body_node_legal`
+        / :meth:`_via_ok`, the #6381 no-drift contract) from the accepted
+        stub landings and reports the pad SEALED when neither a node clear of
+        every own-net SMD pad's ``(half + edge)`` shell nor a legal via is
+        reachable.  The walk is bounded by ``_BAND_SEALED_ESCAPE_BUDGET``
+        states; an exhausted budget reports unsealed (conservative -- a big
+        reachable region is exactly the unsealed case).  ``edge_mm <= 0``
+        (guard off) is never sealed.
+        """
+        edge_mm = float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
+        if edge_mm <= 0.0:
+            return False
+        if committed is None:
+            committed = self._fresh_committed()
+        lattice = self.build()
+        obstacles = self.obstacles
+        extra = max(0.0, half + clr - self._agent_radius)
+        pw, ko = self._pairwise, self._keepouts
+        boundary = self._escape_boundary
+        seen: set[tuple[NodeKey, int]] = set()
+        frontier: list[tuple[NodeKey, int]] = []
+        # The stub's own legs are pad-attached copper: the first body edge out
+        # of its landing may ride them collinearly (#9517), exactly as
+        # ``_stub_has_egress`` and the A* seed treat it.  Only the SEED state
+        # carries them -- a state reached through the walk has a predecessor.
+        seed_rides: dict[tuple[NodeKey, int], tuple[tuple[Pt, Pt, float], ...]] = {}
+        for stub in stubs:
+            state = (stub[0], stub[1])
+            if state not in seen:
+                seen.add(state)
+                frontier.append(state)
+                seed_rides[state] = tuple(
+                    (c, d, half) for c, d in zip(stub[2], stub[2][1:], strict=False)
+                )
+        while frontier:
+            if len(seen) > _BAND_SEALED_ESCAPE_BUDGET:
+                return False
+            key, layer = frontier.pop()
+            rides = seed_rides.get((key, layer), ())
+            point = lattice.node_point(key)
+            if obstacles.same_net_pad_band_point_clear(point, layer, net, half, edge_mm):
+                return False
+            if (
+                allow_vias
+                and self.num_layers > 1
+                and self._via_ok(
+                    key,
+                    net,
+                    committed,
+                    via_in_pad_override=via_in_pad_override,
+                    clearance=clr if net_class is not None else None,
+                )
+            ):
+                return False
+            for nbr, _elen in lattice.adj.get(key, ()):
+                edge = (min(key, nbr), max(key, nbr))
+                if not self._body_edge_legal(
+                    edge,
+                    layer,
+                    net,
+                    half,
+                    clr,
+                    committed,
+                    extra=extra,
+                    pw=pw,
+                    ko=ko,
+                    attached=rides,
+                )[0]:
+                    continue
+                if not boundary.segment_clear(
+                    lattice.node_point(edge[0]), lattice.node_point(edge[1]), half
+                ):
+                    continue
+                if not self._body_node_legal(
+                    nbr, layer, net, half, clr, committed, extra=extra, pw=pw, ko=ko
+                )[0]:
+                    continue
+                state = (nbr, layer)
+                if state not in seen:
+                    seen.add(state)
+                    frontier.append(state)
+        return True
+
+    def _band_sealed_far_stubs(
+        self,
+        pad: Pad,
+        net: int,
+        committed: CommittedCopper | None,
+        stubs: list[tuple[NodeKey, int, list[Pt], float]],
+        half: float,
+        clr: float,
+        *,
+        kmax: int,
+        layers: tuple[int, ...] | None,
+        exempt_pads: frozenset[int] | None,
+    ) -> list[tuple[NodeKey, int, list[Pt], float]]:
+        """Append far escape landings for a band-sealed pad (issue #9708).
+
+        Re-runs :meth:`_scan_stubs` at the full body width with
+        ``min_landing_gap_mm`` set, so the scan skips the sealed near cloud
+        and collects up to ``kmax`` landings per layer that keep the band
+        detection edge from every own-net SMD pad.  Every dogleg leg passes
+        the unchanged clearance checks: a straight landing stub unions the
+        pad (its first centreline point is inside the outline), so the shell
+        is crossed by CONNECTED copper and the validator sees no slit -- the
+        shape the per-edge band verdict could not express once the exit was
+        subdivided.  Existing landings are kept and the result is deduplicated;
+        the pass never replaces a landing, so the stub set only grows.
+        """
+        edge_mm = float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
+        if edge_mm <= 0.0:
+            return stubs
+        lattice = self.build()
+        radius = max(3.0 * lattice.fine + max(pad.width, pad.height), 2.0) + edge_mm
+        far = self._scan_stubs(
+            pad,
+            net,
+            committed,
+            half,
+            clr,
+            kmax=kmax,
+            search_radius=radius,
+            layers=layers,
+            exempt_pads=exempt_pads,
+            min_landing_gap_mm=edge_mm,
+        )
+        have = {(stub[0], stub[1]) for stub in stubs}
+        out = list(stubs)
+        for stub in far:
+            if (stub[0], stub[1]) not in have:
+                have.add((stub[0], stub[1]))
+                out.append(stub)
+        return out
 
     def _keepout_escape_reason(
         self,
@@ -2828,10 +3084,10 @@ class LatticePathfinder:
         if via_pairs is not None and fat:
             search_kwargs["via_pairs"] = via_pairs
         if not last_resort:
-            return self._route_search(start, end, net_class, **search_kwargs)
+            return self._route_search_checked(start, end, net_class, **search_kwargs)
 
         # Stage (a)+(b): via-in-pad forced OFF regardless of tier.
-        result, reason = self._route_search(
+        result, reason = self._route_search_checked(
             start, end, net_class, via_in_pad_override=False, **search_kwargs
         )
         if result is not None:
@@ -2851,7 +3107,9 @@ class LatticePathfinder:
                 return None, "via-in-pad-tier-unsupported"
             return None, reason
 
-        return self._route_search(start, end, net_class, via_in_pad_override=None, **search_kwargs)
+        return self._route_search_checked(
+            start, end, net_class, via_in_pad_override=None, **search_kwargs
+        )
 
     def _route_search(
         self,
@@ -2873,6 +3131,7 @@ class LatticePathfinder:
         guide: PartnerGuide | None = None,
         mirror: LayerMirror | None = None,
         via_pairs: _ViaPairSpec | None = None,
+        banned_landings: frozenset[tuple[str, NodeKey, int]] = frozenset(),
     ) -> tuple[_RouteResult | None, str]:
         """A* over the (node, layer) graph; returns ``(result, reason)``.
 
@@ -2891,6 +3150,9 @@ class LatticePathfinder:
         filtered stub sets (``(stubs_a, stubs_b)``) instead of recomputing.
         ``via_in_pad_override`` (issue #4475) is forwarded verbatim to every
         :meth:`_via_ok` call this search makes; see that method's docstring.
+        ``banned_landings`` (issue #9708) drops ``(end, node, layer)`` stub
+        landings -- far band-sealed escapes whose emitted join with the body
+        left a slit -- before the search; empty keeps the search unchanged.
         """
         lattice = self.build()
         obstacles = self.obstacles
@@ -3011,6 +3273,7 @@ class LatticePathfinder:
         # The lattice body is emitted (and spaced) at the full class width;
         # the pad-escape legs may taper to a narrower neck (issue #4293).
         body_w = getattr(net_class, "trace_width", None) or self.rules.trace_width
+        far_landed: dict[int, frozenset[tuple[NodeKey, int]]] = {}
         if stubs_override is not None:
             stubs_a, stubs_b = stubs_override
             width_a = width_b = body_w
@@ -3020,7 +3283,7 @@ class LatticePathfinder:
             def escape(pad: Pad) -> tuple[list, float]:
                 if escape_plan and id(pad) in escape_plan:
                     return chosen_stub(escape_plan[id(pad)], committed)
-                return self._escape_stubs(
+                result = self._escape_stubs(
                     pad,
                     net,
                     committed,
@@ -3033,6 +3296,8 @@ class LatticePathfinder:
                     allow_vias=allow_vias,
                     via_in_pad_override=via_in_pad_override,
                 )
+                far_landed[id(pad)] = self._last_far_landings
+                return result
 
             stubs_a, width_a = escape(start)
             stubs_b, width_b = escape(end)
@@ -3082,6 +3347,9 @@ class LatticePathfinder:
 
         stubs_a = boundary_stubs(stubs_a, width_a)
         stubs_b = boundary_stubs(stubs_b, width_b)
+        if banned_landings:
+            stubs_a = [s for s in stubs_a if ("a", s[0], s[1]) not in banned_landings]
+            stubs_b = [s for s in stubs_b if ("b", s[0], s[1]) not in banned_landings]
         if not stubs_a:
             if hard_avoided and had_stubs_a:
                 return None, "layer-constrained-start"
@@ -3958,7 +4226,7 @@ class LatticePathfinder:
         found_pairs: list[ViaPair] = []
         cur_layer = start_state[1]
         start_poly = list(start_stub[start_state])  # pad -> first node
-        cur_pts: list[Pt] = start_poly
+        cur_pts: list[Pt] = list(start_poly)
         # The start escape legs carry ``width_a`` (neck or full); the lattice
         # body carries ``body_w``; the end escape legs carry ``width_b``.  Each
         # segment is spaced at the width it is EMITTED at (issue #4293).
@@ -4000,9 +4268,98 @@ class LatticePathfinder:
         route = self._emit(start, net, net_class, runs, via_points)
         if route is None:
             return None, "empty-route"
+        far_ban = self._far_join_slits(
+            route,
+            [
+                ("a", start_state[:2], start_poly, width_a, far_landed.get(id(start), frozenset())),
+                ("b", end_state[:2], stub_b_poly, width_b, far_landed.get(id(end), frozenset())),
+            ],
+        )
         if found_pairs:
-            return _RouteResult(route, runs, via_points, resources, found_pairs), "ok"
-        return _RouteResult(route, runs, via_points, resources), "ok"
+            return _RouteResult(route, runs, via_points, resources, found_pairs, far_ban), "ok"
+        return _RouteResult(route, runs, via_points, resources, far_ban=far_ban), "ok"
+
+    def _route_search_checked(
+        self, start: Pad, end: Pad, net_class: object | None, **kwargs: Any
+    ) -> tuple[_RouteResult | None, str]:
+        """:meth:`_route_search`, re-run without a far landing whose join slits (#9708).
+
+        A far band-sealed escape landing is vetted only once the whole path
+        is known (:meth:`_far_join_slits`): the stub's own copper can sit a
+        sliver from the arriving body leg.  Each retry bans the offending
+        landings, so the loop is bounded by the finite landing set.
+        """
+        banned: frozenset[tuple[str, NodeKey, int]] = kwargs.pop("banned_landings", frozenset())
+        while True:
+            result, reason = self._route_search(
+                start, end, net_class, banned_landings=banned, **kwargs
+            )
+            if result is None or not result.far_ban:
+                return result, reason
+            banned = banned | frozenset(result.far_ban)
+
+    def _far_join_slits(
+        self,
+        route: Route,
+        ends: Sequence[
+            tuple[str, tuple[NodeKey, int], list[Pt], float, frozenset[tuple[NodeKey, int]]]
+        ],
+    ) -> tuple[tuple[str, NodeKey, int], ...]:
+        """Far landings of ``ends`` whose stub copper slits against the route (#9708).
+
+        Only an end whose selected landing was added by the band-sealed far
+        pass is judged.  The emitted route is measured with the validator's
+        own ``physical_copper_gap`` at the band detection edge; a finding
+        whose closest boundary lies on that end's stub legs blames the
+        landing.  No far landing used (every pre-#9708 route) returns without
+        building anything.
+        """
+        edge_mm = float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
+        judged = [e for e in ends if edge_mm > 0.0 and e[1] in e[4]]
+        if not judged or not route.segments:
+            return ()
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.sexp import parse_string
+        from kicad_tools.validate.rules.physical_gap import check_physical_copper_gap
+
+        names = sorted({s.layer.kicad_name for s in route.segments}, key=str)
+        layer_ids = {"F.Cu": 0, "B.Cu": 31}
+        for name in names:
+            if name not in layer_ids:
+                layer_ids[name] = int(name[2:].split(".")[0]) if name.startswith("In") else 1
+        layers = " ".join(f'({i} "{n}" signal)' for n, i in layer_ids.items())
+        # Serialise through the #3907 / #6485 choke points (``Segment.to_sexp``
+        # / ``Via.to_sexp``) rather than hand-building s-expression text; the
+        # synthetic board has one net, so every item is pinned to ``net 1``.
+        items = [
+            replace(s, net=1, net_name="").to_sexp(uuid=f"s{i}")
+            for i, s in enumerate(route.segments)
+        ]
+        items.extend(
+            replace(v, net=1, net_name="").to_sexp(uuid=f"v{i}") for i, v in enumerate(route.vias)
+        )
+        pcb = PCB(
+            parse_string(
+                f"(kicad_pcb (version 20240108) (generator pcbnew) (general (thickness 1.6)) "
+                f'(layers {layers}) (net 0 "") (net 1 "N") {" ".join(items)})'
+            )
+        )
+        findings = [
+            v
+            for v in check_physical_copper_gap(pcb, edge_mm).violations
+            if v.rule_id == "physical_copper_gap" and v.closest_locations
+        ]
+        banned: list[tuple[str, NodeKey, int]] = []
+        for tag, (key, layer), poly, width, _far in judged:
+            reach = width / 2.0 + 1e-3
+            if any(
+                seg_pt_dist(c, d, (px, py)) <= reach
+                for v in findings
+                for px, py in v.closest_locations
+                for c, d in zip(poly, poly[1:], strict=False)
+            ):
+                banned.append((tag, key, layer))
+        return tuple(banned)
 
     def _own_via_floor(self) -> float:
         """Centre-to-centre floor between two of ONE route's vias (issue #6957).

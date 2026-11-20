@@ -29,7 +29,10 @@ Covers:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
+
+import pytest
 
 if TYPE_CHECKING:
     from kicad_tools.router.primitives import Route
@@ -1240,3 +1243,172 @@ class TestCheckerIntegration:
         # Group dropped: no rules_checked, no violation.
         assert results.rules_checked == 0
         assert len(results.violations) == 0
+
+
+# ---------------------------------------------------------------------------
+# Issue #9304: the defect-copper ruler (one rule, every member alike)
+# ---------------------------------------------------------------------------
+
+DEFECT_RULER_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "CLEAN")
+  (net 2 "BUMP")
+  (net 3 "STUB")
+  (net 4 "LOOP")
+  (net 5 "SMALL")
+
+  (gr_rect
+    (start 0 0)
+    (end 50 60)
+    (stroke (width 0.1))
+    (layer "Edge.Cuts")
+  )
+
+  (footprint "Test:Pads"
+    (layer "F.Cu")
+    (at 0 0)
+    (property "Reference" "J1")
+    (pad "1" smd rect (at 5 10) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 1 "CLEAN"))
+    (pad "2" smd rect (at 25 10) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 1 "CLEAN"))
+    (pad "3" smd rect (at 5 20) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 2 "BUMP"))
+    (pad "4" smd rect (at 25 20) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 2 "BUMP"))
+    (pad "5" smd rect (at 5 30) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 3 "STUB"))
+    (pad "6" smd rect (at 25 30) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 3 "STUB"))
+    (pad "7" smd rect (at 5 40) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 4 "LOOP"))
+    (pad "8" smd rect (at 25 40) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 4 "LOOP"))
+    (pad "9" smd rect (at 5 50) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 5 "SMALL"))
+    (pad "10" smd rect (at 25 50) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 5 "SMALL"))
+  )
+
+  # CLEAN: one straight 20 mm run.
+  (segment (start 5 10) (end 25 10) (width 0.2) (layer "F.Cu") (net 1))
+
+  # BUMP: 20 mm host line plus an 11 mm detour that leaves it at x=10 and
+  # rejoins it at x=15 -- the tuner-style rejoined cycle copper.
+  (segment (start 5 20) (end 25 20) (width 0.2) (layer "F.Cu") (net 2))
+  (segment (start 10 20) (end 10 23) (width 0.2) (layer "F.Cu") (net 2))
+  (segment (start 10 23) (end 15 23) (width 0.2) (layer "F.Cu") (net 2))
+  (segment (start 15 23) (end 15 20) (width 0.2) (layer "F.Cu") (net 2))
+
+  # STUB: 20 mm trunk plus a 6 mm dead-end branch off its midpoint
+  # (above the 4.0 mm report epsilon).
+  (segment (start 5 30) (end 25 30) (width 0.2) (layer "F.Cu") (net 3))
+  (segment (start 15 30) (end 15 36) (width 0.2) (layer "F.Cu") (net 3))
+
+  # LOOP: 20 mm direct run plus a 22 mm rectangle rooted at pad 8
+  # (leaves the pad and returns to it -- copper the signal never travels).
+  (segment (start 5 40) (end 25 40) (width 0.2) (layer "F.Cu") (net 4))
+  (segment (start 25 40) (end 32 40) (width 0.2) (layer "F.Cu") (net 4))
+  (segment (start 32 40) (end 32 44) (width 0.2) (layer "F.Cu") (net 4))
+  (segment (start 32 44) (end 25 44) (width 0.2) (layer "F.Cu") (net 4))
+  (segment (start 25 44) (end 25 40) (width 0.2) (layer "F.Cu") (net 4))
+
+  # SMALL: 20 mm trunk plus a 0.5 mm nub off its midpoint (below the
+  # epsilon -- escape-scale residual that must stay counted).
+  (segment (start 5 50) (end 25 50) (width 0.2) (layer "F.Cu") (net 5))
+  (segment (start 15 50) (end 15 50.5) (width 0.2) (layer "F.Cu") (net 5))
+)
+"""
+
+
+@pytest.fixture
+def defect_ruler_pcb(tmp_path: Path) -> Path:
+    """Real PCB whose five two-pad nets each carry different copper."""
+    pcb_file = tmp_path / "defect_ruler.kicad_pcb"
+    pcb_file.write_text(DEFECT_RULER_PCB)
+    return pcb_file
+
+
+def _defect_ruler_group(pcb_path: Path, members: list[str]) -> tuple[float, dict]:
+    """Derive the skew of one declared group over the given members."""
+    from kicad_tools.router.rules import NetClassRouting
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.match_group_skew import derive_group_skew_data
+
+    nc = NetClassRouting(name="BUS", length_match_group="BUS")
+    net_class_map = dict.fromkeys(members, nc)
+    pcb = PCB.load(str(pcb_path))
+    skew_data, _groups, _thresholds = derive_group_skew_data(pcb, net_class_map)
+    assert "BUS" in skew_data
+    return skew_data["BUS"], _thresholds
+
+
+class TestDefectCopperRuler:
+    """Issue #9304: the skew figure excludes defect copper only.
+
+    One uniform rule for every member (no per-member cutoff): rejoined
+    cycle copper stays counted, dead-end branches and terminal-rooted
+    loops above the report epsilon are shed, sub-epsilon escape residual
+    stays counted.
+    """
+
+    def test_all_clean_group_measures_summed_byte_for_byte(self, defect_ruler_pcb):
+        """Two clean members: figures are the summed lengths exactly."""
+        skew, _ = _defect_ruler_group(defect_ruler_pcb, ["CLEAN", "SMALL"])
+        # SMALL keeps its sub-epsilon nub: 20.5 - 20.0.
+        assert abs(skew - 0.5) < 1e-9
+
+    def test_tuner_bump_copper_stays_in_figure(self, defect_ruler_pcb):
+        """The rejoined detour (11 mm) is NOT shed: skew 31 - 20 = 11."""
+        skew, _ = _defect_ruler_group(defect_ruler_pcb, ["CLEAN", "BUMP"])
+        assert abs(skew - 11.0) < 1e-9
+
+    def test_dead_end_stub_is_shed_from_figure(self, defect_ruler_pcb):
+        """The 6 mm dead end is shed: 26 - 6 = 20 -> skew 0."""
+        skew, _ = _defect_ruler_group(defect_ruler_pcb, ["CLEAN", "STUB"])
+        assert abs(skew - 0.0) < 1e-9
+
+    def test_same_net_loop_is_shed_from_figure(self, defect_ruler_pcb):
+        """The 22 mm pad-rooted rectangle is shed: 42 - 22 = 20 -> skew 0."""
+        skew, _ = _defect_ruler_group(defect_ruler_pcb, ["CLEAN", "LOOP"])
+        assert abs(skew - 0.0) < 1e-9
+
+    def test_one_ruler_across_mixed_members(self, defect_ruler_pcb):
+        """Bump kept + stub/loop shed by the same rule: skew 31 - 20.
+
+        Under the summed ruler the same group would measure 42 - 26 = 5
+        (both defects masking real length differences); shedding only
+        defect copper corrects it to 11.
+        """
+        skew, _ = _defect_ruler_group(defect_ruler_pcb, ["CLEAN", "BUMP", "STUB", "LOOP"])
+        assert abs(skew - 11.0) < 1e-9
+
+    def test_sub_epsilon_residual_is_not_corrected(self, defect_ruler_pcb):
+        """SMALL's 0.5 mm nub stays counted: the figure moves only when
+        the off-path warning's epsilon would already fire (4.0 mm)."""
+        from kicad_tools.analysis.trace_length import TraceLengthAnalyzer
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(defect_ruler_pcb))
+        measurement = TraceLengthAnalyzer().measure_net_path(pcb, "SMALL", defect_epsilon_mm=4.0)
+        assert measurement.defect_track_mm == pytest.approx(0.0)
+        assert measurement.defect_structures == 0
+
+    def test_warning_names_the_excluded_defect(self, defect_ruler_pcb, caplog):
+        """The off-path warning reports how much was classified defect."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="kicad_tools.validate.match_group_skew"):
+            _defect_ruler_group(defect_ruler_pcb, ["CLEAN", "LOOP"])
+
+        loop_warnings = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == "kicad_tools.validate.match_group_skew"
+            and "net LOOP" in record.getMessage()
+        ]
+        assert loop_warnings, caplog.text
+        message = loop_warnings[0]
+        assert "off-path copper" in message
+        assert "22.0" in message
+        assert "excluded from the measured length" in message

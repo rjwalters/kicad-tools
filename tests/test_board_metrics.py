@@ -1137,13 +1137,21 @@ def test_layout_quality_match_group_skew_on_committed_board07():
     # sidecar: the committed fleet must report its four SDRAM match
     # groups (values verified against derive_group_skew_data on the
     # routed PCB in the #9614 review).
+    #
+    # Issue #9304 re-pinned SDRAM_BYTE0 (0.104 -> 8.357) and SDRAM_BYTE1
+    # (2.842 -> 12.616): the ruler now sheds defect copper (stubs /
+    # off-path spurs) from each net's measured length instead of counting
+    # it, so the committed artifact's real routing defects on those two
+    # groups surface as skew rather than being averaged away. The board
+    # artifact is unchanged; only the ruler changed. SDRAM_ADDRESS and
+    # SDRAM_COMMAND are unaffected.
     m = extract_board_metrics(REPO_ROOT / "boards" / "07-matchgroup-test")
     skew = m["layout_quality"]["match_group_skew"]
     assert skew == pytest.approx(
         {
             "SDRAM_ADDRESS": 2.452,
-            "SDRAM_BYTE0": 0.104,
-            "SDRAM_BYTE1": 2.842,
+            "SDRAM_BYTE0": 8.357,
+            "SDRAM_BYTE1": 12.616,
             "SDRAM_COMMAND": 0.949,
         },
         abs=1e-3,
