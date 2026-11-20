@@ -450,8 +450,12 @@ def _layer_token(layer: Any) -> str:
     return value if isinstance(value, str) else str(value)
 
 
-def _endpoints(segments: Sequence[Segment]) -> list[tuple[float, float]]:
-    return [(s.x1, s.y1) for s in segments] + [(s.x2, s.y2) for s in segments]
+def _endpoints(segments: Sequence[Segment]) -> list[tuple[float, float, str]]:
+    """Each segment endpoint as ``(x, y, layer token)``, the layer taken
+    from the segment the endpoint belongs to (issue #9660)."""
+    return [(s.x1, s.y1, _layer_token(s.layer)) for s in segments] + [
+        (s.x2, s.y2, _layer_token(s.layer)) for s in segments
+    ]
 
 
 def _same_geometry(a: Segment, b: Segment, tolerance: float) -> bool:
@@ -527,6 +531,15 @@ def rewrite_keeps_pad_escapes(
     *old* already carries is exempt throughout: the guard undoes regressions
     the cleanup would introduce, it does not repair pre-existing escapes.
 
+    The guarded layer is resolved **per segment**, not from ``old[0]``
+    (issue #9660): the reachable Kelvin caller hands the guard a whole
+    branch whose legs meet through vias and so span copper layers.  Each
+    old endpoint, each surviving new end and each new segment's zone tests
+    run against the openings that expose *that* segment's layer, so a
+    mixed-layer chain is guarded on every layer it touches -- and an
+    opening on another layer can neither be missed nor falsely vetoed.
+    ``net_name`` stays chain-wide: a chain/branch is one net.
+
     Args:
         old: The chain before the pass.
         new: The chain after the pass.
@@ -538,28 +551,41 @@ def rewrite_keeps_pad_escapes(
     """
     if not zones or not old or old == new:
         return True
-    layer = _layer_token(old[0].layer)
     net_name = old[0].net_name
-    layer_zones = [z for z in zones if z.covers_layer(layer)]
-    if not layer_zones:
-        return True
+    layer_zones: dict[str, list[PadMaskZone]] = {}
+
+    def zones_for(layer: str) -> list[PadMaskZone]:
+        covered = layer_zones.get(layer)
+        if covered is None:
+            covered = layer_zones[layer] = [z for z in zones if z.covers_layer(layer)]
+        return covered
 
     old_ends = _endpoints(old)
     new_ends = _endpoints(new)
 
-    for px, py in old_ends:
-        for zone in layer_zones:
+    for px, py, layer in old_ends:
+        for zone in zones_for(layer):
             if zone.net_name != net_name or not zone.contains_point(px, py):
                 continue
             # The terminating end may have been straightened along the pad
-            # (issue #8325) but must remain inside the pad copper.
-            if not any(zone.contains_point(nx, ny, copper=True) for nx, ny in new_ends):
+            # (issue #8325) but must remain inside the pad copper -- on the
+            # same layer: identical XY on another layer is not this escape
+            # surviving (issue #9660).
+            if not any(
+                zone.contains_point(nx, ny, copper=True)
+                for nx, ny, new_layer in new_ends
+                if new_layer == layer
+            ):
                 return False
 
     for seg in new:
-        if any(_same_geometry(seg, prior, tolerance) for prior in old):
-            continue  # copper the board already carries
-        for zone in layer_zones:
+        layer = _layer_token(seg.layer)
+        if any(
+            _same_geometry(seg, prior, tolerance) and _layer_token(prior.layer) == layer
+            for prior in old
+        ):
+            continue  # copper the board already carries on this layer
+        for zone in zones_for(layer):
             if not zone.segment_intersects(seg.x1, seg.y1, seg.x2, seg.y2):
                 continue
             if zone.net_name == net_name and _terminates_on_pad(seg, zone, tolerance):

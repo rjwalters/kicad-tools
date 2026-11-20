@@ -1851,6 +1851,45 @@ class CppPathfinder:
             if getattr(b, "source_net", 0) != net
         ]
 
+    def _under_body_budgets_for_net(self, net: int) -> list:
+        """Per-net under-body surcharge budgets (Issue #9622).
+
+        The regions are computed once on the shared Python grid
+        (``RoutingGrid.under_body_surcharges``); a net with a pad on the
+        component ("local") is exempt.  Each region becomes one
+        ``PadChannelBudget`` per outer layer, so the C++ search prices the
+        surcharge through the existing #3143 per-cell lookup
+        (``get_pad_channel_cost``) on every cost site -- trace steps and
+        via drops alike -- with no new C++ code.  The penalty rides the
+        same additive, never-blocking semantics as the escape-channel
+        budgets: a board whose only path runs under the body still routes.
+
+        Returns an empty list when the board has no qualifying fine-pitch
+        component (the default), keeping the C++ cost function identical
+        to pre-#9622 behaviour.
+        """
+        if self._rules.cost_under_body <= 0.0:
+            return []
+        py_grid = getattr(self._grid, "_py_grid", None)
+        if py_grid is None:
+            return []
+        regions = getattr(py_grid, "under_body_surcharges", None) or []
+        penalty = float(self._rules.cost_under_body * self._rules.cost_straight)
+        budgets: list = []
+        for region in regions:
+            if net in region.local_nets:
+                continue
+            for layer in region.layers:
+                budget = router_cpp.PadChannelBudget()
+                budget.gx1 = region.gx1
+                budget.gy1 = region.gy1
+                budget.gx2 = region.gx2
+                budget.gy2 = region.gy2
+                budget.layer = int(layer)
+                budget.overflow_penalty = penalty
+                budgets.append(budget)
+        return budgets
+
     def set_pad_channel_budgets(self, budgets: list | None) -> None:
         """Inject the per-pad lateral-channel budget list (Issue #3143).
 
@@ -2877,6 +2916,10 @@ class CppPathfinder:
                 # OWN escape endpoint -- only contention from OTHER nets
                 # is shaped.
                 self._filter_pad_channel_budgets_for_net(start.net)
+                # Issue #9622: under-body surcharge budgets for nets with
+                # no pad on the fine-pitch component (empty on boards
+                # without one -- pre-#9622 behaviour).
+                + self._under_body_budgets_for_net(start.net)
                 + (escape_fences if fence_state["on"] else []),
             )
 
