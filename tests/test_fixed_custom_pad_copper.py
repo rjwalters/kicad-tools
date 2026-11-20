@@ -275,15 +275,33 @@ def test_export_reload_preserves_source_pad_bytes(tmp_path, checkpoint):
 @pytest.mark.parametrize(
     "pad,message",
     [
+        # A gr_circle without center/end (the old pts-style fixture) still
+        # refuses, naming the primitive kind; gr_rect/gr_arc/gr_line are the
+        # kinds left refused by design (Issue #9501 AC3).
         (custom_pad(primitives=(poly(UPPER_WALL, tag="gr_circle"),)), "gr_circle"),
+        (
+            custom_pad(
+                primitives=(
+                    "(gr_rect (start -0.2 -8.0) (end 0.2 -3.9) (stroke (width 0.1) (type default)))",
+                )
+            ),
+            "gr_rect",
+        ),
+        (
+            custom_pad(
+                primitives=(
+                    "(gr_line (start -0.2 -8.0) (end 0.2 -3.9) (stroke (width 0.1) (type default)))",
+                )
+            ),
+            "gr_line",
+        ),
         (custom_pad(primitives=(poly(UPPER_WALL, fill="no"),)), "unfilled"),
-        (custom_pad(primitives=(poly(UPPER_WALL, width=0.1),)), "stroke"),
         (custom_pad(anchor="trapezoid"), "anchor"),
         (custom_pad(layers='"F.Paste" "F.Mask"'), "copper layer"),
         (custom_pad(extra="(padstack (mode front_inner_back))"), "padstack"),
         (custom_pad(size="0 0"), "size"),
     ],
-    ids=["primitive", "fill", "stroke", "anchor", "layers", "padstack", "size"],
+    ids=["circle-no-end", "rect", "line", "fill", "anchor", "layers", "padstack", "size"],
 )
 def test_unsupported_fixed_geometry_is_refused(tmp_path, pad, message):
     path = write_board(tmp_path, pad=pad)
@@ -309,6 +327,128 @@ def test_self_intersecting_primitive_refused_without_dropping_native_lobe(tmp_pa
     path = write_board(tmp_path, pad=custom_pad(primitives=[primitive]))
     original = path.read_bytes()
     with pytest.raises(ValueError, match=r"U6\.9: invalid or self-intersecting gr_poly"):
+        load_board(path)
+    assert path.read_bytes() == original
+
+
+def _built_copper(primitives):
+    """Board-frame copper of the fixture pad (at 108, 108, unrotated)."""
+    from kicad_tools.router.fixed_copper import custom_pad_copper
+
+    pad = custom_pad(primitives=primitives)
+    copper = custom_pad_copper(
+        pad,
+        reference="U6",
+        pad_number="9",
+        x=108.0,
+        y=108.0,
+        rotation=0.0,
+        source_net="GND",
+        source_net_id=1,
+    )
+    return copper.geometry
+
+
+def test_gr_circle_primitives_build_disc_and_ring():
+    """Issue #9501: filled gr_circle is a disc of r + w/2, unfilled a ring.
+
+    The analytic oracle is built independently of the production parser at a
+    much finer tessellation than the builder needs, so the 1e-4 mm^2 budget
+    (the pinned-image acceptance tolerance) measures the builder's shape
+    semantics and tessellation, not the oracle's.
+    """
+    filled = "(gr_circle (center -2 -3) (end -1 -3) (width 0.2) (fill yes))"
+    ring = "(gr_circle (center 2 -3) (end 3 -3) (width 0.15) (fill none))"
+    geometry = _built_copper((filled, ring))
+
+    ideal = unary_union(
+        [
+            box(107.8, 107.8, 108.2, 108.2),
+            Point(106, 105).buffer(1.1, quad_segs=4096),
+            Point(110, 105)
+            .buffer(1.075, quad_segs=4096)
+            .difference(Point(110, 105).buffer(0.925, quad_segs=4096)),
+        ]
+    )
+    assert geometry.symmetric_difference(ideal).area < 1e-4
+    # The ring keeps a real hole: its inner boundary sits at ~0.925 mm from
+    # the centre (the disc at (106, 105) and the anchor carry no interiors).
+    parts = geometry.geoms if geometry.geom_type == "MultiPolygon" else (geometry,)
+    ring_part = min(parts, key=lambda p: p.distance(Point(110, 105)))
+    assert ring_part.interiors
+    assert Point(110, 105).distance(ring_part.interiors[0]) == pytest.approx(0.925, abs=0.01)
+
+
+def test_stroked_gr_poly_builds_rounded_outline_and_band():
+    """Issue #9501: a stroke grows gr_poly copper by width/2 with round joins.
+
+    A filled outline gains a w/2 rounded rim around the polygon; an unfilled
+    one is only the outline band, keeping the interior open exactly as KiCad
+    plots it.
+    """
+    filled = poly((-4.2, -4.0, -2.2, -2.0), width=0.3)
+    unfilled = "(gr_poly (pts (xy 2 -4) (xy 4 -4) (xy 3 -2)) (width 0.25) (fill none))"
+    geometry = _built_copper((filled, unfilled))
+
+    filled_poly = box(103.8, 104.0, 105.8, 106.0).buffer(0.15, quad_segs=4096)
+    band = LineString([(110, 104), (112, 104), (111, 106), (110, 104)]).buffer(
+        0.125, quad_segs=4096
+    )
+    ideal = unary_union([box(107.8, 107.8, 108.2, 108.2), filled_poly, band])
+    assert geometry.symmetric_difference(ideal).area < 1e-4
+    # The unfilled band's interior stays open (its hole contains the
+    # triangle's centre) -- KiCad prints no fill there.
+    parts = geometry.geoms if geometry.geom_type == "MultiPolygon" else (geometry,)
+    band_part = min(parts, key=lambda p: p.distance(Point(111.2, 104.6)))
+    assert band_part.interiors
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_circle_and_stroked_poly_keep_physical_clearance(tmp_path, native):
+    """Router-level: ring holes stay open, stroke rims still block (#9501)."""
+    primitives = (
+        "(gr_circle (center 0 -3) (end 1 -3) (width 0.15) (fill none))",
+        poly((-3.0, 2.5, -1.0, 4.5), width=0.3),
+    )
+    path = write_board(tmp_path, pad=custom_pad(primitives=primitives))
+    router, _ = load_board(path, native=native)
+    obstacles = router.grid.fixed_fills
+    # Across the ring band at board (108, 105): the metal ring blocks...
+    assert not obstacles.segment_clear((107, 105), (109, 105), 0, 0.1, 0.127)
+    # ...but straight through the ring's hole nothing blocks (the anchor is
+    # 3 mm away at y=108 and the ring's inner radius is 0.925).
+    assert obstacles.segment_clear((108, 104.95), (108, 105.05), 0, 0.05, 0.05)
+    # Inside the stroked wall (x 105..107 grown by 0.15) is copper...
+    assert not obstacles.segment_clear((105.5, 110.5), (106.5, 110.5), 0, 0.05, 0.05)
+    # ...while a probe ending 0.1 mm short of its rim stays clear.
+    assert obstacles.segment_clear((104.2, 110.5), (104.6, 110.5), 0, 0.05, 0.05)
+    if native:
+        from kicad_tools.router.cpp_backend import CppPathfinder
+
+        assert isinstance(router.router, CppPathfinder)
+        grid = router.grid._cpp_grid
+        assert grid is not None
+        grid = grid._impl
+        assert not grid.fixed_fill_clear(107, 105, 109, 105, 0, 0.1, 0.127)
+        assert grid.fixed_fill_clear(108, 104.95, 108, 105.05, 0, 0.05, 0.05)
+
+
+def test_unfilled_circle_with_zero_width_is_refused(tmp_path):
+    """An unfilled zero-width gr_circle prints no copper: refuse by name."""
+    primitive = "(gr_circle (center -2 -3) (end -1 -3) (width 0) (fill none))"
+    path = write_board(tmp_path, pad=custom_pad(primitives=[primitive]))
+    original = path.read_bytes()
+    with pytest.raises(ValueError, match="unfilled gr_circle with zero stroke width"):
+        load_board(path)
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("width", [-0.2, "nan", "inf", "-inf"])
+def test_nonfinite_circle_stroke_is_refused(tmp_path, width):
+    primitive = f"(gr_circle (center -2 -3) (end -1 -3) (width {width}) (fill yes))"
+    path = write_board(tmp_path, pad=custom_pad(primitives=[primitive]))
+    original = path.read_bytes()
+    with pytest.raises(ValueError, match="stroke width"):
         load_board(path)
     assert path.read_bytes() == original
 
@@ -411,11 +551,14 @@ def test_paste_only_custom_pad_is_dropped_rather_than_refused(tmp_path):
 def test_unrepresentable_copper_falls_back_to_a_conservative_bound(tmp_path):
     """A primitive we cannot reproduce exactly is BOUNDED, never shrunk (#5863).
 
-    A stroked ``gr_poly`` is real copper ``width / 2`` outside its outline.
-    The fallback bound must contain all of it -- an under-estimate would let
-    the router lay a trace where the board already has metal.
+    A stroked ``gr_rect`` (still refused exactly, Issue #9501 AC3) is real
+    copper ``width / 2`` outside its outline. The fallback bound must contain
+    all of it -- an under-estimate would let the router lay a trace where the
+    board already has metal.
     """
-    stroked = poly((-0.2, -3.0, 0.2, -1.5), width=0.3)
+    stroked = (
+        "(gr_rect (start -0.2 -3.0) (end 0.2 -1.5) (stroke (width 0.3) (type default)) (fill yes))"
+    )
     path = write_board(tmp_path, pad=custom_pad(net='(net 2 "SIG")', primitives=(stroked,)))
     router, nets = load_board(path)
     assert ("U6", "9") not in router.pads
@@ -536,12 +679,13 @@ def test_arc_primitive_bound_contains_the_whole_swept_arc(tmp_path, case):
     assert router.grid.fixed_fills.segment_clear((107, 107.2), (109, 107.2), 0, 0.1, 0.2)
 
 
-def test_circle_primitive_bound_contains_the_whole_disc(tmp_path):
-    """A degraded ``gr_circle`` is bounded by its radius, not by its points.
+def test_circle_primitive_is_exact_not_bounded(tmp_path):
+    """A ``gr_circle`` primitive is built exactly now, not bounded (#9501).
 
-    ``center``/``end`` are two points on a disc that reaches ``radius`` in
-    every direction; bounding their hull would expose three quarters of the
-    copper. The bound is the disc's exact box, grown by half the stroke.
+    Before #9501 this pad degraded to a conservative box because the builder
+    refused circles; the assertion that mattered then -- the disc's far side
+    is metal even though no authored point sits there -- must now hold for
+    the EXACT disc, and the pad's net must no longer be excluded.
     """
     primitive = (
         "(gr_circle (center -0.5 -3) (end 0.5 -3) (stroke (width 0.2) (type default)) (fill yes))"
@@ -549,17 +693,18 @@ def test_circle_primitive_bound_contains_the_whole_disc(tmp_path):
     path = write_board(tmp_path, pad=custom_pad(net='(net 2 "SIG")', primitives=(primitive,)))
     router, nets = load_board(path)
     assert ("U6", "9") not in router.pads
+    # A custom pad is never a routing terminal, so its net stays excluded --
+    # but the copper is now the EXACT disc, not the conservative box the
+    # bound path used before #9501.
     assert nets["SIG"] not in router.nets
     assert router.unsupported_geometry_nets == frozenset({"SIG"})
     fills = [f for f in router.grid.fixed_fills.fills if f.source_kind == "pad"]
     assert len(fills) == 1
     geometry = fills[0].geometry
-    # True copper: the filled 1.0 disc at board (107.5, 105), stroked by 0.1.
-    true_copper = unary_union([Point(107.5, 105.0).buffer(1.1, quad_segs=256), ANCHOR_COPPER])
-    assert geometry.buffer(1e-9).covers(true_copper)
-    expected = unary_union([box(106.4, 103.9, 108.6, 106.1), ANCHOR_COPPER])
-    assert geometry.geom_type == "MultiPolygon"
-    assert geometry.symmetric_difference(expected).area < 1e-9
+    # The exact copper: the filled 1.1 disc at board (107.5, 105) plus the
+    # anchor, within the pinned-image acceptance tolerance.
+    expected = unary_union([Point(107.5, 105.0).buffer(1.1, quad_segs=4096), ANCHOR_COPPER])
+    assert geometry.symmetric_difference(expected).area < 1e-4
     # The disc's far side is metal even though no authored point sits there.
     assert not router.grid.fixed_fills.segment_clear((106.0, 105.0), (106.6, 105.0), 0, 0.1, 0.2)
     assert router.grid.fixed_fills.segment_clear((107, 107.2), (109, 107.2), 0, 0.1, 0.2)

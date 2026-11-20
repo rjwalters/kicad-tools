@@ -186,7 +186,7 @@ project.export_assembly("output/", manufacturer="jlcpcb")
 
 Complete working examples are organized into two directories:
 
-### Feature Examples ([`examples/`](https://github.com/rjwalters/kicad-tools/tree/main/examples))
+### Feature Examples ([`examples/`](https://github.com/2AMLogic/kicad-tools/tree/main/examples))
 
 | Example | Description |
 |---------|-------------|
@@ -204,7 +204,7 @@ Complete working examples are organized into two directories:
 | `agent-integration/` | Integration with AI agents |
 | `llm-routing/` | LLM-driven routing decisions |
 
-### Complete Board Demos ([`boards/`](https://github.com/rjwalters/kicad-tools/tree/main/boards))
+### Complete Board Demos ([`boards/`](https://github.com/2AMLogic/kicad-tools/tree/main/boards))
 
 | Board | Complexity | Description |
 |-------|------------|-------------|
@@ -224,6 +224,6 @@ Complete working examples are organized into two directories:
 
 ## Version History
 
-See [CHANGELOG.md](https://github.com/rjwalters/kicad-tools/blob/main/CHANGELOG.md) for release notes.
+See [CHANGELOG.md](https://github.com/2AMLogic/kicad-tools/blob/main/CHANGELOG.md) for release notes.
 
-See [ROADMAP.md](https://github.com/rjwalters/kicad-tools/blob/main/ROADMAP.md) for planned features.
+See [ROADMAP.md](https://github.com/2AMLogic/kicad-tools/blob/main/ROADMAP.md) for planned features.

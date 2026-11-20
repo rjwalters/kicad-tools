@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools._shapely import require_shapely
-from kicad_tools.core.board_outline import board_outline_bounds
+from kicad_tools.core.board_outline import board_outline_bounds, outline_graphics
 from kicad_tools.core.sexp_file import save_pcb
 from kicad_tools.geometry.courtyard import _courtyard_polygon, _fp_transform, _side_has_geometry
 from kicad_tools.schema.pcb import PCB, _is_footprint_tag
@@ -170,20 +170,12 @@ def references_over_holes(pcb: PCB) -> set[str]:
     leaving every reviewed position that is already clear where it is.  Read
     from the rule's own findings, so it can never name a different set.
     """
-    from kicad_tools.manufacturers.base import DesignRules
     from kicad_tools.validate.rules.silkscreen import check_silk_hole_overlap
 
-    rules = DesignRules(
-        min_trace_width_mm=0.0,
-        min_clearance_mm=0.0,
-        min_via_drill_mm=0.0,
-        min_via_diameter_mm=0.0,
-        min_annular_ring_mm=0.0,
-    )
     suffix = " (reference)"
     return {
         violation.items[0][: -len(suffix)]
-        for violation in check_silk_hole_overlap(pcb, rules).violations
+        for violation in check_silk_hole_overlap(pcb).violations
         if violation.items and violation.items[0].endswith(suffix)
     }
 
@@ -508,29 +500,24 @@ def _board_material(pcb: _SilkscreenPCB, Polygon: Any) -> tuple[list, Any | None
         return [], None, pcb.outline_error
     segments = pcb.get_board_outline_segments()
     ox, oy = pcb._board_origin
-    for node in pcb._sexp.children:
-        if node.is_atom:
-            continue
-        if _is_footprint_tag(node.name):
-            for element in node.iter_all():
-                element_layer = element.find("layer")
-                if element_layer is not None and element_layer.get_string(0) == "Edge.Cuts":
-                    return segments, None, "board outline unavailable: footprint-local Edge.Cuts"
-        layer = node.find("layer")
-        if layer is None or layer.get_string(0) != "Edge.Cuts":
-            continue
-        if node.name not in {"gr_line", "gr_rect", "gr_poly"}:
-            return segments, None, f"board outline unavailable: unsupported {node.name}"
-        if node.name in {"gr_line", "gr_rect"}:
+    # Walk the shared outline node stream: top-level gr_* plus footprint-local
+    # Edge.Cuts re-emitted in board coordinates. Curved geometry is still
+    # refused here (the two-chord arc approximation is not accurate enough to
+    # prove containment), exactly as it is for board-level graphics.
+    for node in outline_graphics(pcb._sexp):
+        name = node.tag or ""
+        if name not in {"gr_line", "gr_rect", "gr_poly"}:
+            return segments, None, f"board outline unavailable: unsupported {name}"
+        if name in {"gr_line", "gr_rect"}:
             for endpoint in ("start", "end"):
-                point = node.find(endpoint)
+                point = node.find_child(endpoint)
                 if point is None or len(point.get_atoms()) != 2:
                     return segments, None, "board outline unavailable: malformed endpoint"
                 for coordinate in (point.get_float(0), point.get_float(1)):
                     if coordinate is None or not math.isfinite(coordinate):
                         return segments, None, "board outline unavailable: malformed endpoint"
-        if node.name == "gr_poly":
-            pts = node.find("pts")
+        if name == "gr_poly":
+            pts = node.find_child("pts")
             vertices = []
             if pts is not None:
                 for xy in pts.children:
@@ -544,7 +531,11 @@ def _board_material(pcb: _SilkscreenPCB, Polygon: Any) -> tuple[list, Any | None
                 vertices.pop()
             if len(vertices) < 3:
                 return segments, None, "board outline unavailable: malformed polygon"
-            segments.extend(zip(vertices, vertices[1:] + vertices[:1], strict=True))
+            # The polygon's boundary edges are already in ``segments``:
+            # ``get_board_outline_segments`` is their single owner. Adding
+            # them here too duplicated every edge and the strict
+            # one-mate-per-endpoint walk below saw a branched contour
+            # (#9593 review).
     if not segments:
         return segments, None, "board outline unavailable: missing Edge.Cuts"
     if any(not math.isfinite(v) for segment in segments for point in segment for v in point):

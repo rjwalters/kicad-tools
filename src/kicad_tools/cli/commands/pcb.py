@@ -1574,6 +1574,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             build_pairwise_clearance_table,
             load_pair_bounds,
             load_signed_voltage_map,
+            load_voltage_intervals,
         )
 
         vm_path = Path(voltage_map_arg)
@@ -1589,6 +1590,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 material_group=getattr(args, "material_group", "IIIa"),
                 hv_threshold=getattr(args, "hv_threshold", 30.0),
                 pair_bounds=load_pair_bounds(vm_path) or None,
+                net_intervals=load_voltage_intervals(vm_path),
             )
         except (ValueError, OSError, StandardLookupError) as e:
             print(f"Error: invalid voltage-map: {e}", file=sys.stderr)
@@ -1777,6 +1779,14 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 "required_mm": round(r.required_mm, 4),
                 "actual_mm": round(r.actual_mm, 4),
                 "obstacle_net": r.obstacle_net,
+                # Issue #9649: locate the blocking obstacle (additive).
+                "obstacle_layer": r.obstacle_layer,
+                "obstacle_kind": r.obstacle_kind,
+                "obstacle_at": (
+                    [round(r.obstacle_at[0] + origin_x, 4), round(r.obstacle_at[1] + origin_y, 4)]
+                    if r.obstacle_at is not None
+                    else None
+                ),
             }
             for r in outcome.refused_openings
         ],
@@ -1938,10 +1948,22 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                         f" width {o.width_mm:.3f} mm" + (" [already present]" if o.existing else "")
                     )
                 for ro in outcome.refused_openings:
+                    at = ""
+                    if ro.obstacle_at is not None:
+                        at = (
+                            f" at ({ro.obstacle_at[0] + origin_x:.2f}, "
+                            f"{ro.obstacle_at[1] + origin_y:.2f})"
+                        )
+                    obstacle = (
+                        f"; obstacle: {ro.obstacle_kind} on {ro.obstacle_layer}{at}"
+                        if ro.obstacle_kind
+                        else ""
+                    )
                     print(
                         f"    opening refused on {ro.copper_layer} [{ro.rule}: need "
                         f"{ro.required_mm:.3f} mm, have {ro.actual_mm:.3f} mm"
                         + (f", vs {ro.obstacle_net}" if ro.obstacle_net else "")
+                        + obstacle
                         + "]"
                     )
                 if outcome.openings:

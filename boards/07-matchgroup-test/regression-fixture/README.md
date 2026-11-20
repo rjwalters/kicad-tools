@@ -6,7 +6,7 @@
 # Match-Group Test Board (Board 07)
 
 Regression testbench for the N-trace match-group routing subsystem
-introduced by Epic [#2661](https://github.com/rjwalters/kicad-tools/issues/2661)
+introduced by Epic [#2661](https://github.com/2AMLogic/kicad-tools/issues/2661)
 (Phases 1-2).  Demonstrates each match-group scenario the epic was
 scoped against (DDR data byte, MIPI CSI lane group, HDMI TMDS lane
 group, generic address bus) by routing one or more match-grouped
@@ -714,7 +714,7 @@ The gate is a sibling of the `diffpair-routing-regression` job (board
    is deleted).  The board has no entry in
    `.github/routed-drc-tolerance.yml`, so the count of blocking findings
    *outside* the allowance must be 0
-   ([#7367](https://github.com/rjwalters/kicad-tools/issues/7367); the
+   ([#7367](https://github.com/2AMLogic/kicad-tools/issues/7367); the
    old count, ratcheted 35 -> 14 -> 9 -> 8, let a new finding hide
    behind a fixed one).  Advisory `connectivity` is not blocking; reach
    is gated by item 4.
@@ -899,7 +899,7 @@ the merge button.
 
 ## Out of Scope
 
-Per issue [#2724](https://github.com/rjwalters/kicad-tools/issues/2724)
+Per issue [#2724](https://github.com/2AMLogic/kicad-tools/issues/2724)
 Scope (out):
 
 - **No new router / validate features.** This board EXERCISES
@@ -913,8 +913,8 @@ Scope (out):
 
 ## Related Issues
 
-- Epic: [#2661](https://github.com/rjwalters/kicad-tools/issues/2661) (N-trace match-group routing subsystem)
-- This issue: [#2724](https://github.com/rjwalters/kicad-tools/issues/2724) (Phase 3L scaffolding)
-- Blocked by: [#2723](https://github.com/rjwalters/kicad-tools/issues/2723) (Phase 3H CLI flag + orchestrator)
-- Blocks: [#2726](https://github.com/rjwalters/kicad-tools/issues/2726) (Phase 3N CI integration)
+- Epic: [#2661](https://github.com/2AMLogic/kicad-tools/issues/2661) (N-trace match-group routing subsystem)
+- This issue: [#2724](https://github.com/2AMLogic/kicad-tools/issues/2724) (Phase 3L scaffolding)
+- Blocked by: [#2723](https://github.com/2AMLogic/kicad-tools/issues/2723) (Phase 3H CLI flag + orchestrator)
+- Blocks: [#2726](https://github.com/2AMLogic/kicad-tools/issues/2726) (Phase 3N CI integration)
 - Documentation: Phase 3M will cite this board's `project.kct` + net-class declarations as canonical examples.

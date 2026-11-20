@@ -2753,6 +2753,44 @@ class TestResolveNetNamesForBoard:
         names = self._resolve(tmp_path, ["/A", "GND", "+3V3"], ["/NEW"])
         assert names == ["/NEW"]
 
+    def test_auto_named_nets_excluded_from_census(self, tmp_path):
+        """KiCad auto-named ``Net-(...)`` nets do not outvote label nets.
+
+        Issue #9571: ``Net-(...)`` -- KiCad's other auto-generated name
+        class -- carries no ``/`` prefix but passed all three census
+        exclusions, so a KiCad-native board whose remaining nets are
+        auto-named read as "bare-dominant" and a new label net was
+        added bare.  They are excluded alongside ``unconnected-(...)``.
+        """
+        names = self._resolve(
+            tmp_path,
+            ["/A", "/B", "Net-(C11-Pad2)", "Net-(R1-1)", "Net-(R2-1)", "GND"],
+            ["/NEW"],
+        )
+        assert names == ["/NEW"]
+
+    def test_mixed_auto_and_unconnected_nets_excluded_from_census(self, tmp_path):
+        """``Net-(...)`` and ``unconnected-(...)`` both skip the census."""
+        names = self._resolve(
+            tmp_path,
+            ["/A", "Net-(C11-Pad2)", "unconnected-(U1-Pad1)", "Net-(R2-1)"],
+            ["/NEW"],
+        )
+        assert names == ["/NEW"]
+
+    def test_only_auto_named_board_resolves_bare(self, tmp_path):
+        """A board of only auto-named nets has no convention: tie -> bare.
+
+        With every net excluded the census counts 0 vs 0, so the
+        tie-break keeps the historical bare default (#3370).
+        """
+        names = self._resolve(
+            tmp_path,
+            ["Net-(C11-Pad2)", "Net-(R1-1)", "Net-(R2-1)"],
+            ["/NEW"],
+        )
+        assert names == ["NEW"]
+
     def test_new_net_stripped_on_bare_dominant_board(self, tmp_path):
         """A net new to a kct-style (bare) board is added bare."""
         names = self._resolve(tmp_path, ["A", "B", "GND"], ["/NEW"])
@@ -3322,8 +3360,15 @@ class TestGetBoardOutlineGrPoly:
         assert min(ys) == pytest.approx(0.0)
         assert max(ys) == pytest.approx(75.0)
 
-    def test_gr_curve_outline_returns_nonempty_polygon(self, tmp_path):
-        """A gr_curve Edge.Cuts outline also contributes its vertex chain."""
+    def test_gr_curve_lone_open_outline_returns_empty(self, tmp_path):
+        """A lone open ``gr_curve`` on Edge.Cuts yields no outline.
+
+        Native KiCad reports a board whose only Edge.Cuts graphic is an open
+        curve as ``invalid_outline``; ``get_board_outline`` mirrors that by
+        refusing to close a curve chain implicitly (no authored closing edge,
+        no outline).  Closing the contour with an explicit ``gr_line`` is
+        covered by ``test_gr_curve_closed_by_line_returns_polygon`` below.
+        """
         from kicad_tools.schema.pcb import PCB
 
         pcb_text = """(kicad_pcb
@@ -3345,7 +3390,44 @@ class TestGetBoardOutlineGrPoly:
 
         outline = pcb.get_board_outline()
 
-        assert outline, "gr_curve outline should not return an empty list"
+        assert outline == [], (
+            "lone open gr_curve must not close implicitly (native invalid_outline)"
+        )
+
+    def test_gr_curve_closed_by_line_returns_polygon(self, tmp_path):
+        """A ``gr_curve`` closed by an explicit ``gr_line`` contributes its chain.
+
+        The tessellated curve plus the closing line bound the board, so the
+        outline is the curve's true tessellated geometry (extrema beyond the
+        control-point hull: x in [0, 60], not [10, 70]).
+        """
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_text = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (net 0 "")
+  (gr_curve
+    (pts (xy 10 10) (xy 40 5) (xy 70 10) (xy 70 60))
+    (stroke (width 0.1) (type default))
+    (layer "Edge.Cuts")
+    (uuid "curve-1")
+  )
+  (gr_line (start 70 60) (end 10 10)
+    (stroke (width 0.1) (type default))
+    (layer "Edge.Cuts")
+    (uuid "line-1")
+  )
+)
+"""
+        pcb_path = tmp_path / "curve_closed.kicad_pcb"
+        pcb_path.write_text(pcb_text)
+        pcb = PCB.load(pcb_path)
+
+        outline = pcb.get_board_outline()
+
+        assert outline, "gr_curve closed by gr_line should not return an empty list"
         xs = [pt[0] for pt in outline]
         assert min(xs) == pytest.approx(0.0)
         assert max(xs) == pytest.approx(60.0)

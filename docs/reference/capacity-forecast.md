@@ -250,7 +250,7 @@ through `kicad_tools.schema.PCB`, which understands both the legacy
 the regex loader in `router/io.py` reads only the former and silently sees zero
 footprints on a board saved by a current KiCad.
 
-[#3438]: https://github.com/rjwalters/kicad-tools/issues/3438
-[#4409]: https://github.com/rjwalters/kicad-tools/issues/4409
-[#4799]: https://github.com/rjwalters/kicad-tools/issues/4799
-[#4865]: https://github.com/rjwalters/kicad-tools/pull/4865
+[#3438]: https://github.com/2AMLogic/kicad-tools/issues/3438
+[#4409]: https://github.com/2AMLogic/kicad-tools/issues/4409
+[#4799]: https://github.com/2AMLogic/kicad-tools/issues/4799
+[#4865]: https://github.com/2AMLogic/kicad-tools/pull/4865

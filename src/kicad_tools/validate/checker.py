@@ -27,6 +27,7 @@ from .rules.impedance import ImpedanceRule
 from .rules.match_group_length_skew import MatchGroupLengthSkewRule
 from .rules.path_ampacity import PathAmpacityRule
 from .rules.placement import FootprintOutsideBoardRule
+from .rules.plane_split import PlaneSplitRule
 from .rules.pour_slot import PourSlotRule
 from .rules.redundant_copper import RedundantCopperRule
 from .rules.reinforcement_courtyard import ReinforcementCourtyardRule
@@ -425,6 +426,7 @@ class DRCChecker:
         "check_copper_slivers",
         "check_courtyard_overlap",
         "check_dangling_copper",
+        "check_plane_split",
         "check_pour_slot",
         "check_redundant_copper",
         "check_diffpair_clearance_intra",
@@ -583,6 +585,7 @@ class DRCChecker:
         # Redundant copper (Issue #8218): warning-only advisories for
         # avoidable copper (duplicates, fragment runs, detours, off-centre
         # via ends).  Explicit entries keep them out of fab-blocking prefixes.
+        "plane_split": CATEGORY_ADVISORY,
         "pour_slot": CATEGORY_ADVISORY,
         "redundant_copper": CATEGORY_ADVISORY,
         "redundant_copper_duplicate": CATEGORY_ADVISORY,
@@ -1084,6 +1087,14 @@ class DRCChecker:
         rule = PourSlotRule(netclass_clearances)
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
+    def check_plane_split(self) -> DRCResults:
+        """Report zones cut into pad-bearing pieces by foreign tracks (Issue #9591).
+
+        Own CLI category (``plane_split``) so ``--skip plane_split`` works.
+        """
+        rule = PlaneSplitRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
     def check_redundant_copper(self) -> DRCResults:
         """Report avoidable copper (Issue #8218).
 
@@ -1443,7 +1454,20 @@ class DRCChecker:
             a declared net not covered by any resolved path. Empty when no
             path is declared.
         """
-        rule = PathAmpacityRule(specs=self.current_path_specs)
+        rule = PathAmpacityRule(
+            specs=self.current_path_specs,
+            # Issue #9648: a leg reinforcement_incomplete judges fully wired
+            # credits its buttress wire's cross-section here -- the same
+            # board-derived verdict (and sidecar gauge) that rule reports,
+            # so the two rules cannot disagree. Empty without a
+            # reinforcement-eligible declaration, leaving this check at
+            # bare copper width exactly as before.
+            wired_legs=ReinforcementIncompleteRule(
+                specs=self.current_path_specs,
+                wires=self.reinforcement_wires,
+                waived_nets=self.reinforcement_waived_nets,
+            ).fully_wired_legs(self.pcb, self.design_rules),
+        )
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_reinforcement_incomplete(self) -> DRCResults:

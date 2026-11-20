@@ -1,7 +1,17 @@
 """Clearance rule implementation for DRC checks.
 
-Validates minimum spacing between copper elements (traces, pads, vias)
-on the same layer but different nets.
+Validates minimum spacing between copper elements (traces, arcs, pads,
+vias) on the same layer but different nets.
+
+Runtime note on arcs (Issue #9673): an arc's pair distance is minimised
+over its covering chord tessellation, so an arc-vs-arc pair costs the
+product of the two chord counts (at the 1 um sagitta bound a 90 deg arc
+of radius 50 mm is ~125 chords).  The broad-phase ``bounds`` gate keeps
+that off every pair but near neighbours; between near neighbours the
+chord search itself prunes with a bounding-box lower bound that cannot
+change the verdict or its witness (Issue #9714, see
+:func:`_arc_pair_clearance`), so large-radius arcs whose element boxes
+mutually overlap no longer pay the full chord product.
 """
 
 from __future__ import annotations
@@ -47,11 +57,11 @@ from ..clearance_shapes import (
 from ..copper_refs import Origin, board_origin, segment_ref, via_ref
 from ..spatial import candidate_pairs
 from ..violations import DRCResults, DRCViolation
-from .base import DRC_TOLERANCE, DRCRule
+from .base import DRC_TOLERANCE, DRCRule, drc_clear
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers import DesignRules
-    from kicad_tools.schema.pcb import PCB, Footprint, Pad, Segment, Via
+    from kicad_tools.schema.pcb import PCB, Arc, Footprint, Pad, Segment, Via
 
 
 # Floating-point tolerance for detecting segment-endpoint / via-center
@@ -86,6 +96,35 @@ _GEOM_UNSET = object()
 #: leaves this ``True``; the memo is a pure allocation saving.
 _MEMOIZE_COPPER_GEOM = True
 
+#: Sagitta bound (mm) for the chord tessellation of copper arcs in this
+#: rule's pairwise predicates (Issue #9673).  The chords lie on the arc's
+#: concave side, so same-width chords would under-cover the swept copper
+#: by up to one sagitta on the convex side; the chord width therefore
+#: carries twice this bound so the tessellated copper always *covers* the
+#: authored arc -- the check can only be stricter, never looser.  1 um is
+#: the coordinate quantum :mod:`kicad_tools.validate.copper_refs` keys
+#: findings on, so the covered geometry and the authored arc agree within
+#: one quantum.  ``kct probe`` appends proposed arcs through the same
+#: policy (``cli/probe_cmd.py``), so a probed arc and the ``(arc ...)``
+#: node this rule measures answer identically.
+ARC_COPPER_SAGITTA_MM: float = 0.001
+
+#: Safety slack on the chord-search pruning bound (Issue #9714), in mm.  A
+#: pair is skipped only when its bounding-box lower bound exceeds the
+#: running best by MORE than this, so the decision can never flip on
+#: last-bit rounding disagreement between the bound (squared axis gaps)
+#: and the kernel's own distance arithmetic.  1 nm is five orders below
+#: the 0.1 um coordinate quantum :data:`ARC_COPPER_SAGITTA_MM` keys
+#: findings on, and orders above the ~1e-13 mm worst-case divergence of
+#: the two computations at board-coordinate scale (<1e4 mm).
+_ARC_PRUNE_EPS_MM: float = 1e-9
+
+#: Chords per merged broad-phase bucket in the pruned arc-pair search
+#: (Issue #9714).  Purely a constant-factor knob: buckets only widen the
+#: ranges of consecutive chord indices one skip decision covers, never
+#: which pairs are evaluated or in what order.
+_CHORD_BUCKET_SIZE: int = 16
+
 
 @dataclass
 class CopperElement:
@@ -95,7 +134,7 @@ class CopperElement:
     to simplify distance calculations.
     """
 
-    element_type: str  # "segment", "pad", "via"
+    element_type: str  # "segment", "arc", "pad", "via"
     layer: str
     net_number: int
     # For segments: (start_x, start_y, end_x, end_y, width)
@@ -144,6 +183,15 @@ class CopperElement:
     # the existing analytic AABB behaviour unchanged.  ``""`` for
     # segments and vias.
     pad_shape: str = ""
+    # For arcs (Issue #9673): the tessellated centreline polyline (board
+    # coordinates, authored endpoints exact) and the chord width -- the
+    # authored width inflated by twice :data:`ARC_COPPER_SAGITTA_MM` so the
+    # chords cover the swept copper.  ``geometry`` keeps the AUTHORED
+    # endpoints and width: the via colocation exemption (issue #2706) and
+    # the finding's reference name the arc as authored, never an internal
+    # chord joint.
+    polyline: tuple[tuple[float, float], ...] = ()
+    arc_chord_width: float = 0.0
     # Issue #5240: lazily-memoised shapely copper geometry.  A clearance
     # sweep asks the same element for its copper shape once per candidate
     # PAIR it takes part in -- on board 06's routed artifact that is 4,059
@@ -162,6 +210,11 @@ class CopperElement:
     # element for it once per candidate pair it takes part in, and it is a pure
     # function of fields that are assigned once at construction.
     _kernel_shape_cache: object = field(default=_GEOM_UNSET, compare=False, repr=False)
+    # Issue #9714: the chord tessellation a pair distance is minimised over,
+    # with its pruning records (see ``_chord_search_data``), memoised for the
+    # same reason -- a heavily arc'd board rebuilds an arc's chord list once
+    # per candidate pair otherwise.
+    _chord_search_cache: object = field(default=_GEOM_UNSET, compare=False, repr=False)
 
     @classmethod
     def from_segment(cls, seg: Segment, origin: Origin = (0.0, 0.0)) -> CopperElement:
@@ -179,6 +232,27 @@ class CopperElement:
             # Issue #6088: geometry, not the (unseeded-random) UUID.
             reference=segment_ref(seg, origin),
             net_name=seg.net_name if seg.net_number != 0 else "",
+        )
+
+    @classmethod
+    def from_arc(cls, arc: Arc, origin: Origin = (0.0, 0.0)) -> CopperElement:
+        """Create from an authored copper ``(arc ...)`` node (Issue #9673).
+
+        The arc stays ONE element -- the reporting unit -- and carries its
+        own covering chord tessellation; pair distances are the minimum
+        over its chords (``_arc_pair_clearance``), never a re-issue of the
+        arc as loose segment elements (which would report per chord and
+        lend internal chord joints the via-endpoint exemption).
+        """
+        return cls(
+            element_type="arc",
+            layer=arc.layer,
+            net_number=arc.net_number,
+            geometry=(arc.start[0], arc.start[1], arc.end[0], arc.end[1], arc.width),
+            reference=segment_ref(arc, origin),
+            net_name=arc.net_name if arc.net_number != 0 else "",
+            polyline=_arc_check_polyline(arc),
+            arc_chord_width=arc.width + 2.0 * ARC_COPPER_SAGITTA_MM,
         )
 
     @classmethod
@@ -222,6 +296,15 @@ class CopperElement:
 
     def bounds(self) -> tuple[float, float, float, float]:
         """Enclose both analytic and polygon shapes used by exact predicates."""
+        if self.element_type == "arc":
+            points = self.polyline or (
+                (self.geometry[0], self.geometry[1]),
+                (self.geometry[2], self.geometry[3]),
+            )
+            half = self.arc_chord_width / 2.0
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            return (min(xs) - half, min(ys) - half, max(xs) + half, max(ys) + half)
         if self.element_type == "segment":
             x1, y1, x2, y2, width = self.geometry
             radius = width / 2
@@ -281,6 +364,8 @@ class CopperElement:
         if self.element_type == "segment":
             x1, y1, x2, y2, width = self.geometry
             return KSegment(x1=x1, y1=y1, x2=x2, y2=y2, width=width)
+        if self.element_type == "arc":
+            return _arc_kernel_shape(self)
         cx, cy, width, height = self.geometry
         if self.element_type == "via":
             # ``from_via`` records ``(size, size)``, so either dimension is the
@@ -331,6 +416,55 @@ class CopperElement:
         if self.layer == "*":
             return True  # Pads and vias span multiple layers
         return self.layer == layer
+
+
+def _is_track_copper(elem: CopperElement) -> bool:
+    """Whether this element is track copper pinned to one declared layer.
+
+    Segments and arcs (Issue #9673) share every layer-scoping decision in
+    the pairwise rules: each lives on exactly its own layer (so a via's
+    barrel vs an arc is checked on every spanned layer, issue #3487), and
+    each is measured as authored copper with its endpoints in
+    ``geometry``.
+    """
+    return elem.element_type in ("segment", "arc")
+
+
+def _via_colocated_with_track(elem1: CopperElement, elem2: CopperElement) -> bool:
+    """Whether this is a segment/arc-vs-via pair joined at the track's ENDPOINT.
+
+    The same artifact and the same epsilon as the segment-via exemption
+    (Issue #2706), extended to arcs (Issue #9673): an arc element's
+    ``geometry`` holds its AUTHORED start/end, so the exemption fires at a
+    real arc endpoint and never at an internal tessellation chord joint.
+    """
+    if elem1.element_type == "via" and _is_track_copper(elem2):
+        track, via = elem2, elem1
+    elif elem2.element_type == "via" and _is_track_copper(elem1):
+        track, via = elem1, elem2
+    else:
+        return False
+    sx1, sy1, sx2, sy2, _ = track.geometry
+    vx, vy = via.geometry[0], via.geometry[1]
+    return (
+        math.hypot(sx1 - vx, sy1 - vy) < _COLOCATION_EPSILON_MM
+        or math.hypot(sx2 - vx, sy2 - vy) < _COLOCATION_EPSILON_MM
+    )
+
+
+def _arc_check_polyline(arc: Arc) -> tuple[tuple[float, float], ...]:
+    """The arc's centreline as chords at the shared sagitta bound.
+
+    A schema-valid but pathological arc (more edges than
+    :meth:`Arc.centerline_points`'s 100000-edge guard admits at 1 um) falls
+    back to its three authored points rather than failing the whole check:
+    such geometry only exists in hostile files, and the fallback keeps the
+    rule's answer bounded instead of crashing ``kct check``.
+    """
+    try:
+        return tuple(arc.centerline_points(max_error_mm=ARC_COPPER_SAGITTA_MM))
+    except ValueError:
+        return (arc.start, arc.mid, arc.end)
 
 
 def _transform_pad_position(pad: Pad, footprint: Footprint) -> tuple[float, float]:
@@ -718,6 +852,225 @@ def _build_diff_pair_set(
     return pairs
 
 
+def _element_chord_shapes(elem: CopperElement) -> list[KShape]:
+    """The kernel shapes a pair distance is minimised over (Issue #9673).
+
+    An arc answers one capsule per chord, at the covering chord width; every
+    other element is its single ``kernel_shape()``.  Memoised on the element
+    (Issue #9714): the list is a pure function of construction-time fields,
+    and a sweep asks the same element for it once per candidate pair.
+    """
+    return _chord_search_data(elem)[0]
+
+
+#: One conservative lower-bound record for the pruned arc-pair search:
+#: ``(lo_x, lo_y, hi_x, hi_y, half_width)`` -- a chord centreline's
+#: axis-aligned box plus half its copper width (Issue #9714).
+_ChordRecord = tuple[float, float, float, float, float]
+
+#: Memoised per-element chord search data (see ``_chord_search_data``).
+_ChordSearchData = tuple[
+    list[KShape], list[_ChordRecord] | None, list[_ChordRecord] | None, _ChordRecord | None
+]
+
+
+def _chord_search_data(elem: CopperElement) -> _ChordSearchData:
+    """``(shapes, prunes, buckets, whole)`` for the pruned pair search.
+
+    **shapes** is :func:`_element_chord_shapes`' list.  The other three
+    entries carry the conservative pruning records of Issue #9714, and are
+    ``None`` exactly when the shapes are not all :class:`KSegment` capsules
+    (an arc against a pad/via/zone counterpart), in which case the pair
+    search stays exhaustive:
+
+    * **prunes** -- one :data:`_ChordRecord` per shape: the centreline's
+      axis-aligned box and half the copper width.
+    * **buckets** -- the same record merged over each run of
+      :data:`_CHORD_BUCKET_SIZE` consecutive shapes.
+    * **whole** -- the record merged over every shape.
+    """
+    cached = elem._chord_search_cache
+    if cached is not _GEOM_UNSET:
+        return cached  # type: ignore[return-value]
+    if elem.element_type != "arc":
+        shapes: list[KShape] = [elem.kernel_shape()]
+    else:
+        points = elem.polyline or (
+            (elem.geometry[0], elem.geometry[1]),
+            (elem.geometry[2], elem.geometry[3]),
+        )
+        shapes = [
+            KSegment(x1=a[0], y1=a[1], x2=b[0], y2=b[1], width=elem.arc_chord_width)
+            for a, b in zip(points, points[1:], strict=False)
+        ]
+    segments = [shape for shape in shapes if isinstance(shape, KSegment)]
+    if len(segments) != len(shapes):
+        # A pad/via/zone counterpart (non-capsule shapes): no lower-bound
+        # record, so the pair search over these shapes stays exhaustive.
+        data: _ChordSearchData = (shapes, None, None, None)
+    else:
+        prunes = [
+            (
+                min(s.x1, s.x2),
+                min(s.y1, s.y2),
+                max(s.x1, s.x2),
+                max(s.y1, s.y2),
+                s.width / 2.0,
+            )
+            for s in segments
+        ]
+
+        def _merge(records: list[_ChordRecord]) -> _ChordRecord:
+            return (
+                min(r[0] for r in records),
+                min(r[1] for r in records),
+                max(r[2] for r in records),
+                max(r[3] for r in records),
+                max(r[4] for r in records),
+            )
+
+        size = _CHORD_BUCKET_SIZE
+        buckets = [_merge(prunes[start : start + size]) for start in range(0, len(prunes), size)]
+        data = (shapes, prunes, buckets, _merge(prunes))
+    elem._chord_search_cache = data
+    return data
+
+
+def _arc_pair_clearance(elem1: CopperElement, elem2: CopperElement) -> tuple[float, float, float]:
+    """Edge-to-edge ``(gap, x, y)`` for a pair with an arc on either side.
+
+    The distance to a union of shapes is the minimum over its parts, so the
+    verdict is the smallest kernel gap across the arc's chords (both sides
+    when both elements are arcs).  The overlap refinement and the location
+    follow the module's existing conventions: :func:`_overlap_depth` where
+    :func:`_overlap_depth_applies` says so, and the closest chord standing
+    in for the arc in the per-pair-kind positions.
+
+    Issue #9714: between two chord capsules the kernel gap is the
+    centreline distance minus both half widths, and the distance between
+    two centrelines is at least the distance between their axis-aligned
+    boxes.  So whenever that box bound already exceeds the running best
+    (plus :data:`_ARC_PRUNE_EPS_MM`), the exact evaluation cannot lower the
+    gap -- and because the exhaustive loop keeps the FIRST pair at an equal
+    minimum (``gap < best`` is strict), a pair that cannot strictly lower
+    the best can never become the witness either.  Skipped pairs therefore
+    change neither the reported gap nor its location, whatever the
+    evaluation order among equal minima.  The skip is applied per chord,
+    per run of :data:`_CHORD_BUCKET_SIZE` consecutive counterpart chords,
+    and per outer run against the counterpart's whole chord extent; a run
+    skip only ever removes a contiguous block from the same row-major
+    walk, so the evaluated pairs keep their exhaustive relative order.
+    Pairs that are not both all-:class:`KSegment` (an arc against a
+    pad/via/zone) keep the exhaustive search unchanged.
+    """
+    shapes1, prunes1, buckets1, _whole1 = _chord_search_data(elem1)
+    shapes2, prunes2, buckets2, whole2 = _chord_search_data(elem2)
+    best: tuple[float, KShape, KShape] | None = None
+    if prunes1 is None or prunes2 is None:
+        for c1 in shapes1:
+            for c2 in shapes2:
+                gap = _kernel_copper_gap(c1, c2)
+                if best is None or gap < best[0]:
+                    best = (gap, c1, c2)
+    else:
+        # The three pruning records are built and memoised together, so a
+        # non-None ``prunes`` on both sides implies the rest are set too.
+        assert buckets1 is not None and buckets2 is not None and whole2 is not None
+        eps = _ARC_PRUNE_EPS_MM
+        size = _CHORD_BUCKET_SIZE
+        n1 = len(shapes1)
+        n2 = len(shapes2)
+        fx1, fy1, fx2, fy2, fhw2 = whole2
+        best_gap = math.inf
+        for ostart in range(0, n1, size):
+            ox1, oy1, ox2, oy2, ohw1 = buckets1[ostart // size]
+            dx = ox1 - fx2
+            d = fx1 - ox2
+            if d > dx:
+                dx = d
+            dy = oy1 - fy2
+            d = fy1 - oy2
+            if d > dy:
+                dy = d
+            if dx < 0.0:
+                dx = 0.0
+            if dy < 0.0:
+                dy = 0.0
+            t = best_gap + eps + ohw1 + fhw2
+            # Skip the whole outer run when no chord pair inside it can
+            # strictly beat the running best (bbox_dist >= t; squared form,
+            # with ``t <= 0`` meaning even touching boxes cannot beat it).
+            if t <= 0.0 or dx * dx + dy * dy >= t * t:
+                continue
+            oend = min(ostart + size, n1)
+            for i in range(ostart, oend):
+                c1 = shapes1[i]
+                ax1, ay1, ax2, ay2, hw1 = prunes1[i]
+                for jstart in range(0, n2, size):
+                    bx1, by1, bx2, by2, bhw2 = buckets2[jstart // size]
+                    dx = ax1 - bx2
+                    d = bx1 - ax2
+                    if d > dx:
+                        dx = d
+                    dy = ay1 - by2
+                    d = by1 - ay2
+                    if d > dy:
+                        dy = d
+                    if dx < 0.0:
+                        dx = 0.0
+                    if dy < 0.0:
+                        dy = 0.0
+                    t = best_gap + eps + hw1 + bhw2
+                    if t <= 0.0 or dx * dx + dy * dy >= t * t:
+                        continue
+                    jend = min(jstart + size, n2)
+                    for j in range(jstart, jend):
+                        bx1, by1, bx2, by2, hw2 = prunes2[j]
+                        dx = ax1 - bx2
+                        d = bx1 - ax2
+                        if d > dx:
+                            dx = d
+                        dy = ay1 - by2
+                        d = by1 - ay2
+                        if d > dy:
+                            dy = d
+                        if dx < 0.0:
+                            dx = 0.0
+                        if dy < 0.0:
+                            dy = 0.0
+                        t = best_gap + eps + hw1 + hw2
+                        if t <= 0.0 or dx * dx + dy * dy >= t * t:
+                            continue
+                        gap = _kernel_copper_gap(c1, shapes2[j])
+                        if gap < best_gap:
+                            best_gap = gap
+                            best = (gap, c1, shapes2[j])
+    assert best is not None  # an arc always yields at least one chord
+    gap, s1, s2 = best
+
+    if gap <= 0.0 and _overlap_depth_applies(elem1, elem2):
+        depth = _overlap_depth(elem1, elem2)
+        if depth is not None:
+            gap = depth
+
+    if (
+        _is_track_copper(elem1)
+        and _is_track_copper(elem2)
+        and isinstance(s1, KSegment)
+        and isinstance(s2, KSegment)
+    ):
+        # Track-vs-track (segment or arc): the closest chord stands in for
+        # the arc, so the four endpoints mean the same thing they do for a
+        # segment-segment pair.
+        loc_x = (s1.x1 + s1.x2 + s2.x1 + s2.x2) / 4
+        loc_y = (s1.y1 + s1.y2 + s2.y1 + s2.y2) / 4
+    elif _is_track_copper(elem1):
+        loc_x, loc_y = elem2.geometry[0], elem2.geometry[1]
+    else:
+        loc_x, loc_y = elem1.geometry[0], elem1.geometry[1]
+    return gap, loc_x, loc_y
+
+
 def _calculate_clearance(elem1: CopperElement, elem2: CopperElement) -> tuple[float, float, float]:
     """Edge-to-edge clearance between two copper elements, from the shared kernel.
 
@@ -766,6 +1119,11 @@ def _calculate_clearance(elem1: CopperElement, elem2: CopperElement) -> tuple[fl
     Returns:
         Tuple of (clearance_mm, location_x, location_y).
     """
+    if elem1.element_type == "arc" or elem2.element_type == "arc":
+        # Arc copper (Issue #9673): the verdict is minimised over the arc's
+        # covering chords rather than one kernel shape.
+        return _arc_pair_clearance(elem1, elem2)
+
     gap = _kernel_copper_gap(elem1.kernel_shape(), elem2.kernel_shape())
 
     if gap <= 0.0 and _overlap_depth_applies(elem1, elem2):
@@ -835,13 +1193,15 @@ def _overlap_depth_applies(elem1: CopperElement, elem2: CopperElement) -> bool:
       Minkowski gap saturates at exactly ``0.0``.
 
     Segment-vs-segment and via-vs-via pairs never used it: their kernel gap is a
-    true signed distance already.
+    true signed distance already.  Arc pairs (Issue #9673) follow the same
+    split: their chords' kernel gap is a signed distance, so only an arc
+    against a divergent-outline pad is refined.
     """
-    t1, t2 = elem1.element_type, elem2.element_type
-    if t1 == "segment" or t2 == "segment":
-        if t1 == t2:
+    track1, track2 = _is_track_copper(elem1), _is_track_copper(elem2)
+    if track1 or track2:
+        if track1 and track2:
             return False
-        other = elem2 if t1 == "segment" else elem1
+        other = elem2 if track1 else elem1
         return other.polygon is not None and other.pad_shape in _POLYGON_DIVERGENT_SHAPES
     return elem1.polygon is not None or elem2.polygon is not None
 
@@ -885,6 +1245,8 @@ def _copper_geom_for_overlap(elem: CopperElement):
     ``corner_radius`` of exactly 0 only ever pairs with the 4-vertex case, so
     the un-dilated ``base`` returned there is already a proper polygon.
     """
+    if elem.element_type == "arc":
+        return _arc_copper_geom(elem)
     if elem.element_type == "segment":
         return _segment_copper_geom(elem)
     geom = _element_to_shapely_geom(elem)
@@ -1069,6 +1431,52 @@ def _segment_copper_geom(seg: CopperElement):
     return geom
 
 
+def _arc_copper_geom(arc: CopperElement):
+    """Return (and memoise) an arc's shapely copper footprint (Issue #9673).
+
+    The chord polyline buffered by half the covering chord width -- the same
+    copper the pair-distance verdict measured (``_element_chord_shapes``),
+    so the overlap refinement refines the shape the verdict judged.
+    Memoised on the ``_seg_geom_cache`` slot for exactly the reason
+    :func:`_segment_copper_geom` is.
+    """
+    if _MEMOIZE_COPPER_GEOM:
+        cached = arc._seg_geom_cache
+        if cached is not _GEOM_UNSET:
+            return cached
+
+    require_shapely("arc clearance geometry")
+    from shapely.geometry import LineString
+
+    points = list(
+        arc.polyline or ((arc.geometry[0], arc.geometry[1]), (arc.geometry[2], arc.geometry[3]))
+    )
+    geom = LineString(points).buffer(arc.arc_chord_width / 2.0)
+    if _MEMOIZE_COPPER_GEOM:
+        arc._seg_geom_cache = geom
+    return geom
+
+
+def _arc_kernel_shape(arc: CopperElement) -> KShape:
+    """An arc's covering chord footprint as one kernel zone shape (Issue #9673).
+
+    The pairwise predicates never ask this -- they minimise over the arc's
+    chords (``_element_chord_shapes``), which is exact.  A caller that does
+    ask ``kernel_shape()`` directly gets the same copper as one filled
+    polygon: the chord polyline buffered by half the covering chord width
+    (``_arc_copper_geom``'s footprint, the shape ``bounds`` and the overlap
+    refinement already model), so the public helper answers its own new
+    element type instead of dying on the pad/via 4-tuple unpack.
+    """
+    geom = _arc_copper_geom(arc)
+    polygons = list(geom.geoms) if geom.geom_type == "MultiPolygon" else [geom]
+    rings: list[list[tuple[float, float]]] = []
+    for polygon in polygons:
+        rings.append(list(polygon.exterior.coords))
+        rings.extend(list(interior.coords) for interior in polygon.interiors)
+    return _kernel_zone_shape(rings)
+
+
 def _segment_polygon_clearance(seg: CopperElement, circle: CopperElement) -> float | None:
     """Signed segment-to-pad clearance using the pad's true copper polygon.
 
@@ -1245,12 +1653,13 @@ def _rect_segment_centerline_distance(
 
 
 def _element_to_shapely_geom(elem: CopperElement):
-    """Return a shapely geometry for a pad/via copper element.
+    """Return a shapely geometry for a pad/via/arc copper element.
 
     Pads carry a precomputed ``polygon`` (true outline).  Vias (and any
     element without a polygon) are represented as a circle buffered around
-    their center using the AABB diameter.  Returns ``None`` if no geometry
-    can be built.
+    their center using the AABB diameter.  Arcs answer their covering
+    chord footprint (Issue #9673, :func:`_arc_copper_geom`).  Returns
+    ``None`` if no geometry can be built.
 
     Memoised per element (Issue #5240): the result is a pure function of
     ``elem.polygon`` / ``elem.geometry``, both assigned once at construction
@@ -1271,6 +1680,11 @@ def _element_to_shapely_geom(elem: CopperElement):
 
 def _build_pad_copper_geom(elem: CopperElement):
     """Build a pad/via shapely geometry without consulting the memo."""
+    if elem.element_type == "arc":
+        # Issue #9673: an arc's geometry is the 5-tuple track form, not the
+        # pad/via centre box -- answer its covering chord footprint so this
+        # helper never dies on the 4-tuple unpack below.
+        return _arc_copper_geom(elem)
     if elem.polygon is not None:
         return elem.polygon
     from shapely.geometry import Point
@@ -1504,7 +1918,9 @@ class ClearanceRule(DRCRule):
 
     Validates that spacing between traces, pads, and vias on the same
     layer but different nets meets the manufacturer's minimum clearance
-    requirement.
+    requirement.  Authored copper arcs (``(arc ...)`` nodes) are trace
+    copper here too, measured through their covering chord tessellation
+    and reported as the arc itself (Issue #9673).
 
     Differential-pair within-pair edges (segment-to-segment edges where
     both segments belong to the P/N halves of a detected diff pair) are
@@ -1677,8 +2093,11 @@ class ClearanceRule(DRCRule):
             # are already evaluated on the via's explicitly-declared
             # endpoint layers -- re-running them on each spanned
             # inner layer would only duplicate the same report, so
-            # restrict non-segment pairs to declared layers.
-            if elem1.element_type != "segment" and elem2.element_type != "segment":
+            # restrict non-segment pairs to declared layers.  Track
+            # copper is segment OR arc (Issue #9673): an arc lives on
+            # one declared layer exactly like a segment, so arc-via
+            # pairs stay checked on every spanned layer.
+            if not _is_track_copper(elem1) and not _is_track_copper(elem2):
                 if (
                     elem1.element_type == "via"
                     and elem1.explicit_layers
@@ -1708,7 +2127,7 @@ class ClearanceRule(DRCRule):
                 if key in diff_pair_set:
                     continue
 
-            # Skip segment/via pairs where the segment endpoint
+            # Skip track/via pairs where the track's authored endpoint
             # coincides with the via center.  The router's in-pad
             # escape places segment endpoints exactly at via centers
             # (router invariant); when a neighboring net's escape
@@ -1717,18 +2136,13 @@ class ClearanceRule(DRCRule):
             # and the rule reports a spurious "negative clearance"
             # violation at the via center.  The Via schema has no
             # ``in_pad`` flag (dropped at serialization), so the
-            # detection is geometric.  See Issue #2706 and the
-            # ``_COLOCATION_EPSILON_MM`` constant above.
-            if {elem1.element_type, elem2.element_type} == {"segment", "via"}:
-                seg = elem1 if elem1.element_type == "segment" else elem2
-                via = elem2 if elem1.element_type == "segment" else elem1
-                sx1, sy1, sx2, sy2, _ = seg.geometry
-                vx, vy, _, _ = via.geometry
-                if (
-                    math.hypot(sx1 - vx, sy1 - vy) < _COLOCATION_EPSILON_MM
-                    or math.hypot(sx2 - vx, sy2 - vy) < _COLOCATION_EPSILON_MM
-                ):
-                    continue
+            # detection is geometric.  Arcs join the same exemption at
+            # their AUTHORED endpoints only -- an internal tessellation
+            # chord joint is copper mid-arc, not a trace endpoint, and
+            # must not acquire it (Issue #9673).  See Issue #2706 and
+            # the ``_COLOCATION_EPSILON_MM`` constant above.
+            if _via_colocated_with_track(elem1, elem2):
+                continue
 
             # Calculate clearance
             clearance, loc_x, loc_y = _calculate_clearance(elem1, elem2)
@@ -1753,7 +2167,7 @@ class ClearanceRule(DRCRule):
                 and elem1.source_footprint is not elem2.source_footprint
             ):
                 required = max(required, min_smd_pad_clearance or 0)
-            if clearance + DRC_TOLERANCE < required:
+            if not drc_clear(clearance, required):
                 violation = self._create_violation(
                     elem1, elem2, clearance, required, layer_name, loc_x, loc_y
                 )
@@ -1769,6 +2183,15 @@ class ClearanceRule(DRCRule):
         # Add segments on this layer
         for seg in pcb.segments_on_layer(layer_name):
             elements.append(CopperElement.from_segment(seg, origin))
+
+        # Add authored copper arcs on this layer (Issue #9673): one element
+        # per arc, carrying its own covering chord tessellation -- the arc
+        # (not a chord) is the reporting unit.  Before this, arc copper was
+        # invisible to the net-aware pairwise rules: a foreign-net segment
+        # crossing an applied arc's apex read clean while the same geometry
+        # with straight segments reported the short.
+        for arc in pcb.arcs_on_layer(layer_name):
+            elements.append(CopperElement.from_arc(arc, origin))
 
         # Add pads that are on this layer
         for fp in pcb.footprints:
@@ -1804,17 +2227,11 @@ class ClearanceRule(DRCRule):
         endpoint coinciding with a via center is a modeling artifact, not
         a real copper join -- mirror the suppression in ``_check_layer``
         (Issue #2706) so it does not fabricate an island/contact edge.
+        Arc endpoints join the same suppression at their authored
+        endpoints only (Issue #9673).
         """
-        if {a.element_type, b.element_type} == {"segment", "via"}:
-            seg = a if a.element_type == "segment" else b
-            via = b if a.element_type == "segment" else a
-            sx1, sy1, sx2, sy2, _ = seg.geometry
-            vx, vy, _, _ = via.geometry
-            if (
-                math.hypot(sx1 - vx, sy1 - vy) < _COLOCATION_EPSILON_MM
-                or math.hypot(sx2 - vx, sy2 - vy) < _COLOCATION_EPSILON_MM
-            ):
-                return False
+        if _via_colocated_with_track(a, b):
+            return False
 
         clearance, _, _ = _calculate_clearance(a, b)
         return clearance <= _COLOCATION_EPSILON_MM
@@ -1927,7 +2344,12 @@ class ClearanceRule(DRCRule):
 
         # Locate at the net-0 element's representative point.
         gx = net0_elem.geometry
-        if net0_elem.element_type == "segment":
+        if net0_elem.element_type == "arc" and net0_elem.polyline:
+            # An arc's own midpoint, not the chord between its endpoints
+            # (which can run far from the swept copper).
+            point = net0_elem.polyline[len(net0_elem.polyline) // 2]
+            loc_x, loc_y = point
+        elif net0_elem.element_type in ("segment", "arc"):
             loc_x = (gx[0] + gx[2]) / 2
             loc_y = (gx[1] + gx[3]) / 2
         else:
@@ -2301,7 +2723,7 @@ class SegmentZoneClearanceRule(DRCRule):
             )
 
         clearance = centerline_dist - half_w
-        if clearance + DRC_TOLERANCE >= min_clearance:
+        if drc_clear(clearance, min_clearance):
             return None
 
         p_line, p_poly = nearest_points(line, poly)
@@ -2527,7 +2949,7 @@ class ViaZoneClearanceRule(DRCRule):
 
         if dist > 0:
             clearance = dist
-            if clearance + DRC_TOLERANCE >= min_clearance:
+            if drc_clear(clearance, min_clearance):
                 return None
             from shapely.ops import nearest_points
 
