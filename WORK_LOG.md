@@ -16,6 +16,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-20
 
+- **Issue #9304** (closed): Match-group skew: exclude truly-defect off-path copper without switching rulers (from #9138)
+- **PR #9741**: fix(validate): shed defect copper from the match-group skew ruler (Issue #9304)
+- **Issue #9752** (closed): Padstack-nested pad primitives: flip_footprint_children_to_back and custom_pad_copper still read only the top-level block
+- **PR #9770**: fix: mirror nested padstack pad primitives and exchange front/back blocks like KiCad Flip
+- **Issue #9771** (closed): test flake: two test_route_pairwise_gate_4588 route tests time out (>60s) on Test (siblings of #9766 pattern)
+- **PR #9774**: test: skip chained completion pass in pairwise gate grid routes
+- **Issue #9708** (closed): CI red on main: test_route_pairwise_gate_4588 strict-noop tests route 0% since the lattice own-net pad band (#9060)
+- **PR #9728**: fix: route lattice pads sealed inside their own slit-band shell
 - **PR #9769**: fix: pcb prune and readiness cleanup honour the board's current-paths sidecar
 - **Issue #9747** (closed): readiness --generate: the cleanup's prune step ignores the board's current-paths sidecar, removes one layer of deliberately doubled power copper, and the run then fails its own path_ampacity check
 - **PR #9768**: perf: bucket junction candidates in layout-quality corner counting
