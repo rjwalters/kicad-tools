@@ -216,6 +216,10 @@ def make_pcb(out, parts):
     for n, code in nets.items():
         pcb.append(parse_string(f'(net {code} "{n}")'))
     positions = {}
+    # Half extent of each pad's mask aperture along the board x axis.  The
+    # board's mask expansion is 0, so the aperture is the pad copper itself;
+    # the tangential power vias below offset past it (issue #9548).
+    aperture_x = {}
     for part in parts:
         lib, name = part["footprint"].split(":")
         fp = parse_file(footprint_root() / f"{lib}.pretty" / f"{name}.kicad_mod")
@@ -260,7 +264,15 @@ def make_pcb(out, parts):
                 x + px * math.cos(a) + py * math.sin(a),
                 y - px * math.sin(a) + py * math.cos(a),
             )
+            size = pad.find_child("size")
+            sw, sh = size.get_float(0), size.get_float(1)
             atoms = at.get_atoms()
+            # Pad shapes are axis-aligned in the footprint frame; the total
+            # pad rotation (own + footprint) carries them into the board
+            # frame.  Exact for the 90-degree multiples this board uses and
+            # a safe outer bound for anything else.
+            rot = math.radians((atoms[2] if len(atoms) > 2 else 0) + angle)
+            aperture_x[(part["ref"], pin)] = (abs(sw * math.cos(rot)) + abs(sh * math.sin(rot))) / 2
             fp_angle = (atoms[2] if len(atoms) > 2 else 0) + angle
             if len(atoms) > 2:
                 at.set_atom(2, fp_angle)
@@ -295,8 +307,14 @@ def make_pcb(out, parts):
                 net,
                 [
                     start,
-                    (36.6, start[1]),
-                    (37.03, middle + sign * 0.205),
+                    # The pad-centre stub runs past the aperture's right
+                    # edge (37.45) before the 45-degree dogleg: with the
+                    # dogleg at 36.6/37.03 the parallel run started under
+                    # the aperture and touched its edge with 0 clearance
+                    # (issue #9548).  Both waypoints shift by the same
+                    # 1.2 mm, so P/N conductor lengths are unchanged.
+                    (37.8, start[1]),
+                    (38.23, middle + sign * 0.205),
                     (62.18, middle + sign * 0.205),
                     (62.8, termination[1]),
                     termination,
@@ -313,6 +331,12 @@ def make_pcb(out, parts):
           (polygon (pts (xy 5.5 5.5) (xy 94.5 5.5) (xy 94.5 74.5) (xy 5.5 74.5))))''')
         )
     # Tangential through vias: all power pins receive a real plane connection.
+    # The offset must clear the pad's own mask aperture by the annulus plus
+    # _VIA_APERTURE_CLEARANCE_MM (issue #9548): a flat 1.2 mm left the long
+    # SOIC power pads' annulus 0.075 mm inside the aperture -- a same-net
+    # mask_to_copper violation whose pad-edge slide landed somewhere still
+    # tighter.  Smaller pads keep the historical 1.2 mm.
+    _VIA_APERTURE_CLEARANCE_MM = 0.25
     for part in parts:
         if part["ref"].startswith("J"):
             continue
@@ -321,6 +345,8 @@ def make_pcb(out, parts):
                 continue
             x, y = positions[(part["ref"], pin)]
             dx = -1.2 if x < part["xy"][0] else 1.2
+            need = aperture_x[(part["ref"], pin)] + 0.3 + _VIA_APERTURE_CLEARANCE_MM
+            dx = math.copysign(max(abs(dx), need), dx)
             via = (x + dx, y)
             trace(net, [(x, y), via], 0.3)
             pcb.append(

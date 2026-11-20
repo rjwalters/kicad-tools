@@ -146,6 +146,11 @@ _NET_RELATIONSHIP_RULE_IDS: frozenset[str] = frozenset(
         "clearance_segment_segment",
         "clearance_via_via",
         "clearance_pad_via",
+        # Copper-arc pair kinds (Issue #9673) carry the same ``nets`` pair.
+        "clearance_arc_arc",
+        "clearance_arc_pad",
+        "clearance_arc_segment",
+        "clearance_arc_via",
         # Issue #8938: physical_copper_gap findings carry the structured
         # ``same_net`` flag (a same-net slit is one net, so the two-name
         # classifier below sees nothing to compare).
@@ -295,6 +300,12 @@ class MetaCheckResult:
     # name list, never the reason for ``overall`` -- ``compute_overall``
     # reads only ``coverage_incomplete``.
     incomplete_categories: tuple[str, ...] = ()
+    # Issue #9637: which schematic ERC/LVS/netlist sync ran against and how it
+    # was found (``--schematic``, ``project.kct``, ``sibling``,
+    # ``.kicad_pro pairing`` or ``sole schematic``).  Both ``None`` when no
+    # schematic was discovered (see ``schematic_missing``).
+    schematic_path: str | None = None
+    schematic_source: str | None = None
 
     def _subs(self) -> tuple[SubCheckResult, ...]:
         return (self.drc, self.erc, self.lvs, self.manifest)
@@ -340,6 +351,8 @@ class MetaCheckResult:
             # FAILED).  The ``coverage_incomplete`` flag itself stays
             # unserialized: machine consumers read ``overall``.
             "incomplete_categories": list(self.incomplete_categories),
+            # Issue #9637: additive -- the schematic ERC/LVS compared against.
+            "schematic": {"path": self.schematic_path, "source": self.schematic_source},
         }
 
 
@@ -1064,6 +1077,18 @@ def _manifest_subcheck(pcb_path: Path) -> SubCheckResult:
     )
 
 
+def _resolve_check_schematic_with_source(
+    schematic: str | None, pcb_path: Path
+) -> tuple[Path | None, str | None]:
+    """:func:`_resolve_check_schematic` plus how the schematic was found (issue #9637)."""
+    from kicad_tools.sync.discover import resolve_schematic_with_source
+
+    if schematic is not None:
+        candidate = Path(schematic).resolve()
+        return (candidate, "--schematic") if candidate.exists() else (None, None)
+    return resolve_schematic_with_source(pcb_path)
+
+
 def _resolve_check_schematic(schematic: str | None, pcb_path: Path) -> Path | None:
     """Resolve the schematic used by schematic-aware checks.
 
@@ -1073,14 +1098,10 @@ def _resolve_check_schematic(schematic: str | None, pcb_path: Path) -> Path | No
     override path resolves to ``None``), otherwise sibling discovery via
     :func:`kicad_tools.sync.discover.resolve_schematic_for_pcb` (which
     handles ``project.kct artifacts.schematic`` and the ``_routed``-style
-    stage-suffix strip).
+    stage-suffix strip).  ``project.kct artifacts.schematic`` is used only
+    when the PCB is the board that spec names (issue #9637).
     """
-    from kicad_tools.sync.discover import resolve_schematic_for_pcb
-
-    if schematic is not None:
-        candidate = Path(schematic).resolve()
-        return candidate if candidate.exists() else None
-    return resolve_schematic_for_pcb(pcb_path)
+    return _resolve_check_schematic_with_source(schematic, pcb_path)[0]
 
 
 def run_meta_checks(
@@ -1123,7 +1144,7 @@ def run_meta_checks(
             wider than ``coverage_incomplete`` (see
             :attr:`MetaCheckResult.incomplete_categories`).
     """
-    resolved_sch = _resolve_check_schematic(schematic, pcb_path)
+    resolved_sch, schematic_source = _resolve_check_schematic_with_source(schematic, pcb_path)
 
     erc = _erc_subcheck(resolved_sch, strict)
     lvs = _lvs_subcheck(resolved_sch, pcb_path)
@@ -1151,6 +1172,8 @@ def run_meta_checks(
         schematic_missing=schematic_missing,
         coverage_incomplete=coverage_incomplete,
         incomplete_categories=incomplete_categories,
+        schematic_path=portable_report_path(resolved_sch) if resolved_sch is not None else None,
+        schematic_source=schematic_source,
     )
     result.compute_overall()
     return result
@@ -1229,6 +1252,10 @@ def print_meta_check_stanza(result: MetaCheckResult, verbose: bool = False) -> N
     if verbose:
         _print_lvs_verbose_expansion(result.lvs)
     print(_format_meta_status_line("Manifest", result.manifest))
+    if result.schematic_path is not None:
+        # Issue #9637: say which schematic ERC/LVS used and how it was found,
+        # so a wrong-revision comparison is never silent.
+        print(f"{'Schematic:':10} {result.schematic_path} (found via {result.schematic_source})")
     if result.overall == "INCOMPLETE" and result.incomplete_categories:
         print(f"{'Overall:':10} {result.overall} ({', '.join(result.incomplete_categories)})")
     else:
@@ -1446,6 +1473,73 @@ def _resolve_check_scope(args: argparse.Namespace, parser: argparse.ArgumentPars
     return scope
 
 
+def _inactive_rules_from_coverage(coverage: dict[str, Any]) -> frozenset[str]:
+    """Categories that could not produce findings this run, from the coverage map.
+
+    ``run_selected_checks`` records one
+    :class:`~kicad_tools.validate.coverage.Coverage` per category, and a
+    ``skipped`` state there means the category's inputs were absent (or the
+    category is opt-in and was not opted in), so its rule could not produce
+    findings.  Deriving the inactive set from those recorded states -- instead
+    of re-deriving :func:`kicad_tools.validate.coverage.precheck`'s conditions
+    by hand -- covers every skip reason (issue #9529): the two the previous
+    hand-mirrored helper knew (``ampacity``, ``path_ampacity``) and the nine
+    more ``precheck`` carries, with no drift when ``precheck`` grows another.
+
+    An ``unknown`` state counts as inactive exactly when its reason is
+    ``needs_input:<X>`` (:func:`kicad_tools.validate.coverage.rule_never_ran`,
+    issue #9552): the absent input is a prerequisite for any finding of that
+    category, so the rule was a no-op -- ``ampacity`` with declared-but-
+    unmapped currents is the reported case, and the rule's empty specs map
+    makes the pre-#9534 ``[rule not evaluated in this run]`` wording the
+    accurate one.  The other ``unknown`` reasons (``zone_fills_absent``,
+    ``no_courtyard_geometry``, ...) evaluated the board partially and may
+    still have found something, so an orphan naming one keeps the generic
+    wording.
+
+    ``--migrate-waivers`` uses this so an orphan whose rule never ran is
+    reported as such instead of implying the key changed (issue #9504).
+    ``--only``/``--skip`` cannot combine with ``--migrate-waivers``, so the
+    ``deselected:*`` skip reasons never reach this path.
+    """
+    from kicad_tools.validate.coverage import rule_never_ran
+
+    return frozenset(name for name, cov in coverage.items() if rule_never_ran(cov))
+
+
+def _run_waiver_migration(
+    results: Any,
+    pcb: Any,
+    waivers_path: Path | None,
+    *,
+    write: bool,
+    inactive_rules: frozenset[str] = frozenset(),
+) -> int:
+    """Run ``--migrate-waivers`` (Issue #9454) and print its report."""
+    from kicad_tools import __version__
+    from kicad_tools.validate.evidence import PRIOR_EVIDENCE_HASH_VERSION, EvidenceContext
+    from kicad_tools.validate.rules.waivers import format_waiver_migration, migrate_evidence_waivers
+
+    if waivers_path is None or not waivers_path.is_file():
+        where = f" {waivers_path}" if waivers_path is not None else ""
+        print(f"Error: no waivers file to migrate{where}; pass --waivers PATH.", file=sys.stderr)
+        return 1
+    try:
+        report = migrate_evidence_waivers(
+            waivers_path,
+            results.violations,
+            EvidenceContext(pcb, recipe=PRIOR_EVIDENCE_HASH_VERSION),
+            write=write,
+            tool_version=__version__,
+            inactive_rules=inactive_rules,
+        )
+    except (OSError, ValueError) as e:
+        print(f"Error: cannot migrate waivers in {waivers_path}: {e}", file=sys.stderr)
+        return 1
+    print("\n".join(format_waiver_migration(report, waivers_path, write=write)))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for kct check command."""
     parser = argparse.ArgumentParser(
@@ -1514,6 +1608,28 @@ def main(argv: list[str] | None = None) -> int:
             "--waivers PATH, else the discovered sidecar, else "
             "<board>.kct-waivers.json next to the board (Issue #5946)."
         ),
+    )
+    parser.add_argument(
+        "--migrate-waivers",
+        dest="migrate_waivers",
+        action="store_true",
+        help=(
+            "Re-bind evidence-bound waivers recorded under the previous "
+            "evidence version (ev3) to the current one (ev4) without "
+            "re-recording them (Issue #9454). For each ev3 entry the ev3 "
+            "digest is recomputed on this board; on a match the entry takes "
+            "the ev4 hash and keeps reviewer, date, reason and issue (adding "
+            "rebound_at / rebound_from / rebound_by); a mismatch stays stale "
+            "and a key that names no finding is reported as an orphan. "
+            "Previews by default; add --write to apply. Never runs during a "
+            "normal check; run it without --only/--skip."
+        ),
+    )
+    parser.add_argument(
+        "--write",
+        dest="migrate_write",
+        action="store_true",
+        help="With --migrate-waivers: apply the migration to the waivers file",
     )
     parser.add_argument(
         "--waive-reason",
@@ -1846,8 +1962,8 @@ def main(argv: list[str] | None = None) -> int:
             "blocking by default."
         ),
     )
-    # Issue #3061: auto-derive the pad_grid tolerance from each board's
-    # pad-offset histogram by default for the CLI.  Users can opt back into
+    # Issues #3061, #9434: auto-derive the pad_grid tolerance per footprint
+    # from that footprint's own pad lattice by default for the CLI.  Users can opt back into
     # the fixed-0.05mm behaviour with --pad-grid-strict, or pin a custom
     # value with --pad-grid-tolerance.
     pad_grid_group = parser.add_mutually_exclusive_group()
@@ -1856,8 +1972,9 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help=(
             "Use the fixed 0.05mm pad_grid tolerance (PR #3057 default) "
-            "instead of auto-deriving per-board from the pad-offset "
-            "histogram (issue #3061).  Default: auto-derive."
+            "instead of auto-deriving a tolerance per footprint from that "
+            "footprint's own pad lattice (issues #3061, #9434; other parts "
+            "never influence it).  Default: auto-derive."
         ),
     )
     pad_grid_group.add_argument(
@@ -1969,6 +2086,15 @@ def main(argv: list[str] | None = None) -> int:
         (args.waive_reason or "").strip() and (args.waive_reviewer or "").strip()
     ):
         parser.error("--waive requires --waive-reason and --waive-reviewer")
+    if args.migrate_write and not args.migrate_waivers:
+        parser.error("--write only applies to --migrate-waivers")
+    if args.migrate_waivers and (
+        args.waive or args.only_checks or args.skip_checks or args.diff is not None
+    ):
+        parser.error(
+            "--migrate-waivers cannot be combined with --waive, --only, --skip or --diff "
+            "(it needs the board's complete finding set)"
+        )
 
     # Issue #4651: validate the routing-quality ceilings up front.  The
     # metrics are fractions in [0, 1], so anything outside that range is a
@@ -2586,7 +2712,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    from kicad_tools.sync.discover import resolve_declared_currents_for_pcb
+    from kicad_tools.sync.discover import (
+        resolve_declared_currents_for_pcb,
+        resolve_declared_reference_height_for_pcb,
+    )
     from kicad_tools.validate.coverage import _declares_ampacity
 
     declared_spec_currents = resolve_declared_currents_for_pcb(pcb_path)
@@ -2623,6 +2752,7 @@ def main(argv: list[str] | None = None) -> int:
             suppress_library=args.suppress_library,
             net_class_map=net_class_map,
             authored_min_clearance_mm=_authored_min_clearance_mm(pcb_path),
+            declared_reference_height_mm=resolve_declared_reference_height_for_pcb(pcb_path),
             # The CLI already prints its own up-front INACTIVE warning
             # below, so suppress the per-rule checker-level warning here to
             # avoid duplicating it (Issue #3917 Defect 3).
@@ -2764,6 +2894,17 @@ def main(argv: list[str] | None = None) -> int:
     from kicad_tools.validate.evidence import annotate_evidence
 
     annotate_evidence(results, pcb)
+
+    # Issue #9454: ``--migrate-waivers`` re-binds ev3 waivers to ev4 (previewing
+    # unless ``--write``) and stops; a normal check never rewrites a waiver.
+    if args.migrate_waivers:
+        return _run_waiver_migration(
+            results,
+            pcb,
+            gw_path,
+            write=args.migrate_write,
+            inactive_rules=_inactive_rules_from_coverage(coverage),
+        )
 
     # Issue #5946: ``--waive KEY`` records reviewed, evidence-bound waivers for
     # the current findings with that key, then applies them below.
@@ -3033,6 +3174,7 @@ def main(argv: list[str] | None = None) -> int:
     # boards 03/04's ad hoc ``fabrication_overrides`` block.  ``None`` when
     # no ``via_in_pad_process_id`` is declared (the common case).
     fabrication_process_dict = describe_selection(checker.design_rules)
+    declared_deviations = _declared_deviations(checker, pcb_path)
     machine_output = args.format in ("json", "sarif")
     if results.mask_copper_assessments and not machine_output:
         # Issue #8949: collapse the repeated reason lines (the live
@@ -3074,6 +3216,7 @@ def main(argv: list[str] | None = None) -> int:
             project_rules=project_rules,
             copper_weights=copper_weights,
             fab_dfm_parity=fab_dfm_parity,
+            declared_deviations=declared_deviations,
         )
     elif args.format == "summary":
         output_summary(violations, results, pcb_path)
@@ -3092,6 +3235,7 @@ def main(argv: list[str] | None = None) -> int:
             layers,
             args.verbose,
             copper_weights=copper_weights,
+            declared_deviations=declared_deviations,
         )
         if meta is not None:
             print_meta_check_stanza(meta, args.verbose)
@@ -3127,6 +3271,7 @@ def main(argv: list[str] | None = None) -> int:
             scope=scope_record,
             copper_weights=copper_weights,
             fab_dfm_parity=fab_dfm_parity,
+            declared_deviations=declared_deviations,
         )
 
     # Issue #4375: optionally emit DRC-constraint sidecars from the SAME
@@ -3649,9 +3794,26 @@ def build_check_rule_set(
         except (OSError, ValueError) as exc:
             notes.append(f"ignoring malformed current-paths sidecar {cp_path}: {exc}")
 
-    from kicad_tools.sync.discover import resolve_declared_currents_for_pcb
+    from kicad_tools.sync.discover import (
+        resolve_declared_currents_for_pcb,
+        resolve_declared_reference_height_for_pcb,
+    )
 
     copper_outer, copper_inner = stackup_copper_oz(pcb)
+    # Issue #9590: resolve the fab-view passes (net-agnostic copper gap,
+    # tht_smd_spacing, pad mask bridge) exactly like the CLI's flag-free
+    # default path, so a rule set built here agrees with ``kct check``
+    # instead of silently skipping them.
+    fab_view_gap_policy = None
+    if effective_mfr == "jlcpcb":
+        fab_view_gap_policy = _resolve_fab_gap_policy(
+            effective_mfr,
+            layers,
+            copper_outer,
+            copper_inner,
+            copper_outer if copper_outer is not None else 1.0,
+            len(pcb.copper_layers),
+        )
     checker = DRCChecker(
         pcb,
         manufacturer=effective_mfr,
@@ -3659,8 +3821,12 @@ def build_check_rule_set(
         copper_oz=copper_outer if copper_outer is not None else 1.0,
         copper_oz_outer=copper_outer,
         copper_oz_inner=copper_inner,
+        fab_view=effective_mfr == "jlcpcb",
+        fab_view_copper_oz=copper_outer,
+        fab_view_gap_policy=fab_view_gap_policy,
         net_class_map=net_class_map,
         authored_min_clearance_mm=_authored_min_clearance_mm(project_pcb_path),
+        declared_reference_height_mm=resolve_declared_reference_height_for_pcb(project_pcb_path),
         warn_on_inactive_skew_rules=False,
         courtyard_waivers=courtyard_waivers,
         strict_connectivity=True,
@@ -3803,7 +3969,7 @@ def run_selected_checks(
             Issue #3061.
         pad_grid_auto_derive: When ``True`` and ``pad_grid_threshold``
             is ``None``, the pad_grid check derives the threshold from
-            the board's pad-offset histogram (issue #3061).  Defaults
+            each footprint's own pad lattice (issues #3061, #9434).  Defaults
             to ``True`` for the CLI; ``False`` preserves the PR #3057
             fixed-0.05mm behaviour.
         sch_path: Resolved schematic path for the ``sch_fields``
@@ -4036,6 +4202,7 @@ def run_selected_checks(
         "copper_sliver": checker.check_copper_slivers,
         "courtyard_overlap": checker.check_courtyard_overlap,
         "dangling_copper": checker.check_dangling_copper,
+        "plane_split": checker.check_plane_split,
         "pour_slot": _pour_slot_check,
         "redundant_copper": checker.check_redundant_copper,
         "diffpair_clearance_intra": checker.check_diffpair_clearance_intra,
@@ -4327,6 +4494,37 @@ def _print_category_summary(violations: list[DRCViolation]) -> None:
         print(f"      {adv.detail()}  [{adv.rule_list()}]")
 
 
+def _declared_deviations(checker: Any, pcb_path: Path) -> list[dict]:
+    """Project-declared relaxations active in this run (Issue #9448).
+
+    One entry when ``project.kct`` declares a reference-designator height that
+    lowers the fab's silkscreen text-height floor, else ``[]`` -- so a relaxed
+    board is distinguishable from an unrelaxed one in the report of the engine
+    whose floor was lowered.
+    """
+    rules = checker.design_rules
+    if not rules.has_reference_height_deviation:
+        return []
+    return [
+        {
+            "rule": "silkscreen_text_height",
+            "scope": "reference designators",
+            "declared_min_height_mm": rules.min_silkscreen_reference_height_mm,
+            "fab_min_height_mm": rules.min_silkscreen_height_mm,
+            "source": "project.kct requirements.manufacturing.silkscreen_min_reference_height_mm",
+        }
+    ]
+
+
+def _format_declared_deviation(deviation: dict) -> str:
+    """One-line form of a :func:`_declared_deviations` entry."""
+    return (
+        f"{deviation['rule']} for {deviation['scope']} relaxed to "
+        f"{deviation['declared_min_height_mm']:g} mm (fab floor "
+        f"{deviation['fab_min_height_mm']:g} mm) per project.kct"
+    )
+
+
 def _copper_weights_provenance(
     outer: float | None,
     inner: float | None,
@@ -4514,6 +4712,7 @@ def output_table(
     layers: int,
     verbose: bool = False,
     copper_weights: dict | None = None,
+    declared_deviations: list[dict] | None = None,
 ) -> None:
     """Output violations as a formatted table."""
     error_count = sum(1 for v in violations if v.is_error)
@@ -4527,6 +4726,8 @@ def output_table(
     print(f"File: {pcb_path.name}")
     print(f"Manufacturer: {mfr.upper()}")
     print(f"Layers: {layers}")
+    for deviation in declared_deviations or ():
+        print(f"Declared deviation: {_format_declared_deviation(deviation)}")
     if copper_weights:
         print(f"Copper (ampacity): {_format_copper_weights(copper_weights)}")
         dfm = copper_weights.get("dfm_table")
@@ -4893,6 +5094,7 @@ def output_json(
     exit_code: int | None = None,
     scope: dict | None = None,
     project_rules: list[dict] | None = None,
+    declared_deviations: list[dict] | None = None,
     copper_weights: dict | None = None,
     fab_dfm_parity: dict | None = None,
 ) -> None:
@@ -4980,6 +5182,8 @@ def output_json(
     }
     if copper_weights is not None:
         data["copper_weights"] = copper_weights
+    if declared_deviations:
+        data["declared_deviations"] = declared_deviations
     if meta is not None:
         data["meta_checks"] = meta.to_dict()
     if routing_quality is not None:
@@ -5055,6 +5259,7 @@ def write_json_report(
     scope: dict | None = None,
     copper_weights: dict | None = None,
     fab_dfm_parity: dict | None = None,
+    declared_deviations: list[dict] | None = None,
 ) -> None:
     """Write DRC results as a JSON report file.
 
@@ -5121,6 +5326,8 @@ def write_json_report(
     }
     if copper_weights is not None:
         data["copper_weights"] = copper_weights
+    if declared_deviations:
+        data["declared_deviations"] = declared_deviations
     if meta is not None:
         data["meta_checks"] = meta.to_dict()
     if routing_quality is not None:

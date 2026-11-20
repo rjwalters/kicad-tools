@@ -73,12 +73,7 @@ import time
 
 import pytest
 
-from kicad_tools.router.cpp_backend import is_cpp_available
-
-pytestmark = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ backend not built; test exercises the C++ flat-array A* fast path",
-)
+pytestmark = pytest.mark.requires_router_cpp
 
 
 # ---------------------------------------------------------------------------

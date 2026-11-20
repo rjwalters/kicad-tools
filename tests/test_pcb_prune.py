@@ -2327,6 +2327,16 @@ def test_audit_gate_uses_discovered_sidecar(tmp_path, forced_looping_plan):
     assert res.uncut_loops == []
 
 
+def test_audit_gate_takes_an_empty_resolution_as_suppressed(tmp_path, forced_looping_plan):
+    """Issue #9747: ``[]`` is the caller's resolution (suppression, or a
+    sidecar with no paths), not a request for discovery -- a sidecar beside
+    the board must not sneak back into the gate through it."""
+    p, cp = _gate_board(tmp_path)
+    cp.rename(tmp_path / "current_paths.json")
+    pcb, res = prune_board(p, verify_drc=False, current_paths=[])
+    assert len(res.accepted) == 1 and not res.rejected
+
+
 def test_audit_gate_inactive_without_specs(tmp_path, forced_looping_plan):
     p, _ = _gate_board(tmp_path)
     pcb, res = prune_board(p, verify_drc=False)

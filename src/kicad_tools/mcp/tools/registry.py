@@ -1564,6 +1564,112 @@ register_tool(
 )
 
 
+def _probe_items_param() -> dict[str, Any]:
+    return {
+        "type": "array",
+        "description": (
+            "Proposed copper items, same shape as the kct probe items file: "
+            '{"type": "segment"|"arc"|"via", "net", "layer", "width", '
+            '"start"/"mid"/"end"/"at"/"size"/"drill"/"layers" as each type '
+            "needs}. Coordinates are absolute board millimetres."
+        ),
+    }
+
+
+def _handler_probe_items(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle probe_items tool call."""
+    from kicad_tools.cli.probe_cmd import parse_items, probe_items
+
+    items = parse_items({"items": params["items"]})
+    outcome = probe_items(params["pcb_path"], items, manufacturer=params.get("mfr"))
+    return {"success": outcome.report["ok"], **outcome.report}
+
+
+register_tool(
+    name="probe_items",
+    description=(
+        "Check a batch of proposed tracks, arcs and vias against the board "
+        "without writing anything: pairwise clearances and shorts, the "
+        "net-agnostic copper-gap and thin-copper-sliver fab passes, zone "
+        "fills, board edge, trace/via dimensions, net-class clearances, via "
+        "placement, THT-to-SMD pad spacing. The copper-gap pass is "
+        "net-agnostic: a same-net parallel track can fail it. Reports only "
+        "findings the batch adds; pre-existing board problems never fail a "
+        "probe. Same rules as kct check."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Path to .kicad_pcb file",
+            },
+            "items": _probe_items_param(),
+            "mfr": {
+                "type": "string",
+                "description": "Manufacturer rules (default: resolved like kct check)",
+            },
+        },
+        required=["pcb_path", "items"],
+    ),
+    handler=_handler_probe_items,
+    category="routing",
+)
+
+
+def _handler_apply_items_checked(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle apply_items_checked tool call."""
+    from kicad_tools.cli.probe_cmd import apply_items_checked, parse_items
+
+    items = parse_items({"items": params["items"]})
+    report, _code = apply_items_checked(
+        params["pcb_path"],
+        items,
+        backup_path=params.get("backup_path"),
+        manufacturer=params.get("mfr"),
+    )
+    return {"success": report["written"] is not None, **report}
+
+
+register_tool(
+    name="apply_items_checked",
+    description=(
+        "Probe a batch of proposed tracks, arcs and vias (see probe_items), "
+        "then write them to the board only when every item passes. The write "
+        "is atomic, the previous bytes are backed up (default <pcb>.kicad_pcb.bak), "
+        "and a board that changed on disk since it was read is refused with "
+        "nothing written. Items whose dedupe key is already on the board "
+        "(segments: net, layer, unordered endpoints and width; vias: net, "
+        "position and layers -- size and drill are outside the key) are "
+        "skipped by dedupe and reported under items_skipped_as_duplicate, "
+        "not items_written. A skipped via counts as a duplicate if any via "
+        "sharing its key has the requested size and drill. Otherwise it "
+        "is reported under items_skipped_conflicting (conflicting_via_details "
+        "names the existing and requested size/drill). Arcs have no dedupe "
+        "path and are appended on every successful apply."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Path to .kicad_pcb file (written in place)",
+            },
+            "items": _probe_items_param(),
+            "backup_path": {
+                "type": "string",
+                "description": "Backup path for the previous bytes (default: <pcb>.kicad_pcb.bak)",
+            },
+            "mfr": {
+                "type": "string",
+                "description": "Manufacturer rules (default: resolved like kct check)",
+            },
+        },
+        required=["pcb_path", "items"],
+    ),
+    handler=_handler_apply_items_checked,
+    category="routing",
+)
+
+
 def _handler_route_net_auto(params: dict[str, Any]) -> dict[str, Any]:
     """Handle route_net_auto tool call."""
     from kicad_tools.mcp.tools.routing import route_net_auto

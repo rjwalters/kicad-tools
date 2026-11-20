@@ -469,6 +469,28 @@ def test_known_issue_in_the_bundle_matches_the_readiness_refresh(mod, tmp_path, 
 
 
 # --------------------------------------------------------------------------- PDFs (#7675)
+def test_normalize_pdf_timestamps_anchors_creation_date(mod, tmp_path, monkeypatch):
+    """Two plots differing only in wall-clock stamps normalize identical (#9536)."""
+    base = b"BT /F1 12 Tf (x) Tj ET\n/CreationDate (D:2026:11:19:21:01:32)\ntrailer"
+    later = b"BT /F1 12 Tf (x) Tj ET\n/CreationDate (D:2026:11:20:00:12:07)\ntrailer"
+    one, two = tmp_path / "one.pdf", tmp_path / "two.pdf"
+    one.write_bytes(base)
+    two.write_bytes(later)
+
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1760000000")
+    mod._normalize_pdf_timestamps(one)
+    mod._normalize_pdf_timestamps(two)
+    assert one.read_bytes() == two.read_bytes()
+    assert b"D:2025:10:09:08:53:20" in one.read_bytes()
+
+    # Without the anchor the plotted bytes are untouched.
+    three = tmp_path / "three.pdf"
+    three.write_bytes(later)
+    monkeypatch.delenv("SOURCE_DATE_EPOCH")
+    mod._normalize_pdf_timestamps(three)
+    assert three.read_bytes() == later
+
+
 def test_replot_covers_every_committed_pdf(mod):
     """A whole-bundle re-plot rewrites every committed PDF (Issue #7675).
 
@@ -479,8 +501,11 @@ def test_replot_covers_every_committed_pdf(mod):
         mfg = REPO / "boards" / board / "output" / "manufacturing"
         committed = {p.relative_to(mfg).as_posix() for p in mfg.rglob("*.pdf")}
         if bundle.gerber_members:
-            # Board 04 re-plots only Gerber members; it ships no schematic PDF.
+            # Board 04 re-plots its Gerber members and assembly drawings from
+            # the published routed PCB; report.pdf comes from the recipe's
+            # bundle regeneration, and it ships no schematic PDF.
             assert "schematic.pdf" not in committed and bundle.schematic_pdfs == ()
+            assert committed == {"report.pdf", *(name for name, _ in bundle.assembly_pdfs)}
             continue
         replotted = {
             *(m for m in bundle.export_members if m.endswith(".pdf")),
@@ -524,8 +549,15 @@ def test_board04_config_reuses_the_shared_pipeline(mod):
     bundle, cfg = mod.BUNDLES["04-stm32-devboard"], mod.rr.BOARDS["04-stm32-devboard"]
     # The board-local check hook is what repin_staged's gate runs, not bare kct check.
     assert cfg.check_script == "check_manufacturing.py"
-    # Only the copper and front-silk members follow the saved fills.
-    assert bundle.export_members == () and bundle.assembly_pdfs == () and bundle.renders is None
+    # Only the copper and front-silk members follow the saved fills, and the
+    # assembly drawings are re-plotted from the published routed PCB with
+    # them (Issue #9536: skipping them re-pinned the previous copper's
+    # drawings under the new manifest hashes).
+    assert bundle.export_members == () and bundle.renders is None
+    assert [name for name, _ in bundle.assembly_pdfs] == [
+        "assembly-front.pdf",
+        "assembly-back.pdf",
+    ]
     assert [p.search("b-F_Cu.gbr") is not None for p in bundle.gerber_members] == [True, False]
     assert [p.search("b-F_Silkscreen.gbr") is not None for p in bundle.gerber_members] == [
         False,

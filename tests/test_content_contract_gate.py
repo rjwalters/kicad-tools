@@ -18,11 +18,20 @@ def test_ci_content_gate_is_unconditional() -> None:
     lint = workflow["jobs"]["lint"]
     assert "if" not in lint
     assert "needs" not in lint
-    steps = [step for step in lint["steps"] if step.get("run") == f"bash {RUNNER}"]
+    # Issue #9340: the lint job's gating commands moved into one script the
+    # local gate also runs (2am#7561 ruling); the workflow calls it from a
+    # single unconditional step.
+    steps = [step for step in lint["steps"] if step.get("run") == "bash scripts/ci/jobs/lint.sh"]
     assert len(steps) == 1
     assert "if" not in steps[0]
     assert not steps[0].get("continue-on-error", False)
     assert not lint.get("continue-on-error", False)
+    # The content-contract runner is invoked by that script, unconditionally
+    # (the script is a linear ruff/ruff/contracts sequence).
+    job_script = (ROOT / "scripts/ci/jobs/lint.sh").read_text()
+    assert job_script.count(f"bash {RUNNER}") == 1, (
+        "scripts/ci/jobs/lint.sh must invoke the content-contract runner exactly once"
+    )
 
 
 def test_local_lint_propagates_content_failure(tmp_path: Path) -> None:
@@ -31,6 +40,9 @@ def test_local_lint_propagates_content_failure(tmp_path: Path) -> None:
         target = tmp_path / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / relative, target)
+    # Issue #9340: the dispatcher runs the real per-job script; copy the
+    # whole jobs directory (its lint.sh sources _lib.sh).
+    shutil.copytree(ROOT / "scripts/ci/jobs", tmp_path / "scripts/ci/jobs")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     uv = bin_dir / "uv"

@@ -67,7 +67,7 @@ from .violations import DRCViolation
 Status = Literal["covered", "partial", "not_covered"]
 
 #: Where the observed categories/thresholds came from (counts are hand-recorded).
-SOURCE = "https://github.com/rjwalters/kicad-tools/issues/8838"
+SOURCE = "https://github.com/2AMLogic/kicad-tools/issues/8838"
 RETRIEVED = "2026-11-12"
 
 #: Manufacturer ids the table applies to (``jlcpcb`` and its ``jlcpcb-tier*`` profiles).
@@ -108,10 +108,14 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "partial",
         True,
         # Non-pad copper spacing: the pair-type clearance ids with no pad on
-        # either side (segment/via gaps -- the fab's trace_spacing
-        # population), plus the trace-band-graded fab-view findings
-        # (``#trace`` qualified key, issue #8972).
+        # either side (segment/arc/via gaps -- the fab's trace_spacing
+        # population; the arc pairs since issue #9713), plus the
+        # trace-band-graded fab-view findings (``#trace`` qualified key,
+        # issue #8972).
         (
+            "clearance_arc_arc",
+            "clearance_arc_segment",
+            "clearance_arc_via",
             "clearance_segment_segment",
             "clearance_segment_via",
             "clearance_via_via",
@@ -135,12 +139,13 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         ("clearance", "physical_copper_gap"),
         "partial",
         True,
-        # Pad-involving clearance ids plus the pad populations of the
-        # physical pass: pad-band-graded and mask-bridge findings via the
+        # Pad-involving clearance ids (``clearance_arc_pad`` since #9713)
+        # plus the pad populations of the physical pass: pad-band-graded and mask-bridge findings via the
         # ``#pad`` qualified key, and the bare id for the bandless emit
         # sites (the legacy opt-in pass, zone-fill `info` findings) so the
         # partition stays total (issue #8972).
         (
+            "clearance_arc_pad",
             "clearance_pad_pad",
             "clearance_pad_segment",
             "clearance_pad_via",
@@ -163,7 +168,14 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "pair per layer (closest measurement wins -- measured on the #9034 "
         "fixture), so it cannot come from per-edge inflation within a pair. "
         "No fab-sourced edge justifies a threshold change, so the stricter "
-        "same-net error stays (#8938). Zone-fill (pour) gaps are "
+        "same-net error stays (#8938). One narrow exception (#9420): two pads of "
+        "the SAME footprint on one identical non-empty net in the 2 oz pad "
+        "mask-bridge check report at info (still listed). Located fab evidence "
+        "on the consumer board: the fab measured the two 0.19 mm pad pairs "
+        "(round 0.81 mm pads of RF_Module:ESP32-C3-WROOM-02's ground array) "
+        "and rated them Good under pad spacing, and its Soldermask bridge row "
+        "was empty for the whole board (2026-11-18). Different footprints, "
+        "different nets and every other pair keep the error. Zone-fill (pour) gaps are "
         "kct's own advisory only and report at info, not tiered: JLCDFM does "
         "not judge pour clearance -- 1,516 pour-to-pad gaps at 0.10-0.13 mm "
         "went unflagged on the #8938 board -- so kct's warning count for this "
@@ -181,7 +193,8 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "source. Observed 5 danger, all same-net: a track running beside, along, or "
         "leaving and jogging beside its own pad at 0-0.08 mm (#8914); those shapes "
         "stay errors at the 0.09 mm band. Since #8858 one shape is `within_own_pad` "
-        "at info: a straight track entering its own plain pad once, at 45 degrees or "
+        "at info: a straight track entering its own pad (plain, or custom since "
+        "#9750) once, at 45 degrees or "
         "steeper, exposing nothing beyond the pad and leaving no more copper under "
         "mask beside the opening than that one crossing (or a track lying wholly on "
         "the pad). The fab did not flag plain entries (#8914; 655 entries on the "
@@ -197,14 +210,33 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "gaps 0.2 and 0.3 mm; #8858, 2026-11-17); same-net pairs were absent, not "
         "rated Good. Unconnected same-net pour, a pour body "
         "inside 0.15 mm, and pour exposed by a positive expansion keep their "
-        "verdict. Since #9436 a third shape is `own_pour_solid` at info: a plain "
+        "verdict. Since #9436 a further shape is `own_pour_solid` at info: a plain "
         "pad whose effective zone connection is solid and whose fill shows the "
         "join, at 0 mm expansion with nothing beyond the pad. The consumer board "
         "had 13 such pads solid in their own-net pour; JLCDFM (`--mfr jlcpcb`, "
         "2026-11-18) reported 0 danger / 0 warning for them. "
-        "Different-net pour on that board agrees with the fab: R2.1 at "
+        "Since #9420 another shape is `within_own_footprint` at info: a "
+        "single plain-pad opening (not a merged region) overlapping only the "
+        "same-net pad(s) of its own footprint, every owner and the exposed pad "
+        "on one identical non-empty net. JLCDFM located by position at that pad "
+        "array (#9420, 2026-11-18, one board, one export setting): the two 0.19 mm "
+        "pad pairs are Good under Pad spacing (Danger 0.1 mm, Warning 0.15 mm); "
+        "Soldermask bridge is empty board-wide (0 danger / 0 warning / 0 good); "
+        "none of the 6 Solder mask opening exposing trace warnings is at the pads "
+        "(nearest about 35 mm away); and the 19 Soldermask opening with multiple "
+        "segments warnings are reinforce-wire objects (8 of the 15 top-side items "
+        "located by position, 40 mm or more away; the other 11 by object type "
+        "only). So the fab lists no soldermask item at those pads, but it cannot "
+        "see footprints or nets: this is a presentation-only downgrade (finding "
+        "kept, distance intact), not a fab-confirmed pass. Different-net "
+        "pour on that board agrees with the fab: R2.1 at "
         "0.1275 mm is a kct warning (fab: warning, 0.13 mm); R1.1 and R1.2 at "
         "0.2 mm get no finding (fab: good). "
+        "Since #9750 `within_own_pad` also covers a bar wider than its own pad "
+        "whose copper covers the whole perimeter band (the pad's own perimeter "
+        "is the allowance, so round and square pads agree) and a track entering "
+        "a bare custom pad measured through its real copper outline; padstack "
+        "and chamfered pads, and the own-pour class, keep their verdict. "
         "Since #8914 an assessment that could not complete reports "
         "`mask_to_copper_incomplete` at info, so zero findings no longer read as a "
         "clean board.",
@@ -231,7 +263,19 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "sub-1.0 mm fan-out vias as the hole side. A pad shape the rule "
         "cannot measure now reports `tht_smd_spacing_incomplete` at info instead of "
         "vanishing. Fab-view gated -- runs only when the effective --mfr is exactly "
-        "`jlcpcb`. Observed 5 danger.",
+        "`jlcpcb`. Observed 5 danger. Thresholds are 2.032 mm error / 3.05 mm "
+        "warning since #9421 (were 2.0 / 2.7): the fab rated two pairs at 2.00 and "
+        "2.025 mm danger that the 2.0 mm floor passed. 2.032 mm (80 mil) is the "
+        'likely real limit; the fab\'s "2.03" display fits either, so this is '
+        "one-board evidence, not confirmed. Source: jlcdfm.com Alert value panel, "
+        "read 2026-11-17/18, 4-layer, 2 oz outer copper. Same-panel values kct "
+        "does not gate: via-to-pad 0.1 / 0.15 mm (danger / warning) is "
+        "**not gated, observed** -- a single-board observation, and the "
+        "`via_at_pad_edge` advisory already warns on that geometry, so no new rule "
+        "or flag was added; pad-to-line 0.1 / 0.15 mm and mask-opening-exposing-"
+        "trace 0.08 / 0.15 mm are recorded here only. Gerber export: toggling "
+        "aperture macros changes how the fab reads pads; `kct export` writes "
+        "macros off (detail in the #8858 comment 6970004546).",
     ),
     ParityRow(
         "silkscreen_to_pad",
@@ -254,7 +298,12 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "Threshold is 0 mm, so a silk-to-hole gap narrower than JLCDFM's clearance "
         "but not touching is still unchecked, and text is tested as its bounding box "
         "rather than glyph outlines. Observed 75 danger, not reproduced against the "
-        "live tool.",
+        "live tool. Fab thresholds read 2026-11-17/18 (jlcdfm.com Alert value "
+        "panel, 4-layer, 2 oz outer copper): danger 0.13 mm / warning 0.18 mm "
+        "silk-to-hole, against kct's overlap-only threshold of 0 -- 27 kct "
+        "warnings vs 50 fab danger on that board. `SILK_HOLE_CLEARANCE_MM` is "
+        "shared with the silkscreen repair tool, so it is deliberately unchanged "
+        "(#9421).",
     ),
     ParityRow(
         "annular_ring",
@@ -340,7 +389,13 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "`silkscreen_text_thickness` (text) enforce JLCPCB's published >= 0.15 mm. "
         "Not covered: JLCDFM flags silk that meets that floor (#8844: 63 "
         "warnings on gerbers with no silk stroke below 0.150 mm). How JLCDFM "
-        "selects the items it flags is unknown (#8943).",
+        "selects the items it flags is unknown (#8943). Text height is a separate "
+        "floor: JLCPCB publishes 1.0 mm (40 mil) minimum character height "
+        "(pcb-capabilities, verified 2026-11-18) and `silkscreen_text_height` "
+        "enforces it; a project may declare a smaller reference-designator height "
+        "(`silkscreen_min_reference_height_mm`, >= 0.8 mm, #9448) which relaxes "
+        "that floor for designators only and is reported by `kct readiness` as a "
+        "declared deviation -- the fab's own limit is unchanged.",
     ),
     ParityRow(
         "fiducial",

@@ -24,7 +24,7 @@ import random
 
 import pytest
 
-from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.pairwise_clearance import (
@@ -37,10 +37,7 @@ from kicad_tools.router.pairwise_clearance import (
 from kicad_tools.router.primitives import Pad, Route, Segment
 from kicad_tools.router.rules import DesignRules, NetClassRouting
 
-requires_cpp = pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ router backend not available",
-)
+requires_cpp = pytest.mark.requires_router_cpp
 
 # IEC 60664-1, PD2, material group IIIa @ 150 V -> 1.6 mm (same constant the
 # Python-side suite pins in ``test_pairwise_clearance.py``).

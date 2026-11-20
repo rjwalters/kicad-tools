@@ -78,6 +78,7 @@ from kicad_tools.schema.pcb import PCB, Pad, Segment, _mm_atom
 
 if TYPE_CHECKING:
     from kicad_tools.router.current_paths import CurrentPathSpec
+    from kicad_tools.router.optimizer.geometry import PadMaskZone
 
 logger = logging.getLogger(__name__)
 
@@ -976,12 +977,18 @@ def _try_snap(
     e: int,
     removed: set[int],
     baseline: frozenset[frozenset[int]],
+    zones: Sequence[PadMaskZone] = (),
 ) -> None:
     """Snap end ``e`` of segment ``i`` -- and every track end sharing that
     point -- onto the nearest anchoring via/pad centre, if that is safe.
 
     Moving the whole coincident group keeps the shared joint shared; moving
     one end alone would strand its neighbours off-centre.
+
+    ``zones`` (issue #9524) are the pads' mask-opening zones: a snap whose
+    re-aimed body would enter an opening the old geometry avoided is refused
+    (ending on the target pad itself stays allowed -- that is the terminating
+    entry every escape wants).
     """
     n = model.nodes[i]
     p = _end_pt(n, e)
@@ -1048,6 +1055,32 @@ def _try_snap(
             for x in (0, 1)
         )
     )
+    if ok and zones:
+        # Issue #9524: nodes are in their moved state here; ``old`` holds the
+        # pre-snap geometry.  The guard's ``moves`` tuples take the OLD
+        # geometry first (the already-crossed -> exempt side), then the moved
+        # one -- the order the veto branch is written against.
+        from kicad_tools.router.optimizer.geometry import snap_preserves_pad_zones
+
+        ok = snap_preserves_pad_zones(
+            zones,
+            [
+                (
+                    old[k][0][0],
+                    old[k][0][1],
+                    old[k][1][0],
+                    old[k][1][1],
+                    model.nodes[k].a[0],
+                    model.nodes[k].a[1],
+                    model.nodes[k].b[0],
+                    model.nodes[k].b[1],
+                    model.nodes[k].layers[0],
+                    getattr(model.nodes[k].ref, "net_name", "") or "",
+                )
+                for k, _x in movers
+            ],
+            c,
+        )
     if ok:
         for k, x in movers:
             plan.snaps.append((model.nodes[k].index, ("start", "end")[x], c))
@@ -1067,9 +1100,11 @@ def _try_reanchor(
     e: int,
     removed: set[int],
     baseline: frozenset[frozenset[int]],
+    zones: Sequence[PadMaskZone] = (),
 ) -> None:
     """Issue #8259: move an overlap-held end onto the via / pad centre, or add a
-    same-layer stub from the centre when moving it would tilt an on-angle track."""
+    same-layer stub from the centre when moving it would tilt an on-angle track.
+    """
     n = model.nodes[i]
     if getattr(n.ref, "locked", False) or model.overlap[i] or model.anch[i][e]:
         return
@@ -1096,6 +1131,33 @@ def _try_reanchor(
     _set_end(n, e, c)
     model.relink(i)
     if model.partition(removed) == baseline and model.end_ok(i, removed):
+        if zones:
+            from kicad_tools.router.optimizer.geometry import snap_preserves_pad_zones
+
+            pad_ok = snap_preserves_pad_zones(
+                zones,
+                [
+                    (
+                        old[0][0],
+                        old[0][1],
+                        old[1][0],
+                        old[1][1],
+                        n.a[0],
+                        n.a[1],
+                        n.b[0],
+                        n.b[1],
+                        n.layers[0],
+                        getattr(n.ref, "net_name", "") or "",
+                    )
+                ],
+                c,
+            )
+            if not pad_ok:
+                # Issue #9524: the re-aim would sweep the body through a pad's
+                # mask opening -- keep the overlap-held end where it was.
+                n.a, n.b = old
+                model.relink(i)
+                return
         plan.snaps.append((n.index, ("start", "end")[e], c))
         return
     n.a, n.b = old
@@ -2020,6 +2082,33 @@ def required_widths_for(pcb: PCB, current_a: float) -> dict[str, float]:
     return out
 
 
+def current_path_declarations(
+    pcb_path: Path, sidecar: Path
+) -> tuple[list[CurrentPathSpec], set[str], dict[str, dict[str, float]]]:
+    """Load a resolved current-paths sidecar into prune's planning inputs.
+
+    Returns ``(specs, declared_nets, required_widths)``: the parsed specs,
+    the net names they declare, and each declared net's per-layer IPC-2221
+    width (``required_widths_for``, at the board's own stackup copper
+    weight).  Raises on an unreadable sidecar or board; the caller decides
+    whether that is fatal (explicit ``--current-paths``) or a warning
+    (auto-discovered, mirroring ``kct check``'s contract).  Issue #9747:
+    one loader shared by ``kct pcb prune`` and the readiness cleanup.
+    """
+    from kicad_tools.router.current_paths import load_current_path_specs
+
+    specs = load_current_path_specs(sidecar)
+    declared_nets = {spec.net_name for spec in specs}
+    required_widths: dict[str, dict[str, float]] = {}
+    board = PCB.load(pcb_path)
+    for spec in specs:
+        need = required_widths_for(board, spec.thermal_design_current().current_a)
+        have = required_widths.setdefault(spec.net_name, {})
+        for layer, width in need.items():
+            have[layer] = max(have.get(layer, 0.0), width)
+    return specs, declared_nets, required_widths
+
+
 def _plan_declared_loops(
     model: _NetModel,
     plan: NetPlan,
@@ -2123,6 +2212,7 @@ def _plan_net(
     declared: bool = False,
     wide: float = DEFAULT_WIDE_MM,
     required: Required = 0.0,
+    zones: Sequence[PadMaskZone] = (),
 ) -> NetPlan:
     plan = NetPlan(net_number=net_number)
     baseline = model.partition(set())
@@ -2206,7 +2296,7 @@ def _plan_net(
         if i in removed or model.protected[i]:
             continue
         for e in (0, 1):
-            _try_snap(model, plan, i, e, removed, baseline)
+            _try_snap(model, plan, i, e, removed, baseline, zones)
 
     # Overlap-held ends that survive: centre them on the via / pad (issue #8259).
     for i in seg_ids:
@@ -2214,7 +2304,7 @@ def _plan_net(
             continue
         for e in (0, 1):
             if model.held[i][e]:
-                _try_reanchor(model, plan, i, e, removed, baseline)
+                _try_reanchor(model, plan, i, e, removed, baseline, zones)
 
     done = _plan_collinear_merges(model, plan, removed)
     _plan_anchored_merges(model, plan, removed, done)
@@ -2275,6 +2365,12 @@ def plan_prune(
     straddle it are appended to ``region_skipped_out``.
     """
     eff_wide = math.inf if wide is None else wide
+    # Issue #9524: the pads' mask-opening zones (board-relative, like every
+    # model coordinate here) gate endpoint snaps that would swing copper into
+    # an opening.
+    from kicad_tools.router.optimizer.geometry import pad_mask_zones_from_pcb
+
+    zones = pad_mask_zones_from_pcb(pcb)
     names = (
         {net.number: net.name for net in getattr(pcb, "nets", {}).values()}
         if isinstance(getattr(pcb, "nets", None), dict)
@@ -2293,6 +2389,7 @@ def plan_prune(
             declared=declared,
             wide=eff_wide,
             required=(required_widths or {}).get(net_name, 0.0) if wide is None else 0.0,
+            zones=zones,
         )
         if uncut_out is not None:
             uncut_out.extend({"net": net_name or net_number, **u} for u in plan.uncut_loops)
@@ -2574,11 +2671,15 @@ def prune_board(
 def _gate_specs(
     pcb_path: Path, current_paths: Sequence[CurrentPathSpec] | None
 ) -> Sequence[CurrentPathSpec]:
-    """Specs for the audit gate: explicit ones, else the board's sidecar (#8687).
+    """Specs for the audit gate: the caller's, else the board's sidecar (#8687).
 
+    ``current_paths=None`` means "not requested" and keeps the historical
+    discovery (direct callers rely on it).  Any sequence -- including an
+    empty one, an intentional suppression or a sidecar with no paths -- is
+    taken as the caller's resolution and never re-discovered (Issue #9747).
     Discovery only feeds the gate; an unreadable sidecar warns and disables it.
     """
-    if current_paths:
+    if current_paths is not None:
         return current_paths
     from kicad_tools.router.current_paths import (
         discover_current_paths_sidecar,

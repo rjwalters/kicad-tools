@@ -483,6 +483,16 @@ def init_project(
     # Create/update DRU file
     try:
         existing_dru = dru_path.read_text(encoding="utf-8") if dru_path.exists() else None
+        # Issue #9448: honour a project-declared designator height so a re-run
+        # does not collapse the split silkscreen rule back to the blanket floor.
+        if rules.declared_reference_height_mm is None:
+            from dataclasses import replace
+
+            from kicad_tools.sync.discover import resolve_declared_reference_height_for_pcb
+
+            declared_height = resolve_declared_reference_height_for_pcb(dru_path)
+            if declared_height is not None:
+                rules = replace(rules, declared_reference_height_mm=declared_height)
         dru_content = update_dru_content(existing_dru, rules, profile.id, layers, path=dru_path)
         dru_path.write_text(dru_content, encoding="utf-8")
     except OSError as e:

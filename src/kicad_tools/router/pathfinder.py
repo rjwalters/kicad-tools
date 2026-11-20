@@ -20,6 +20,7 @@ different routing strategies. See heuristics.py for available options.
 import contextlib
 import heapq
 import itertools
+import logging
 import math
 import os
 import sys
@@ -28,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .body_surcharge import BodySurchargeRegion
     from .pairwise_clearance import PairwiseClearanceTable
 
 import numpy as np
@@ -46,7 +48,21 @@ from .primitives import Pad, Route, Segment, Via
 from .quantize import dogleg_points, is_45_aligned
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting, layer_permitted
 from .search_radius import search_radius_cells
-from .via_clearance import point_clear_of_copper, segment_clears_foreign_via
+from .via_clearance import (
+    OWN_NET_BAND_STEP_TOL_MM,
+    _segment_box_gap_mm,
+    point_clear_of_copper,
+    segment_clears_foreign_via,
+)
+
+# Issue #9622: the Python under-body mirror packs one bit per surcharge
+# region into per-cell int64 bitmasks, one plane per
+# ``_UNDER_BODY_REGIONS_PER_PLANE`` regions.  Boards with more fine-pitch
+# ICs than one plane simply get more planes, so every region stays priced
+# on the Python engine exactly like the uncapped C++ budget lookup (a
+# 64-region cap made the charged set depend on component insertion order,
+# review of #9635).
+_UNDER_BODY_REGIONS_PER_PLANE = 64
 
 # Issue #3135: env-gated A* neighbor-expansion trace.  Set
 # ``KICAD_ROUTER_TRACE_ASTAR=1`` to log every accept/reject decision from the
@@ -56,6 +72,8 @@ from .via_clearance import point_clear_of_copper, segment_clears_foreign_via
 # is performed once at module load; the resulting bool is cached in
 # ``_ASTAR_TRACE_ENABLED`` for branch-predictable use in the hot loop.
 _ASTAR_TRACE_ENABLED = os.environ.get("KICAD_ROUTER_TRACE_ASTAR", "").strip() not in ("", "0")
+
+logger = logging.getLogger(__name__)
 
 
 def _astar_trace(message: str) -> None:
@@ -446,6 +464,13 @@ class Router:
         self.last_route_deadline_hit: bool = False
         self.last_route_deadline_iterations: int = 0
 
+        # Issue #9019 (review): the own-net slit-band gate's telemetry.  A
+        # refusal is one step the gate turned away; a fallback is one search
+        # re-run with the gate suspended (the #6761-escape-fence analogue),
+        # so a silent gate-off retry is visible in the routing stats.
+        self._own_net_band_refusals: int = 0
+        self._own_net_band_fallbacks: int = 0
+
         # Neighbor offsets: (dx, dy, dlayer, cost_multiplier)
         # Same layer moves - orthogonal directions
         self.neighbors_2d = [
@@ -608,6 +633,10 @@ class Router:
         # #6315).  Same invalidation contract as ``_non_th_pad_cache``: the
         # pad count, plus ``invalidate_pad_geometry_cache`` for in-place moves.
         self._pad_bucket_cache: tuple[int, dict[tuple[int, int], list[Pad]]] | None = None
+        # Issue #9019: own-net SMD pad boxes per (net, layer) for the slit-band gate.
+        self._own_band_cache: (
+            tuple[int, dict[tuple[int, int], list[tuple[float, float, float, float]]]] | None
+        ) = None
         # Issue #6389: memo of ``_pad_step_clear`` verdicts.  The disc, the
         # centre cell and both diagonal corners of one step all ask the same
         # question.  Dropped with the pad-geometry caches (every route start)
@@ -753,6 +782,13 @@ class Router:
         self._pairwise_band_kernel_cache: tuple[tuple[int, int], np.ndarray, np.ndarray] | None = (
             None
         )
+
+        # Issue #9622: cached per-cell region-bitmask planes for the
+        # under-body surcharge, identity-checked against the grid's region
+        # list (which expires when the pad registry changes).
+        self._under_body_mask_cache: (
+            tuple[list[BodySurchargeRegion], tuple[np.ndarray, ...]] | None
+        ) = None
 
         # Issue #2929: Per-A*-call wall-clock instrumentation.  When
         # ``_per_call_timing_enabled`` is True, every ``route()`` invocation
@@ -2120,6 +2156,101 @@ class Router:
                     width, self.rules.get_neck_down_width(0.0, pitch, base_width=base_width)
                 )
         return refs, width
+
+    def _own_net_band_bboxes(self, net: int, layer: int) -> list[tuple[float, float, float, float]]:
+        """Own-net SMD pad boxes on grid ``layer`` for the slit-band gate (#9019).
+
+        ``(min_x, min_y, max_x, max_y)`` per pad, the shape
+        :func:`~kicad_tools.router.via_clearance.same_net_segment_pad_gap_acceptable`
+        takes.  Through-hole pads are skipped (the #9012 predicate's SMD
+        scope).  Cached per ``(net, layer)`` and dropped with the pad-geometry
+        caches.
+        """
+        pads = self.grid._pads
+        cache = self._own_band_cache
+        if cache is None or cache[0] != len(pads):
+            cache = (len(pads), {})
+            self._own_band_cache = cache
+        key = (net, layer)
+        hit = cache[1].get(key)
+        if hit is None:
+            hit = []
+            for pad in pads:
+                if pad.net != net or pad.through_hole or getattr(pad, "drill", 0.0) > 0:
+                    continue
+                if self.grid.layer_to_index(pad.layer.value) != layer:
+                    continue
+                hit.append(
+                    (
+                        pad.x - pad.width / 2.0,
+                        pad.y - pad.height / 2.0,
+                        pad.x + pad.width / 2.0,
+                        pad.y + pad.height / 2.0,
+                    )
+                )
+            cache[1][key] = hit
+        return hit
+
+    def _own_net_band_step_ok(
+        self,
+        fx: int,
+        fy: int,
+        gx: int,
+        gy: int,
+        layer: int,
+        net: int,
+        width: float,
+        edge_mm: float,
+        exclude_pts: tuple[tuple[float, float], ...] = (),
+    ) -> bool:
+        """Is the step ``(fx,fy)->(gx,gy)`` out of the own-net pad slit band? (#9019).
+
+        Python twin of ``Pathfinder::own_net_band_step_ok``.  The step's swept
+        copper must UNION an own-net SMD pad (gap <= 0) or keep the fab
+        detection edge ``edge_mm`` from it -- the two acceptable regions of
+        :func:`~kicad_tools.router.via_clearance.same_net_segment_pad_gap_acceptable`
+        (#9012); the open band between is refused.  The same exact gap, with
+        the float32-noise slack ``OWN_NET_BAND_STEP_TOL_MM`` both backends
+        share.  ``edge_mm <= 0`` keeps the gate off.
+
+        ``exclude_pts`` are world points (the search's start/end pad centres).
+        A pad whose metal box contains one is skipped: the leg is UNIONED with
+        that pad through the path itself, so its isolated gap goes positive
+        (inside the band) as soon as a step leaves the pad's half-trace halo
+        even though no slit exists -- measuring every step against the pad
+        being left or approached refused every planar exit and pushed each
+        route through a pair of pad-edge vias (9019 review).  Every OTHER
+        own-net pad of the net is still gated, so a trace skirting a
+        third pad in the band is still refused.  Each refusal increments
+        ``_own_net_band_refusals`` (the fallback retry's evidence).
+        """
+        if edge_mm <= 0:
+            return True
+        bboxes = self._own_net_band_bboxes(net, layer)
+        if not bboxes:
+            return True
+        ax, ay = self.grid.grid_to_world(fx, fy)
+        bx, by = self.grid.grid_to_world(gx, gy)
+        half = width / 2
+        reach = half + edge_mm
+        lo_x, hi_x = min(ax, bx) - reach, max(ax, bx) + reach
+        lo_y, hi_y = min(ay, by) - reach, max(ay, by) + reach
+        near = [
+            bb
+            for bb in bboxes
+            if bb[2] >= lo_x and bb[0] <= hi_x and bb[3] >= lo_y and bb[1] <= hi_y
+        ]
+        if not near:
+            return True
+        tol = OWN_NET_BAND_STEP_TOL_MM
+        for bb in near:
+            if any(bb[0] <= px <= bb[2] and bb[1] <= py <= bb[3] for px, py in exclude_pts):
+                continue
+            gap = _segment_box_gap_mm(ax, ay, bx, by, half, bb)
+            if tol < gap < edge_mm - tol:
+                self._own_net_band_refusals += 1
+                return False
+        return True
 
     def _own_pad_step_clear(
         self,
@@ -3720,6 +3851,102 @@ class Router:
         self._pairwise_band_kernel_cache = ((hard_r, band), dist_sq, band_mask)
         return dist_sq, band_mask
 
+    # ------------------------------------------------------------------
+    # Under-body surcharge (Issue #9622, audit row 9)
+    # ------------------------------------------------------------------
+    #
+    # Python mirror of the C++ engine's under-body cost: CppPathfinder
+    # installs the same regions as per-net-filtered ``PadChannelBudget``
+    # entries, so both engines price the identical additive term through
+    # their per-cell cost lookups.  Regions come from the grid's cached
+    # ``under_body_surcharges`` (see ``body_surcharge.py``); a net with a
+    # pad on the component ("local") is exempt.  Dormant (``None`` mask
+    # array) on boards without a qualifying fine-pitch component or with
+    # ``rules.cost_under_body <= 0`` -- the hot loop then adds nothing and
+    # stays byte-identical to pre-#9622 behaviour.
+    #
+    # Where two regions overlap (two fine-pitch bodies whose margin-grown
+    # pad bboxes share cells), the C++ lookup builder SUMS the budgets
+    # (``out[key] += b.overflow_penalty`` in ``pathfinder.cpp``), so the
+    # mirror charges ``popcount(cell_mask & ~local_mask) * penalty``: one
+    # penalty per covering region the net is NOT local to.  The bitmask
+    # (rather than a single region id per cell) is what makes the two
+    # engines agree on overlaps -- and keeps the charge independent of the
+    # order the components were added in.
+
+    def _under_body_regions(self) -> "list[BodySurchargeRegion]":
+        """The board's under-body surcharge regions ([] when none)."""
+        return getattr(self.grid, "under_body_surcharges", None) or []
+
+    def _under_body_mask_planes(self) -> "tuple[np.ndarray, ...] | None":
+        """Per-cell region-bitmask planes (int64 each), or ``None``.
+
+        Region ``i`` (1-based, in the grid's region-list order
+        ``_under_body_net_state`` indexes the same way) sets bit
+        ``(i - 1) % 64`` of plane ``(i - 1) // 64`` in
+        ``plane[layer, gy, gx]`` when it covers the cell.  ALL regions are
+        packed -- one plane per
+        ``_UNDER_BODY_REGIONS_PER_PLANE`` regions -- so a board with more
+        fine-pitch bodies than one int64 holds keeps every region priced,
+        exactly like the uncapped C++ budget lookup, and the charged set
+        stays independent of component insertion order (a 64-region slice
+        made body 65 free in one add order and surcharged in the other;
+        review of #9635).  Cached until the grid's region list is replaced
+        (pad registry change), mirroring the grid's own invalidation
+        contract.
+        """
+        regions = self._under_body_regions()
+        if not regions or self.rules.cost_under_body <= 0.0:
+            return None
+        cached = self._under_body_mask_cache
+        if cached is not None and cached[0] is regions:
+            return cached[1]
+        mask = np.zeros((self.grid.num_layers, self.grid.rows, self.grid.cols), dtype=np.int64)
+        planes = [mask]
+        cols = self.grid.cols
+        rows = self.grid.rows
+        for i, region in enumerate(regions, start=1):
+            if (i - 1) % _UNDER_BODY_REGIONS_PER_PLANE == 0 and i > 1:
+                mask = np.zeros((self.grid.num_layers, rows, cols), dtype=np.int64)
+                planes.append(mask)
+            gx1 = max(0, region.gx1)
+            gy1 = max(0, region.gy1)
+            gx2 = min(cols - 1, region.gx2)
+            gy2 = min(rows - 1, region.gy2)
+            if gx1 > gx2 or gy1 > gy2:
+                continue
+            for layer in region.layers:
+                if 0 <= layer < self.grid.num_layers:
+                    mask[layer, gy1 : gy2 + 1, gx1 : gx2 + 1] |= np.int64(1) << np.int64(
+                        (i - 1) % _UNDER_BODY_REGIONS_PER_PLANE
+                    )
+        plane_tuple = tuple(planes)
+        self._under_body_mask_cache = (regions, plane_tuple)
+        return plane_tuple
+
+    def _under_body_net_state(self, net: int) -> tuple[tuple[int, ...], float]:
+        """``(per-plane non-local region bitmasks, per-region surcharge)``.
+
+        The returned tuple parallels ``_under_body_mask_planes``' planes:
+        entry ``c`` has bit ``(i - 1) % 64`` set for every region ``i`` of
+        plane ``c`` the net has NO pad on.  The hot loop charges, per plane,
+        ``popcount(cell_mask & nonlocal_mask) * surcharge`` -- summing the
+        planes then yields one penalty per covering non-local region, over
+        the FULL region list (no cap, no insertion-order dependence).
+        """
+        regions = self._under_body_regions()
+        plane_bits = _UNDER_BODY_REGIONS_PER_PLANE
+        local_masks = [0] * ((len(regions) + plane_bits - 1) // plane_bits)
+        for i, region in enumerate(regions, start=1):
+            if net in region.local_nets:
+                local_masks[(i - 1) // plane_bits] |= 1 << ((i - 1) % plane_bits)
+        nonlocal_masks = []
+        for c, local in enumerate(local_masks):
+            bits_in_plane = min(plane_bits, len(regions) - c * plane_bits)
+            nonlocal_masks.append(((1 << bits_in_plane) - 1) & ~local)
+        penalty = self.rules.cost_under_body * self.rules.cost_straight
+        return tuple(nonlocal_masks), penalty
+
     def _pairwise_gradient_band(self, net: int, deadline: float | None = None) -> np.ndarray | None:
         """Cells where :meth:`_pairwise_avoidance_cost` can be non-zero.
 
@@ -4197,6 +4424,7 @@ class Router:
         """
         self._non_th_pad_cache = None
         self._pad_bucket_cache = None  # Issue #6389
+        self._own_band_cache = None  # Issue #9019
         self._pad_step_memo.clear()
         self._pad_step_memo_token = None
         # Issue #5617: the two site-level via memos read exactly the state
@@ -4476,6 +4704,48 @@ class Router:
                     return False
         return True
 
+    def _route_impl_band_relaxed(self, *args, **kwargs) -> Route | None:
+        """``_route_impl`` with a one-shot retry off the own-net slit-band gate (#9019).
+
+        The band gate is a hard step refusal; on a pad whose every escape
+        step lands in the band it would turn a routable net into an unrouted
+        one.  Like the #6761 escape fence, it must reshape a route, never
+        lose a connection: when the gated search finds nothing AND the gate
+        actually refused at least one step of that search, retry once with
+        the gate suspended and count the fallback.  A failure the gate never
+        influenced (a drained budget, an unrelated blockage -- the refusal
+        counter did not move) is not retried: the second search would only
+        pay the gate's cost again and fail the same way.  The suspension is
+        one search, never the router: the counter and the log line are the
+        visible trace of every net routed gate-off.
+        """
+        band_gate_armed = (
+            not self.relief_mode
+            and not getattr(self, "_own_net_band_suspended", False)
+            and float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0) > 0.0
+        )
+        refusals_before = self._own_net_band_refusals
+        result = self._route_impl(*args, **kwargs)
+        if result is not None or not band_gate_armed:
+            return result
+        if getattr(self, "last_route_deadline_hit", False):
+            return result
+        if self._own_net_band_refusals <= refusals_before:
+            return result
+        self._own_net_band_fallbacks += 1
+        start_pad = args[0] if args else None
+        logger.info(
+            "own-net pad slit-band gate suspended for one retry (fallback #%d, "
+            "net=%s): gated search found no path",
+            self._own_net_band_fallbacks,
+            getattr(start_pad, "net_name", "?"),
+        )
+        self._own_net_band_suspended = True
+        try:
+            return self._route_impl(*args, **kwargs)
+        finally:
+            self._own_net_band_suspended = False
+
     def route(
         self,
         start: Pad,
@@ -4502,7 +4772,7 @@ class Router:
         if weight == 1.0 and net_weights:
             weight = net_weights.get(start.net, weight)
         if not self._per_call_timing_enabled:
-            return self._route_impl(
+            return self._route_impl_band_relaxed(
                 start,
                 end,
                 net_class=net_class,
@@ -4516,7 +4786,7 @@ class Router:
         t0 = time.monotonic()
         succeeded = False
         try:
-            result = self._route_impl(
+            result = self._route_impl_band_relaxed(
                 start,
                 end,
                 net_class=net_class,
@@ -4718,6 +4988,17 @@ class Router:
         own_gate_memo: dict[tuple[int, int, int, int, int], bool] = {}
         # The validator does not run on relief probes (#3438); neither does the gate.
         own_gate_active = not self.relief_mode
+        # Issue #9019: own-net pad slit-band gate inputs.  Off (edge 0) when the
+        # caller resolved no stackup edge; the validator-style relief probes skip it.
+        band_edge_mm = (
+            0.0
+            if self.relief_mode or getattr(self, "_own_net_band_suspended", False)
+            else float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
+        )
+        band_width = self._get_trace_width_for_net(start.net_name)
+        # The pads this leg is unioned with (its own start/end) are exempt
+        # from the band measure -- see ``_own_net_band_step_ok``.
+        band_exclude_pts = ((start.x, start.y), (end.x, end.y))
 
         start_approach_gx1 = start_metal_gx1 - pad_escape_margin
         start_approach_gy1 = start_metal_gy1 - pad_escape_margin
@@ -4878,6 +5159,27 @@ class Router:
                 0.0,
             ),
         )
+
+        # Issue #9622: soft under-body surcharge state.  ``None`` mask
+        # array (boards without a qualifying fine-pitch component, or the
+        # cost disabled) keeps the hot loop byte-identical to pre-#9622
+        # behaviour.  ``under_body_masks`` is the FIRST plane (the only
+        # one on boards with <= _UNDER_BODY_REGIONS_PER_PLANE bodies, i.e.
+        # every realistic board); ``under_body_extra`` carries the rest as
+        # ``(plane, nonlocal_mask)`` pairs for boards with more.
+        under_body_planes = self._under_body_mask_planes()
+        under_body_masks = under_body_planes[0] if under_body_planes else None
+        under_body_extra: tuple[tuple[np.ndarray, int], ...] = ()
+        under_body_nonlocal = 0
+        under_body_penalty = 0.0
+        if under_body_planes is not None:
+            nonlocal_masks, under_body_penalty = self._under_body_net_state(start.net)
+            under_body_nonlocal = nonlocal_masks[0]
+            if len(under_body_planes) > 1:
+                under_body_extra = tuple(
+                    (plane, mask)
+                    for plane, mask in zip(under_body_planes[1:], nonlocal_masks[1:], strict=True)
+                )
 
         # Create heuristic context - for PTH end pads, use closest routable layer
         # for heuristic estimation (the actual goal check will accept any)
@@ -5369,6 +5671,34 @@ class Router:
                         )
                     continue
 
+                # Issue #9019: own-net pad slit-band gate.  A planar step whose
+                # swept copper parks in the fab ``pad_spacing`` band beside an
+                # own-net SMD pad (neither unioned with it nor clear of the
+                # detection edge) is a slit the fab sees regardless of nets.
+                # Python twin of ``Pathfinder::own_net_band_step_ok``.
+                if (
+                    band_edge_mm > 0.0
+                    and nlayer == current.layer
+                    and not self._own_net_band_step_ok(
+                        current.x,
+                        current.y,
+                        nx,
+                        ny,
+                        nlayer,
+                        start.net,
+                        band_width,
+                        band_edge_mm,
+                        exclude_pts=band_exclude_pts,
+                    )
+                ):
+                    if _ASTAR_TRACE_ENABLED:
+                        _astar_trace(
+                            f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
+                            f"nbr=({nx},{ny},L{nlayer}) REJECT "
+                            f"reason=own_net_pad_slit_band"
+                        )
+                    continue
+
                 # Issue #6008: inside a net-filtered track keepout -- hard reject.
                 if rule_area_core is not None and rule_area_core[nlayer, ny, nx]:
                     continue
@@ -5459,6 +5789,26 @@ class Router:
                         pairwise_cost_cache[cache_key] = cached_cost
                     pairwise_cost = cached_cost
 
+                # Issue #9622: soft under-body surcharge for a non-local net
+                # (the Python mirror of the per-cell cost CppPathfinder
+                # installs through its pad-channel lookup).  Zero unless the
+                # cell sits inside a fine-pitch component's body bbox on an
+                # outer layer AND this net has no pad on that component;
+                # one penalty per covering non-local region, so overlapping
+                # bodies sum exactly like the C++ budget lookup.
+                under_body_cost = 0.0
+                if under_body_masks is not None:
+                    cover = int(under_body_masks[nlayer, ny, nx]) & under_body_nonlocal
+                    if cover:
+                        under_body_cost = cover.bit_count() * under_body_penalty
+                    if under_body_extra:
+                        # Boards with more fine-pitch bodies than one int64
+                        # plane: the remaining planes' charges add on top.
+                        for extra_mask, extra_nonlocal in under_body_extra:
+                            cover = int(extra_mask[nlayer, ny, nx]) & extra_nonlocal
+                            if cover:
+                                under_body_cost += cover.bit_count() * under_body_penalty
+
                 positive_step_cost = (
                     neighbor_cost_mult * self.rules.cost_straight * layer_pref_mult
                     + turn_cost
@@ -5469,6 +5819,7 @@ class Router:
                     + layer_util_cost
                     + corridor_cost
                     + pairwise_cost
+                    + under_body_cost
                 )
                 if attractor_bonus > 0.0:
                     positive_step_cost = max(0.0, positive_step_cost - attractor_bonus)
@@ -5644,6 +5995,26 @@ class Router:
                 if self.rules.via_cost_cap_factor > 0.0:
                     via_cap = self.rules.via_cost_cap_factor * self.rules.cost_via
                     via_incremental = min(via_incremental, via_cap)
+
+                # Issue #9622: the same surcharge on the via-drop destination
+                # cell, mirroring the C++ via branch (which charges its
+                # pad-channel lookup on ``new_layer``).  Added after the #2325
+                # cap so the surcharge survives it -- the C++ term is uncapped.
+                # Overlapping bodies sum (one penalty per covering non-local
+                # region), matching the C++ budget-lookup semantics.
+                if under_body_masks is not None:
+                    cover = (
+                        int(under_body_masks[new_layer, current.y, current.x]) & under_body_nonlocal
+                    )
+                    if cover:
+                        via_incremental += cover.bit_count() * under_body_penalty
+                    if under_body_extra:
+                        for extra_mask, extra_nonlocal in under_body_extra:
+                            cover = (
+                                int(extra_mask[new_layer, current.y, current.x]) & extra_nonlocal
+                            )
+                            if cover:
+                                via_incremental += cover.bit_count() * under_body_penalty
 
                 # Issue #2911: Apply the attractor AFTER the cap so the
                 # bonus is felt even when the via cost is at the ceiling.
@@ -5949,6 +6320,8 @@ class Router:
         # Look up the net class for this net and use its trace_width if defined,
         # falling back to the global rules.trace_width for unclassified nets.
         base_trace_width = self._get_trace_width_for_net(start_pad.net_name)
+        # Issue #9019: the own-net pad slit-band edge (0 = guard off).
+        band_edge_mm = float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
 
         # Issue #1692: Use per-net-class via size when creating vias.
         _nc = self._get_net_class(start_pad.net_name)
@@ -6033,7 +6406,7 @@ class Router:
             """
             if abs(x2 - x1) > 0.01 or abs(y2 - y1) > 0.01:
                 # Issue #1018: Calculate width with neck-down support
-                from .neck_down import taper_points
+                from .neck_down import band_safe_width, taper_points
 
                 centers = []
                 if start_needs_neckdown:
@@ -6052,8 +6425,19 @@ class Router:
                             self.rules.grid_resolution,
                         )[1:]
                     )
+                # Issue #9019: a taper that only narrows must not open an air
+                # gap beside the net's own pad (the slit band).
+                band_bboxes = (
+                    self._own_net_band_bboxes(start_pad.net, layer_idx)
+                    if band_edge_mm > 0.0 and (start_needs_neckdown or end_needs_neckdown)
+                    else None
+                )
                 for (sx, sy), (ex, ey) in zip(points, points[1:], strict=False):
                     width = _calculate_segment_width(sx, sy, ex, ey)
+                    if band_bboxes:
+                        width = band_safe_width(
+                            (sx, sy), (ex, ey), width, base_trace_width, band_bboxes, band_edge_mm
+                        )
                     if sx == ex and sy == ey:
                         continue
                     seg = Segment(
@@ -6778,6 +7162,36 @@ class Router:
         own_gate: tuple[set[str] | None, float, dict[tuple[int, int, int, int, int], bool]] | None
         own_gate = None if self.relief_mode else (*self._own_pad_gate_inputs(start, end), {})
 
+        # Issue #9019: the pads both frontiers are unioned with -- exempt from
+        # the band measure, as in ``_route_impl`` (see ``_own_net_band_step_ok``).
+        band_exclude_pts = ((start.x, start.y), (end.x, end.y))
+
+        # Issue #9622: soft under-body surcharge state for BOTH frontiers,
+        # the same tuple ``_route_impl`` prepares for the one-way search
+        # (first plane, its non-local mask, the extra planes, the per-region
+        # penalty).  Both frontiers route the same net (``start.net``), so
+        # one preparation serves them.  ``None`` -- boards without a
+        # qualifying fine-pitch body, or the cost disabled -- keeps the
+        # bidirectional hot loop byte-identical to pre-#9622 behaviour.
+        # Review of #9635: the expansion previously omitted the surcharge
+        # entirely, so the public ``--fallback-bidirectional`` path (and
+        # ``route_auto`` over a long Manhattan distance) crossed bodies the
+        # one-way search detours around.
+        under_body_state: tuple[np.ndarray, int, tuple[tuple[np.ndarray, int], ...], float] | None
+        under_body_state = None
+        under_body_planes = self._under_body_mask_planes()
+        if under_body_planes is not None:
+            nonlocal_masks, under_body_penalty = self._under_body_net_state(start.net)
+            under_body_state = (
+                under_body_planes[0],
+                nonlocal_masks[0],
+                tuple(
+                    (plane, mask)
+                    for plane, mask in zip(under_body_planes[1:], nonlocal_masks[1:], strict=True)
+                ),
+                under_body_penalty,
+            )
+
         # Best meeting point tracking
         best_path_cost = float("inf")
         meeting_point: tuple[int, int, int] | None = None
@@ -6842,6 +7256,8 @@ class Router:
                         partner_active=partner_active_flag,
                         seq_counter=forward_seq_counter,
                         own_gate=own_gate,
+                        band_exclude_pts=band_exclude_pts,
+                        under_body_state=under_body_state,
                     )
 
             # Process backward step
@@ -6883,6 +7299,8 @@ class Router:
                         partner_active=partner_active_flag,
                         seq_counter=backward_seq_counter,
                         own_gate=own_gate,
+                        band_exclude_pts=band_exclude_pts,
+                        under_body_state=under_body_state,
                     )
 
             # Issue #6527: one drained frontier without a meeting point ends
@@ -6947,6 +7365,10 @@ class Router:
         own_gate: (
             tuple[set[str] | None, float, dict[tuple[int, int, int, int, int], bool]] | None
         ) = None,
+        band_exclude_pts: tuple[tuple[float, float], ...] = (),
+        under_body_state: (
+            tuple[np.ndarray, int, tuple[tuple[np.ndarray, int], ...], float] | None
+        ) = None,
     ) -> None:
         """Expand neighbors for bidirectional A* search.
 
@@ -6973,11 +7395,27 @@ class Router:
                 own-pad step gate, from :meth:`_own_pad_gate_inputs`, shared
                 by both frontiers of one search.  ``None`` disables the gate
                 (relief probes, and legacy callers).
+            under_body_state: Issue #9622 -- the under-body surcharge state
+                prepared by ``route_bidirectional`` (first mask plane, its
+                non-local region bitmask, the extra ``(plane, nonlocal_mask)``
+                pairs beyond 64 regions, the per-region penalty), shared by
+                both frontiers of one search.  ``None`` (boards without a
+                qualifying fine-pitch body) adds no cost.
         """
         # Extract bounds (Issue #990: also need source bounds for pad exit check)
         src_gx1, src_gy1, src_gx2, src_gy2 = source_metal_bounds
         tgt_gx1, tgt_gy1, tgt_gx2, tgt_gy2 = target_metal_bounds
         source_gx, source_gy = self.grid.world_to_grid(source_pad.x, source_pad.y)
+
+        # Issue #9622: unpack the under-body surcharge state once (``None``
+        # locals keep both expansion types below free of it on boards
+        # without a fine-pitch body).
+        ub_masks: np.ndarray | None = None
+        ub_nonlocal = 0
+        ub_extra: tuple[tuple[np.ndarray, int], ...] = ()
+        ub_penalty = 0.0
+        if under_body_state is not None:
+            ub_masks, ub_nonlocal, ub_extra, ub_penalty = under_body_state
 
         # Issue #1618: Precompute geometry-derived pad approach bounds
         pad_escape_margin = 2  # cells beyond pad metal edge
@@ -6989,6 +7427,15 @@ class Router:
         tgt_approach_gy1 = tgt_gy1 - pad_escape_margin
         tgt_approach_gx2 = tgt_gx2 + pad_escape_margin
         tgt_approach_gy2 = tgt_gy2 + pad_escape_margin
+
+        # Issue #9019: own-net pad slit-band gate inputs (off on relief probes
+        # and when the caller resolved no stackup edge).
+        band_edge_mm = (
+            0.0
+            if self.relief_mode or getattr(self, "_own_net_band_suspended", False)
+            else float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
+        )
+        band_width = self._get_trace_width_for_net(source_pad.net_name)
 
         # Explore 2D neighbors (same layer moves)
         for dx, dy, _dlayer, neighbor_cost_mult in self.neighbors_2d:
@@ -7176,6 +7623,30 @@ class Router:
                     )
                 continue
 
+            # Issue #9019: own-net pad slit-band gate, as in ``_route_impl``.
+            if (
+                band_edge_mm > 0.0
+                and nlayer == current.layer
+                and not self._own_net_band_step_ok(
+                    current.x,
+                    current.y,
+                    nx,
+                    ny,
+                    nlayer,
+                    source_pad.net,
+                    band_width,
+                    band_edge_mm,
+                    exclude_pts=band_exclude_pts,
+                )
+            ):
+                if _ASTAR_TRACE_ENABLED:
+                    _astar_trace(
+                        f"[A*/py-bidi] cur=({current.x},{current.y},L{current.layer}) "
+                        f"nbr=({nx},{ny},L{nlayer}) REJECT "
+                        f"reason=own_net_pad_slit_band"
+                    )
+                continue
+
             # Check zone blocking
             if self._is_zone_blocked(nx, ny, nlayer, source_pad.net):
                 continue
@@ -7225,6 +7696,24 @@ class Router:
                 self.rules.cost_corridor_attractor,
             )
 
+            # Issue #9622: soft under-body surcharge for a non-local net,
+            # the mirror of the one-way expansion's term (see ``_route_impl``
+            # for the full rationale).  One penalty per covering non-local
+            # region, so overlapping bodies sum exactly like the C++ budget
+            # lookup.  Review of #9635: this expansion previously omitted
+            # the term, so the bidirectional search crossed fine-pitch
+            # bodies at zero cost.
+            under_body_cost = 0.0
+            if ub_masks is not None:
+                cover = int(ub_masks[nlayer, ny, nx]) & ub_nonlocal
+                if cover:
+                    under_body_cost = cover.bit_count() * ub_penalty
+                if ub_extra:
+                    for extra_mask, extra_nonlocal in ub_extra:
+                        cover = int(extra_mask[nlayer, ny, nx]) & extra_nonlocal
+                        if cover:
+                            under_body_cost += cover.bit_count() * ub_penalty
+
             positive_step_cost = (
                 neighbor_cost_mult * self.rules.cost_straight * layer_pref_mult
                 + turn_cost
@@ -7234,6 +7723,7 @@ class Router:
                 + crossing_cost
                 + layer_util_cost
                 + corridor_cost
+                + under_body_cost
             )
             if attractor_bonus > 0.0:
                 positive_step_cost = max(0.0, positive_step_cost - attractor_bonus)
@@ -7353,6 +7843,21 @@ class Router:
             if self.rules.via_cost_cap_factor > 0.0:
                 via_cap = self.rules.via_cost_cap_factor * self.rules.cost_via
                 via_incremental = min(via_incremental, via_cap)
+
+            # Issue #9622: the same surcharge on the via-drop destination
+            # cell, mirroring the one-way via branch (added AFTER the
+            # #2325 cap so the surcharge survives it -- the C++ term is
+            # uncapped).  Review of #9635: previously omitted here, so a
+            # bidirectional via drop under a fine-pitch body was free.
+            if ub_masks is not None:
+                cover = int(ub_masks[new_layer, current.y, current.x]) & ub_nonlocal
+                if cover:
+                    via_incremental += cover.bit_count() * ub_penalty
+                if ub_extra:
+                    for extra_mask, extra_nonlocal in ub_extra:
+                        cover = int(extra_mask[new_layer, current.y, current.x]) & extra_nonlocal
+                        if cover:
+                            via_incremental += cover.bit_count() * ub_penalty
 
             # Issue #2911: Apply the attractor AFTER the cap so the bonus
             # is felt even when the via cost is at the ceiling.

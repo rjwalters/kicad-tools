@@ -687,7 +687,7 @@ class TestFootprintDirectSetPersistence:
     without requiring ``update_footprint_position()``.  This was broken
     before the ``_sexp_node`` back-reference was added to ``Footprint``.
 
-    See https://github.com/rjwalters/kicad-tools/issues/1990
+    See https://github.com/2AMLogic/kicad-tools/issues/1990
     """
 
     def test_position_setter_persists(self, routing_test_pcb, tmp_path):

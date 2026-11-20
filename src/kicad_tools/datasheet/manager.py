@@ -298,7 +298,13 @@ class DatasheetManager:
                 key = result.source
                 if key in failures:
                     key = f"{result.source}#{index}"
-                failures[key] = str(e)
+                reason = str(e)
+                # Every failure must name the URL so the user can open it by
+                # hand; not every error type embeds it (e.g. a wrapped
+                # non-network exception), so append it when missing.
+                if result.datasheet_url and result.datasheet_url not in reason:
+                    reason = f"{reason} (url: {result.datasheet_url})"
+                failures[key] = reason
                 logger.warning(
                     f"Download candidate {index} ({result.source}) failed for '{part_number}': {e}"
                 )

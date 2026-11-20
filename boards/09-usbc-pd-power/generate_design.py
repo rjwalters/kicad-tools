@@ -269,7 +269,7 @@ def parts() -> list[Part]:
         ("C3", "1u 16V", "VREG_2V7", "GND", (10, 23), C),
         ("C4", "4.7n 50V", "PMOS_SOURCE", "PMOS_GATE", (39, 31), C),
         ("C5", "10u 50V", "VIN", "GND", (53, 29), "Capacitor_SMD:C_1206_3216Metric"),
-        ("C6", "100n 50V", "VIN", "GND", (55.15, 29), C),
+        ("C6", "100n 50V", "VIN", "GND", (55.2, 29), C),
         ("C7", "100n 50V", "BOOT_CAP", "SW", (61, 23), C),
         ("C8", "22u 25V", "VOUT_PRE", "GND", (50, 16), "Capacitor_SMD:C_1206_3216Metric"),
         ("C9", "22u 25V", "VOUT_PRE", "GND", (56, 16), "Capacitor_SMD:C_1206_3216Metric"),
@@ -1055,6 +1055,16 @@ def generate(output: Path) -> dict:
         "hardware_tested": False,
         "manufacturing_ready": False,
     }
+    # Commit which toolchain -- and which footprint-library content -- produced
+    # the geometry above (Issue #9526): the CLI version gate constrains only
+    # the kicad-cli binary, while add_footprint reads whatever standard
+    # library this host resolved, so its identity is recorded, not gated.
+    # None outside the evidence toolchain (tests calling generate() directly).
+    from kicad_tools.cli.kicad_toolchain import evidence_provenance
+
+    provenance = evidence_provenance()
+    if provenance is not None:
+        result["toolchain"] = provenance
     (output / "circuit.json").write_text(json.dumps(result, indent=2) + "\n")
     (output / "readiness.json").write_text(
         json.dumps(
@@ -1079,7 +1089,24 @@ def generate(output: Path) -> dict:
     return result
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path, nargs="?", default=ROOT / "output")
-    generate(parser.parse_args().output)
+    generate(parser.parse_args(argv).output)
+    return 0
+
+
+if __name__ == "__main__":
+    # Footprints resolve from the installed KiCad library, so the producing
+    # release decides committed geometry; refuse any other than the pinned one
+    # (Issue #9495, contract of #6962).  Under KCT_KICAD_DOCKER=1 the Python
+    # step still runs on the host, so pin_host_footprints sources its standard
+    # footprint reads from the image's libraries too -- otherwise add_footprint
+    # embeds the host library's geometry (Issue #9502 review).
+    from kicad_tools.cli.kicad_toolchain import run_on_evidence_toolchain
+
+    raise SystemExit(
+        run_on_evidence_toolchain(
+            main, [Path(__file__).resolve().parents[2]], pin_host_footprints=True
+        )
+    )

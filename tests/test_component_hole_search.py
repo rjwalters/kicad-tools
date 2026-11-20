@@ -4,11 +4,12 @@ import math
 
 import pytest
 
-from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
+from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
+from tests.conftest import require_router_cpp
 
 
 def context():
@@ -22,8 +23,8 @@ def context():
 @pytest.mark.parametrize("backend", ["python", "cpp"])
 def test_board02_same_net_hole_blocks_via_but_not_same_net_copper(backend, sharing):
     grid, rules, pad = context()
-    if backend == "cpp" and not is_cpp_available():
-        pytest.skip("native router required")
+    if backend == "cpp":
+        require_router_cpp()
     native = CppGrid.from_routing_grid(grid) if backend == "cpp" else None
     # Exercise incremental synchronization after the native snapshot exists.
     grid.add_pad(pad)
@@ -51,6 +52,7 @@ def test_python_new_hole_invalidates_prior_positive_via_answer():
 
 
 @pytest.mark.parametrize("angle", [0, 90, 45])
+@pytest.mark.requires_router_cpp
 def test_rotated_slot_physical_hole_crosses_index_bins(angle):
     grid, rules, pad = context()
     pad.x, pad.y = 166, 116
@@ -59,15 +61,13 @@ def test_rotated_slot_physical_hole_crosses_index_bins(angle):
     a = math.radians(angle)
     x, y = pad.x + 2.6 * math.cos(a), pad.y - 2.6 * math.sin(a)
     assert not grid._component_hole_index.clear(x, y, 0.3, 0.5)
-    if is_cpp_available():
-        native = CppGrid.from_routing_grid(grid)
-        assert not native._impl.component_holes_clear(x, y, 0.3, 0.5)
+    native = CppGrid.from_routing_grid(grid)
+    assert not native._impl.component_holes_clear(x, y, 0.3, 0.5)
 
 
 @pytest.mark.parametrize("method", ["route", "route_resumable"])
 def test_native_search_checks_emitted_drill_override(method):
-    if not is_cpp_available():
-        pytest.skip("native router required")
+    require_router_cpp()
     grid, rules, pad = context()
     grid.add_component_hole(pad)
     native = CppGrid.from_routing_grid(grid)
@@ -93,8 +93,8 @@ def test_native_search_checks_emitted_drill_override(method):
 
 @pytest.mark.parametrize("backend", ["python", "cpp"])
 def test_hole_index_refreshes_moved_pad_and_deduplicates(backend):
-    if backend == "cpp" and not is_cpp_available():
-        pytest.skip("native router required")
+    if backend == "cpp":
+        require_router_cpp()
     grid, rules, pad = context()
     from dataclasses import replace
 
@@ -114,6 +114,7 @@ def test_hole_index_refreshes_moved_pad_and_deduplicates(backend):
 
 
 @pytest.mark.parametrize("known", [True, False])
+@pytest.mark.requires_router_cpp
 def test_loader_keeps_unconnected_npth_hole_outside_routing_pads(tmp_path, monkeypatch, known):
     from kicad_tools.router.io import load_pcb_for_routing
 
@@ -145,12 +146,12 @@ def test_loader_keeps_unconnected_npth_hole_outside_routing_pads(tmp_path, monke
     assert not any(p.through_hole for p in router.grid._pads)
     assert not router.grid._component_hole_index.clear(12.7, 12, 0.3, 0.5)
     assert router.grid._component_hole_index.clear(17, 17, 0.3, 0.5) == known
-    if is_cpp_available():
-        native = CppGrid.from_routing_grid(router.grid)
-        assert not native._impl.component_holes_clear(12.7, 12, 0.3, 0.5)
-        assert native._impl.component_holes_clear(17, 17, 0.3, 0.5) == known
+    native = CppGrid.from_routing_grid(router.grid)
+    assert not native._impl.component_holes_clear(12.7, 12, 0.3, 0.5)
+    assert native._impl.component_holes_clear(17, 17, 0.3, 0.5) == known
 
 
+@pytest.mark.requires_router_cpp
 def test_duplicate_reference_pin_never_moves_another_footprints_hole():
     from dataclasses import replace
 
@@ -160,7 +161,7 @@ def test_duplicate_reference_pin_never_moves_another_footprints_hole():
     for pad in (first, second):
         grid.add_component_hole(replace(pad))
         grid.add_pad(pad)
-    native = CppGrid.from_routing_grid(grid) if is_cpp_available() else None
+    native = CppGrid.from_routing_grid(grid)
     first.x += 2
     grid.refresh_component_holes()
     for x in (165, 167, 175):
@@ -175,8 +176,7 @@ def final_route_valid(grid, rules, via, backend):
     route = Route(via.net, "VCC", [], [via])
     if backend == "python":
         return Router(grid, rules)._validate_route_clearance(route, via.net)
-    if not is_cpp_available():
-        pytest.skip("native router required")
+    require_router_cpp()
     router = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
     terminal = Pad(165, 115, 1, 1, via.net, "VCC")
     return router._validate_route_clearance(route, terminal, terminal, 2) is None

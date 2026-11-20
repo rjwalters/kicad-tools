@@ -8,7 +8,10 @@ files.  This module factors out the single schematic-resolution heuristic so
 Resolution order (matches the historical ``Auditor._resolve_schematic_path``,
 extended by issue #4350 to tolerate versioned board basenames):
     1. ``project.kct`` ``artifacts.schematic`` (looked up next to the PCB, then
-       one directory up), if it points at an existing file.
+       one directory up), if it points at an existing file **and** the PCB is
+       the board the spec names (:func:`pcb_matches_spec`, issue #9637).  A
+       sibling revision's board under the same ``project.kct`` falls through to
+       steps 2-4 so it is never compared against another revision's schematic.
     2. Sibling ``<pcb-basename>.kicad_sch`` (stage-stripped stem first, then the
        raw stem).
     3. Project-pairing fallback: a sibling ``<pro-stem>.kicad_sch`` that is
@@ -86,11 +89,73 @@ def resolve_schematic_for_pcb(pcb_path: str | Path) -> Path | None:
 
     Returns:
         Path to the resolved ``.kicad_sch`` file if one exists, else ``None``.
+        See :func:`resolve_schematic_with_source` for how it was found.
+    """
+    return resolve_schematic_with_source(pcb_path)[0]
+
+
+def _artifact_stem_key(path: Path) -> tuple[str, str]:
+    """``(resolved directory, stage-stripped stem)`` identity of a PCB artifact."""
+    return (str(path.parent.resolve()), _strip_stage_suffix(path.stem))
+
+
+def pcb_matches_spec(pcb_path: str | Path, kct_path: str | Path, spec: object) -> bool:
+    """Whether ``pcb_path`` is the board that ``spec`` (``kct_path``) names (issue #9637).
+
+    One ``project.kct`` can sit above several revisions of a board (sibling
+    output directories with same-named files).  Its ``artifacts`` describe only
+    one of them, so schematic discovery and spec conformance must not treat the
+    spec as describing a board it does not name.
+
+    The PCB matches when its directory and stage-stripped stem
+    (``_routed``/``_optimized``/...) equal those of ``artifacts.pcb``,
+    ``artifacts.pcb_routed`` or the documented default
+    ``<pcb_stem>_routed.kicad_pcb`` -- artifact paths resolved relative to the
+    ``project.kct`` directory.  A spec that names no board artifact at all has
+    nothing to contradict, so it matches (the pre-#9637 behaviour is kept), and
+    so does a spec that sits in the same directory as the PCB.
+    """
+    pcb_path = Path(pcb_path)
+    project = getattr(spec, "project", None)
+    artifacts = getattr(project, "artifacts", None)
+    named: list[str] = [
+        n
+        for n in (getattr(artifacts, "pcb", None), getattr(artifacts, "pcb_routed", None))
+        if isinstance(n, str) and n
+    ]
+    if not named:
+        return True
+
+    base = Path(kct_path).parent
+    # A spec sitting in the PCB's own directory is that board's spec (a recipe
+    # fixture copies its spec beside the PCB, issue #7320; versioned boards
+    # such as ``board_v24`` sit beside the spec of ``board``, issue #4350).
+    # Only a spec found one directory up can describe a *different* revision.
+    if base.resolve() == pcb_path.parent.resolve():
+        return True
+    wanted = {_artifact_stem_key(base / n) for n in named}
+    return _artifact_stem_key(pcb_path) in wanted
+
+
+# How a schematic was found, reported by ``kct check`` (issue #9637).
+SOURCE_PROJECT_KCT = "project.kct"
+SOURCE_SIBLING = "sibling"
+SOURCE_KICAD_PRO = ".kicad_pro pairing"
+SOURCE_SOLE = "sole schematic"
+
+
+def resolve_schematic_with_source(pcb_path: str | Path) -> tuple[Path | None, str | None]:
+    """:func:`resolve_schematic_for_pcb` plus how the schematic was found.
+
+    Returns ``(path, source)`` where ``source`` is one of ``project.kct``,
+    ``sibling``, ``.kicad_pro pairing`` or ``sole schematic`` (``None`` when no
+    schematic was resolved).
     """
     pcb_path = Path(pcb_path)
     project_dir = pcb_path.parent
 
-    # 1. Try project.kct artifacts.schematic (next to the PCB, then one up).
+    # 1. Try project.kct artifacts.schematic (next to the PCB, then one up),
+    #    but only when this PCB is the board the spec names (issue #9637).
     kct_path = project_dir / "project.kct"
     if not kct_path.exists():
         kct_path = project_dir.parent / "project.kct"
@@ -103,8 +168,14 @@ def resolve_schematic_for_pcb(pcb_path: str | Path) -> Path | None:
             if spec.project and spec.project.artifacts and spec.project.artifacts.schematic:
                 sch_path = kct_path.parent / spec.project.artifacts.schematic
                 if sch_path.exists():
-                    logger.debug("Using schematic from project.kct: %s", sch_path)
-                    return sch_path
+                    if pcb_matches_spec(pcb_path, kct_path, spec):
+                        logger.debug("Using schematic from project.kct: %s", sch_path)
+                        return sch_path, SOURCE_PROJECT_KCT
+                    logger.debug(
+                        "%s does not name %s as a board artifact; ignoring its schematic",
+                        kct_path,
+                        pcb_path,
+                    )
         except Exception as e:  # pragma: no cover - defensive
             logger.debug("Failed to load project.kct: %s", e)
 
@@ -118,7 +189,7 @@ def resolve_schematic_for_pcb(pcb_path: str | Path) -> Path | None:
     for candidate in candidates:
         if candidate.exists():
             logger.debug("Using sibling schematic: %s", candidate)
-            return candidate
+            return candidate, SOURCE_SIBLING
 
     # 3. Project-pairing fallback (issue #4350).  Versioned board basenames
     #    (``board_v24.kicad_pcb``) never match the unversioned root schematic
@@ -130,7 +201,7 @@ def resolve_schematic_for_pcb(pcb_path: str | Path) -> Path | None:
     paired = _paired_root_schematics(project_dir)
     if len(paired) == 1:
         logger.debug("Using project-paired root schematic: %s", paired[0])
-        return paired[0]
+        return paired[0], SOURCE_KICAD_PRO
     if len(paired) > 1:
         logger.debug(
             "Ambiguous schematic discovery: %d paired root schematics, none "
@@ -138,7 +209,7 @@ def resolve_schematic_for_pcb(pcb_path: str | Path) -> Path | None:
             len(paired),
             pcb_path.stem,
         )
-        return None
+        return None, None
 
     # 4. Sole-schematic fallback.  A flat single-file project has one
     #    ``.kicad_sch`` and (perhaps) no paired ``.kicad_pro`` at all; if there
@@ -148,9 +219,9 @@ def resolve_schematic_for_pcb(pcb_path: str | Path) -> Path | None:
     all_sch = sorted(project_dir.glob("*.kicad_sch"))
     if len(all_sch) == 1:
         logger.debug("Using sole schematic in directory: %s", all_sch[0])
-        return all_sch[0]
+        return all_sch[0], SOURCE_SOLE
 
-    return None
+    return None, None
 
 
 def unresolved_schematic_candidates(pcb_path: str | Path) -> list[Path]:
@@ -279,3 +350,49 @@ def resolve_declared_currents_for_pcb(pcb_path: str | Path) -> list[str]:
         if key not in ("input", "outputs") and "current" in str(key) and value is not None:
             found.append(str(key))
     return found
+
+
+def resolve_declared_reference_height_for_pcb(pcb_path: str | Path) -> float | None:
+    """The reference-designator height a PCB's ``project.kct`` declares (issue #9448).
+
+    Reads ``requirements.manufacturing.silkscreen_min_reference_height_mm``.
+    Returns ``None`` when there is no ``project.kct``, the key is absent, or
+    the value is not a finite number >= 0.8 mm (an invalid declaration is ignored, so
+    designators stay held to the fab floor; ``load_spec`` rejects it loudly).
+    """
+    from kicad_tools.manufacturers.base import (
+        MIN_DECLARED_REFERENCE_HEIGHT_MM,
+        is_valid_declared_reference_height,
+    )
+
+    kct_path = _project_kct_for_pcb(Path(pcb_path))
+    if kct_path is None:
+        return None
+    try:
+        import yaml
+
+        data = yaml.safe_load(kct_path.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001 - unreadable spec keeps today's behaviour
+        logger.debug("Failed to read reference height from project.kct: %s", e)
+        return None
+    if not isinstance(data, dict):
+        return None
+    requirements = data.get("requirements")
+    manufacturing = requirements.get("manufacturing") if isinstance(requirements, dict) else None
+    value = (
+        manufacturing.get("silkscreen_min_reference_height_mm")
+        if isinstance(manufacturing, dict)
+        else None
+    )
+    if value is None:
+        return None
+    if not is_valid_declared_reference_height(value):
+        logger.warning(
+            "Ignoring silkscreen_min_reference_height_mm=%r in %s "
+            "(must be a finite number >= %s mm)",
+            value,
+            kct_path,
+            MIN_DECLARED_REFERENCE_HEIGHT_MM,
+        )
+        return None
+    return float(value)

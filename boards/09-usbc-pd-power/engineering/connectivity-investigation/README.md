@@ -7,7 +7,7 @@ is the fully routed board before explicit mid-track junction splitting.
 Splitting those segments at existing branch/pad centers changed the buffered
 trace union by exactly 0.0 mm² on every net/layer (Shapely comparison).
 The canonical `../../output/copper-lvs.json` passes with 153 bound pads.
-Tracked in https://github.com/rjwalters/kicad-tools/issues/5060.
+Tracked in https://github.com/2AMLogic/kicad-tools/issues/5060.
 
 To rerun, copy the canonical output project, schematic, and local libraries
 to a temporary directory; replace its PCB with this snapshot, keeping the
@@ -22,6 +22,6 @@ planes. Earlier capacitor array contacts also triggered two false opens;
 explicit pad-center stubs removed those. USB shield-annulus trace splitting
 did not remove the remaining disagreement. Copper LVS suppresses plane opens;
 it cannot be used as independent proof for these contacts. Tracked in
-https://github.com/rjwalters/kicad-tools/issues/5061. Native DRC remains the
+https://github.com/2AMLogic/kicad-tools/issues/5061. Native DRC remains the
 connectivity authority for this development checkpoint; the disagreement
 is retained as a release blocker.

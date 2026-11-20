@@ -21,6 +21,7 @@ artifacts — board 03's ``silk_repair.py`` sat unarchived this way).
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -72,9 +73,16 @@ def test_design_source_copy_matches_live_recipe(archive_copy: Path, request) -> 
     )
     if key in EXPECTED_STALE:
         request.applymarker(pytest.mark.xfail(reason=EXPECTED_STALE[key], strict=True))
-    assert archive_copy.read_bytes() == live.read_bytes(), (
+    # Compare digests, not raw bytes: a bare ``bytes == bytes`` failure makes
+    # pytest's assertion rewriting render a ~150k-element sequence diff, which
+    # can exceed the pytest-timeout bound and hide this message (Issue #9481).
+    archive_digest = hashlib.sha256(archive_copy.read_bytes()).hexdigest()
+    live_digest = hashlib.sha256(live.read_bytes()).hexdigest()
+    assert archive_digest == live_digest, (
         f"{key}: archived design-source copy drifted from the live recipe "
-        f"({live}); refresh it through scripts/boards/refresh_readiness.py so "
+        f"({live}; sha256 archive={archive_digest[:12]} "
+        f"live={live_digest[:12]}); refresh it through "
+        "scripts/boards/refresh_readiness.py so "
         "the manifest hashes stay consistent, or record it in EXPECTED_STALE "
         "citing the owning issue."
     )

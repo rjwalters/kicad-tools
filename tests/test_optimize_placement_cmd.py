@@ -1907,6 +1907,94 @@ class TestHvContext:
                 quiet=True,
             )
 
+    # -- issue #9710: signed / swinging pairs are differenced end-to-end -----
+
+    def _ctx(self, tmp_path, *, voltage_map=None, hv_domains=None, nets=None):
+        vm_path = dm_path = None
+        if voltage_map is not None:
+            vm_path = tmp_path / "v.json"
+            vm_path.write_text(json.dumps(voltage_map))
+        if hv_domains is not None:
+            dm_path = tmp_path / "d.json"
+            dm_path.write_text(json.dumps(hv_domains))
+        return _build_hv_context(
+            self._components(),
+            nets if nets is not None else self._nets(),
+            voltage_map_path=str(vm_path) if vm_path else None,
+            hv_domains_path=str(dm_path) if dm_path else None,
+            creepage_standard="iec60664",
+            pollution_degree=2,
+            material_group="IIIa",
+            hv_threshold=30.0,
+            quiet=True,
+        )
+
+    def test_bipolar_voltage_map_requires_300v_spacing(self, tmp_path):
+        """+150 V / -150 V is a 300 V pair (3.2 mm), not a 0 V pair."""
+        ref_domains, required = self._ctx(
+            tmp_path, voltage_map={"/AC_LINE": 150, "/REF_1V65": -150}
+        )
+        assert ref_domains == {"R1": "/AC_LINE", "C1": "/REF_1V65"}
+        assert required == {("/AC_LINE", "/REF_1V65"): pytest.approx(3.2)}
+
+    def test_swinging_net_against_fixed_rails_uses_worst_endpoint(self, tmp_path):
+        """A [-150, +150] net paired with either fixed rail sees 300 V."""
+        for rail in (150, -150):
+            _, required = self._ctx(
+                tmp_path,
+                voltage_map={"/AC_LINE": {"min": -150, "max": 150}, "/REF_1V65": rail},
+            )
+            assert required == {("/AC_LINE", "/REF_1V65"): pytest.approx(3.2)}, rail
+
+    def test_identical_swinging_intervals_still_get_keepout(self, tmp_path):
+        """Two distinct nets each swinging [-150, +150] hold up to 300 V apart."""
+        swing = {"min": -150, "max": 150}
+        _, required = self._ctx(tmp_path, voltage_map={"/AC_LINE": swing, "/REF_1V65": swing})
+        assert required == {("/AC_LINE", "/REF_1V65"): pytest.approx(3.2)}
+
+    def test_equal_fixed_potentials_get_no_keepout(self, tmp_path):
+        """Control: two distinct nets at the same fixed potential need no keepout."""
+        for v in (150, -150):
+            _, required = self._ctx(tmp_path, voltage_map={"/AC_LINE": v, "/REF_1V65": v})
+            assert required == {}, v
+
+    def test_swinging_pair_below_threshold_is_omitted(self, tmp_path):
+        """The existing threshold applies to the end-to-end difference."""
+        _, required = self._ctx(
+            tmp_path,
+            voltage_map={"/AC_LINE": {"min": -10, "max": 10}, "/REF_1V65": 5},
+        )
+        assert required == {}
+
+    def test_bipolar_out_of_range_difference_raises(self, tmp_path):
+        """+/-1000 V is in range per net but 2000 V apart -> fail loud, no extrapolation."""
+        with pytest.raises(ValueError, match="creepage lookup failed"):
+            self._ctx(tmp_path, voltage_map={"/AC_LINE": 1000, "/REF_1V65": -1000})
+
+    def test_multi_net_ref_keeps_highest_magnitude_first_seen_domain(self, tmp_path):
+        """Selection still uses |V| with first-seen ties; pairs use signed intervals."""
+        nets = [
+            Net(name="/POS", pins=[("R1", "1")]),
+            Net(name="/NEG", pins=[("R1", "2"), ("C1", "1")]),
+        ]
+        ref_domains, required = self._ctx(
+            tmp_path, voltage_map={"/POS": 150, "/NEG": -150}, nets=nets
+        )
+        # R1 ties at 150 V -> first-seen /POS; C1 only touches /NEG.
+        assert ref_domains == {"R1": "/POS", "C1": "/NEG"}
+        assert required == {("/NEG", "/POS"): pytest.approx(3.2)}
+
+    def test_bipolar_declaration_requires_300v_spacing(self, tmp_path):
+        ref_domains, required = self._ctx(
+            tmp_path,
+            hv_domains={
+                "P": {"refs": ["R1"], "voltage": 150},
+                "M": {"refs": ["C1"], "voltage": -150},
+            },
+        )
+        assert ref_domains == {"R1": "P", "C1": "M"}
+        assert required == {("M", "P"): pytest.approx(3.2)}
+
 
 class TestRunWithVoltageMap:
     """End-to-end run_optimize_placement wiring for the HV inputs."""
@@ -1956,6 +2044,82 @@ class TestRunWithVoltageMap:
         # so the dry-run should flag the current placement as INFEASIBLE.
         out = capsys.readouterr().out
         assert "HV domains" in out
+
+
+class TestDryRunScorerRequiredTable:
+    """Issue #9710: the dry-run scorer receives the signed pair requirement.
+
+    ``tmp_pcb``: R1/R2 select N1, C1 selects N2.  Before #9710 the bipolar and
+    swinging cases reached ``_evaluate`` with an empty table (exit 0 either way,
+    so the captured table is the assertion, not the exit code).
+    """
+
+    def _capture(self, tmp_pcb, tmp_path, monkeypatch, *, voltage_map=None, hv_domains=None):
+        from kicad_tools.cli import optimize_placement_cmd as mod
+
+        captured: dict = {}
+        real_eval = mod._evaluate
+
+        def spy(*args, **kwargs):
+            captured["ref_domains"] = kwargs.get("ref_domains")
+            captured["required"] = kwargs.get("required_mm_by_domain_pair")
+            captured["exempt_pairs"] = kwargs.get("exempt_pairs")
+            return real_eval(*args, **kwargs)
+
+        monkeypatch.setattr(mod, "_evaluate", spy)
+        kwargs: dict = {}
+        if voltage_map is not None:
+            vm = tmp_path / "v.json"
+            vm.write_text(json.dumps(voltage_map))
+            kwargs["voltage_map_path"] = str(vm)
+        if hv_domains is not None:
+            dm = tmp_path / "d.json"
+            dm.write_text(json.dumps(hv_domains))
+            kwargs["hv_domains_path"] = str(dm)
+        result = run_optimize_placement(str(tmp_pcb), dry_run=True, quiet=True, **kwargs)
+        assert result == 0
+        return captured
+
+    def test_bipolar_map(self, tmp_pcb, tmp_path, monkeypatch):
+        cap = self._capture(tmp_pcb, tmp_path, monkeypatch, voltage_map={"N1": 150, "N2": -150})
+        assert cap["ref_domains"] == {"R1": "N1", "R2": "N1", "C1": "N2"}
+        assert cap["required"] == {("N1", "N2"): pytest.approx(3.2)}
+        assert not cap["exempt_pairs"]
+
+    def test_swinging_map(self, tmp_pcb, tmp_path, monkeypatch):
+        swing = {"min": -150, "max": 150}
+        cap = self._capture(tmp_pcb, tmp_path, monkeypatch, voltage_map={"N1": swing, "N2": swing})
+        assert cap["required"] == {("N1", "N2"): pytest.approx(3.2)}
+        assert not cap["exempt_pairs"]
+
+    def test_positive_only_control_unchanged(self, tmp_pcb, tmp_path, monkeypatch):
+        cap = self._capture(tmp_pcb, tmp_path, monkeypatch, voltage_map={"N1": 150, "N2": 1.65})
+        assert cap["required"] == {("N1", "N2"): pytest.approx(1.6)}
+        assert frozenset({"C1", "R1"}) in cap["exempt_pairs"]
+
+    def test_bipolar_declaration(self, tmp_pcb, tmp_path, monkeypatch):
+        cap = self._capture(
+            tmp_pcb,
+            tmp_path,
+            monkeypatch,
+            hv_domains={
+                "P": {"refs": ["R1", "R2"], "voltage": 150},
+                "M": {"refs": ["C1"], "voltage": -150},
+            },
+        )
+        assert cap["ref_domains"] == {"R1": "P", "R2": "P", "C1": "M"}
+        assert cap["required"] == {("M", "P"): pytest.approx(3.2)}
+
+    def test_negative_and_swinging_tap_parents_keep_exemption(self, tmp_pcb, tmp_path, monkeypatch):
+        """A derived tap off a negative or swinging parent stays parent-only exempt."""
+        for parent in (-150, {"min": -150, "max": 150}):
+            cap = self._capture(
+                tmp_pcb, tmp_path, monkeypatch, voltage_map={"N1": parent, "N2": 1.65}
+            )
+            ep = cap["exempt_pairs"]
+            assert ep == {frozenset({"C1", "R1"}), frozenset({"C1", "R2"})}, parent
+            # The keepout table itself now carries the full end-to-end stress.
+            assert cap["required"] == {("N1", "N2"): pytest.approx(1.6)}, parent
 
 
 class TestDerivedTapAutoExempt:

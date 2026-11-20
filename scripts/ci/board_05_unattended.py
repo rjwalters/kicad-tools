@@ -14,7 +14,9 @@ that proof. It leaves the shipping path alone:
    (:data:`PROTOCOL_FLAGS`) at each ``--seed``. Since #7831 it chains the
    ``--complete`` lattice pass itself; ``--reserve-pour-only-passives`` has
    been on by default since #7835, so it is not passed.
-3. The routed board is graded with the pinned toolchain
+3. The graded board gets the #8532 preparation the shipping recipe applies
+   after its copper (``pcb add-fiducials`` + ``pcb add-board-info``), then is
+   graded with the pinned toolchain
    (:func:`kicad_tools.cli.kicad_toolchain.evidence_toolchain`, so
    ``KCT_KICAD_DOCKER=1`` works on a host):
 
@@ -217,6 +219,29 @@ def route_flags(seed: int) -> list[str]:
     return [*PROTOCOL_FLAGS, "--seed", str(seed)]
 
 
+def prepare_for_grading(routed: Path) -> dict[str, list[str]]:
+    """Add the #8532 global fiducials + board-ID silk the shipping recipe adds.
+
+    ``redesign/build.py`` runs ``pcb add-fiducials`` and ``pcb add-board-info``
+    after applying the reviewed copper, so the release board passes the
+    ``fiducials_missing`` / ``board_id_missing`` DFM warnings.  The unattended
+    path routes from scratch and wrote neither, so without this step its board
+    alone fails the recipe's own 0-warning bar (issue #9424).  Fixed geometry
+    on the board, never a waiver.
+    """
+    from kicad_tools.cli.pcb_add_board_info import run_add_board_info
+    from kicad_tools.cli.pcb_add_fiducials import run_add_fiducials
+
+    prep: list[str] = []
+    if run_add_fiducials(routed, sides="populated") != 0:
+        raise RuntimeError("pcb add-fiducials failed")
+    prep.append("fiducials")
+    if run_add_board_info(routed, auto=True) != 0:
+        raise RuntimeError("pcb add-board-info failed")
+    prep.append("board_info")
+    return {"prep": prep}
+
+
 def run_kicad_drc(routed: Path, evidence: Path) -> dict:
     """kicad-cli DRC on *routed*; raises ``KiCadEnvironmentError`` on library findings."""
     from kicad_tools.cli.kicad_toolchain import require_library_environment
@@ -386,6 +411,10 @@ def run_seed(harness, generated: Path, work_dir: Path, seed: int, timeout: float
     else:
         row["routed"] = str(artifact)
         row["artifact"] = kind
+        try:
+            row.update(prepare_for_grading(artifact))
+        except Exception as exc:  # recorded; gate_failures sees row["error"]
+            row["error"] = f"post-route prep failed: {type(exc).__name__}: {exc}"
         row.update(grade(artifact, run_dir / SCH_NAME))
     with contextlib.suppress(OSError):
         row["loadavg_end"] = [round(x, 2) for x in os.getloadavg()]

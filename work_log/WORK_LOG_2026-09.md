@@ -2,6 +2,99 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-20
+
+- **PR #5621**: chore(changelog): reconcile [Unreleased] since v0.20.0
+- **PR #5620**: feat(board06): reuse through-hole pads as pour-bridge termini in sub-stage D (#5606)
+- **PR #5619**: feat(router): replay commit journal into per-pad access witness
+- **PR #5615**: fix(zones): allocate new pours around pre-existing same-layer zones
+- **PR #5614**: fix(router): resume loop rejects accepted goal node + localized strict pad parity check
+- **PR #5612**: fix(ci): cache kicad-cli capability probes to cut native-launch amplification
+- **PR #5611**: feat(router): ordered commit journal + access-witness sidecar
+- **Issue #5610** (closed): [Epic #5508] Phase 1b (PR 2): access-witness replay + net-status/StuckNetDiagnosis consumers
+- **PR #5609**: fix(router): congestion-mark stagnation recovery so board06 converges without the avoidance leak
+- **Issue #5606** (closed): board06: port the through-hole pad pour-bridge reuse (#5564) into sub-stage D
+- **PR #5605**: fix(board06): reuse an existing same-net barrel for a pour bridge
+- **PR #5604**: feat(mcp): migrate to mcp 2.x SDK (FastMCP -> MCPServer) + fastmcp 4 (#5601)
+- **PR #5602**: fix(ci): board06 determinism smoke -- explicit output dir for --step route (#5597)
+- **Issue #5601** (closed): chore(mcp): migrate to fastmcp 4 / mcp 2.x (FastMCP renamed to MCPServer)
+- **PR #5600**: fix(ci): fix board 02/04 determinism-smoke flag drift + raise board-02 timeout
+- **Issue #5599** (closed): router: C++ pathfinder gives up on post-route clearance validation, falls back to slow Python A* (blocks board 02/04 routes)
+- **PR #5598**: fix(ci): delegate board06 smoke + load-independence copper hash to normalize_copper.py
+- **Issue #5597** (closed): board06_determinism_smoke.sh: generate_design.py's default output_dir (regression-output) breaks --step route without an explicit output dir
+- **PR #5596**: fix(tests): compose finite-mode route budget in test_route_artifact_receipt
+- **PR #5595**: feat(router): add pad outlines and zone polygons to the clearance kernel
+- **Issue #5594** (closed): test(router): board02 jlcpcb-tier1 baseline fails on main -- GND net partially routed, 2 of 3 pads stranded
+- **PR #5593**: fix(zones): derive generated zone UUIDs from content so pour fills are reproducible
+- **PR #5592**: feat(router): add exact-geometry clearance kernel for segments, vias and edges
+- **Issue #5591** (closed): pcb: generated boards emit pads with no (uuid ...), so KiCad invents a random one per pad on every load
+- **Issue #5590** (closed): zones: an auto-poured zone that overlaps an equal-priority zone on the same layer is starved of copper
+- **Issue #5589** (closed): feat(router): extend the clearance kernel with pad outlines and zone polygons
+- **Issue #5587** (closed): ci: board_route_determinism_smoke.sh 02 and 04 fail on a loaded host (wall-clock stage deadline / route deadline)
+- **Issue #5586** (closed): ci: two more line-based copper normalizers compare element COUNTS (board06 smoke, load-independence test)
+- **Issue #5584** (closed): flake risk: test_route_artifact_receipt's finite mode carries the same flat-30s route budget fixed in #5579
+- **Issue #5578** (closed): router: zone pour-fill island decomposition is not reproducible run-to-run (routed copper is)
+- **PR #5569**: chore(deps): bump anyio from 4.12.0 to 4.14.2
+- **Issue #5566** (closed): flake: lattice post-pass gating tests time out in native_concurrency acquire
+- **PR #5564**: fix(zones): reuse an existing through-hole pad as a pour-bridge terminus
+- **PR #5562**: chore(deps-dev): bump cmake from 4.4.2 to 4.4.3
+- **PR #5561**: chore(deps): bump the python-minor-patch group across 1 directory with 2 updates
+- **PR #5560**: chore(deps): bump actions/upload-artifact from 4 to 7
+- **PR #5559**: chore(deps): bump astral-sh/setup-uv from 10.0.1 to 10.1.0 in the github-actions group across 1 directory
+- **PR #5558**: chore(deps-dev): bump the site-minor-patch group in /site with 2 updates
+- **Issue #5551** (closed): board06: port the existing-barrel pour-bridge planner into sub-stage D
+- **Issue #5545** (closed): router: cohort-reroute converges on board06 U2.B1 stranding without the stale-penalty leak PR #5541 removes
+- **Issue #5517** (closed): [Epic #5508] Phase 1b: ordered commit journal + offline access-loss witness surfaced in `net-status --why`
+- **Issue #5514** (closed): [Epic #5509] Phase 1b: clearance kernel API in router/cpp with Python port and mandatory parity test (no consumer switched)
+- **Issue #5505** (closed): CI runtime: representative-cohort remeasurement and close-out for #5240
+- **Issue #5504** (closed): router: make per-connection avoidance cleanup the default once Board06 U2.B1 stranding is explained
+
+### 2026-09-19
+
+- **PR #5588**: docs(routing-plan): fix understated elapsed_s claim in Cost section
+- **PR #5585**: fix(ci): compare whole copper nodes, not header lines, in the route-determinism gate
+- **PR #5583**: test(ci): size the partial-placement route budget against the native-permit queue (#5579)
+- **Issue #5582** (closed): docs(routing-plan): "Cost" section understates the measured plan-stage elapsed_s by ~60x
+- **PR #5581**: feat(router): run the report-only routing plan stage on every default route (+ --no-routing-plan)
+- **Issue #5580** (closed): ci: board_route_determinism_smoke.sh normalize_copper() compares copper element COUNTS, not geometry
+- **Issue #5579** (closed): flake: test_route_partial_placement_cli deadline-exceeded failures redden the Test job on main
+- **PR #5577**: perf(board06): spatially prune the pour-repair obstacle clearance scans
+- **PR #5576**: fix(ci): credit native-slot wait back to the waiting test's pytest-timeout budget
+- **PR #5574**: fix(judge): restore draft-PR fallback exclusion reverted by installed-surface resync
+- **PR #5573**: test(ci): add evidence-sized pytest-timeout overrides to the three 60s-reaped test groups
+- **Issue #5572** (closed): CI: native-slot wait from KCT_NATIVE_MAX_CONCURRENCY=1 is charged to the waiting test's pytest-timeout budget
+- **PR #5571**: perf(router): hoist loop-invariant clearance lookups in validate_routes
+- **PR #5570**: fix(router): persist add_obstacle keepouts across grid resets
+- **Issue #5567** (closed): Flaky >60s pytest-timeout in tests/router/lattice/test_post_pass_gating.py CLI tests
+- **Issue #5557** (closed): judge-fallback-guard.sh: exclude draft PRs from fallback evaluation
+- **Issue #5556** (closed): CI: Test job flakes on a fixed 60s pytest-timeout hitting an arbitrary test (seen on main and PRs)
+- **Issue #5555** (closed): router: _reset_for_new_trial drops add_obstacle keepouts, silently reopening the grid
+- **Issue #5552** (closed): chore: resync installed Loom surfaces silently reverted merged fix #5543 (draft-PR fallback exclusion)
+- **Issue #5513** (closed): [Epic #5509] Phase 1a: kicad-cli clearance conformance oracle (report-only) with four adapters and named fixtures
+
+### 2026-09-18
+
+- **PR #5568**: fix(router): sum both edge directions in RoutingPlan edge entries
+- **PR #5565**: test(conformance): wrap five clearance consumers as adapters and populate the conformance table
+- **PR #5554**: perf(router): write segment clearance envelopes with slice assignment
+- **PR #5553**: feat(router): apply declared swap groups via a pad-rebind applicator
+- **PR #5549**: fix(zones): reuse an existing same-net barrel for a pour bridge (#5507)
+- **PR #5548**: feat(board-07): netlist write-back for generator-owned boards (Epic #5511 Phase 2b)
+- **PR #5547**: chore(deps): bump soupsieve from 2.8.4 to 2.9
+- **PR #5546**: chore(deps): bump devalue from 5.8.1 to 5.9.2 in /site
+- **Issue #5544** (closed): RoutingPlan.from_global_result() may disagree with get_total_overflow() on reverse-direction-only overflow
+- **PR #5542**: fix: parse kicad-cli 10 hole-to-hole 'min X mm; actual Y mm' wording
+- **PR #5540**: fix: RegionGraph.get_total_overflow() undercounts reverse-direction edge overflow
+- **Issue #5538** (closed): classify-dependency-block.sh's ref extraction treats a parenthetical epic mention as a second open blocker, wedging phase issues in DEFER forever
+- **Issue #5537** (closed): [Epic #5511] Phase 2b: netlist write-back for generator-owned boards
+- **Issue #5536** (closed): [Epic #5511] Phase 2a: pad-rebind applicator for declared swap groups
+- **Issue #5534** (closed): drc/report.py's clearance extractor doesn't parse kicad-cli 10's hole-to-hole wording
+- **Issue #5533** (closed): [Epic #5509] Phase 1a (2/2): five consumer adapters + populated clearance-conformance table
+- **Issue #5529** (closed): RegionGraph.get_total_overflow() can undercount overflow on reverse-direction edge traversals
+- **PR #5524**: ci: bound native KiCad subprocess concurrency from measured attribution
+- **Issue #5523** (closed): loom-fleet-dispatch auto-relabels draft PRs to loom:review-requested
+- **Issue #5501** (closed): CI: bound remaining native subprocess concurrency after confirmed Test cgroup OOM
+
 ### 2026-09-17
 
 - **PR #5543**: fix(judge): exclude draft PRs from fallback-mode evaluation

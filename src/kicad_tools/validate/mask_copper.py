@@ -56,21 +56,32 @@ opening covers that part -- but it is the pad's own exposed land, and the one
 track width it puts under mask where it leaves the pad is unavoidable. Such a
 measurement's disposition is ``within_own_pad`` and its finding is ``info``.
 The class is granted for what the copper *does*, never merely for touching
-the pad (``_within_own_pad`` states the conditions): a plain pad shape with a
+the pad (``_within_own_pad`` states the conditions): a plain pad shape, or a
+custom pad through its real copper outline (issue #9750), with a
 non-negative margin; the same identified net; a proven direct overlap; nothing
 exposed beyond the pad (the construction budget ``u`` tolerated once); and no
 copper under mask within the danger clearance beside the opening beyond what
 one straight entry at 45 degrees or steeper puts there. Only a straight
 segment with at least one authored end strictly inside the pad gets that
-allowance (issue #9261). So a track that straddles, runs along or passes
-through the pad, a shallower entry, an arc, a via or pour touching the pad
-(ring copper beside the opening), a positive expansion ring wider than
-``u``, solder-mask-defined, custom and padstack pads, pads with no net, and
-any different-net copper all keep their measured verdict.
+allowance (issue #9261) -- or, when its copper already covers the whole
+perimeter band, the allowance is that band itself: a bar wider than the pad
+leaves the pad's own perimeter under mask, not a second trace, so round and
+square pads agree (issue #9750). So a track that straddles, runs along or
+passes through the pad, a shallower entry, an arc, a via or pour touching the
+pad (ring copper beside the opening), a positive expansion ring wider than
+``u``, solder-mask-defined, padstack and chamfered pads, pads with no net,
+and any different-net copper all keep their measured verdict.
 ``exposed_beyond_owner_mm2`` and ``beside_owner_excess_mm2`` record the two
-measured quantities. "Same net" is the net pcbnew loads, which assigns a
-floating stub touching one pad to that pad's net. Evidence:
-``docs/research/mask-to-copper-own-pad-8858.md``.
+measured quantities, and ``within_own_pad_failed_condition`` names the
+``_within_own_pad`` docstring condition (1-5) that kept a same-net,
+single-pad-owner measurement from downgrading to ``within_own_pad`` -- None
+when the class qualified or was not attempted (issue #9305). The field names
+why the downgrade was missed, not the finding's final disposition: another
+classification may still take over afterwards, e.g. a pad tied to its own
+pour by thermal spokes fails condition 4 yet reads ``own_pour_thermal`` at
+info. "Same net" is the net pcbnew loads, which assigns a floating stub
+touching one pad to that pad's net.
+Evidence: ``docs/research/mask-to-copper-own-pad-8858.md``.
 
 Copper a reinforce wire run exposes on purpose (issue #9315)
 ============================================================
@@ -87,7 +98,9 @@ lies within the strip tolerance of a recorded anchor point or of a piece
 already in the run's chain, seeded at anchors a same-net hole really
 stands on -- anchor flashes and end-hole rings sit within the strip
 tolerance of a recorded anchor point -- and the measurement's owner net
-becomes the run's net instead of ``null``. The run's own track (wholly
+becomes the run's net instead of ``null``. A same-net via or a
+gauge-sized ``gr_circle`` hole whose centre stands on the strip mid-run (and
+its mask circle on the far side) is attributed (#9444). The run's own track (wholly
 under its strip, or entering one of its anchors), its anchor vias, and a
 same-net pad standing on the run (the strip passes over its copper, or
 the pad is itself an anchor) measure as disposition
@@ -97,6 +110,20 @@ same-net copper that is not the run's (a neighbouring track the strip
 clips, or a trace wholly under an unrelated opening elsewhere on the
 board) stays at its current severity: that is the hazard a strip can
 actually create. With no sidecar, or no matching record, nothing changes.
+
+A pad of the same footprint (issue #9420)
+=========================================
+
+A footprint can carry a rectangular ground pad with circular thermal pads on
+it (``RF_Module:ESP32-C3-WROOM-02``); each circular opening exposes the
+rectangular pad's copper. When the opening is a single-pad (not merged)
+opening, the relation is ``overlap``, and the conductor and every opening
+owner are **pads of one footprint** on one identical non-empty net, the
+measurement is ``within_own_footprint`` at info (kept visible, never dropped).
+A merged opening, copper beside the opening (``touching``/``disjoint``), pads
+of different footprints or nets, and any track, via or pour keep their
+measured verdict. This is a presentation change on the kct side only; no fab
+row confirms the fab passes these pads (see the issue).
 
 A pad's own pour joined by thermal spokes (issue #9284)
 =======================================================
@@ -272,6 +299,12 @@ class MaskCopperMeasurement:
     # different-net exposure behind a same-net allowance entry. Empty means
     # "not recorded" (a payload written before this field loads unchanged).
     owner_nets: tuple[str, ...] = ()
+    # Issue #9305: for a same-net conductor measured against a single pad
+    # owner, the docstring condition (1-5) of ``_within_own_pad`` that kept
+    # the measurement from downgrading to ``within_own_pad``; None when the
+    # conductor qualified or the downgrade path was not attempted. Optional,
+    # like the other triage fields, so a v1 payload without it loads unchanged.
+    within_own_pad_failed_condition: int | None = None
 
     def __post_init__(self):
         if self.disposition not in (
@@ -283,6 +316,7 @@ class MaskCopperMeasurement:
             "within_reinforce_run",
             "own_pour_thermal",
             "own_pour_solid",
+            "within_own_footprint",
         ) or self.relation not in ("overlap", "touching", "disjoint"):
             raise ValueError("Invalid mask measurement disposition/relation")
         if self.mask_side not in (
@@ -312,6 +346,12 @@ class MaskCopperMeasurement:
         for flag in (self.same_net, self.own_pad_entry):
             if flag is not None and not isinstance(flag, bool):
                 raise ValueError("Invalid mask measurement triage metadata")
+        if self.within_own_pad_failed_condition is not None and (
+            isinstance(self.within_own_pad_failed_condition, bool)
+            or not isinstance(self.within_own_pad_failed_condition, int)
+            or not 1 <= self.within_own_pad_failed_condition <= 5
+        ):
+            raise ValueError("Invalid mask measurement triage metadata")
         for extra in (self.exposed_beyond_owner_mm2, self.beside_owner_excess_mm2):
             if extra is not None and (
                 isinstance(extra, bool)
@@ -418,9 +458,68 @@ class MaskCopperAssessment:
             "binding": self.binding.to_dict() if self.binding else None,
             "measurements": [m.to_dict() for m in self.measurements],
             "intent_audit": self.intent_audit,
-            "geometry_provenance": self.geometry_provenance,
+            "geometry_provenance": committed_geometry_provenance(self.geometry_provenance),
             "evaluated_pairs": self.evaluated_pairs,
         }
+
+
+def _wkt_digest(wkt_text):
+    """Provenance record standing in for one raw WKT string in committed evidence.
+
+    Issue #9575: the raw polygon text made a poured board's assessment tens of
+    megabytes per file. The digest keeps each layer's payload identifiable and
+    tamper-evident without shipping it; the raw geometry stays in memory, where
+    the assessment's own tests and any further measurement read it.
+    """
+    import hashlib
+
+    payload = wkt_text.encode("utf-8")
+    return {"sha256": hashlib.sha256(payload).hexdigest(), "bytes": len(payload)}
+
+
+def _digested_wkt_entry(entry):
+    """One ``layers_wkt``-bearing provenance mapping, digests in the WKT's place.
+
+    Passes through anything that does not carry a ``layers_wkt`` map, and keeps
+    non-string layer values (an already-digested record) as they are, so
+    serializing a reloaded assessment changes nothing.
+    """
+    if not isinstance(entry, dict) or not isinstance(entry.get("layers_wkt"), dict):
+        return entry
+    return {
+        **entry,
+        "layers_wkt": {
+            layer: _wkt_digest(text) if isinstance(text, str) else text
+            for layer, text in entry["layers_wkt"].items()
+        },
+    }
+
+
+def committed_geometry_provenance(provenance):
+    """``geometry_provenance`` as ``MaskCopperAssessment.to_dict`` ships it (#9575).
+
+    Every ``layers_wkt`` map -- export-level, per ``source_geometries`` entry
+    and per ``source_objects`` entry -- is replaced by per-layer
+    ``_wkt_digest`` records. The in-memory dict is copied, never mutated, and
+    every other key (``features``, ``gerber_sha256``, ``objects``, ...) is
+    carried as-is.
+    """
+    committed = dict(provenance)
+    export = provenance.get("export")
+    if isinstance(export, dict):
+        export = _digested_wkt_entry(dict(export))
+        if isinstance(export.get("source_geometries"), dict):
+            export["source_geometries"] = {
+                key: _digested_wkt_entry(value)
+                for key, value in export["source_geometries"].items()
+            }
+        committed["export"] = export
+    if isinstance(provenance.get("source_objects"), dict):
+        committed["source_objects"] = {
+            identity: _digested_wkt_entry(value)
+            for identity, value in provenance["source_objects"].items()
+        }
+    return committed
 
 
 def source_binding(geometry):
@@ -468,9 +567,17 @@ def _conductor_endpoints(copper):
 
 
 #: Owner pad shapes whose plotted opening the within-own-pad class has been
-#: checked against (issue #8858). Custom, padstack and chamfered pads, and any
-#: shape not listed, keep their measured verdict.
+#: checked against (issue #8858); also the pour-thermal class's gate
+#: (``_own_pour_thermal``, which #9750 leaves on this plain tuple). Custom,
+#: padstack and chamfered pads, and any shape not listed, keep their measured
+#: verdict on this tuple.
 _WITHIN_OWN_PAD_OWNER_KINDS = ("pad:rect", "pad:roundrect", "pad:circle", "pad:oval")
+
+#: Owner kinds the within-own-pad entry class additionally admits (issue
+#: #9750): stock custom pads such as the SOT-89 tab, whose conditions 2-4 run
+#: against the pad's real copper outline. Suffixed kinds (padstack, chamfer)
+#: stay out, so a bare ``pad:custom`` never widens the pour tuple above.
+_WITHIN_OWN_PAD_ENTRY_OWNER_KINDS = _WITHIN_OWN_PAD_OWNER_KINDS + ("pad:custom",)
 
 #: One straight track crossing the pad edge at 45 degrees or steeper puts at
 #: most sqrt(2) x width x clearance of copper under mask in the band beside the
@@ -483,13 +590,16 @@ _AREA_EPSILON_MM2 = 1e-9
 
 
 def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearance, uncertainty):
-    """``(qualifies, beside_excess_mm2)`` for the within-own-pad class (issue #8858).
+    """``(qualifies, beside_excess_mm2, failed_condition)`` for the within-own-pad class.
 
     A same-net conductor qualifies only when **what it does** is a clean entry
     into its own pad. Every condition is required:
 
-    1. The owner is a plain pad shape (``_WITHIN_OWN_PAD_OWNER_KINDS``) with a
-       non-negative mask margin. Solder-mask-defined openings fail closed.
+    1. The owner is a plain pad shape or a custom pad
+       (``_WITHIN_OWN_PAD_ENTRY_OWNER_KINDS``) with a non-negative mask
+       margin. Solder-mask-defined, padstack and chamfered openings fail
+       closed; a custom pad's remaining conditions run against its real
+       copper outline (issue #9750).
     2. Direct connection: the conductor's copper and the pad's copper overlap
        beyond the construction budget ``u`` (both shrunk by ``u``).
     3. Nothing exposed beyond the pad: ``opening ∩ copper − pad.buffer(u)`` is
@@ -501,24 +611,35 @@ def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearanc
        opening. Its allowance ``A`` is zero, except for a straight segment
        with at least one authored endpoint strictly inside the pad: one entry
        crossing, ``A = 1.45 × width × clearance`` (the other end may exit, sit
-       on the edge or be inside too).
+       on the edge or be inside too), or, when that copper covers the whole
+       perimeter band (a bar wider than the pad), the band itself,
+       ``A = area(opening.buffer(clearance + u) − opening.buffer(u))`` -- the
+       copper left under mask beside the opening is then the pad's own
+       perimeter, not a second trace, so round and square pads agree by
+       construction (issue #9750).
        The finding qualifies only if ``B − A`` (returned as the excess) is
        numerically zero. So a track that straddles, runs along or passes
        through the pad, an entry shallower than about 45 degrees, a via or
        pour with ring copper beside the pad, and arcs all keep their verdict.
     5. For a via, its authored drill lies wholly outside the opening.
+
+    ``failed_condition`` is the docstring number (1-5) of the first condition
+    that failed, or ``None`` when the conductor qualifies (issue #9305: the
+    measurement records it so a report names the test that kept the verdict).
+    It names why the downgrade to ``within_own_pad`` was missed, not the
+    finding's final disposition: a later classification may still take over,
+    e.g. a spoke-connected own pour fails condition 4 yet reads
+    ``own_pour_thermal`` at info.
     """
-    if (
-        owner["kind"] not in _WITHIN_OWN_PAD_OWNER_KINDS
-        or margin < 0
-        or owner_copper.buffer(-uncertainty).intersection(copper.buffer(-uncertainty)).area <= 0
-    ):
-        return False, None
+    if owner["kind"] not in _WITHIN_OWN_PAD_ENTRY_OWNER_KINDS or margin < 0:
+        return False, None, 1
+    if owner_copper.buffer(-uncertainty).intersection(copper.buffer(-uncertainty)).area <= 0:
+        return False, None, 2
     if (
         opening.intersection(copper).difference(owner_copper.buffer(uncertainty)).area
         > _AREA_EPSILON_MM2
     ):
-        return False, None
+        return False, None, 3
     band = (
         copper.difference(opening.buffer(uncertainty))
         .intersection(opening.buffer(clearance + uncertainty))
@@ -531,27 +652,58 @@ def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearanc
         width = item.get("width_mm")
         ends = item.get("endpoints_mm")
         if not width or not ends:
-            return False, None
+            return False, None, 4
         core = owner_copper.buffer(-uncertainty)
         if not any(core.contains(Point(p)) for p in ends):
             # Pass-through, straddle or along-edge copper: not an entry.
-            return False, max(0.0, band)
+            return False, max(0.0, band), 4
         # At least one authored end is strictly inside the pad. The budget is
         # one entry crossing whether the other end exits, lies on the edge or
         # is also inside, so an end cap poking a hair past the edge never
         # scores worse than a full exit (issue #9261). B is still measured
         # from the real copper, so the excess check keeps gating.
         allowance = _ENTRY_CROSSING_FACTOR * width * clearance
+        ring = opening.buffer(clearance + uncertainty).difference(opening.buffer(uncertainty))
+        if ring.difference(copper).area <= _AREA_EPSILON_MM2:
+            # A bar wider than the pad covers the whole perimeter band, so
+            # the copper it leaves under mask beside the opening is the pad's
+            # own perimeter band, not a second trace: allow the band itself
+            # (issue #9750). Round and square pads then agree by construction,
+            # and a narrower track keeps the one-crossing budget above.
+            allowance = ring.area
     excess = max(0.0, band - allowance)
     if excess > _AREA_EPSILON_MM2:
-        return False, excess
+        return False, excess, 4
     if item["kind"] == "via":
         drill = item.get("drill_mm")
         if drill is None or drill <= 0:
-            return False, excess
+            return False, excess, 5
         if opening.distance(copper.centroid) < drill / 2 + uncertainty:
-            return False, excess
-    return True, excess
+            return False, excess, 5
+    return True, excess, None
+
+
+def _same_footprint_pads(owner_items, item) -> bool:
+    """True when the conductor and every opening owner are pads of one footprint.
+
+    Issue #9420.  The footprint is the object's ``parent_uuid``; an empty one
+    (no identifiable footprint) never qualifies.  Every owner and the conductor
+    must carry one identical non-empty net (not merely overlap in nets).
+    """
+    footprint = item.get("parent_uuid")
+    net = item.get("net")
+    return bool(
+        footprint
+        and net
+        and str(item.get("kind", "")).startswith("pad:")
+        and owner_items
+        and all(
+            str(o.get("kind", "")).startswith("pad:")
+            and o.get("parent_uuid") == footprint
+            and o.get("net") == net
+            for o in owner_items
+        )
+    )
 
 
 @dataclass
@@ -576,6 +728,7 @@ class _ReinforceRun:
     mask_side: str
     anchors: tuple[tuple[float, float], ...]
     confirmed_anchors: tuple[tuple[float, float], ...]
+    wire_gauge_awg: int | None = None
 
 
 def _reinforce_run_label(record: dict[str, Any]) -> str:
@@ -657,9 +810,43 @@ def _reinforce_runs(objects: dict[str, Any], wires: Any) -> list[_ReinforceRun]:
                 mask_side=mask_side,
                 anchors=tuple(anchors),
                 confirmed_anchors=confirmed,
+                wire_gauge_awg=_record_awg(record),
             )
         )
     return runs
+
+
+# Largest mid-run ``gr_circle`` a run may attribute: the anchor drill for the
+# record's gauge plus this much flash on each side (#9444). A bigger circle is
+# a board feature, not a wire-end hole, and would excuse unbounded copper.
+# The 0.5 mm is a chosen envelope, not a derived size: ``pcb reinforce`` emits
+# no circular flash (only ``gr_line`` openings), so mid-run circles are
+# hand-drawn board graphics. The nearest producer value is the anchor pad,
+# ``anchor_pad_for_drill(anchor_drill_for_awg(awg), min_annular_ring_mm)``
+# (drill + 2 x annular ring, sized in ``pcb/reinforce.py``): 1.916 mm for
+# 16 AWG at the fallback 0.25 mm ring, so the envelope sits one 0.25 mm ring
+# per side above that pad (#9490).
+_MID_RUN_CIRCLE_FLASH_MM = 0.5
+_CENTRE_EPS_MM = 1e-6
+
+
+def _record_awg(record):
+    awg = record.get("wire_gauge_awg")
+    if isinstance(awg, bool) or not isinstance(awg, (int, float)):
+        return None
+    return int(awg)
+
+
+def _mid_run_circle_limit_mm(awg):
+    """Max diameter of a ``gr_circle`` hole attributable mid-run; ``None`` = never."""
+    if awg is None:
+        return None
+    from kicad_tools.physics.wire_gauge import anchor_drill_for_awg
+
+    try:
+        return anchor_drill_for_awg(awg) + 2 * _MID_RUN_CIRCLE_FLASH_MM
+    except ValueError:
+        return None
 
 
 def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs=()):
@@ -685,7 +872,14 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs
     already in the chain, seeded by the pieces standing on the confirmed
     anchors. An opening that is merely over the same net's copper elsewhere
     on the board is not continuous with any anchor flash and attributes to
-    nothing (#9315). An anchor-flash ``via`` or ``pad`` must also carry the
+    nothing (#9315). A same-net ``via`` (a layer change) or a ``gr_circle``
+    (a hole no wider than the record's anchor drill plus flash) joins the run
+    when its centre lies on an admitted strip piece (#9444), on either mask
+    side; a hole merely beside the strip does not. The ``via`` branch carries
+    no size bound: in a real export a via's mask opening is its pad plus the
+    mask expansion -- a small flash -- so the copper it can excuse stays close
+    to the strip; only the ``gr_circle`` is capped, because a board graphic
+    can be drawn any size (#9490). An anchor-flash ``via`` or ``pad`` must also carry the
     run's net (#9348); board graphics have none to check. Ties between records of one net go
     to the run with the nearest anchor, first recorded winning a tie, so
     attribution is deterministic. ``merged_region`` openings attribute
@@ -701,6 +895,9 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs
     claimants = [(run, False) for run in runs] + [(run, True) for run in far_runs]
     candidates: dict[str, list[tuple[_ReinforceRun, float]]] = {}
     strip_materials: dict[str, Any] = {}
+    # Mid-run candidates (#9444): same-net vias and board-graphic circles whose
+    # claim rests on continuity with the run's strip, not on an anchor.
+    mid_run: list[tuple[str, Any, str, str]] = []
     for owners, material, kind, *_ in openings:
         if kind == "merged_region" or material is None or material.is_empty:
             continue
@@ -715,6 +912,8 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs
         if kind == "via" or kind.startswith("pad"):
             owner = objects.get(uuid) if len(owners) == 1 else None
             owner_net = (owner.get("net") if owner else "") or ""
+        if kind == "gr_circle" or (kind == "via" and len(owners) == 1):
+            mid_run.append((uuid, hull, kind, owner_net or ""))
         for run, far in claimants:
             if not run.confirmed_anchors:
                 continue
@@ -728,13 +927,26 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs
 
     # Grow each run's strip chain to a fixpoint: a piece whose hull lies
     # within the strip tolerance of a confirmed anchor -- or of an already
-    # admitted piece -- joins the chain and reaches further pieces.
-    for run in runs:
+    # admitted piece -- joins the chain and reaches further pieces. A far-side
+    # run's strip lives on the opposite mask layer, so its chain is grown from
+    # the source ``gr_line`` objects there (#9444); it claims no strip piece
+    # on this side, only the mid-run holes standing on it below.
+    chain_hulls: dict[int, list[Any]] = {}
+    for run, far in claimants:
         if not run.confirmed_anchors:
             continue
         anchor_points = [Point(a) for a in run.confirmed_anchors]
+        if far:
+            pending = [
+                (uuid, item["layers_geometry"][run.mask_side])
+                for uuid, item in objects.items()
+                if item.get("kind") == "gr_line"
+                and run.mask_side in item.get("layers_geometry", {})
+                and not item["layers_geometry"][run.mask_side].is_empty
+            ]
+        else:
+            pending = list(strip_materials.items())
         admitted_hulls: list[Any] = []
-        pending = list(strip_materials.items())
         while pending:
             remaining = []
             progressed = False
@@ -746,13 +958,40 @@ def _attribute_reinforce_openings(runs, openings, objects, uncertainty, far_runs
                 if not near:
                     remaining.append((uuid, material))
                     continue
-                if not any(r is run for r, _ in candidates.get(uuid, ())):
+                if not far and not any(r is run for r, _ in candidates.get(uuid, ())):
                     candidates.setdefault(uuid, []).append((run, float("inf")))
                 admitted_hulls.append(hull)
                 progressed = True
             pending = remaining
             if not progressed:
                 break
+        chain_hulls[id(run)] = admitted_hulls
+
+    # Mid-run holes (#9444): a same-net layer-change via, or an anchor-size
+    # board circle, standing on the run's strip is soldered with the rest of
+    # the run. Mask continuity with the admitted strip attributes it, exactly
+    # as a strip piece is attributed; an opening elsewhere on the board is
+    # continuous with nothing and stays unattributed (#9315).
+    for uuid, hull, kind, owner_net in mid_run:
+        for run, _far in claimants:
+            hulls = chain_hulls.get(id(run))
+            if not hulls:
+                continue
+            if kind == "via" and owner_net != run.net:
+                continue
+            if kind == "gr_circle":
+                limit = _mid_run_circle_limit_mm(run.wire_gauge_awg)
+                minx, miny, maxx, maxy = hull.bounds
+                if limit is None or max(maxx - minx, maxy - miny) > limit + 2 * _CENTRE_EPS_MM:
+                    continue
+            if any(r is run for r, _ in candidates.get(uuid, ())):
+                continue
+            # The hole must stand ON the run: its centre lies in the admitted
+            # strip, not merely within tolerance of its edge.
+            centre = hull.centroid
+            distance = min(other.distance(centre) for other in hulls)
+            if distance <= _CENTRE_EPS_MM:
+                candidates.setdefault(uuid, []).append((run, distance))
 
     run_by_uuid: dict[str, _ReinforceRun] = {}
     pieces: dict[int, list[Any]] = {}
@@ -1300,13 +1539,14 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                 if area > 0 and owner_copper is not None and not owner_copper.is_empty:
                     beyond_owner = intersection.difference(owner_copper).area
                 beside_excess = None
+                within_own_pad_failed_condition = None
                 if (
                     disposition in ("violation", "uncertain")
                     and same_net
                     and owner_copper is not None
                     and not owner_copper.is_empty
                 ):
-                    qualifies, beside_excess = _within_own_pad(
+                    qualifies, beside_excess, failed_condition = _within_own_pad(
                         opening,
                         copper,
                         owner_copper,
@@ -1318,6 +1558,18 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                     )
                     if qualifies:
                         disposition = "within_own_pad"
+                    else:
+                        within_own_pad_failed_condition = failed_condition
+                if (
+                    disposition in ("violation", "uncertain")
+                    and same_net
+                    and kind != "merged_region"
+                    and relation == "overlap"
+                    and _same_footprint_pads(owner_items, item)
+                ):
+                    # Issue #9420: same-net pads of one footprint are its
+                    # footprint's own pad stack, not routed copper.
+                    disposition = "within_own_footprint"
                 pour_spokes = pour_gap = pour_spoke = None
                 if (
                     disposition in ("violation", "uncertain")
@@ -1447,6 +1699,7 @@ def assess_attributed_geometry(geometry, policy, intents=(), reinforce_wires=())
                         owner_ref=owner_ref,
                         exposed_beyond_owner_mm2=beyond_owner,
                         beside_owner_excess_mm2=beside_excess,
+                        within_own_pad_failed_condition=within_own_pad_failed_condition,
                         owner_run=owner_run,
                         pour_spokes=pour_spokes,
                         pour_relief_gap_mm=pour_gap,
@@ -1589,12 +1842,15 @@ def assessment_results(assessment: MaskCopperAssessment) -> DRCResults:
         # beside the opening is the pad's own thermal spokes.
         # ``own_pour_solid`` (issue #9436): the copper is the pour the pad is
         # solid-connected to; the fab reports nothing for that shape.
+        # ``within_own_footprint`` (issue #9420): the opening and the copper
+        # are same-net pads of one footprint -- its same-footprint pad exposure.
         if measurement.disposition in (
             "intentional",
             "within_own_pad",
             "within_reinforce_run",
             "own_pour_thermal",
             "own_pour_solid",
+            "within_own_footprint",
         ):
             severity = "info"
         # Warning-disposition measurements and provisional (incomplete-run)

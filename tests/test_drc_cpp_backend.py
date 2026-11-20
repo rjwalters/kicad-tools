@@ -418,7 +418,7 @@ class TestCppPythonParity:
     not change behavior.
     """
 
-    @pytest.mark.skipif(not is_cpp_available(), reason="C++ DRC backend not built")
+    @pytest.mark.requires_router_cpp
     def test_parity_violation_detection(self, tmp_path: Path, default_rules: DesignRules):
         """C++ and Python backends detect the same violations."""
         pcb = _load_pcb(tmp_path, PCB_CLOSE_COMPONENTS)
@@ -446,7 +446,7 @@ class TestCppPythonParity:
             # Clearance values should match within float32 tolerance
             assert abs(v_cpp.actual_value - v_py.actual_value) < 1e-3
 
-    @pytest.mark.skipif(not is_cpp_available(), reason="C++ DRC backend not built")
+    @pytest.mark.requires_router_cpp
     def test_parity_clean_board(self, tmp_path: Path, default_rules: DesignRules):
         """Both backends agree on clean board."""
         pcb = _load_pcb(tmp_path, PCB_WELL_SPACED)
@@ -461,7 +461,7 @@ class TestCppPythonParity:
         assert len(violations_cpp) == 0
         assert len(violations_py) == 0
 
-    @pytest.mark.skipif(not is_cpp_available(), reason="C++ DRC backend not built")
+    @pytest.mark.requires_router_cpp
     def test_parity_same_net_skip(self, tmp_path: Path, default_rules: DesignRules):
         """Both backends correctly skip same-net pairs."""
         pcb = _load_pcb(tmp_path, PCB_SAME_NET)
@@ -476,7 +476,7 @@ class TestCppPythonParity:
         assert len(violations_cpp) == 0
         assert len(violations_py) == 0
 
-    @pytest.mark.skipif(not is_cpp_available(), reason="C++ DRC backend not built")
+    @pytest.mark.requires_router_cpp
     def test_parity_rotated(self, tmp_path: Path, default_rules: DesignRules):
         """Both backends agree on rotated component results."""
         pcb = _load_pcb(tmp_path, PCB_ROTATED)
@@ -490,7 +490,7 @@ class TestCppPythonParity:
 
         assert len(violations_cpp) == len(violations_py)
 
-    @pytest.mark.skipif(not is_cpp_available(), reason="C++ DRC backend not built")
+    @pytest.mark.requires_router_cpp
     def test_parity_numerical_precision(self, tmp_path: Path, default_rules: DesignRules):
         """C++ and Python clearance values match within float32 tolerance."""
         pcb = _load_pcb(tmp_path, PCB_CLOSE_COMPONENTS)
@@ -514,7 +514,7 @@ class TestCppPythonParity:
                 f"vs Python={v_py.actual_value:.6f}"
             )
 
-    @pytest.mark.skipif(not is_cpp_available(), reason="C++ DRC backend not built")
+    @pytest.mark.requires_router_cpp
     def test_parity_check_move(self, tmp_path: Path, default_rules: DesignRules):
         """Both backends agree on check_move results with position offset."""
         pcb = _load_pcb(tmp_path, PCB_CLOSE_COMPONENTS)

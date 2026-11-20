@@ -139,38 +139,117 @@ _ROUND_OUT = 1.0 / math.cos(math.pi / 256)
 # drop copper or seal a legal corridor.
 _FILLED_TOKENS = {"yes", "true", "solid"}
 _ANCHOR_SHAPES = {"rect", "circle"}
+# Segments per full circle for primitive discs and rings, scaled by radius so
+# the tessellation's area error stays under ~2e-5 mm^2 (circumscribed) and
+# ~3e-5 mm^2 (inscribed) at any radius (Issue #9501): circ err = pi^3 r^2 /
+# (3 N^2), inscribed twice that. Below the knee the flat 256-segment floor
+# bounds circ err by 1.6e-4 r^2, at the knee (r = 0.32 mm) 1.6e-5.
+_CIRCLE_SEGMENTS_PER_MM = 800.0
+_CIRCLE_SEGMENT_FLOOR = 256
 
 
 def _refuse(reference: str, pad_number: str, detail: str) -> ValueError:
     return ValueError(
         f"Cannot preserve placement-excluded custom pad {reference}.{pad_number}: "
-        f"{detail}; only filled zero-width gr_poly primitives with a rect or circle "
-        "anchor are represented as fixed copper. Route this board with a router "
-        "supporting its full copper geometry."
+        f"{detail}; only gr_circle and filled or stroked gr_poly primitives with a "
+        "rect or circle anchor are represented as fixed copper. Route this board "
+        "with a router supporting its full copper geometry."
     )
 
 
-def _primitive_polygon(node, reference: str, pad_number: str):
-    """Actual copper of one supported primitive, in the pad's local frame."""
-    # shapely ships no stubs; the module's first import carries the ignore
-    # (it used to sit in ``segment_clear``, which no longer needs shapely --
-    # the clearance predicate is the kernel's now, Epic #5509 Phase 3f).
-    from shapely.geometry import Polygon  # type: ignore[import-untyped]
-
-    if node.name != "gr_poly":
-        raise _refuse(reference, pad_number, f"unsupported primitive {node.name!r}")
+def _primitive_width(node, reference: str, pad_number: str) -> float:
+    """A primitive's pen width: how far its stroke reaches outside the outline."""
     stroke = node.find_child("stroke")
     width_node = stroke.find_child("width") if stroke is not None else node.find_child("width")
     width = width_node.get_float(0) if width_node is not None else 0.0
-    if width is None or not math.isfinite(width) or width != 0:
-        raise _refuse(reference, pad_number, f"unsupported gr_poly stroke width {width}")
+    if width is None or not math.isfinite(width) or width < 0:
+        raise _refuse(reference, pad_number, f"unsupported {node.name} stroke width {width}")
+    return width
+
+
+def _primitive_fill_token(node) -> str:
     fill = node.find_child("fill")
     token = ""
     if fill is not None:
         nested = fill.find_child("type")
         token = str((nested or fill).get_string(0) or "").lower()
-    if token not in _FILLED_TOKENS:
-        raise _refuse(reference, pad_number, f"unfilled or unrecognized gr_poly fill {token!r}")
+    return token
+
+
+def _disc(radius: float, *, conservative: bool = True):
+    """A tessellated disc, circumscribed so copper is never under-estimated.
+
+    The vertex count grows with the radius because the area this module's
+    consumers compare against is an absolute tolerance (1e-4 mm^2, Issue
+    #9501), not a relative one; ``conservative=False`` inscribes instead, for
+    the inner boundary of a ring where growing the disc would eat copper.
+    """
+    from shapely.geometry import Point  # type: ignore[import-untyped]
+
+    segments = int(
+        max(
+            _CIRCLE_SEGMENT_FLOOR,
+            math.ceil(_CIRCLE_SEGMENTS_PER_MM * radius / 4.0) * 4,
+        )
+    )
+    scale = 1.0 / math.cos(math.pi / segments) if conservative else 1.0
+    return Point(0, 0).buffer(radius * scale, quad_segs=segments // 4)
+
+
+def _circle_primitive(node, reference: str, pad_number: str):
+    """Actual copper of a ``gr_circle`` primitive: a disc or a ring.
+
+    KiCad grows a filled circle's copper to ``radius + width / 2`` and an
+    unfilled one to the ring between ``radius - width / 2`` and
+    ``radius + width / 2`` (verified against the pinned image's own
+    ``GetEffectivePolygon`` at every probe placement, Issue #9501).
+    """
+    center = node.find_child("center")
+    end = node.find_child("end")
+    if (
+        center is None
+        or end is None
+        or (cx := center.get_float(0)) is None
+        or (cy := center.get_float(1)) is None
+        or (ex := end.get_float(0)) is None
+        or (ey := end.get_float(1)) is None
+    ):
+        raise _refuse(reference, pad_number, "gr_circle without a center and an end point")
+    radius = math.hypot(ex - cx, ey - cy)
+    if not math.isfinite(radius) or radius <= 0:
+        raise _refuse(reference, pad_number, f"gr_circle radius {radius} is not positive")
+    width = _primitive_width(node, reference, pad_number)
+    from shapely.affinity import translate  # type: ignore[import-untyped]
+
+    outer = _disc(radius + width / 2.0)
+    if _primitive_fill_token(node) in _FILLED_TOKENS:
+        return translate(outer, cx, cy)
+    if width <= 0:
+        raise _refuse(
+            reference, pad_number, "unfilled gr_circle with zero stroke width encloses no copper"
+        )
+    inner_radius = radius - width / 2.0
+    if inner_radius <= 0:
+        return translate(outer, cx, cy)
+    ring = outer.difference(_disc(inner_radius, conservative=False))
+    return translate(ring, cx, cy)
+
+
+def _poly_primitive(node, reference: str, pad_number: str):
+    """Actual copper of a ``gr_poly`` primitive, filled and/or stroked.
+
+    A stroke grows the copper by ``width / 2`` with round joins -- KiCad's
+    ``Inflate`` -- on top of the filled interior when the fill is set, or
+    alone around the unfilled outline.
+    """
+    # shapely ships no stubs; the module's first shapely import (in ``_disc``)
+    # carries the ignore for the whole file, so later imports need none.
+    from shapely.geometry import LineString, Polygon
+
+    width = _primitive_width(node, reference, pad_number)
+    filled = _primitive_fill_token(node) in _FILLED_TOKENS
+    if not filled and width <= 0:
+        raise _refuse(reference, pad_number, "unfilled gr_poly with zero stroke width")
     pts = node.find_child("pts")
     points = [(xy.get_float(0), xy.get_float(1)) for xy in (pts.find_children("xy") if pts else [])]
     if len(points) < 3 or any(x is None or y is None for x, y in points):
@@ -180,9 +259,25 @@ def _primitive_polygon(node, reference: str, pad_number: str):
         # GEOS repair is not KiCad topology: buffer(0) can discard an entire
         # bow-tie lobe and incorrectly clear a route through real copper.
         raise _refuse(reference, pad_number, "invalid or self-intersecting gr_poly")
+    if width > 0:
+        outline = LineString([*points, points[0]])
+        polygon = (
+            polygon.buffer(width / 2.0, quad_segs=64, join_style="round")
+            if filled
+            else outline.buffer(width / 2.0, quad_segs=64, join_style="round")
+        )
     if polygon.is_empty or polygon.geom_type not in ("Polygon", "MultiPolygon"):
         raise _refuse(reference, pad_number, "gr_poly encloses no copper")
     return polygon
+
+
+def _primitive_polygon(node, reference: str, pad_number: str):
+    """Actual copper of one supported primitive, in the pad's local frame."""
+    if node.name == "gr_circle":
+        return _circle_primitive(node, reference, pad_number)
+    if node.name == "gr_poly":
+        return _poly_primitive(node, reference, pad_number)
+    raise _refuse(reference, pad_number, f"unsupported primitive {node.name!r}")
 
 
 def custom_pad_copper(
@@ -206,7 +301,7 @@ def custom_pad_copper(
     the anchor: primitives routinely reach past it, which is why this reads
     the source S-expression instead of the schema's nominal dimensions.
     """
-    from shapely.affinity import rotate, translate  # type: ignore[import-untyped]
+    from shapely.affinity import rotate, translate
     from shapely.geometry import Point, box
     from shapely.ops import unary_union  # type: ignore[import-untyped]
 

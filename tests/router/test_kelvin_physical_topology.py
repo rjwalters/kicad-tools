@@ -8,10 +8,11 @@ from shapely.geometry import LineString, Point, box
 from shapely.ops import unary_union
 
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.cpp_backend import CppPathfinder, get_backend_info
+from kicad_tools.router.cpp_backend import CppPathfinder
 from kicad_tools.router.kelvin_obstacles import isolate_kelvin_branch
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Route, Segment
+from tests.conftest import require_router_cpp
 
 
 @pytest.mark.parametrize("sense_positions", [((16, 12), (16, 8)), ((16, 10), (16, 12))])
@@ -24,8 +25,8 @@ def test_kelvin_branches_do_not_share_copper_away_from_shunt(
     sense_positions, force_python, mode, same_ic, escaped_root, foreign_pad
 ):
     """The collinear sense terminal must not reconnect through the force pad."""
-    if not force_python and not get_backend_info()["available"]:
-        pytest.skip("C++ extension unavailable")
+    if not force_python:
+        require_router_cpp()
     router = Autorouter(
         22, 22, force_python=force_python, physics_enabled=False, per_net_iterations=20000
     )
@@ -129,8 +130,8 @@ def test_kelvin_branches_do_not_share_copper_away_from_shunt(
 
 @pytest.mark.parametrize("force_python", [True, False])
 def test_branch_obstacles_restore_state_when_search_raises(force_python):
-    if not force_python and not get_backend_info()["available"]:
-        pytest.skip("C++ extension unavailable")
+    if not force_python:
+        require_router_cpp()
     router = Autorouter(5, 5, force_python=force_python, physics_enabled=False)
     for ref, x, y in [("R1", 1, 1), ("Q1", 3, 1), ("U1", 3, 3)]:
         router.add_component(
@@ -159,8 +160,8 @@ def test_branch_obstacles_restore_state_when_search_raises(force_python):
 
 @pytest.mark.parametrize("force_python", [True, False])
 def test_branch_avoids_original_metal_of_an_escaped_other_terminal(force_python):
-    if not force_python and not get_backend_info()["available"]:
-        pytest.skip("C++ extension unavailable")
+    if not force_python:
+        require_router_cpp()
     router = Autorouter(22, 22, force_python=force_python, physics_enabled=False)
     for ref, x, y, size in [("R1", 4, 10.3, 0.8), ("Q1", 18, 10.3, 0.8), ("U1", 12, 10, 2.0)]:
         router.add_component(

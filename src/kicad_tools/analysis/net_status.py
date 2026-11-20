@@ -176,6 +176,49 @@ class NetStatus:
     padless_components: int = 0
     # Issue #6491: the tracks/vias in those components, for ``suggested_fix``.
     stranded_items: list[str] = field(default_factory=list)
+    # Issue #9598: per-component via positions (board coords), one list per
+    # island (parallel to ``islands``) and one per pad-less fragment
+    # (parallel to ``padless_pieces``).  Strict mode only; empty otherwise.
+    island_vias: list[list[tuple[float, float]]] = field(default_factory=list, repr=False)
+    # Issue #9598: each pad-less fragment as (track/via labels, via positions).
+    padless_pieces: list[tuple[list[str], list[tuple[float, float]]]] = field(
+        default_factory=list, repr=False
+    )
+
+    @property
+    def pieces(self) -> list[dict]:
+        """Each disconnected piece of this net with its pads and vias (Issue #9598).
+
+        Pad-bearing islands come first, largest first (``piece 1`` is the
+        largest); pad-less track/via fragments follow as their own pieces.
+        Empty when the net is a single piece (``island_count +
+        padless_components <= 1``).  Vias are listed only where the strict
+        contact model attributes them to a component; legacy
+        (``strict=False``) mode lists pads only.
+        """
+        if self.island_count + self.padless_components <= 1:
+            return []
+        out: list[dict] = []
+        for i, island in enumerate(self.islands):
+            vias = self.island_vias[i] if i < len(self.island_vias) else []
+            out.append(
+                {
+                    "piece": len(out) + 1,
+                    "pads": [{"name": p.full_name, "position": list(p.position)} for p in island],
+                    "vias": [list(v) for v in vias],
+                    "stranded_items": [],
+                }
+            )
+        for labels, vias in self.padless_pieces:
+            out.append(
+                {
+                    "piece": len(out) + 1,
+                    "pads": [],
+                    "vias": [list(v) for v in vias],
+                    "stranded_items": list(labels),
+                }
+            )
+        return out
 
     @property
     def is_stranded(self) -> bool:
@@ -350,8 +393,21 @@ class NetStatus:
             return f"kct stitch {board} --net {self.net_name} (zones on {layers_info})"
         return f"Route traces to connect {self.unconnected_count} pads"
 
-    def to_dict(self) -> dict:
-        """Convert to dictionary for serialization."""
+    def to_dict(self, include_pieces: bool = False) -> dict:
+        """Convert to dictionary for serialization.
+
+        With ``include_pieces`` (Issue #9598; ``kct net-status --net``), a
+        split net also carries a ``pieces`` list (:attr:`pieces`).  Single-piece
+        nets and the default call are unchanged.
+        """
+        data = self._base_dict()
+        if include_pieces:
+            pieces = self.pieces
+            if pieces:
+                data["pieces"] = pieces
+        return data
+
+    def _base_dict(self) -> dict:
         return {
             "net_number": self.net_number,
             "net_name": self.net_name,
@@ -673,6 +729,9 @@ class NetStatusAnalyzer:
         self._padless_components = 0
         # Issue #6491: descriptions of the tracks/vias in those components.
         self._stranded_items: list[str] = []
+        # Issue #9598: vias per pad node, and the pad-less fragments' items.
+        self._node_vias: dict[str, list[tuple[float, float]]] = {}
+        self._padless_pieces: list[tuple[list[str], list[tuple[float, float]]]] = []
         # Strict-mode geometry caches (Issue #4176), keyed by object id.
         self._segment_poly_cache: dict[int, Any] = {}
         self._via_geom_cache: dict[int, Any] = {}
@@ -829,6 +888,8 @@ class NetStatusAnalyzer:
         self._fill_bonded_ids = set()
         self._padless_components = 0
         self._stranded_items = []
+        self._node_vias = {}
+        self._padless_pieces = []
         if len(pad_infos) < 2:
             # Single-pad nets are always "complete"
             status.connected_pads = pad_infos
@@ -850,6 +911,7 @@ class NetStatusAnalyzer:
         graph = self._build_connectivity_graph(net_number, pad_infos)
         status.padless_components = self._padless_components
         status.stranded_items = list(self._stranded_items)
+        status.padless_pieces = list(self._padless_pieces)
         # Issue #6315: which pads the poured fill itself bonds (recorded by
         # ``_apply_zone_connectivity`` while the graph was built).
         status.fill_bonded_pads = [
@@ -879,6 +941,11 @@ class NetStatusAnalyzer:
         status.islands = [
             [pad for node in dict.fromkeys(island) for pad in pads_by_id.get(node, [])]
             for island in islands
+        ]
+        # Issue #9598: a pad island's vias are those of its contact component
+        # (every node of an island shares one component).
+        status.island_vias = [
+            list(self._node_vias.get(island[0], [])) if island else [] for island in islands
         ]
 
         # Classify pads
@@ -1011,7 +1078,12 @@ class NetStatusAnalyzer:
         fill island (fill copper only) is skipped: kicad-cli does not
         report it as an unconnected item.
         """
-        from kicad_tools.validate.copper_contact import FILL, PAD, build_copper_contact_graph
+        from kicad_tools.validate.copper_contact import (
+            FILL,
+            PAD,
+            VIA,
+            build_copper_contact_graph,
+        )
 
         contact = build_copper_contact_graph(self._connectivity_geometry(), net_number)
         wanted = {p.connectivity_id for p in pad_infos}
@@ -1025,13 +1097,18 @@ class NetStatusAnalyzer:
                 for item in items
                 if item.kind == PAD and (node := f"__pad:{item.key[0]}:{item.key[1]}") in wanted
             ]
+            vias = [item.center for item in items if item.kind == VIA and item.center is not None]
             if not nodes:
                 if not contact.is_fill_only(members):
                     padless += 1
-                    stranded.extend(
+                    labels = [
                         _stranded_item_label(self.pcb, item) for item in items if item.kind != FILL
-                    )
+                    ]
+                    stranded.extend(labels)
+                    self._padless_pieces.append((labels, vias))
                 continue
+            for node in nodes:
+                self._node_vias[node] = vias
             for node in nodes:
                 graph[node].update(other for other in nodes if other != node)
             if any(item.kind == FILL for item in items):

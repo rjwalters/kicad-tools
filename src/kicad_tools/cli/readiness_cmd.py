@@ -288,6 +288,36 @@ def _declared_copper_weights(pcb_path: Path) -> dict[str, float | None]:
     return {"outer_oz": outer, "inner_oz": inner}
 
 
+def _declared_reference_height_deviation(options: ReadinessOptions) -> dict[str, Any] | None:
+    """The project's declared designator-height deviation, or ``None`` (Issue #9448).
+
+    Present only when ``project.kct`` declares a reference-designator height
+    below the target fab's silkscreen text-height floor -- the one case where
+    ``silkscreen_text_height`` is relaxed for designators.  Reported in the
+    manifest and README so a sign-off never carries the relaxation silently.
+    """
+    from kicad_tools.sync.discover import resolve_declared_reference_height_for_pcb
+
+    declared = resolve_declared_reference_height_for_pcb(options.pcb)
+    if declared is None:
+        return None
+    try:
+        from kicad_tools.manufacturers import get_profile
+
+        fab_floor = get_profile(options.manufacturer).get_design_rules(2).min_silkscreen_height_mm
+    except Exception:  # noqa: BLE001 - receipt metadata must not fail readiness
+        return None
+    if declared >= fab_floor:
+        return None
+    return {
+        "rule": "silkscreen_text_height",
+        "scope": "reference designators",
+        "declared_min_height_mm": declared,
+        "fab_min_height_mm": fab_floor,
+        "source": "project.kct requirements.manufacturing.silkscreen_min_reference_height_mm",
+    }
+
+
 def _run_native_drc(pcb: Path, report_path: Path) -> EngineRun:
     """Inspect exactly the saved candidate; independent refill has its own gate."""
     from kicad_tools.drc import DRCReport
@@ -1591,22 +1621,119 @@ def _blocking_unknown_coverage(report: dict) -> list[str]:
     ]
 
 
-def _gate_kct_check(options: ReadinessOptions, engines: Engines) -> tuple[CheckOutcome, dict]:
+def _gate_kct_check(
+    options: ReadinessOptions,
+    engines: Engines,
+    pre_cleanup: Path | None = None,
+    post_cleanup: Path | None = None,
+) -> tuple[CheckOutcome, dict]:
     """Gate 1 — ``kct check`` at the resolved fab tier.
 
     Issue #8826: a non-passing outcome names the exact ``kct check`` invocation
     used, so a mismatch with a hand-run ``kct check`` (e.g. ``--copper``) is
     diagnosable.
+
+    Issue #9747: with the boards from either side of the cleanup steps
+    (``pre_cleanup``/``post_cleanup``, staged by the candidate run), a
+    non-passing outcome also says when a blocking finding was introduced by
+    ``copper_cleanup`` itself -- absent from the committed board, present
+    right after the cleanup and still blocking here -- and points at
+    ``--skip-cleanup``.  No new gate: only the blocker message changes.
     """
     invocation = " ".join(
         ["kct", "check", "<pcb>", "--mfr", options.manufacturer, *options.check_args]
     )
     outcome, report = _gate_kct_check_run(options, engines)
+    if outcome.status == FAILED and pre_cleanup is not None and post_cleanup is not None:
+        introduced = _cleanup_introduced_errors(options, engines, pre_cleanup, post_cleanup, report)
+        if introduced:
+            shown = ", ".join(introduced[:3]) + (", ..." if len(introduced) > 3 else "")
+            note = (
+                " [introduced by the copper_cleanup step (dedupe/prune/"
+                f"optimize-traces), absent from the committed board: {shown}; "
+                "re-run with --skip-cleanup to keep the committed copper]"
+            )
+            outcome.detail += note
+            outcome.blockers = [b + note for b in outcome.blockers]
     if outcome.status != PASSED:
         note = f" [invocation: {invocation}]"
         outcome.detail += note
         outcome.blockers = [b + note for b in outcome.blockers]
     return outcome, report
+
+
+def _error_keys(report: dict) -> set[tuple[Any, ...]] | None:
+    """Error-violation identities of a ``kct check`` report.
+
+    ``None`` when any error lacks a usable identity: the caller then skips
+    finding-level comparison rather than comparing a partial set.
+    """
+    keys: set[tuple[Any, ...]] = set()
+    for violation in report.get("violations", []):
+        if not isinstance(violation, dict) or violation.get("severity") != "error":
+            continue
+        key = _violation_error_key(violation)
+        if key is None:
+            return None
+        keys.add(key)
+    return keys
+
+
+def _cleanup_introduced_errors(
+    options: ReadinessOptions,
+    engines: Engines,
+    pre_cleanup: Path,
+    post_cleanup: Path,
+    gate_report: dict,
+) -> list[str] | None:
+    """Error findings Gate 1 blocks on that the cleanup steps introduced (#9747).
+
+    A finding counts only when the comparison isolates it: absent from the
+    board as staged (``pre_cleanup``), present right after the cleanup steps
+    (``post_cleanup``, before assembly prep and refill) and still present in
+    the gate's own report -- so pre-existing findings and findings from
+    assembly prep or refill are never blamed on the cleanup.  The snapshot
+    checks run with the same current-paths resolution Gate 1 used.  ``None``
+    means the comparison could not run (a snapshot check failed or a report
+    had unidentifiable errors); attribution is then skipped, never guessed.
+    """
+    extra = list(options.check_args)
+    has_current_paths_flag = any(
+        token == "--current-paths"
+        or token.startswith("--current-paths=")
+        or token == "--no-current-paths"
+        for token in options.check_args
+    )
+    if not has_current_paths_flag:
+        resolved = _cleanup_current_paths_sidecar(options)
+        extra += (
+            ["--current-paths", str(resolved)] if resolved is not None else ["--no-current-paths"]
+        )
+    keys: dict[str, set[tuple[Any, ...]] | None] = {}
+    with tempfile.TemporaryDirectory(prefix="kct-cleanup-attribution-") as tmp:
+        for label, board in (("pre", pre_cleanup), ("post", post_cleanup)):
+            report_path = Path(tmp) / f"kct-check-{label}.json"
+            run = engines.kct_check(board, options.manufacturer, report_path, extra)
+            if not run.ok or not report_path.is_file():
+                logger.warning(
+                    "copper_cleanup attribution skipped: %s-cleanup check failed: %s",
+                    label,
+                    run.detail,
+                )
+                return None
+            keys[label] = _error_keys(_read_json(report_path))
+            if keys[label] is None:
+                return None
+    gate_keys = _error_keys(gate_report)
+    if gate_keys is None:
+        return None
+    assert keys["pre"] is not None and keys["post"] is not None
+    introduced = keys["post"] - keys["pre"]
+    return [
+        _describe_error_key(key)
+        for key in sorted(introduced, key=lambda k: (len(k), *map(str, k)))
+        if key in gate_keys
+    ]
 
 
 def _gate_kct_check_run(options: ReadinessOptions, engines: Engines) -> tuple[CheckOutcome, dict]:
@@ -2373,6 +2500,11 @@ def _write_full_manifest(options: ReadinessOptions, warning_counts: dict[str, in
             "copper_weights": _declared_copper_weights(options.pcb),
         }
     )
+    deviation = _declared_reference_height_deviation(options)
+    if deviation is not None:
+        manifest["declared_deviations"] = [deviation]
+    else:
+        manifest.pop("declared_deviations", None)
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return manifest_path
 
@@ -2627,11 +2759,68 @@ def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
     return problems
 
 
+def _cleanup_current_paths_sidecar(options: ReadinessOptions) -> Path | None:
+    """The current-paths sidecar the check gate would load, for prune (#9747).
+
+    Honours an explicit ``--current-paths``/``--no-current-paths`` in
+    ``options.check_args`` exactly as Gate 1's ``kct check`` would (explicit
+    wins, resolved against the cwd like the check parser does); otherwise
+    auto-discovers the sidecar next to the staged board the same way.  The
+    cleanup's prune step then applies the declared-current width test with
+    the same declarations the very next gate audits.
+    """
+    explicit: str | None = None
+    suppressed = False
+    tokens = list(options.check_args)
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "--current-paths" and i + 1 < len(tokens):
+            explicit = tokens[i + 1]
+            i += 2
+            continue
+        if token.startswith("--current-paths="):
+            explicit = token.split("=", 1)[1]
+        elif token == "--no-current-paths":
+            suppressed = True
+        i += 1
+    if explicit is not None:
+        return Path(explicit).resolve()
+    if suppressed:
+        return None
+    from kicad_tools.router.current_paths import discover_current_paths_sidecar
+
+    return discover_current_paths_sidecar(options.pcb)
+
+
 def _cleanup_prune_step(options: ReadinessOptions) -> dict[str, Any]:
     """``kct pcb prune`` step: DRC-verified, applied only when verified."""
-    from kicad_tools.pcb_prune import prune_board
+    from kicad_tools.pcb_prune import DEFAULT_WIDE_MM, current_path_declarations, prune_board
 
-    pruned, result = prune_board(options.pcb, project=options.project)
+    # Issue #9747: prune with the declarations Gate 1's `kct check` loads.
+    # A malformed sidecar raises and is recorded as a failed prune step by
+    # the caller (`kct check` itself only warns on an auto-discovered one,
+    # but here the very next gate audits against those declarations).
+    sidecar = _cleanup_current_paths_sidecar(options)
+    declared_nets: set[str] | None = None
+    required_widths: dict[str, dict[str, float]] = {}
+    specs: list = []
+    if sidecar is not None:
+        try:
+            specs, declared_nets, required_widths = current_path_declarations(options.pcb, sidecar)
+        except Exception as exc:
+            raise RuntimeError(f"current-paths sidecar {sidecar}: {exc}") from exc
+    pruned, result = prune_board(
+        options.pcb,
+        project=options.project,
+        declared_nets=declared_nets,
+        required_widths=required_widths,
+        current_paths=specs,
+        # Net-relative mode when declarations apply, matching a plain
+        # `kct pcb prune --current-paths ...` (whose --wide defaults to
+        # net-relative); without declarations the historical absolute 0.5 mm.
+        wide=None if declared_nets else DEFAULT_WIDE_MM,
+    )
     if result.accepted and not result.drc_verified:
         return {"status": "not-applied", "detail": result.drc_note, "segments_removed": 0}
     if result.accepted:
@@ -2874,12 +3063,20 @@ def _write_readme(
         lines.extend(["", "Assembly prep", "-------------"])
         for key in ("fiducials", "board_info"):
             lines.append(f"  {key}: {prep[key]}")
+    deviation = _declared_reference_height_deviation(options)
     lines.extend(["", "Accepted-risk waivers", "---------------------"])
     if acked:
         lines.append(f"  see the {len(acked)} line(s) above")
+    if deviation is not None:
+        lines.append(
+            f"  DECLARED DEVIATION: reference designators may be as small as "
+            f"{deviation['declared_min_height_mm']:g} mm (fab floor "
+            f"{deviation['fab_min_height_mm']:g} mm) per project.kct "
+            "silkscreen_min_reference_height_mm; labels keep the fab floor."
+        )
     for entry in options.known_issues:
         lines.append(f"  #{entry['issue']} [{entry['kind']}] {entry['summary']}")
-    if not acked and not options.known_issues:
+    if not acked and not options.known_issues and deviation is None:
         lines.append("  no accepted-risk waivers")
     lines.append("")
 
@@ -4193,9 +4390,22 @@ def _run_readiness_candidate(
     checks: list[CheckOutcome] = []
     metrics: dict[str, Any] = {}
 
+    # Issue #9747: keep the staged board from either side of the cleanup
+    # steps so Gate 1 can attribute candidate-only findings to copper_cleanup
+    # instead of pointing at the committed board.  Outside ``board_dir`` (and
+    # ``output/``), so they are never published or bundled; the candidate
+    # temp tree is deleted with them.
+    pre_cleanup = post_cleanup = None
+    if options.operation == "generate" and not options.skip_cleanup:
+        pre_cleanup = options.board_dir.parent / f".kct-pre-cleanup-{options.pcb.name}"
+        post_cleanup = options.board_dir.parent / f".kct-post-cleanup-{options.pcb.name}"
+        pre_cleanup.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(options.pcb, pre_cleanup)
     cleanup = _copper_cleanup(options)
     options = replace(options, cleanup_record=cleanup)
     metrics["copper_cleanup"] = cleanup
+    if post_cleanup is not None:
+        shutil.copy2(options.pcb, post_cleanup)
 
     prep = _assembly_prep(options)
     options = replace(options, assembly_prep_record=prep)
@@ -4224,7 +4434,9 @@ def _run_readiness_candidate(
             *_project_dependencies(options.pcb, options.root, options.project_root is not None),
         ]
     }
-    kct_check, check_report = _gate_kct_check(options, engines)
+    kct_check, check_report = _gate_kct_check(
+        options, engines, pre_cleanup=pre_cleanup, post_cleanup=post_cleanup
+    )
     checks.append(kct_check)
 
     native, native_report = _gate_native_drc(options, engines)

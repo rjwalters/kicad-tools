@@ -17,7 +17,7 @@ This guide covers setting up a development environment, running tests, and contr
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/rjwalters/kicad-tools.git
+git clone https://github.com/2AMLogic/kicad-tools.git
 cd kicad-tools
 ```
 
@@ -516,8 +516,8 @@ merged `main` SHA.
 
 ## Getting Help
 
-- **Issues**: https://github.com/rjwalters/kicad-tools/issues
-- **Discussions**: https://github.com/rjwalters/kicad-tools/discussions
+- **Issues**: https://github.com/2AMLogic/kicad-tools/issues
+- **Discussions**: https://github.com/2AMLogic/kicad-tools/discussions
 
 
 ### Content checks on docs-only pull requests

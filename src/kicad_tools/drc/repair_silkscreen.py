@@ -674,22 +674,14 @@ class SilkscreenRepairer:
 
     def _pin1_marker_refs(self) -> set[str]:
         """Refs the ``pin1_marker`` rule flags on the current tree."""
-        from kicad_tools.manufacturers.base import DesignRules
         from kicad_tools.schema.pcb import PCB
         from kicad_tools.sexp.parser import parse_string, serialize_sexp
         from kicad_tools.validate.rules.pin1_marker import Pin1MarkerRule
 
-        rules = DesignRules(
-            min_trace_width_mm=0.0,
-            min_clearance_mm=0.0,
-            min_via_drill_mm=0.0,
-            min_via_diameter_mm=0.0,
-            min_annular_ring_mm=0.0,
-        )
         pcb = PCB(parse_string(serialize_sexp(self.doc)))
         return {
             violation.items[0]
-            for violation in Pin1MarkerRule().check(pcb, rules).violations
+            for violation in Pin1MarkerRule().check(pcb).violations
             if violation.rule_id.startswith("pin1_marker") and violation.items
         }
 
@@ -697,21 +689,13 @@ class SilkscreenRepairer:
         """Re-measure ``silk_hole_overlap`` with the real rule on the edited tree."""
         import re
 
-        from kicad_tools.manufacturers.base import DesignRules
         from kicad_tools.schema.pcb import PCB
         from kicad_tools.sexp.parser import parse_string, serialize_sexp
         from kicad_tools.validate.rules.silkscreen import check_silk_hole_overlap
 
-        rules = DesignRules(
-            min_trace_width_mm=0.0,
-            min_clearance_mm=0.0,
-            min_via_drill_mm=0.0,
-            min_via_diameter_mm=0.0,
-            min_annular_ring_mm=0.0,
-        )
         pcb = PCB(parse_string(serialize_sexp(self.doc)))
         graphic = re.compile(r"(\((fp|gr)_[a-z]+\)$)|(^gr_(line|rect|circle|arc|poly|curve)$)")
-        for violation in check_silk_hole_overlap(pcb, rules).violations:
+        for violation in check_silk_hole_overlap(pcb).violations:
             text = " / ".join(violation.items)
             if graphic.search(violation.items[0]):
                 result.residual.append(text)
