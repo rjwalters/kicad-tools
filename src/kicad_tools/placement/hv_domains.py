@@ -68,9 +68,7 @@ def load_voltage_intervals(path: str | Path) -> dict[str, tuple[float, float]]:
         ValueError: If the file is not a JSON object, or if any net voltage is
             not a finite real number.
     """
-    raw = json.loads(Path(path).read_text())
-    if not isinstance(raw, dict):
-        raise ValueError(f"voltage map must be a JSON object, got {type(raw).__name__}")
+    raw = load_voltage_sidecar(path)
     intervals = voltage_map_from_dict(raw)[0]
     return {name: (float(iv.lo), float(iv.hi)) for name, iv in intervals.items()}
 
