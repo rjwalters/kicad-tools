@@ -29,7 +29,10 @@ Covers:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
+
+import pytest
 
 if TYPE_CHECKING:
     from kicad_tools.router.primitives import Route
@@ -847,3 +850,164 @@ class TestCheckerIntegration:
         # Pair is not engaged -> rule short-circuits, no checks.
         assert results.rules_checked == 0
         assert len(results.violations) == 0
+
+
+# ---------------------------------------------------------------------------
+# Issue #9767: the defect-copper correction on the diff-pair skew producers
+# ---------------------------------------------------------------------------
+
+
+def _defect_pair_board(extras: str = "") -> str:
+    """A real 4-layer board carrying one detected pair ``T_P``/``T_N``.
+
+    Each leg runs 10 mm on F.Cu, drops through a via, and runs 10 mm on
+    In1.Cu between pads at its layer's end, so the clean pair is
+    perfectly matched in mm and ps while F.Cu and In1.Cu delays differ
+    (the default 4-layer stackup: ~5.573 vs ~6.937 ps/mm).  ``extras``
+    appends extra same-net copper on the positive leg's F.Cu run.
+    """
+    return f"""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "T_P")
+  (net 2 "T_N")
+  (gr_rect (start 0 0) (end 60 60) (stroke (width 0.1)) (layer "Edge.Cuts"))
+  (footprint "Test:Pads" (layer "F.Cu") (at 0 0)
+    (property "Reference" "J1")
+    (pad "1" smd rect (at 5 10) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 1 "T_P"))
+    (pad "2" smd rect (at 25 10) (size 1.0 1.0) (layers "In1.Cu" "In1.Mask") (net 1 "T_P"))
+    (pad "3" smd rect (at 5 30) (size 1.0 1.0) (layers "F.Cu" "F.Mask") (net 2 "T_N"))
+    (pad "4" smd rect (at 25 30) (size 1.0 1.0) (layers "In1.Cu" "In1.Mask") (net 2 "T_N"))
+  )
+  (segment (start 5 10) (end 15 10) (width 0.2) (layer "F.Cu") (net 1))
+  (via (at 15 10) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 1))
+  (segment (start 15 10) (end 25 10) (width 0.2) (layer "In1.Cu") (net 1))
+  (segment (start 5 30) (end 15 30) (width 0.2) (layer "F.Cu") (net 2))
+  (via (at 15 30) (size 0.6) (drill 0.3) (layers "F.Cu" "In1.Cu") (net 2))
+  (segment (start 15 30) (end 25 30) (width 0.2) (layer "In1.Cu") (net 2))
+{extras})
+"""
+
+
+#: A 6 mm dead-end stub off the positive leg's F.Cu run (above the 4 mm
+#: match-group epsilon, so the classifier sheds it).
+_ABOVE_EPSILON_STUB = '  (segment (start 10 10) (end 10 16) (width 0.2) (layer "F.Cu") (net 1))'
+
+#: A 2 mm dead-end stub (below the epsilon: retained, figures unchanged).
+_BELOW_EPSILON_STUB = '  (segment (start 10 10) (end 10 12) (width 0.2) (layer "F.Cu") (net 1))'
+
+#: A 10 mm parallel detour rejoining the positive leg's F.Cu trunk span
+#: (a length-matching bump: rejoined cycle copper, always kept).
+_REJOINED_BUMP = """  (segment (start 8 10) (end 8 13) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 8 13) (end 12 13) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 12 13) (end 12 10) (width 0.2) (layer "F.Cu") (net 1))"""
+
+
+class TestDefectCopperCorrection9767:
+    """The #9304 defect-copper ruler applied to the pair producers (#9767).
+
+    Each leg's figure is its summed kicad-cli length minus the defect
+    copper the classifier isolates -- same rule, same epsilon as the
+    match-group producer -- in the mm skew, the ps skew (at the stub's
+    own layer delay) and the reported per-layer lengths.  Raw
+    ``measure_pcb_net`` keeps its KiCad length contract.
+    """
+
+    @staticmethod
+    def _pcb(tmp_path: Path, extras: str = ""):
+        from kicad_tools.schema.pcb import PCB
+
+        path = tmp_path / "defect-pair.kicad_pcb"
+        path.write_text(_defect_pair_board(extras))
+        return PCB.load(str(path))
+
+    @staticmethod
+    def _classes():
+        from kicad_tools.router.rules import NetClassRouting
+
+        nc = NetClassRouting(name="HS", coupled_routing=True)
+        return {"T_P": nc, "T_N": nc}
+
+    def test_above_epsilon_stub_is_shed_from_mm_and_ps(self, tmp_path):
+        """The stub leaves the corrected mm and ps figures at the clean control."""
+        from kicad_tools.validate.diffpair_skew import derive_pair_skews
+
+        clean = derive_pair_skews(self._pcb(tmp_path), self._classes(), num_copper_layers=4)
+        stubbed = derive_pair_skews(
+            self._pcb(tmp_path, _ABOVE_EPSILON_STUB), self._classes(), num_copper_layers=4
+        )
+
+        assert len(clean) == len(stubbed) == 1
+        # Clean control: matched in mm and ps.
+        assert clean[0].skew_mm == pytest.approx(0.0, abs=0.05)
+        assert clean[0].skew_ps == pytest.approx(0.0, abs=0.05)
+        # Uncorrected, the stub would read as ~6 mm / ~33 ps of skew.
+        stub_p = stubbed[0].layers["T_P"]
+        assert stub_p["F.Cu"] == pytest.approx(10.0, abs=0.05)  # 16 raw - 6 defect
+        assert stub_p["In1.Cu"] == pytest.approx(10.0, abs=0.05)
+        assert stubbed[0].skew_mm == pytest.approx(0.0, abs=0.05)
+        # The stub sat on F.Cu, so its ps correction is F.Cu's delay: had
+        # the correction charged another layer (or none), this would miss
+        # by 8-42 ps.
+        assert stubbed[0].skew_ps == pytest.approx(0.0, abs=0.5)
+
+    def test_raw_kicad_length_still_includes_the_stub(self, tmp_path):
+        """``measure_pcb_net`` / ``measure_pcb_net_parts`` keep the stub (#6725)."""
+        from kicad_tools.router.kicad_length import measure_pcb_net, measure_pcb_net_parts
+
+        clean, stubbed = self._pcb(tmp_path), self._pcb(tmp_path, _ABOVE_EPSILON_STUB)
+        assert measure_pcb_net(stubbed, 1) - measure_pcb_net(clean, 1) == pytest.approx(
+            6.0, abs=0.05
+        )
+        parts = measure_pcb_net_parts(stubbed, 1)
+        assert parts.by_layer["F.Cu"] == pytest.approx(16.0, abs=0.05)
+
+    def test_scalar_mm_api_sheds_the_stub(self, tmp_path):
+        """``derive_skew_data`` / ``derive_skew_limits`` correct the same leg."""
+        from kicad_tools.validate.diffpair_skew import derive_skew_data, derive_skew_limits
+
+        pcb = self._pcb(tmp_path, _ABOVE_EPSILON_STUB)
+        ncm = self._classes()
+        skew_data, _ = derive_skew_data(pcb, ncm, num_copper_layers=4)
+        assert skew_data[("T_P", "T_N")] == pytest.approx(0.0, abs=0.05)
+        again, _ = derive_skew_limits(pcb, ncm, num_copper_layers=4)
+        assert again[("T_P", "T_N")] == pytest.approx(0.0, abs=0.05)
+
+    def test_below_epsilon_stub_is_retained(self, tmp_path):
+        """A 2 mm structure is under the epsilon: figures stay raw."""
+        from kicad_tools.validate.diffpair_skew import derive_pair_skews
+
+        [m] = derive_pair_skews(
+            self._pcb(tmp_path, _BELOW_EPSILON_STUB), self._classes(), num_copper_layers=4
+        )
+        assert m.layers["T_P"]["F.Cu"] == pytest.approx(12.0, abs=0.05)
+        assert m.skew_mm == pytest.approx(2.0, abs=0.05)
+
+    def test_rejoined_bump_is_counted(self, tmp_path):
+        """A parallel detour (length-matching bump) is rejoined cycle copper."""
+        from kicad_tools.validate.diffpair_skew import derive_pair_skews
+
+        [m] = derive_pair_skews(
+            self._pcb(tmp_path, _REJOINED_BUMP), self._classes(), num_copper_layers=4
+        )
+        # 10 mm trunk + 10 mm U detour (3 up, 4 across, 3 down) on F.Cu,
+        # all counted: defect-free copper measures the raw figure.
+        assert m.layers["T_P"]["F.Cu"] == pytest.approx(20.0, abs=0.05)
+        assert m.skew_mm == pytest.approx(10.0, abs=0.05)
+
+    def test_unavailable_classification_keeps_raw_figures(self):
+        """No path model on the board (stub PCB) -> raw summed figure."""
+        from kicad_tools.validate.diffpair_skew import derive_pair_skews
+
+        pcb = _make_pair_pcb(p_len_mm=10.0, n_len_mm=12.0)
+        [m] = derive_pair_skews(pcb, self._classes(), num_copper_layers=2)
+        assert m.skew_mm == pytest.approx(2.0)

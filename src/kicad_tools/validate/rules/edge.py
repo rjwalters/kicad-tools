@@ -18,7 +18,7 @@ from ..clearance_shapes import pad_center as _kernel_pad_center
 from ..clearance_shapes import segment_shape as _kernel_segment_shape
 from ..clearance_shapes import via_shape as _kernel_via_shape
 from ..violations import DRCResults, DRCViolation
-from .base import DRCRule
+from .base import DRCRule, drc_clear
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -27,11 +27,22 @@ if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB, FilledOutlineRegion, Footprint, Pad
 
 
-# Floating-point tolerance for edge clearance comparisons (0.1 micron).
-# Zone boundaries inset by exactly ``edge_clearance`` via Shapely ``buffer``
-# can land at distances like 0.29999... instead of 0.300 due to IEEE-754
-# rounding.  A 0.1-micron epsilon is well below manufacturing precision and
-# prevents false-positive DRC violations at exact boundaries.
+# Floating-point tolerance for the *hole-minimum* edge comparisons (0.1
+# micron).  Zone boundaries inset by exactly ``edge_clearance`` via Shapely
+# ``buffer`` can land at distances like 0.29999... instead of 0.300 due to
+# IEEE-754 rounding.  A 0.1-micron epsilon is well below manufacturing
+# precision and prevents false-positive DRC violations at exact boundaries.
+#
+# Issue #9724: the *copper-to-edge* comparisons (traces, SMD pads, zones)
+# no longer use this epsilon -- they moved onto the probed KiCad acceptance
+# band via :func:`~kicad_tools.validate.rules.base.drc_clear` (black-box
+# probe on pinned kicad-cli 10.0.6, straight rectangular edge, 0.5 mm
+# ``min_copper_edge_clearance``: a 500 nm shortfall is accepted and 501 nm
+# is flagged -- the same cut-off as the copper-clearance band of #9619;
+# pinned in ``tests/test_clearance_slack_kicad_band_9619.py``).  The via
+# and through-hole-pad branches measure the copper envelope against
+# ``min_hole_to_edge_mm``, a minimum the copper-edge probe cannot speak
+# to, so they keep this plain float epsilon.
 _CLEARANCE_EPSILON_MM = 1e-4
 
 
@@ -178,6 +189,10 @@ class EdgeClearanceRule(DRCRule):
         min_clearance = design_rules.min_copper_to_edge_mm
         del origin  # board-relative invariant: no per-call translation needed
 
+        # Issue #9724: copper-to-edge verdicts ride KiCad's probed 500 nm
+        # acceptance band (``drc_clear``), so a shortfall kicad-cli accepts
+        # is not flagged here.  The gap still carries #9689's conservative
+        # arc-tessellation error term, applied above/below unchanged.
         geometry_error = _outline_geometry_error(outline_segments)
         edges = outline_shapes(outline_segments)
 
@@ -203,7 +218,7 @@ class EdgeClearanceRule(DRCRule):
             if hit is not None:
                 gap = 0.0
 
-            if gap < min_clearance - _CLEARANCE_EPSILON_MM:
+            if not drc_clear(gap, min_clearance):
                 # Build the finding's witness only now that a finding is
                 # being raised: the two O(outline-edges) distance calls
                 # below are pure waste on the vast majority of segments
@@ -279,6 +294,8 @@ class EdgeClearanceRule(DRCRule):
             if hit is not None:
                 gap = 0.0
 
+            # Hole minimum: unprobed by #9724's copper-edge probe, so the
+            # plain float epsilon decides (a 400 nm shortfall flags).
             if gap < min_clearance - _CLEARANCE_EPSILON_MM:
                 items: tuple[str, ...] = (f"Net {via.net_number}",)
                 if hit is not None:
@@ -361,15 +378,20 @@ class EdgeClearanceRule(DRCRule):
                 if hit is not None:
                     gap = 0.0
 
-                # Select clearance rule based on pad type
+                # Select clearance rule based on pad type.  The through-hole
+                # branch keeps the plain epsilon (no probe evidence for a
+                # separate hole minimum, #9724); the SMD branch rides the
+                # probed copper-to-edge band.
                 if pad.type == "thru_hole":
                     min_clearance = min_hole_clearance
                     rule_id = "edge_clearance_pad_hole"
+                    violates = gap < min_clearance - _CLEARANCE_EPSILON_MM
                 else:
                     min_clearance = min_copper_clearance
                     rule_id = "edge_clearance_pad"
+                    violates = not drc_clear(gap, min_clearance)
 
-                if gap < min_clearance - _CLEARANCE_EPSILON_MM:
+                if violates:
                     items: tuple[str, ...] = (footprint.reference, f"Pad {pad.number}")
                     if hit is not None:
                         items = (
@@ -440,7 +462,9 @@ class EdgeClearanceRule(DRCRule):
                     if hit is not None:
                         distance = 0.0
 
-                    if distance < min_clearance - _CLEARANCE_EPSILON_MM:
+                    # Issue #9724: zone copper rides the probed copper-to-edge
+                    # band, like traces and SMD pads.
+                    if not drc_clear(distance, min_clearance):
                         items: tuple[str, ...] = (zone.net_name or f"Net {zone.net_number}",)
                         if hit is not None:
                             items = (
