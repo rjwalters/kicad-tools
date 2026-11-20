@@ -267,7 +267,7 @@ Run design rule check and return violations.
 |-----------|------|----------|---------|-------------|
 | `pcb_path` | string | Yes | - | Absolute path to .kicad_pcb file |
 | `manufacturer` | string | No | resolved like `kct check` | Manufacturer preset or tier id (any registry id, e.g. `"jlcpcb"`, `"jlcpcb-tier1"`, `"oshpark"`, `"pcbway"`, `"seeed"`). Omitted: `fab_profile.json` > `project.kct` `target_fab` > `"jlcpcb"` |
-| `severity_filter` | string | No | `"all"` | `"all"`, `"error"` or `"warning"`. A view filter: the verdict always counts every violation |
+| `severity_filter` | string | No | `"all"` | `"all"`, `"error"` or `"warning"`. A view filter: the verdict always counts every violation; `info` findings (fab-view advisory rows) appear only under `"all"` |
 | `allow_incomplete` | boolean | No | `false` | Like `kct check --allow-incomplete`: an `incomplete` verdict returns `exit_code: 0` (`passed` stays `false`) |
 | `schematic_path` | string | No | discovered | Explicit `.kicad_sch` for the ERC/LVS meta rollup |
 
@@ -726,6 +726,70 @@ List nets that still need routing.
   ]
 }
 ```
+
+---
+
+### probe_items
+
+Check a batch of proposed tracks, arcs and vias against a board; write nothing.
+
+**Description**: Appends the items to an in-memory copy of the board and runs the same rule set `kct check` runs (pairwise clearances and shorts, the net-agnostic copper-gap and thin-copper-sliver fab passes, zone fills, board edge, trace/via dimensions, authored net-class clearances, via placement, THT-to-SMD pad spacing). The copper-gap pass is net-agnostic — a same-net parallel track can fail a probe even when no pairwise clearance rule objects. Only findings the batch adds are reported, so pre-existing board problems never fail a probe. Arcs are checked through a 1 um-sagitta tessellation (Issue #9590).
+
+**Parameters**:
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `pcb_path` | string | Yes | - | Path to .kicad_pcb file |
+| `items` | array | Yes | - | Proposed copper items, same shape as the `kct probe` items file (`type` `segment`/`arc`/`via` with `net`, `layer`, `width`, `start`/`mid`/`end`/`at`/`size`/`drill`/`layers` as each type needs; absolute board millimetres) |
+| `mfr` | string | No | - | Manufacturer rules (default: resolved like `kct check`) |
+
+**Response**:
+
+```json
+{
+  "success": true,
+  "ok": true,
+  "items": [{"index": 1, "type": "segment", "net": "GND"}],
+  "problems": [],
+  "warnings": [],
+  "error_count": 0,
+  "warning_count": 0,
+  "categories": ["clearance", "physical_copper_gap", "copper_sliver", "segment_zone", "via_zone", "edge", "dimensions", "netclass_clearance_copper", "via_in_pad", "via_type", "via_under_body", "zero_length_segment", "tht_smd_spacing"]
+}
+```
+
+Each problem carries `rule_id`, `severity`, `message`, `location`, `layer`,
+`items` (the clashing copper), `nets` and `proposed_item` (the 1-based batch
+item it involves, when attributable).
+
+---
+
+### apply_items_checked
+
+Probe a batch of proposed copper, then write it to the board only when every item passes.
+
+**Description**: The checked form of `probe_items` (Issue #9590). The write is atomic (sibling temp file + rename), the previous bytes are backed up, and a board that changed on disk between read and write is refused with nothing written. A failed probe leaves the board byte-identical.
+
+**Parameters**:
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `pcb_path` | string | Yes | - | Path to .kicad_pcb file (written in place) |
+| `items` | array | Yes | - | Proposed copper items (same shape as `probe_items`) |
+| `backup_path` | string | No | `<pcb>.kicad_pcb.bak` | Backup path for the previous bytes |
+| `mfr` | string | No | - | Manufacturer rules (default: resolved like `kct check`) |
+
+**Response**: the `probe_items` report plus `written` (the board path, or
+`null` when nothing was written), `backup` and `refused` (the refusal reason,
+or `null`), and `items_written` / `items_skipped_as_duplicate` — an item
+whose dedupe key is already on the board (net, layer, unordered endpoints and
+width for a segment; net, position and layers for a via) is skipped by dedupe
+and counted as skipped, never as written (Issue #9674). A via's size and
+drill are outside its key: a skipped via counts as a duplicate if any via sharing the key
+has the requested size and drill. Otherwise the skipped via is counted
+under `items_skipped_conflicting` with one explanatory line per via in
+`conflicting_via_details`. Arcs have no dedupe path; each successful apply
+appends them again and counts each copy as written.
 
 ---
 

@@ -2,9 +2,7 @@
 
 import pytest
 
-from kicad_tools.router.cpp_backend import is_cpp_available
-
-pytestmark = pytest.mark.skipif(not is_cpp_available(), reason="C++ backend unavailable")
+pytestmark = pytest.mark.requires_router_cpp
 
 
 @pytest.mark.parametrize("reverse_candidate", [False, True])

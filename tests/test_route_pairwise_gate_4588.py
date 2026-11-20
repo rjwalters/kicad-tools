@@ -84,11 +84,16 @@ def _two_domain_board(lv_offset_mm: float) -> str:
     """
     hv_y = 105.0
     lv_y = hv_y + lv_offset_mm
+    # Pads sit at x=104/123 so the HV corridor's copper (spanning ~103.8 to
+    # ~123.2) clears the 300 V board-edge creepage requirement (3.2 mm) from
+    # both the x=100 and x=130 Edge.Cuts lines with margin -- the "clean
+    # board" control must be edge-clean too, or the #9685 copper-vs-edge
+    # audit column fails it.
     parts = [
-        _fp("R1", 10, 103.0, hv_y, _pad("1", 0, 0, 1, "/HV_LINE")),
-        _fp("R2", 11, 127.0, hv_y, _pad("1", 0, 0, 1, "/HV_LINE")),
-        _fp("R3", 12, 103.0, lv_y, _pad("1", 0, 0, 2, "/LV_SENSE")),
-        _fp("R4", 13, 127.0, lv_y, _pad("1", 0, 0, 2, "/LV_SENSE")),
+        _fp("R1", 10, 104.0, hv_y, _pad("1", 0, 0, 1, "/HV_LINE")),
+        _fp("R2", 11, 123.0, hv_y, _pad("1", 0, 0, 1, "/HV_LINE")),
+        _fp("R3", 12, 104.0, lv_y, _pad("1", 0, 0, 2, "/LV_SENSE")),
+        _fp("R4", 13, 123.0, lv_y, _pad("1", 0, 0, 2, "/LV_SENSE")),
     ]
     return f"""(kicad_pcb
   (version 20240108)

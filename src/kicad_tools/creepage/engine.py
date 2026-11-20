@@ -21,7 +21,7 @@ reinventing them:
 * zone fills     -> :meth:`ConnectivityValidator._fill_solid_region`
 
 and derives slot/cutout obstacles from the ``Edge.Cuts`` outline
-(:meth:`PCB.get_board_outline_segments` + :meth:`PCB._edge_cuts_poly_chains_sexp`).
+(:meth:`PCB.get_board_outline_segments`).
 
 The MVP surface-path model is an honest approximation: if the straight
 nearest-points segment between two conductors does NOT cross an interior
@@ -63,6 +63,10 @@ _INTERIOR_SHRINK = 1e-6  # shrink a slot before the "crosses interior" test
 _BRIDGE_QUAD_SEGS = 16  # arc resolution of the dimension-X opening (round joins)
 # A pair is a PASS when creepage >= min within this tolerance (mm).  Mirrors
 # the spirit of DRC_TOLERANCE -- a sub-micron shortfall is not a real defect.
+# Deliberately still 1e-4 (not the #9619 checker band): the probe measured
+# kicad-cli copper *clearance*; creepage is an IEC 60664-1 voltage-map
+# requirement the probe never covered, and HV/creepage is never looser than
+# the standard requires.
 _PASS_TOLERANCE = 1e-4
 
 # Per-net voltage model (#4371): two conductors whose mapped potentials differ
@@ -71,6 +75,10 @@ _PASS_TOLERANCE = 1e-4
 # creepage tables start at 50 V and ``_step_up_index`` raises for ``V <= 0``, so
 # a same-potential pair (``dv == 0``) must never reach the lookup.
 _ZERO_DV_EPS = 1e-6
+
+# Board thickness assumed for cross-face bore/edge paths (#9704) when the
+# board declares no stackup strata.  1.6 mm is the default 2-layer FR4 board.
+_DEFAULT_BOARD_THICKNESS_MM = 1.6
 
 
 def _norm_net_key(name: str) -> str:
@@ -188,7 +196,7 @@ def pair_bounds_from_dict(data: Any) -> dict[frozenset[str], tuple[float, str]]:
 
     Raises:
         TypeError: if ``data`` is not a dict.
-        ValueError: on a malformed list/entry, a non-finite or non-positive
+        ValueError: on a malformed list/entry, a non-finite or negative
             ``max_dv`` (bool rejected), a missing/empty ``why``, or a pair
             declared twice.
     """
@@ -215,8 +223,8 @@ def pair_bounds_from_dict(data: Any) -> dict[frozenset[str], tuple[float, str]]:
         if a == b:
             raise ValueError(f"{where}.nets must name two distinct nets, got {nets[0]!r} twice")
         max_dv = _coerce_voltage(f"{where}.max_dv", entry.get("max_dv"))
-        if max_dv <= 0:
-            raise ValueError(f"{where}.max_dv must be > 0, got {max_dv!r}")
+        if max_dv < 0:
+            raise ValueError(f"{where}.max_dv must be >= 0, got {max_dv!r}")
         why = entry.get("why")
         if not isinstance(why, str) or not why.strip():
             raise ValueError(f"{where}.why is required (the reason makes the bound reviewable)")
@@ -234,6 +242,177 @@ def pair_bounds_unmapped_nets(
     """Return sorted net names in *bounds* absent from the voltage map (typo guard)."""
     mapped = {_norm_net_key(n) for n in voltage_nets}
     return sorted({n for pair in bounds for n in pair} - mapped)
+
+
+def merge_voltage_scenarios(
+    maps: Sequence[Any],
+    *,
+    names: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """Merge per-scenario voltage maps into one envelope map (#9582).
+
+    A board whose nets take different potentials per operating scenario (a line
+    node that swings against opposite-polarity banks in forward vs. reverse
+    mode) needs one ``--voltage-map`` per scenario; every consumer takes only
+    one map.  Instead of hand-writing an envelope — per-net ``{min, max}``
+    ranges plus one ``_pair_bounds`` entry per varying-net pair — author the
+    per-scenario maps and merge them:
+
+    ``merge_voltage_scenarios([forward, reverse])`` -> a single envelope map in
+    the ordinary ``--voltage-map`` format, accepted unchanged by the
+    interval-aware consumers (``kct creepage``, ``kct audit``,
+    ``kct repair-creepage``, ``kct route-link``):
+
+    * each net becomes the span of its per-scenario intervals: ``{"min": lo,
+      "max": hi}`` over the scenarios, emitted as a plain scalar when every
+      scenario agrees (byte-identical to a hand-authored static entry);
+    * for every net pair whose *envelope* |ΔV| (the
+      ``max(|a.hi - b.lo|, |b.hi - a.lo|)`` interval worst case) exceeds the
+      pair's worst |ΔV| within any single scenario, a generated
+      ``_pair_bounds`` entry caps the pair back to that worst per-scenario
+      difference.  The envelopes of scenario-correlated nets (a bank that
+      moves with the line, two nets always at the same potential) overstate
+      their real difference; the bounds restore exactly the issue's "worst
+      difference across the maps".  ``max_dv: 0`` is how "always the same
+      potential" is stated (#9582);
+    * ``_edge_voltage`` is carried through; the scenarios must agree on it
+      (there is no silent choice) or :exc:`ValueError` is raised.
+
+    Net names are emitted normalised (one leading ``/`` stripped, via
+    :func:`_norm_net_key`), and the union of the scenarios' nets is keyed the
+    same way the consumers look nets up.
+
+    Args:
+        maps: two or more raw scenario maps (as decoded from the JSON sidecar
+            files).  Each is parsed through :func:`voltage_map_from_dict`, so
+            scalars, ``{min, max}`` ranges and the reserved ``_edge_voltage``
+            key all work per scenario.
+        names: optional per-scenario names (e.g. the source file paths) quoted
+            in generated ``why`` strings; defaults to ``scenario 1 .. N``.
+
+    Returns:
+        The merged envelope map dict (JSON-serialisable).
+
+    Raises:
+        TypeError: if a scenario is not a dict.
+        ValueError: if fewer than two maps are given, ``names`` length
+            mismatches, a scenario carries ``_pair_bounds`` (merge takes raw
+            scenario maps; add device-bounded caps to the merged output by
+            hand if needed), one scenario spells a single net two ways that
+            normalise together (``/VCC`` and ``VCC``; there is no silent
+            last-wins -- keep one spelling per net per scenario, issue #9665),
+            the scenarios disagree on ``_edge_voltage``, or a scenario is
+            malformed.
+
+    Note:
+        A net present in only one scenario is treated as 0 V in the others --
+        the same "unmapped nets default to 0 V" rule every consumer applies --
+        so its envelope spans 0 V and its present-scenario potential.
+
+        The signed-collapse route consumers -- ``kct route`` / ``kct pcb`` via
+        :func:`kicad_tools.router.pairwise_clearance.load_signed_voltage_map` --
+        reduce each net's interval to its largest-magnitude endpoint (#4411),
+        so a pair whose census |dV| rests on interval differencing (a
+        sign-flipping net against its opposite bank) can score *below* this
+        envelope, down to 0 V and out of the route widening matrix.  Use the
+        merged map with the interval-aware census/audit gate and drive
+        route-time spacing per scenario; detect the affected pairs with
+        :func:`kicad_tools.router.pairwise_clearance.route_understated_pairs`
+        (``kct voltage-map-merge`` warns on stderr when its output has any).
+    """
+    if len(maps) < 2:
+        raise ValueError("merge_voltage_scenarios expects at least two scenario maps")
+    if names is None:
+        names = [f"scenario {i + 1}" for i in range(len(maps))]
+    if len(names) != len(maps):
+        raise ValueError(f"names ({len(names)}) must be one per scenario map ({len(maps)})")
+    for i, m in enumerate(maps):
+        if not isinstance(m, dict):
+            raise TypeError(f"scenario {names[i]!r} must be a dict, got {type(m).__name__}")
+        if _PAIR_BOUNDS_KEY in m:
+            raise ValueError(
+                f"scenario {names[i]!r} carries {_PAIR_BOUNDS_KEY}; merge takes raw "
+                "scenario maps only (declare device bounds on the merged output by hand)"
+            )
+
+    parsed = [voltage_map_from_dict(m) for m in maps]
+    edges = {edge for _, edge in parsed}
+    if len(edges) > 1:
+        detail = ", ".join(f"{names[i]}: {edge:g} V" for i, (_, edge) in enumerate(parsed))
+        raise ValueError(f"scenarios disagree on _edge_voltage (no silent choice): {detail}")
+    edge_voltage = edges.pop()
+
+    # Effective per-scenario intervals keyed by the normalised net name; a net
+    # absent from a scenario sits at that scenario's 0 V default.  Two distinct
+    # authored spellings that normalise onto one key inside a single scenario
+    # would otherwise silently drop one declared potential (last one wins,
+    # issue #9665), so the collision is refused loudly -- the lookup of
+    # first-seen spellings is reset per scenario.
+    zero = VoltageInterval(0.0, 0.0)
+    eff: list[dict[str, VoltageInterval]] = []
+    for i, (intervals, _) in enumerate(parsed):
+        first_seen: dict[str, str] = {}
+        e: dict[str, VoltageInterval] = {}
+        for net, iv in intervals.items():
+            key = _norm_net_key(net)
+            if key in first_seen:
+                raise ValueError(
+                    f"scenario {names[i]!r} spells one net two ways: {first_seen[key]!r} "
+                    f"and {net!r} both normalise to {key!r}; keep one spelling per net "
+                    "within a scenario (declare differing potentials in separate scenarios)"
+                )
+            first_seen[key] = net
+            e[key] = iv
+        eff.append(e)
+    all_nets: set[str] = set()
+    for e in eff:
+        all_nets.update(e)
+    net_list = sorted(all_nets)
+    n = len(eff)
+
+    # Envelope interval per net across the scenarios.
+    env = {
+        net: VoltageInterval(
+            min(eff[s].get(net, zero).lo for s in range(n)),
+            max(eff[s].get(net, zero).hi for s in range(n)),
+        )
+        for net in net_list
+    }
+
+    out: dict[str, Any] = {}
+    for net in net_list:
+        lo, hi = env[net]
+        out[net] = lo if lo == hi else {_RANGE_MIN_KEY: lo, _RANGE_MAX_KEY: hi}
+    out[_EDGE_VOLTAGE_KEY] = edge_voltage
+
+    bounds: list[dict[str, Any]] = []
+    for i in range(len(net_list)):
+        for j in range(i + 1, len(net_list)):
+            a, b = net_list[i], net_list[j]
+            ea, eb = env[a], env[b]
+            env_dv = max(abs(ea.hi - eb.lo), abs(eb.hi - ea.lo))
+            scen_dv = max(
+                max(
+                    abs(eff[s].get(a, zero).hi - eff[s].get(b, zero).lo),
+                    abs(eff[s].get(b, zero).hi - eff[s].get(a, zero).lo),
+                )
+                for s in range(n)
+            )
+            if env_dv > scen_dv:
+                bounds.append(
+                    {
+                        "nets": [a, b],
+                        "max_dv": scen_dv,
+                        "why": (
+                            f"scenario envelope over {n} scenarios "
+                            f"({', '.join(str(x) for x in names)}): nets are "
+                            "scenario-correlated; capped to the worst per-scenario |dV|"
+                        ),
+                    }
+                )
+    if bounds:
+        out[_PAIR_BOUNDS_KEY] = bounds
+    return out
 
 
 def _coerce_interval(key: Any, value: Any) -> VoltageInterval:
@@ -429,6 +608,15 @@ class CreepagePair:
     # direct HV<->other gap, not the island path; ``clearance_mm`` /
     # ``creepage_mm`` are the (shorter) island-path values.  Chains through
     # several islands are not searched (single hop only).
+    #
+    # Cross-face bore/edge path (#9704): label of the non-plated bore rim
+    # (``REF.pin``), milled slot (``slot@(x,y)``) or board outline
+    # (``Edge.Cuts``) whose ``face-A conductor -> rim`` + board thickness +
+    # ``rim -> face-B conductor`` surface path binds this row.  ``None`` (and
+    # omitted from JSON) when no cross-face path binds.  As with
+    # ``via_floating``, ``witness`` still marks the closest approach, not the
+    # through-bore path.
+    via_bore: str | None = None
 
     @property
     def residual_passed(self) -> bool:
@@ -526,6 +714,8 @@ class CreepagePair:
             base["waived"] = True
         if self.via_floating is not None:
             base["via_floating"] = self.via_floating
+        if self.via_bore is not None:
+            base["via_bore"] = self.via_bore
         if self.witness is not None:
             base["witness"] = {
                 "point_a_mm": [round(v, 4) for v in self.witness["point_a_mm"]],
@@ -601,6 +791,13 @@ class CreepageReport:
     # can shorten an HV<->other path.  Net-0 zone fills are NOT collected, so they
     # are not counted or used.
     netless_items: int = 0
+    # Board thickness used by cross-face bore/edge paths (#9704) and where it
+    # came from (``"stackup"`` strata sum | ``"default"`` 1.6 mm).  ``None``
+    # (and omitted from JSON) when the census evaluated no cross-face candidate
+    # -- e.g. every conductor sits on one face -- so such boards serialise
+    # exactly as before #9704.
+    board_thickness_mm: float | None = None
+    board_thickness_source: str | None = None
 
     @property
     def passed(self) -> bool:
@@ -650,7 +847,7 @@ class CreepageReport:
         # Phase-1 backward compatibility: no standard -> phase-1 schema (plus
         # the additive verdict keys above, #4687).
         if self.standard is None:
-            return {
+            phase1: dict[str, Any] = {
                 "board": self.board,
                 "net_class": self.net_class,
                 "min_mm": self.min_mm,
@@ -663,6 +860,10 @@ class CreepageReport:
                 "netless_items": self.netless_items,
                 "netless_treatment": "floating",
             }
+            if self.board_thickness_mm is not None:
+                phase1["board_thickness_mm"] = round(self.board_thickness_mm, 4)
+                phase1["board_thickness_source"] = self.board_thickness_source
+            return phase1
         d: dict[str, Any] = {
             "board": self.board,
             "net_class": self.net_class,
@@ -695,6 +896,9 @@ class CreepageReport:
             "netless_items": self.netless_items,
             "netless_treatment": "floating",
         }
+        if self.board_thickness_mm is not None:
+            d["board_thickness_mm"] = round(self.board_thickness_mm, 4)
+            d["board_thickness_source"] = self.board_thickness_source
         # Per-net voltage mode (#4371): the requirement varies per pair, so the
         # report-level scalar requirement / working voltage are null (already set
         # to None by the caller) and we echo the voltage source instead.  These
@@ -1434,26 +1638,32 @@ def _witness_in_attach_zone(
 def _edge_line_segments(pcb: PCB) -> list[tuple[tuple[float, float], tuple[float, float]]]:
     """All Edge.Cuts segments (outer boundary + interior slots/cutouts).
 
-    Combines the parsed ``gr_line``/``gr_arc``/``gr_rect`` segments
-    (:meth:`PCB.get_board_outline_segments`) with any ``gr_poly``/``gr_curve``
-    vertex chains (:meth:`PCB._edge_cuts_poly_chains_sexp`, closed into
-    segments and shifted into the board frame).
+    :meth:`PCB.get_board_outline_segments` is the single owner: it already
+    carries the ``gr_poly`` boundaries (closed into rings) and the
+    tessellated ``gr_curve`` chains alongside the parsed
+    ``gr_line``/``gr_arc``/``gr_rect`` segments -- re-deriving the poly
+    chains here would duplicate every edge.
     """
-    segments = list(pcb.get_board_outline_segments())
+    return list(pcb.get_board_outline_segments())
 
-    chains = pcb._edge_cuts_poly_chains_sexp()
-    if chains:
-        ox, oy = pcb._board_origin
-        for chain in chains:
-            if len(chain) < 2:
-                continue
-            pts = [(x - ox, y - oy) for x, y in chain]
-            # Close the ring so a polygon can be recovered from it.
-            if pts[0] != pts[-1]:
-                pts.append(pts[0])
-            for a, b in zip(pts, pts[1:], strict=False):
-                segments.append((a, b))
-    return segments
+
+def _edge_faces(pcb: PCB) -> list[Any]:
+    """Polygonize all Edge.Cuts linework into faces (empty when it will not close).
+
+    The largest-area face is the board body; interior rings of that face and
+    standalone interior faces are milled voids.  Shared by the slot-obstacle
+    derivation and the cross-face outline rim (#9704).
+    """
+    if not has_shapely():
+        return []
+    from shapely.geometry import LineString
+    from shapely.ops import polygonize, unary_union
+
+    raw_segments = _edge_line_segments(pcb)
+    lines = [LineString([a, b]) for a, b in raw_segments if math.dist(a, b) > _EPS]
+    if not lines:
+        return []
+    return list(polygonize(unary_union(lines)))
 
 
 def board_slot_obstacles(pcb: PCB) -> list[Any]:
@@ -1465,17 +1675,9 @@ def board_slot_obstacles(pcb: PCB) -> list[Any]:
     its own closed loop) are also returned.  Returns ``[]`` when shapely is
     unavailable or no interior geometry exists.
     """
-    if not has_shapely():
-        return []
-    from shapely.geometry import LineString, Polygon
-    from shapely.ops import polygonize, unary_union
+    from shapely.geometry import Polygon
 
-    raw_segments = _edge_line_segments(pcb)
-    lines = [LineString([a, b]) for a, b in raw_segments if math.dist(a, b) > _EPS]
-    if not lines:
-        return []
-
-    faces = list(polygonize(unary_union(lines)))
+    faces = _edge_faces(pcb)
     if not faces:
         return []
 
@@ -1509,6 +1711,140 @@ def board_edge_geometry(pcb: PCB) -> Any | None:
     if not lines:
         return None
     return unary_union(lines)
+
+
+# ---------------------------------------------------------------------------
+# Cross-face bore / edge rims (#9704)
+# ---------------------------------------------------------------------------
+
+
+def _board_thickness_mm(pcb: PCB) -> tuple[float, str]:
+    """``(thickness, source)`` for cross-face paths (#9704).
+
+    The stackup strata sum (copper + dielectric + mask, every ``StackupLayer``
+    carries its mm) is the board's total thickness when the file declares one;
+    otherwise the 1.6 mm two-layer default is assumed and reported as such.
+    """
+    setup = getattr(pcb, "setup", None)
+    stackup = getattr(setup, "stackup", None) or []
+    total = sum(float(getattr(stratum, "thickness", 0.0) or 0.0) for stratum in stackup)
+    if total > 0.0:
+        return total, "stackup"
+    return _DEFAULT_BOARD_THICKNESS_MM, "default"
+
+
+def _npth_bore_rims(pcb: PCB) -> list[tuple[Any, str]]:
+    """Rim rings of non-plated bores (NPTH / mounting holes), labelled ``REF.pin``.
+
+    The wall of a non-plated through hole is an insulating surface joining the
+    two board faces, so its rim is a cross-face path node (#9704).  Bare
+    mounting holes and annular-ring NPTHs both qualify (the ring does not
+    plate the wall); plated barrels (THT pads, vias) do not -- a conductive
+    barrel is the #8548 island-hop domain, not an insulating surface.  An oval
+    drill (``drill_size``) becomes a stadium rim rotated by the pad's absolute
+    angle; a circular drill a polygonal ring fine enough that the chord error
+    stays sub-micron at bore scales.
+    """
+    if not has_shapely():
+        return []
+    from shapely.affinity import rotate as _rotate  # type: ignore[import-untyped]
+    from shapely.geometry import LineString, Point
+
+    from kicad_tools.validate.rules.clearance import _transform_pad_position
+
+    rims: list[tuple[Any, str]] = []
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if getattr(pad, "type", "") != "np_thru_hole":
+                continue
+            drill = float(getattr(pad, "drill", 0.0) or 0.0)
+            oval = getattr(pad, "drill_size", None)
+            cx, cy = _transform_pad_position(pad, fp)
+            label = _pad_label(fp, pad)
+            if oval and min(oval) > 0.0:
+                major, minor = max(oval), min(oval)
+                half = (major - minor) / 2.0
+                focus = LineString([(cx - half, cy), (cx + half, cy)])
+                focus = _rotate(focus, -(getattr(pad, "rotation", 0.0) or 0.0), origin=(cx, cy))
+                rims.append((focus.buffer(minor / 2.0, quad_segs=64).exterior, label))
+            elif drill > 0.0:
+                rims.append((Point(cx, cy).buffer(drill / 2.0, quad_segs=64).boundary, label))
+    return rims
+
+
+def _board_outline_ring(pcb: PCB) -> Any | None:
+    """Exterior ring of the board body (largest Edge.Cuts face), else ``None``.
+
+    The board edge wall is an insulating surface joining the two faces, so the
+    outline is one more cross-face rim (#9704).
+    """
+    faces = _edge_faces(pcb)
+    if not faces:
+        return None
+    return max(faces, key=lambda f: f.area).exterior
+
+
+def _cross_face_rims(pcb: PCB, obstacles: list[Any]) -> list[tuple[Any, str, bool]]:
+    """All rims a cross-face surface path can descend (#9704).
+
+    Entries are ``(ring, label, joint)``.  Non-plated bore rims (``REF.pin``)
+    use the standard's hole construction -- each face's surface distance to
+    the hole edge, independently minimised, plus the depth -- so ``joint`` is
+    ``False``.  Milled-slot rims (``slot@(x,y)``) and the board outline
+    (``Edge.Cuts``) are crossed at a single wall point, so their candidate is
+    minimised jointly over that point (``joint`` ``True``); independent
+    per-face minima would let the path teleport along the wall -- on the
+    #9704 Evidence board a phantom outline path (3.45 mm) would mask the bore
+    path (3.75 mm) the issue is about.
+    """
+    rims: list[tuple[Any, str, bool]] = [(r, lbl, False) for r, lbl in _npth_bore_rims(pcb)]
+    for obs in obstacles:
+        minx, miny, maxx, maxy = obs.bounds
+        rims.append((obs.exterior, f"slot@({(minx + maxx) / 2:.1f},{(miny + maxy) / 2:.1f})", True))
+    outline = _board_outline_ring(pcb)
+    if outline is not None:
+        rims.append((outline, "Edge.Cuts", True))
+    return rims
+
+
+def _min_sum_via_ring(geom_a: Any, geom_b: Any, ring: Any) -> float:
+    """``min`` over points ``p`` on ``ring`` of ``d(geom_a, p) + d(p, geom_b)``.
+
+    The joint single-wall-point construction for slot / outline cross-face
+    paths (#9704): the wall is entered and left at the same point, so the two
+    in-plane legs share it.  The ring is sampled at ~0.05 mm (capped), far
+    below the gate's pass tolerance; the legs are straight-line, so an
+    intervening slot understates the path -- the conservative direction.
+    Returns ``inf`` for an empty ring.
+    """
+    import numpy as np
+    import shapely  # type: ignore[import-untyped]
+
+    segs = _boundary_segments(ring)
+    if segs.shape[0] == 0:
+        return math.inf
+    lengths = np.hypot(*(segs[:, 1, :] - segs[:, 0, :]).T)
+    total = float(lengths.sum())
+    if total <= 0.0:
+        return math.inf
+    budget = max(64, min(20000, int(total / 0.05)))
+    chunks = []
+    spent = 0
+    for (a, b), seg_len in zip(segs, lengths, strict=True):
+        if seg_len <= _EPS:
+            continue
+        m = max(1, int(round(budget * seg_len / total)))
+        t = np.linspace(0.0, 1.0, m + 1)
+        chunks.append(a + t[:, None] * (b - a))
+        spent += m + 1
+        if spent >= 20000:
+            break
+    if not chunks:
+        return math.inf
+    pts = shapely.points(np.unique(np.concatenate(chunks), axis=0))
+    shapely.prepare(geom_a)
+    shapely.prepare(geom_b)
+    return float(np.min(shapely.distance(pts, geom_a) + shapely.distance(pts, geom_b)))
 
 
 # ---------------------------------------------------------------------------
@@ -1640,7 +1976,7 @@ def _first_admissible(
     Returns ``inf`` when no candidate under ``bound`` is admissible.
     """
     import numpy as np
-    import shapely  # type: ignore[import-untyped]
+    import shapely
 
     keep = np.nonzero(lengths < bound)[0]
     if keep.size == 0:
@@ -2166,6 +2502,92 @@ def compute_creepage_census(
                     else:
                         best_via.pop(key, None)
 
+    # --- Cross-face surface paths through bores / the outline (#9704) -----
+    # A non-plated bore wall, a milled slot wall and the board edge are
+    # insulating surfaces joining the two outer faces, so a creepage path may
+    # run ``conductor A on face 1 -> rim`` + board thickness + ``rim ->
+    # conductor B on face 2``.  Each candidate is folded into the pair's
+    # creepage as a minimum, so a result can only get stricter, never looser.
+    # The rim-per-face distances are independent minima (the standard's own
+    # rim-plus-thickness construction), which understates a path whose two rim
+    # points differ -- the conservative direction.
+    #
+    # key -> (creepage, rim label, face of net A, face of net B, geom A, geom B)
+    cross_best: dict[tuple[int, int], tuple[float, str, str, str, Any, Any]] = {}
+    thickness_mm, thickness_source = _board_thickness_mm(pcb)
+    _copper = pcb.copper_layers
+    _faces = [_copper[0].name, _copper[-1].name] if _copper else []
+    thickness_evaluated = False
+    if len(_faces) == 2 and _faces[0] != _faces[1]:
+        rims = _cross_face_rims(pcb, obstacles)
+        unions_by_face = {f: layer_unions.get(f, {}) for f in _faces}
+        # Straight-line rim distances per (face, net): a lower bound on the
+        # surface legs, so pairs whose bound cannot be beaten skip the exact
+        # (slot-aware) search entirely.
+        straight: list[dict[tuple[str, int], float]] = []
+        for rim, _label, _joint in rims:
+            dist: dict[tuple[str, int], float] = {}
+            for f in _faces:
+                for net_num, geom in unions_by_face[f].items():
+                    dist[(f, net_num)] = geom.distance(rim)
+            straight.append(dist)
+        for hv_num in hv_nets:
+            for fa, fb in ((_faces[0], _faces[1]), (_faces[1], _faces[0])):
+                ga = unions_by_face[fa].get(hv_num)
+                if ga is None:
+                    continue
+                for other_num, gb in unions_by_face[fb].items():
+                    if other_num == 0 or other_num == hv_num:
+                        continue
+                    if other_num in hv_nets:
+                        if not map_mode or other_num < hv_num:
+                            continue
+                    key = (hv_num, other_num)
+                    prev = best.get(key)
+                    if prev is not None:
+                        # Existing (same-face) row: a cross-face path binds
+                        # only by being strictly shorter.
+                        bound = prev[1] - _PASS_TOLERANCE
+                    else:
+                        # The pair shares no copper layer.  It enters the
+                        # report only when the cross-face path FAILS the
+                        # pair's bound -- a passing one keeps the pre-#9704
+                        # silence (and the report contents stable).
+                        if map_mode:
+                            req_creep, _, _ = _pair_requirement(
+                                hv_nets[hv_num],
+                                number_to_name.get(other_num, f"net{other_num}"),
+                            )
+                        else:
+                            req_creep = required_creepage_mm or 0.0
+                        bound = max(min_mm or 0.0, req_creep) - _PASS_TOLERANCE
+                    # The other face ordering may already have stored a
+                    # candidate for this pair: only a strictly shorter path
+                    # replaces it, so the orderings minimise.
+                    earlier = cross_best.get(key)
+                    if earlier is not None:
+                        bound = min(bound, earlier[0])
+                    best_cand = math.inf
+                    best_label: str | None = None
+                    for k, (rim, label, joint) in enumerate(rims):
+                        lb = straight[k][(fa, hv_num)] + straight[k][(fb, other_num)]
+                        if lb + thickness_mm >= min(bound, best_cand):
+                            continue
+                        thickness_evaluated = True
+                        if joint:
+                            cand = _min_sum_via_ring(ga, gb, rim) + thickness_mm
+                        else:
+                            leg_a = surface_path_length(ga, rim, obstacles, _bridged=True)[1]
+                            leg_b = surface_path_length(rim, gb, obstacles, _bridged=True)[1]
+                            cand = leg_a + thickness_mm + leg_b
+                        if cand < best_cand:
+                            best_cand, best_label = cand, label
+                    if best_label is not None and best_cand < bound:
+                        cross_best[key] = (best_cand, best_label, fa, fb, ga, gb)
+    if thickness_evaluated:
+        report.board_thickness_mm = thickness_mm
+        report.board_thickness_source = thickness_source
+
     def _attach_zone_row(
         layer: str,
         geom_a: Any,
@@ -2207,6 +2629,17 @@ def compute_creepage_census(
         net_a_name = hv_nets[hv_num]
         net_b_name = number_to_name.get(other_num, f"net{other_num}")
         via_floating = best_via.get((hv_num, other_num))
+        # Cross-face bore/edge path (#9704): when it is shorter than the
+        # same-face binding path it takes over the creepage (never the layer,
+        # relationship or same-face witness) and caps the clearance at the
+        # two faces' in-plan projection (a conservative floor on the true 3-D
+        # through-bore air path, which the 2-D model cannot measure).
+        cross = cross_best.get((hv_num, other_num))
+        via_bore_label: str | None = None
+        if cross is not None and cross[0] < creepage - _PASS_TOLERANCE:
+            creepage = cross[0]
+            via_bore_label = cross[1]
+            clearance = min(clearance, cross[4].distance(cross[5]))
         # A row bound by a floating-island hop is board-level by nature (#8548):
         # the direct-gap same_footprint / attach-zone classification would not apply.
         if via_floating is not None:
@@ -2270,6 +2703,7 @@ def compute_creepage_census(
                         relationship=row_rel,
                         witness=row_witness,
                         via_floating=via_floating if row_layer == layer_name else None,
+                        via_bore=via_bore_label if row_layer == layer_name else None,
                         **row_residual,
                     )
                 )
@@ -2285,9 +2719,46 @@ def compute_creepage_census(
                         relationship=row_rel,
                         witness=row_witness,
                         via_floating=via_floating if row_layer == layer_name else None,
+                        via_bore=via_bore_label if row_layer == layer_name else None,
                         **row_residual,
                     )
                 )
+
+    # --- Cross-face-only pairs (#9704): nets sharing no copper layer -----
+    # These pairs had no row at all before #9704; one appears only when the
+    # bore/edge path FAILS the pair's bound (see the ``bound`` above), so a
+    # passing cross-face pair keeps the old silence.
+    for (hv_num, other_num), (creepage, label, fa, fb, ga, gb) in cross_best.items():
+        if (hv_num, other_num) in best:
+            continue  # already folded into its same-face row above
+        net_a_name = hv_nets[hv_num]
+        net_b_name = number_to_name.get(other_num, f"net{other_num}")
+        xf_req_creep, xf_req_clear, xf_prov = (
+            _pair_requirement(net_a_name, net_b_name)
+            if map_mode
+            else (required_creepage_mm, required_clearance_mm, None)
+        )
+        witness = _witness(
+            ga, gb, layer_items[fa].get(hv_num, []), layer_items[fb].get(other_num, [])
+        )
+        report.pairs.append(
+            _make_pair(
+                req_creep=xf_req_creep,
+                req_clear=xf_req_clear,
+                prov=xf_prov,
+                net_a=net_a_name,
+                net_b=net_b_name,
+                kind="conductor",
+                layer=f"{fa}/{fb}",
+                # In-plan projection of the two faces' copper: the honest
+                # lower bound the 2-D model has for their clearance.
+                clearance_mm=ga.distance(gb),
+                creepage_mm=creepage,
+                relationship="board",
+                witness=witness,
+                via_bore=label,
+            )
+        )
 
     # --- HV-vs-board-edge pairs (copper union across all layers) ---
     edge_geom = board_edge_geometry(pcb)

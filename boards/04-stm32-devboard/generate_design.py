@@ -3030,9 +3030,23 @@ def fill_zones(routed_path: Path) -> bool:
     return True
 
 
+CURATED_README = """\
+STM32 development board — fabrication and assembly package
+
+Order TWO layers, 1.6 mm FR4, 1 oz copper, tented through vias, and the PAID 0.15 mm minimum MECHANICAL via-hole option. See manufacturing-requirements.json. No laser microvias or via-in-pad process is used.
+
+Use bom_jlcpcb.csv and cpl_jlcpcb.csv for 17 placements: 15 SMT parts plus the through-hole Y1 crystal (C114147) and J1 SWD header (C37208), which JLCPCB assembles (issue #7268). Procurement must review the Y1/J1 rows before ordering. U1 MUST be Microchip MCP1825S-3302E/DB (C148031); AMS1117 has the wrong pinout for this board. No automatic substitutions.
+
+Power with regulated 5 V only, maximum 6 V. Verify 3.3 V before attaching peripherals; then verify SWD programming, crystal, reset/BOOT0 and PB12 LED. Thermal/load qualification remains required on assembled hardware.
+
+Gerbers: gerbers/gerbers.zip. Editable sources: kicad_project.zip. Engineering review: DESIGN_REVIEW.md. Source scripts: design-source/. Native DRC/ERC and reviewed Python checks accompany the final package.
+"""
+
+
 def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
     """Export the assembly bundle with the reviewed paid-drill native rules."""
     from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
+    from kicad_tools.export.preflight import PreflightConfig
 
     process = runpy.run_path(str(Path(__file__).with_name("manufacturing_process.py")))
     process["validate_process"](routed_path)
@@ -3045,11 +3059,25 @@ def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
     # The stock tier1 export would overwrite the paid process's .15/.30/.075
     # via floors before preflight and packaging. Preserve the validated native
     # constraints throughout export, including the project ZIP and final gate.
+    # Issue #9536: the report/manifest also describe the reviewed process --
+    # the report audits under the paid ``process_rules()`` (not the stock
+    # tier1 floors that read the reviewed vias as 68 blocking errors and a
+    # 0.300 mm drill order), and the manifest's ERC preflight leg reads the
+    # shipped zero-violation native ERC report instead of "no ERC report
+    # found".  The curated README (order instructions, U1 no-substitution,
+    # power limits) is rewritten after the export so the generic generator
+    # cannot drop it again.
+    erc_report = routed_path.parent / "native-erc.json"
     package = ManufacturingPackage(
         pcb_path=routed_path,
         schematic_path=output_dir / "stm32_devboard.kicad_sch",
         manufacturer="jlcpcb-tier1",
-        config=ManufacturingConfig(output_dir=mfr_dir, emit_drc_constraints=False),
+        config=ManufacturingConfig(
+            output_dir=mfr_dir,
+            emit_drc_constraints=False,
+            report_design_rules=process["process_rules"](),
+            preflight=PreflightConfig(erc_report_path=erc_report if erc_report.is_file() else None),
+        ),
     )
     result = package.export(mfr_dir)
     for warning in result.warnings:
@@ -3058,6 +3086,7 @@ def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
         for error in result.errors:
             print(f"   Export error: {error}")
         return False
+    (mfr_dir / "README.txt").write_text(CURATED_README, encoding="utf-8")
 
     process["validate_process"](routed_path)
 

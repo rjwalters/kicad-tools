@@ -1,6 +1,6 @@
 # Placement GA Routability A/B Benchmark
 
-**Issue**: [#2720](https://github.com/rjwalters/kicad-tools/issues/2720) — KiCad-2: replace placement GA's spacing proxy with inner-loop routing quality (outer-loop swap)
+**Issue**: [#2720](https://github.com/2AMLogic/kicad-tools/issues/2720) — KiCad-2: replace placement GA's spacing proxy with inner-loop routing quality (outer-loop swap)
 **Epic**: #7199 in a private repo — Cascaded optimization architecture for place-and-route
 **Date**: 2026-05-17
 
@@ -143,7 +143,7 @@ return (
 ## Hand-off
 
 The dense-board A/B is the empirical bar that
-[#2906](https://github.com/rjwalters/kicad-tools/issues/2906) (board-05
+[#2906](https://github.com/2AMLogic/kicad-tools/issues/2906) (board-05
 ≥38% completion / ≤14 DRC) depends on. Once #2906's benchmarking environment
 has the C++ A\* extension available, this document should be updated with
 the board-04 / board-05 numbers and the

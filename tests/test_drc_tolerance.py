@@ -1,22 +1,34 @@
 """Tests for the DRC numerical guard band on clearance and dimension checks.
 
-``DRC_TOLERANCE`` is a float-rounding guard band -- NOT a manufacturing
-tolerance.  Issue #3913 reduced it from 0.005 mm (5 um) to 1e-4 mm
-(0.1 um): the old 5 um dead band silently PASSED genuine marginal
+``DRC_TOLERANCE`` started life as a float-rounding guard band -- NOT a
+manufacturing tolerance.  Issue #3913 reduced it from 0.005 mm (5 um) to
+1e-4 mm (0.1 um): the old 5 um dead band silently PASSED genuine marginal
 violations up to 5 um below the floor (e.g. a 0.0999 mm clearance vs a
-0.1016 mm / 4 mil JLCPCB floor is only 1.7 um short).  The guard now
-suppresses only IEEE-754 rounding noise (~1e-9 mm at board coordinates)
-while marginal-class shortfalls of a few um correctly FAIL.
+0.1016 mm / 4 mil JLCPCB floor is only 1.7 um short).
+
+Issue #9619 split the probed KiCad acceptance band out of it: copper
+*clearance* verdicts now use ``KICAD_CLEARANCE_BAND_MM`` (5e-4 mm / 0.5
+um, applied by ``drc_clear`` -- the black-box probe on pinned KiCad 10.0.6
+with 10 nm steps refined at 1 nm, on parallel tracks / a 45-degree pair /
+a pad-to-track pair, accepts shortfalls up to 500 nm and flags 501 nm),
+while ``DRC_TOLERANCE`` itself stays at 1e-4 mm for every other check.
+The #9619 review probe showed KiCad gives track width and via drill size
+*no* band at all -- a 100 nm shortfall is flagged -- so widening those
+checks to 500 nm would let ``kct check`` pass boards kicad-cli rejects.
+
+Both constants still sit below the ~1.6 um marginal-violation class, so
+those correctly fail, and float64 rounding noise (~1e-9 mm at board
+coordinates) is still five orders of magnitude below the band.
 
 Historical note: issue #1803 originally motivated a wide dead band to
 avoid a 1 um false positive (0.101 mm vs 0.102 mm).  #3913 established
-that such a shortfall is a TRUE positive at KiCad IU granularity (1 nm),
-so that case is now (correctly) reported.
+that such a shortfall is a TRUE positive, and it still is: 1 um > 0.5 um,
+so the widened clearance band does not resurrect that false negative.
 """
 
 import pytest
 
-from kicad_tools.validate.rules.base import DRC_TOLERANCE
+from kicad_tools.validate.rules.base import DRC_TOLERANCE, KICAD_CLEARANCE_BAND_MM
 from kicad_tools.validate.rules.clearance import ClearanceRule
 from kicad_tools.validate.rules.dimensions import DimensionRules
 
@@ -115,6 +127,9 @@ class MockPCB:
     def segments_on_layer(self, layer_name):
         return [s for s in self.segments if s.layer == layer_name]
 
+    def arcs_on_layer(self, layer_name):
+        return []
+
     def get_net(self, number):
         return self._nets.get(number)
 
@@ -129,9 +144,22 @@ class TestDRCToleranceConstant:
         assert DRC_TOLERANCE > 0
 
     def test_tolerance_value(self):
-        """Guard band is 0.1 um (#3913), tight enough to catch marginal-class
-        violations while still suppressing float64 rounding noise."""
+        """Guard band is 0.1 um (#3913), the float-rounding guard for every
+        non-clearance check: dimensions, annular rings, floors, holes,
+        silk.  #9619 review: pinned kicad-cli flags a 100 nm track-width
+        or drill shortfall outright, so this must NOT take KiCad's
+        clearance band -- that would let kct pass boards kicad-cli
+        rejects."""
         assert pytest.approx(1e-4) == DRC_TOLERANCE
+
+    def test_clearance_band_value(self):
+        """The probed KiCad acceptance band (0.5 um, #9619) lives in its own
+        constant and is applied only to copper-clearance verdicts via
+        ``drc_clear`` -- the largest shortfall pinned KiCad 10.0.6 accepts
+        (500 nm accepted, 501 nm flagged).  Still tight enough to catch
+        the ~1.6 um marginal class (#3913)."""
+        assert pytest.approx(5e-4) == KICAD_CLEARANCE_BAND_MM
+        assert KICAD_CLEARANCE_BAND_MM > DRC_TOLERANCE
 
     def test_tolerance_is_sub_micron(self):
         """The band must stay well below the ~1.6 um marginal-violation width
@@ -139,6 +167,12 @@ class TestDRCToleranceConstant:
         rounding (~1e-9 mm at board coordinates)."""
         assert DRC_TOLERANCE < 1.6e-3  # below the marginal class it must catch
         assert DRC_TOLERANCE > 1e-9  # above float rounding noise
+        assert KICAD_CLEARANCE_BAND_MM < 1.6e-3
+
+    def test_issue_1803_one_um_shortfall_still_fails(self):
+        """The #3913 regression: a 1 um shortfall (1e-3 mm) must FAIL even
+        with the widened 0.5 um band (#9619)."""
+        assert DRC_TOLERANCE < 1e-3
 
 
 # ---------------------------------------------------------------------------
@@ -203,13 +237,14 @@ class TestClearanceRuleTolerance:
         assert result.error_count == 1
 
     def test_float_rounding_noise_still_passes(self):
-        """A shortfall below the 0.1 um guard band (pure float noise) passes."""
+        """A 0.05 um shortfall is far inside the 0.5 um guard band (float
+        noise, and inside KiCad's probed acceptance band) and passes."""
         # 0.10195mm clearance vs 0.102mm min => 0.05 um short, below the guard
         pcb, rules = self._make_segment_via_pcb(0.10195)
         result = ClearanceRule().check(pcb, rules)
         assert result.error_count == 0, (
-            "A 0.05 um shortfall is within float64 rounding noise and must not "
-            "be flagged; only genuine sub-floor clearances should fail."
+            "A 0.05 um shortfall is well inside the 0.5 um guard band and must "
+            "not be flagged; only genuine sub-floor clearances should fail."
         )
 
     def test_clearance_beyond_tolerance_fails(self):
@@ -259,7 +294,9 @@ class TestDimensionRulesTolerance:
         )
 
     def test_trace_width_float_noise_passes(self):
-        """Trace within the 0.1 um guard band of the floor still passes."""
+        """Trace 0.05 um below the floor passes (inside the 1e-4
+        float-noise guard; dimension checks do not take KiCad's clearance
+        band)."""
         seg = MockSegment(
             start=(0, 0),
             end=(10, 0),
@@ -272,6 +309,55 @@ class TestDimensionRulesTolerance:
         result = DimensionRules().check(pcb, rules)
         width_violations = [v for v in result.violations if v.rule_id == "dimension_trace_width"]
         assert len(width_violations) == 0
+
+    @pytest.mark.parametrize("width", [0.1996, 0.1995, 0.1994])
+    def test_trace_width_400_to_600nm_shortfall_flagged(self, width):
+        """#9619 review probe rows: pinned kicad-cli flags a track-width
+        shortfall of 100 nm outright -- track width gets NO acceptance
+        band -- so kct must flag 400/500/600 nm shortfalls (0.2 mm floor)
+        too.  A shared 500 nm band here would pass boards kicad-cli
+        rejects; ``DRC_TOLERANCE`` stays 1e-4 for dimensions."""
+        seg = MockSegment(
+            start=(0, 0),
+            end=(10, 0),
+            width=width,
+            layer="F.Cu",
+            net_number=1,
+        )
+        pcb = MockPCB(segments=[seg], nets=[MockNet(1, "VCC")])
+        rules = MockDesignRules(min_trace_width_mm=0.2)
+        result = DimensionRules().check(pcb, rules)
+        width_violations = [v for v in result.violations if v.rule_id == "dimension_trace_width"]
+        assert len(width_violations) == 1, (
+            f"A {(0.2 - width) * 1e6:.0f} nm track-width shortfall under a "
+            "0.2 mm floor must be flagged: kicad-cli flags it (no band on "
+            "track width), so kct must not be looser."
+        )
+
+    @pytest.mark.parametrize("drill", [0.2996, 0.2995, 0.2994])
+    def test_via_drill_400_to_600nm_shortfall_flagged(self, drill):
+        """#9619 review probe rows: pinned kicad-cli flags a via-drill
+        shortfall of 100 nm outright (``drill_out_of_range``) -- drill
+        size gets NO acceptance band -- so kct must flag 400/500/600 nm
+        shortfalls (0.3 mm floor) too."""
+        via = MockVia(
+            position=(5, 5),
+            size=0.8,
+            drill=drill,
+            layers=["F.Cu", "B.Cu"],
+            net_number=1,
+        )
+        pcb = MockPCB(vias=[via], nets=[MockNet(1, "VCC")])
+        rules = MockDesignRules(
+            min_via_drill_mm=0.3, min_via_diameter_mm=0.6, min_annular_ring_mm=0.15
+        )
+        result = DimensionRules().check(pcb, rules)
+        drill_violations = [v for v in result.violations if v.rule_id == "dimension_via_drill"]
+        assert len(drill_violations) == 1, (
+            f"A {(0.3 - drill) * 1e6:.0f} nm via-drill shortfall under a "
+            "0.3 mm floor must be flagged: kicad-cli flags it (no band on "
+            "drill size), so kct must not be looser."
+        )
 
     def test_trace_width_beyond_tolerance_fails(self):
         """Trace 0.110mm vs 0.127mm minimum -- 17 um short, should fail."""

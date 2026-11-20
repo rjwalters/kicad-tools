@@ -389,11 +389,28 @@ def _r(v: float, nd: int = 3) -> float:
     return round(float(v), nd) + 0.0  # +0.0 folds -0.0 into 0.0
 
 
-def fingerprint(pcb_path: Path) -> dict[str, Any]:
+def fingerprint(pcb_path: Path, net_class_map_path: Path | None = None) -> dict[str, Any]:
     """What a fixed-placement router must not change."""
+    from kicad_tools.analysis.layout_quality import analyze_layout_quality
     from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp import parse_string
 
-    pcb = PCB.load(str(pcb_path))
+    # One read feeds the parse and the sidecar's stack resolution alike:
+    # passing pcb_path would reopen the PCB inside the loader.
+    pcb_text = pcb_path.read_bytes().decode("utf-8")
+    sexp = parse_string(pcb_text)
+    if sexp.tag != "kicad_pcb":
+        # Direct construction replaced PCB.load, which had refused a
+        # different KiCad file type saved as .kicad_pcb; without this
+        # check such a file fingerprinted as an empty board and sent the
+        # case down the placement-violation branch instead of the
+        # fingerprint-error path (review finding on #9614).
+        from kicad_tools.exceptions import FileFormatError
+
+        raise FileFormatError(
+            "Not a KiCad PCB file", context={"file": str(pcb_path), "got": sexp.tag}
+        )
+    pcb = PCB(sexp, pcb_path)
     seen: Counter[str] = Counter()
     footprints: dict[str, list[Any]] = {}
     pad_nets: dict[str, str] = {}
@@ -422,13 +439,50 @@ def fingerprint(pcb_path: Path) -> dict[str, Any]:
         f"{'[keepout]' if getattr(z, 'keepout', None) else ''}"
         for z in pcb.zones
     )
+    # The board's net-class-map sidecar (when one is frozen) feeds the
+    # match-group skew half of the block. It is advisory metadata like
+    # the block itself: a sidecar that cannot be loaded omits the skew,
+    # never the case.
+    net_class_map = None
+    if net_class_map_path is not None:
+        try:
+            from kicad_tools.router.rules import net_class_map_from_path
+
+            net_class_map = net_class_map_from_path(net_class_map_path, pcb_text=pcb_text)
+        except Exception:  # noqa: BLE001
+            net_class_map = None
+    # The quality block is advisory metadata: a metrics bug must not lose
+    # a routing case as a scorer-failure (board-metrics isolates the same
+    # call the same way). The invariant fingerprint above still raises.
+    try:
+        layout_quality: dict[str, Any] | None = analyze_layout_quality(pcb, net_class_map).to_dict()
+    except Exception:  # noqa: BLE001
+        layout_quality = None
     return {
         "footprints": footprints,
         "pad_nets": pad_nets,
         "outline": [list(s) for s in outline],
         "copper_layers": sorted(layer.name for layer in pcb.copper_layers),
         "zones": zones,
+        # Reported per case (issue #9594): the layout-quality metric block.
+        # compare_fingerprints deliberately does NOT compare it — routing is
+        # supposed to change it, that is the metric's point.
+        "layout_quality": layout_quality,
     }
+
+
+def board_net_class_map_path(board: dict[str, Any]) -> Path | None:
+    """The board's frozen ``net_class_map.json`` sidecar, when one exists.
+
+    Match-group skew is part of the per-case quality block (issue #9594);
+    it needs the net-class map the board was routed with, which the
+    manifest freezes under ``routing_sidecars``.
+    """
+    for entry in board.get("routing_sidecars", []):
+        rel = entry.get("path")
+        if rel and Path(rel).name == "net_class_map.json":
+            return REPO / rel
+    return None
 
 
 def compare_fingerprints(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
@@ -446,6 +500,8 @@ def compare_fingerprints(before: dict[str, Any], after: dict[str, Any]) -> list[
     for key in ("outline", "copper_layers"):
         if before[key] != after[key]:
             out.append(f"{key} changed")
+    # "layout_quality" is intentionally absent here: it is the per-case
+    # quality report (issue #9594), and routing changing it is the point.
     # Every input zone (copper or keepout) must survive unchanged. A router
     # ADDING a pour is routing output, not a placement change: see added_zones.
     remaining = Counter(after["zones"])
@@ -1371,7 +1427,8 @@ def run_tool(
 
     try:
         # Baseline from the prepared input outside run_dir, never the router's copy.
-        fp_in, fp_out = fingerprint(prep.pcb), fingerprint(out)
+        ncm = board_net_class_map_path(board)
+        fp_in, fp_out = fingerprint(prep.pcb, ncm), fingerprint(out, ncm)
         violations = compare_fingerprints(fp_in, fp_out)
         rec.tool_config["zones_added_by_tool"] = added_zones(fp_in, fp_out)
     except Exception as exc:  # noqa: BLE001
@@ -1384,6 +1441,10 @@ def run_tool(
         return rec
 
     rec.score = score(out, prep, int(board["copper_layers"]), base / "score", kicad_cli)
+    # Per-case layout quality (issue #9594): routed output alongside the
+    # copper-stripped input it was routed from.
+    rec.score["layout_quality"] = fp_out["layout_quality"]
+    rec.score["layout_quality_input"] = fp_in["layout_quality"]
     if not rec.score["drc"].get("ran"):
         rec.outcome, rec.stage = "scorer-failure", "drc"
         rec.reason = "headline kicad-cli DRC unavailable: " + str(rec.score["drc"].get("note"))
@@ -1525,7 +1586,7 @@ def print_table(rows: list[dict[str, Any]]) -> None:
     cols = [
         "Board", "Tool", "Outcome", "Connections", "DRC errors (total)", "DRC warnings",
         "Unconnected", "kct check (jlcpcb)", "Sync", "Vias", "Wirelength mm", "Clean pass",
-        "Wall s", "Lost constraints",
+        "Corners 90/ac/turn", "Wall s", "Lost constraints",
     ]  # fmt: skip
     print("\n| " + " | ".join(cols) + " |")
     print("|" + "---|" * len(cols))
@@ -1535,6 +1596,10 @@ def print_table(rows: list[dict[str, Any]]) -> None:
         comp = s.get("completion") or {}
         chk = s.get("kct_check") or {}
         sync = s.get("sync") or {}
+        lq = (s.get("layout_quality") or {}).get("corners") or {}
+        # "--" (like the adjacent cells) when the score carries no
+        # layout_quality block: unknown must not display as zero corners.
+        corners = f"{lq['right_angle']}/{lq['acute']}/{lq['turn_back']}" if lq else "--"
         cells = [
             r["board"], r["tool"], r["outcome"],
             f"{comp['connections_routed']}/{comp['connections_total']}" if comp else "--",
@@ -1546,6 +1611,7 @@ def print_table(rows: list[dict[str, Any]]) -> None:
             _cell(s.get("via_count")) if s else "--",
             _cell(s.get("wirelength_mm")) if s else "--",
             _cell(s.get("clean_pass")) if s else "--",
+            corners,
             _cell(r.get("wall_s")) + (" (TIMEOUT)" if r.get("timed_out") else ""),
             str(len(r.get("lost_constraints") or [])),
         ]  # fmt: skip

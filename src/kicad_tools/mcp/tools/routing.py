@@ -492,6 +492,77 @@ def _apply_declared_clearances(path: Path, pcb_rules, design_rules) -> list[str]
     return resolved.warnings
 
 
+def _resolve_route_auto_grid(
+    path: Path,
+    pcb: PCB,
+    pcb_rules,
+    grid: float | str | None,
+) -> tuple[float | None, list[str]]:
+    """Resolve route-auto's routing grid pitch (Issue #9620).
+
+    ``grid`` is ``None`` / ``"auto"`` (the default) or an explicit mm value.
+    Auto reuses ``auto_select_grid_resolution`` -- pad-position aware and
+    memory-capped, the same selector ``kct route --grid auto`` uses -- over the
+    board's WHOLE pad set (the lattice is global), with the #6283
+    declared-aware clearance (``resolve_routing_clearances``, the same resolver
+    ``_apply_declared_clearances`` uses) as the DRC basis.  An explicit value
+    is honoured as given (#6741 semantics: the orchestrator's routers are built
+    by ``load_pcb_for_routing``, which disables the #972 adaptive coarsening).
+
+    Returns ``(resolution, warnings)``.  ``None`` means "fall back to
+    ``to_design_rules``'s legacy ``clearance / 2``" -- only when selection
+    cannot run at all (no pads extractable, or the selector raised); a
+    successful selection is never coarsened further and there is no retry
+    loop, only selection.
+    """
+    warnings: list[str] = []
+    if grid is not None and not (isinstance(grid, str) and grid.strip().lower() == "auto"):
+        try:
+            value = float(grid)
+        except (TypeError, ValueError):
+            raise ValueError(f"--grid must be 'auto' or a number in mm, got {grid!r}") from None
+        # Issue #9620 review: NaN compares false against everything and
+        # infinity against zero, so a plain ``<= 0`` accepted both -- require
+        # a finite positive pitch.
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"--grid must be a finite positive pitch in mm, got {value}")
+        return value, warnings
+    try:
+        from kicad_tools.router.clearance_resolver import resolve_routing_clearances
+        from kicad_tools.router.io import auto_select_grid_resolution, extract_pad_positions
+
+        clearance = resolve_routing_clearances(path, target_mm=pcb_rules.min_clearance).trace_mm
+        pads = extract_pad_positions(path)
+        if not pads:
+            return None, warnings
+        board_width: float | None = None
+        board_height: float | None = None
+        outline = pcb.get_board_outline()
+        if outline:
+            xs = [p[0] for p in outline]
+            ys = [p[1] for p in outline]
+            board_width = max(xs) - min(xs)
+            board_height = max(ys) - min(ys)
+        selection = auto_select_grid_resolution(
+            pads=pads,
+            clearance=clearance,
+            board_width=board_width,
+            board_height=board_height,
+        )
+        if selection.memory_forced_unsafe_grid:
+            warnings.append(
+                f"Auto-selected a {selection.resolution:.4g}mm grid, coarser than "
+                f"clearance/2 ({clearance / 2:.4g}mm), because the memory cap "
+                "forced it; copper may violate clearance (Issue #9620)"
+            )
+        return float(selection.resolution), warnings
+    except Exception as exc:
+        logger.warning(
+            "route-auto auto grid selection failed (%s); falling back to clearance/2", exc
+        )
+        return None, warnings
+
+
 def _detect_stub_terminals_for_pcb(pcb: PCB, region_box: tuple[float, float, float, float]) -> dict:
     """Detect boundary stub terminals for every straddling net on ``pcb``.
 
@@ -584,6 +655,7 @@ def route_net_auto(
     via_drill: float | None = None,
     via_diameter: float | None = None,
     diagnose_unrouted_budget: float | None = None,
+    grid: float | str | None = None,
 ) -> dict:
     """Route a specific net using the RoutingOrchestrator.
 
@@ -649,6 +721,14 @@ def route_net_auto(
                 board at route-auto's fine grid resolution) and add the
                 ``unrouted`` list and ``unrouted_diagnosis`` summary to the
                 result.  ``None`` / ``0`` (the default) skips it.
+        grid: Issue #9620.  The routing grid pitch in mm, or ``None`` /
+                ``"auto"`` (the default) to auto-select: the same
+                pad-position-aware, memory-capped selector ``kct route --grid
+                auto`` uses (``auto_select_grid_resolution``), replacing the
+                legacy fixed ``clearance / 2`` lattice that had no memory cap
+                and could burn a long net's whole budget on a fine pitch over
+                a big board.  An explicit numeric value is honoured as given
+                (no adaptive coarsening, no retry loop -- selection only).
 
     Returns:
         Dictionary with routing result including:
@@ -682,20 +762,24 @@ def route_net_auto(
     if path.suffix != ".kicad_pcb":
         raise ParseError(f"Invalid file extension: {path.suffix} (expected .kicad_pcb)")
 
+    # Issue #9599 row 4 / #9663 (stale-write guard): snapshot the output
+    # file's identity BEFORE the board file is read, so the save below can
+    # refuse to overwrite content this run never read.  ``route_net_auto``
+    # rewrites the board wholesale from its in-memory copy, so an external
+    # edit landing between this load and the save would otherwise be silently
+    # clobbered ("a killed router process finished later and rewrote the
+    # board").  Stat-before-read, not after the load (#9663): a write that
+    # preceded the stat is in both the signature and the content this run
+    # reads (no false reject); a write between the stat and the read only
+    # false-rejects -- the safe direction -- whereas a stat taken after the
+    # read misses a write that landed in the read-to-stat window and lets
+    # the save clobber it.
+    _output_sig_at_load = _stat_signature(Path(output_path)) if output_path else None
+
     try:
         pcb = PCB.load(pcb_path)
     except Exception as e:
         raise ParseError(f"Failed to parse PCB file: {e}") from e
-
-    # Issue #9599 row 4 (stale-write guard): snapshot the output file's
-    # identity NOW, immediately after the load, so the save below can refuse
-    # to overwrite content this run never read.  ``route_net_auto`` rewrites
-    # the board wholesale from its in-memory copy, so an external edit landing
-    # between this load and the save would otherwise be silently clobbered
-    # ("a killed router process finished later and rewrote the board").
-    # Captured after the load (not before) so a write that preceded the load
-    # -- content this run's copy already includes -- does not false-reject.
-    _output_sig_at_load = _stat_signature(Path(output_path)) if output_path else None
 
     # Find the net
     net_number = None
@@ -793,9 +877,15 @@ def route_net_auto(
     # Extract design rules from PCB
     pcb_text = path.read_text()
     pcb_rules = parse_pcb_design_rules(pcb_text)
-    design_rules = pcb_rules.to_design_rules()
+    # Issue #9620: the routing grid -- auto-selected (pad-aware, memory-
+    # capped, the ``kct route --grid auto`` selector) or an explicit --grid
+    # value honoured as given.  ``None`` only when selection could not run;
+    # ``to_design_rules`` then keeps its legacy clearance/2 fallback.
+    grid_resolution, grid_warnings = _resolve_route_auto_grid(path, pcb, pcb_rules, grid)
+    design_rules = pcb_rules.to_design_rules(grid_resolution=grid_resolution)
     # Issue #6283: honour the board's .kicad_pro / .kicad_dru clearances.
     clearance_warnings = _apply_declared_clearances(path, pcb_rules, design_rules)
+    clearance_warnings.extend(grid_warnings)
 
     # Apply explicit via-geometry overrides (Issue #4247).  Only the fields the
     # caller explicitly passes are overridden; the rest still derive from the
@@ -953,6 +1043,46 @@ def route_net_auto(
     result_dict["net_name"] = net_name
     if clearance_warnings:
         result_dict["warnings"] = list(clearance_warnings) + list(result_dict.get("warnings", []))
+
+    # Issue #9600 (audit row 3): never silent about necked copper on the
+    # route-auto path either.  The orchestrator's strategies can emit
+    # sub-class-width copper (e.g. the global corridor at the board default
+    # width for a HIGH_CURRENT-class net); measure the produced segments
+    # against the net's class width -- same census, same class-width rule
+    # as ``kct route`` -- and attach the structured entries so both the
+    # JSON document and the CLI text report (which renders them) carry it.
+    # Absent (not empty) when the copper is entirely at class width.
+    from kicad_tools.router.neck_report import (
+        class_width_lookup,
+        collect_necked_copper,
+        necked_net_to_dict,
+    )
+    from kicad_tools.router.primitives import Route
+
+    if result.segments:
+        produced = Route(net=net_number, net_name=net_name)
+        produced.segments.extend(result.segments)
+        produced.vias.extend(getattr(result, "vias", []) or [])
+        # #9600 row 3 review: an authored ``.kicad_pro`` netclass assignment
+        # (or pattern) is the designer's explicit width for this net and wins
+        # over the name-classification map above.
+        from kicad_tools.router.io import authored_net_widths
+
+        authored = authored_net_widths(pcb_path, [net_name])
+        necked = collect_necked_copper(
+            [produced],
+            class_width_lookup(net_class_map, design_rules.trace_width, authored),
+        )
+        if necked:
+            result_dict["necked_copper"] = [
+                necked_net_to_dict(
+                    info,
+                    long_threshold_mm=(
+                        design_rules.neck_down_distance + design_rules.grid_resolution
+                    ),
+                )
+                for _, info in sorted(necked.items())
+            ]
 
     # Issue #6001: why is the net (still) unrouted -- congested or blocked?
     if diagnose_unrouted_budget and diagnose_unrouted_budget > 0 and not result.success:

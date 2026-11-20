@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 import subprocess
 import tempfile
 import time
 import zipfile
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -197,6 +199,82 @@ _VSCORE_END_TOL_MM = 0.1
 _EDGE_CURVE_STEPS = 64
 
 _Pt = tuple[float, float]
+
+# Fixed zip entry timestamp for reproducible archives (the zip epoch itself,
+# so the value is stable whatever SOURCE_DATE_EPOCH is anchored to).
+_REPRO_ZIP_DATE_TIME = (1980, 1, 1, 0, 0, 0)
+
+# ``%TF.CreationDate,2026-11-19T21:01:32+00:00*`` file attribute kicad-cli
+# stamps into every Gerber it plots, plus the matching ``G04 Created by
+# KiCad ... date`` comment, the Excellon header ``; DRILL file ... date`` /
+# ``; #@! TF.CreationDate`` lines and the ``.gbrjob`` ``"CreationDate"``
+# field (ASCII throughout).
+_CREATION_DATE_RE = re.compile(r"%TF\.CreationDate,[^*]*\*")
+_G04_DATE_RE = re.compile(
+    r"(G04 Created by KiCad \(PCBNEW [^)]*\) date )\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}"
+)
+_DRL_DATE_RE = re.compile(r"(; DRILL file KiCad [^d]* date )\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+_DRL_TF_DATE_RE = re.compile(r"(; #@! TF\.CreationDate,)[^*\n]+")
+_JOB_CREATION_RE = re.compile(r'("CreationDate": ")[^"]+(")')
+
+
+def _source_date_epoch() -> datetime | None:
+    """``SOURCE_DATE_EPOCH`` as an aware UTC datetime, or ``None`` (Issue #9536).
+
+    Honours the reproducible-builds convention the manufacturing exporter
+    already anchors its own stamps to: when set, Gerber ``%TF.CreationDate``
+    attributes and the zip entry metadata are rewritten to a pure function of
+    the environment, so a repeated export with the same inputs writes
+    byte-identical archives instead of wall-clock-drifting ones.
+    """
+    epoch = os.environ.get("SOURCE_DATE_EPOCH", "").strip()
+    if not epoch.isdigit():
+        return None
+    try:
+        return datetime.fromtimestamp(int(epoch), tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _normalize_gerber_timestamps(output_dir: Path) -> list[str]:
+    """Rewrite ``%TF.CreationDate`` stamps to ``SOURCE_DATE_EPOCH`` when set.
+
+    Returns the file names rewritten.  Without ``SOURCE_DATE_EPOCH`` nothing
+    is touched, so an ordinary export keeps its real plot times.
+    """
+    epoch = _source_date_epoch()
+    if epoch is None:
+        return []
+    stamp = epoch.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    flat = epoch.strftime("%Y-%m-%d %H:%M:%S")
+    no_tz = epoch.strftime("%Y-%m-%dT%H:%M:%S")
+    rewritten: list[str] = []
+    for path in sorted(output_dir.iterdir()):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="ascii")
+        except (UnicodeDecodeError, OSError):
+            continue
+        if not any(
+            marker in text
+            for marker in (
+                "%TF.CreationDate",
+                "G04 Created by KiCad",
+                "; DRILL file KiCad",
+                "; #@! TF.CreationDate",
+                '"CreationDate"',
+            )
+        ):
+            continue
+        text = _CREATION_DATE_RE.sub(f"%TF.CreationDate,{stamp}*", text)
+        text = _G04_DATE_RE.sub(rf"\g<1>{flat}", text)
+        text = _DRL_DATE_RE.sub(rf"\g<1>{no_tz}", text)
+        text = _DRL_TF_DATE_RE.sub(rf"\g<1>{stamp}", text)
+        text = _JOB_CREATION_RE.sub(rf"\g<1>{stamp}\g<2>", text)
+        path.write_text(text, encoding="ascii")
+        rewritten.append(path.name)
+    return rewritten
 
 
 def _is_tagged_vscore(node: Any) -> bool:
@@ -858,6 +936,11 @@ class GerberExporter:
             self._export_drill(config, out_dir)
             current_step += 1
 
+        # Issue #9536: with SOURCE_DATE_EPOCH anchored, rewrite the Gerber
+        # CreationDate stamps before any hashing or zipping sees them, so a
+        # repeated export writes byte-identical members.
+        _normalize_gerber_timestamps(out_dir)
+
         # Create zip if requested
         if config.create_zip:
             if progress_callback is not None:
@@ -1302,10 +1385,19 @@ class GerberExporter:
         if zip_path.exists():
             zip_path.unlink()
 
+        repro = _source_date_epoch() is not None
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for file in source_dir.iterdir():
+            for file in sorted(source_dir.iterdir(), key=lambda p: p.name):
                 if file.is_file() and file != zip_path:
-                    zf.write(file, file.name)
+                    if repro:
+                        # Issue #9536: fixed entry metadata under
+                        # SOURCE_DATE_EPOCH, so repeated exports write
+                        # byte-identical archives.
+                        info = zipfile.ZipInfo(file.name, date_time=_REPRO_ZIP_DATE_TIME)
+                        info.compress_type = zipfile.ZIP_DEFLATED
+                        zf.writestr(info, file.read_bytes(), compresslevel=9)
+                    else:
+                        zf.write(file, file.name)
 
         logger.info(f"Created {zip_path}")
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import json
 import subprocess
@@ -299,11 +300,47 @@ EXPECTED_DEFAULT_STANZA = (
     "  covered     fiducial: fiducials"
 )
 
+
+def _clearance_element_types() -> frozenset[str]:
+    """The ``element_type`` values the clearance pass constructs copper with.
+
+    Read from the ``element_type=...`` keywords of the ``CopperElement``
+    factory classmethods in ``rules/clearance.py`` rather than a hand-typed
+    list, so a newly modelled kind
+    (as ``arc`` was in #9673) widens :data:`_CLEARANCE_PAIR_IDS` by itself and
+    the attribution guards below fail until the parity table names its pairs
+    (issue #9713).
+    """
+    from kicad_tools.validate.rules import clearance
+
+    tree = ast.parse(Path(clearance.__file__).read_text(encoding="utf-8"))
+    (cls_node,) = (
+        n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "CopperElement"
+    )
+    kinds = {
+        kw.value.value
+        for node in ast.walk(cls_node)
+        if isinstance(node, ast.Call)
+        for kw in node.keywords
+        if kw.arg == "element_type"
+        and isinstance(kw.value, ast.Constant)
+        and isinstance(kw.value.value, str)
+    }
+    return frozenset(kinds)
+
+
+def test_clearance_element_types_are_found():
+    """Guard the AST scan itself: an empty or shrunken result would make the
+    pair-family guards vacuous."""
+    assert _clearance_element_types() >= {"arc", "pad", "segment", "via"}
+
+
 #: The dynamic ``clearance_{a}_{b}`` family (rules/clearance.py builds the id
 #: from the sorted element-type pair of the two sides).  Counted per pair over
 #: the element types the clearance pass models.
 _CLEARANCE_PAIR_IDS = frozenset(
-    f"clearance_{a}_{b}" for a, b in combinations_with_replacement(("pad", "segment", "via"), 2)
+    f"clearance_{a}_{b}"
+    for a, b in combinations_with_replacement(sorted(_clearance_element_types()), 2)
 )
 
 
@@ -378,6 +415,41 @@ def test_count_rule_ids_split_the_shared_spacing_rules():
     assert "physical_copper_gap#trace" in trace
     assert "physical_copper_gap#pad" in pad
     assert "physical_copper_gap" in pad  # bandless emit sites stay attributed
+
+
+def test_every_clearance_pair_id_is_attributed_or_deliberately_unattributed():
+    """Issue #9713: a registered pair id may not fall through every row.
+
+    The four ``clearance_arc_*`` ids (#9673) were emitted but named by no
+    row's ``count_rule_ids`` and not by the module docstring's "Ids
+    deliberately unattributed" list, so a recorded-result comparison silently
+    under-counted them.  Each pair id must be attributed to a row or named
+    (````id````) in that docstring with its reason.
+    """
+    attributed = {rule for r in fdp.PARITY_TABLE for rule in r.count_rule_ids}
+    doc = fdp.__doc__ or ""
+    missing = sorted(
+        rid for rid in _CLEARANCE_PAIR_IDS if rid not in attributed and f"``{rid}``" not in doc
+    )
+    assert not missing, missing
+
+
+@pytest.mark.parametrize(
+    ("rule_id", "trace_errors", "pad_errors"),
+    [
+        ("clearance_arc_arc", 1, 0),
+        ("clearance_arc_segment", 1, 0),
+        ("clearance_arc_via", 1, 0),
+        ("clearance_arc_pad", 0, 1),
+    ],
+)
+def test_arc_clearance_finding_counts_to_exactly_one_spacing_row(rule_id, trace_errors, pad_errors):
+    """Issue #9713 AC: one arc clearance error counts once, on the right row."""
+    rep = fdp.evaluate_parity("jlcpcb", findings=[_finding(rule_id)], recorded_counts=RECORDED_8838)
+    by_cat = {c.category: c for c in rep.comparisons}
+    assert by_cat["trace_spacing"].kct_errors == trace_errors
+    assert by_cat["pad_spacing"].kct_errors == pad_errors
+    assert sum(c.kct_errors or 0 for c in rep.comparisons) == 1
 
 
 def _policy_2layer_1oz():

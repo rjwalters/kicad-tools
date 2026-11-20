@@ -61,13 +61,17 @@ except ImportError:
     rtree_index = None  # type: ignore[assignment]
 
 
-# Floating-point tolerance for pad-pad clearance comparisons (0.1 micron).
-# Without this epsilon, IEEE-754 rounding in radius and trig math can leave
-# pad-edge distances at e.g. 0.14999999... when the design intent was 0.15
-# exactly, producing spurious sub-micron DRC violations like "0.149mm vs
-# 0.150mm".  0.1 micron is well below any manufacturing precision and
-# matches the edge-clearance epsilon introduced in #2428
-# (validate/rules/edge.py).
+# Floating-point tolerance for pad-pad clearance comparisons.
+# Deliberately 1e-4, NOT the #9619 checker band (``validate/rules/base.py``'s
+# ``KICAD_CLEARANCE_BAND_MM``, 5e-4, clearance verdicts only): this engine
+# feeds ``optim/session.py``'s placement feedback loop, which *writes*
+# copper -- a placement accepted because of the 500 nm parity band could
+# round over into a real kicad-cli violation on save, so the writer side
+# keeps the pre-#9619 margin
+# (:data:`kicad_tools.validate.rules.base.WRITER_CLEARANCE_MARGIN_MM`;
+# #9619 ruling: split, don't change).  Before #3913-era cleanups this was
+# introduced for IEEE-754 rounding in radius and trig math (e.g.
+# 0.14999999... vs 0.15 exactly), which 1e-4 still absorbs.
 _CLEARANCE_EPSILON_MM = 1e-4
 
 

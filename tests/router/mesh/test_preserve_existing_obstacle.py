@@ -25,16 +25,22 @@ from __future__ import annotations
 
 import pytest
 
+# The mesh engine calls ``router_cpp.constrained_delaunay`` with no Python
+# fallback (``pathfinder.build()``); without the native extension these tests
+# cannot exercise the fix at all.
+from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.lattice.geometry import seg_seg_dist
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.mesh.pathfinder import MeshPathfinder
 from kicad_tools.router.primitives import Pad, Route, Segment
 from kicad_tools.router.rules import DesignRules
 
-# The mesh engine calls ``router_cpp.constrained_delaunay`` with no Python
-# fallback (``pathfinder.build()``); without the native extension these tests
-# cannot exercise the fix at all.
-router_cpp = pytest.importorskip("kicad_tools.router.router_cpp")
+if is_cpp_available():
+    from kicad_tools.router import router_cpp
+else:
+    router_cpp = None
+pytestmark = pytest.mark.requires_router_cpp
+
 
 _OUTLINE = [(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)]
 

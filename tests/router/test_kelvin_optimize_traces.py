@@ -28,7 +28,9 @@ SENSE = [(2, 10), (2, 12.6), (7.55, 12.6), (7.55, 10.3)]
 SENSE_SWEEP = [(2, 10), (2, 12.6), (7.5, 12.6), (7.5, 10.7)]
 
 
-def _footprint(ref: str, lib: str, x: float, y: float, size: float, net: str) -> str:
+def _footprint(
+    ref: str, lib: str, x: float, y: float, size: float, net: str, net_id: int = 1
+) -> str:
     return (
         f'\t(footprint "{lib}"\n'
         '\t\t(layer "F.Cu")\n'
@@ -36,7 +38,7 @@ def _footprint(ref: str, lib: str, x: float, y: float, size: float, net: str) ->
         f"\t\t(at {x} {y})\n"
         f'\t\t(property "Reference" "{ref}" (at 0 -1.5) (layer "F.SilkS") (uuid "ref-{ref}"))\n'
         f'\t\t(pad "1" smd rect (at 0 0) (size {size} {size}) '
-        f'(layers "F.Cu" "F.Paste" "F.Mask") (net 1 "{net}"))\n'
+        f'(layers "F.Cu" "F.Paste" "F.Mask") (net {net_id} "{net}"))\n'
         "\t)\n"
     )
 
@@ -170,3 +172,133 @@ def test_kelvin_accept_still_refused_by_pad_guard(tmp_path, capsys):
     kept = {(s.start, s.end) for s in parse_segments(out.read_text())["ISENSE_TEST"]}
     assert set(zip(FORCE, FORCE[1:], strict=False)) <= kept  # corner not chamfered
     assert _exposure_count(out) <= before
+
+
+def _tht_footprint(ref: str, lib: str, x: float, y: float, size: float, net: str) -> str:
+    return (
+        f'\t(footprint "{lib}"\n'
+        '\t\t(layer "F.Cu")\n'
+        f'\t\t(uuid "fp-{ref}")\n'
+        f"\t\t(at {x} {y})\n"
+        f'\t\t(property "Reference" "{ref}" (at 0 -1.5) (layer "F.SilkS") (uuid "ref-{ref}"))\n'
+        f'\t\t(pad "1" thru_hole circle (at 0 0) (size {size} {size}) (drill 0.4)\n'
+        f'\t\t\t(layers "*.Cu" "*.Mask") (net 1 "{net}"))\n'
+        "\t)\n"
+    )
+
+
+def mixed_layer_star_pcb() -> str:
+    """The star with the sense branch dropped to B.Cu through a via (#9660).
+
+    The sense branch reaches the shunt on F.Cu, passes through a via, and
+    runs two B.Cu legs to a through-hole sense terminal -- the mixed-layer
+    branch ``KelvinBoardGate.optimize_net`` hands the pad guard.  A
+    foreign-net B.Cu pad sits above the first B.Cu leg's line, clear of the
+    routed copper.
+    """
+    sense_f = [(2, 10), (2, 12.6)]
+    sense_b = [(2, 12.6), (6.5, 12.6), (6.5, 11.0)]
+    return (
+        "(kicad_pcb\n"
+        "\t(version 20240108)\n"
+        '\t(generator "test")\n'
+        "\t(general\n\t\t(thickness 1.6)\n\t)\n"
+        '\t(paper "A4")\n'
+        '\t(layers\n\t\t(0 "F.Cu" signal)\n\t\t(31 "B.Cu" signal)\n'
+        '\t\t(44 "Edge.Cuts" user)\n\t)\n'
+        "\t(setup\n\t\t(pad_to_mask_clearance 0)\n\t)\n"
+        '\t(net 0 "")\n'
+        '\t(net 1 "ISENSE_TEST")\n'
+        '\t(net 2 "N2")\n'
+        "\t(gr_rect (start 0 0) (end 20 20) (stroke (width 0.1) (type default)) "
+        '(fill none) (layer "Edge.Cuts") (uuid "edge"))\n'
+        + _footprint("R1", "Resistor_SMD:R_2512_6332Metric", 2, 10, 0.8, "ISENSE_TEST")
+        + _footprint("Q1", "Package_TO_SOT_SMD:SOT-23", 8, 14, 0.8, "ISENSE_TEST")
+        + _tht_footprint("U1", "Package_TO_SOT_THT:TO-92", 6.5, 11.0, 0.8, "ISENSE_TEST")
+        + _footprint("F2", "Resistor_SMD:R_0603_1608Metric", 4.5, 13.4, 0.6, "N2", net_id=2)
+        + _segments(FORCE, 1, "force")
+        + "".join(
+            f"\t(segment (start {a[0]} {a[1]}) (end {b[0]} {b[1]}) (width 0.2) "
+            f'(layer "F.Cu") (net 1) (uuid "sense-f-{i}"))\n'
+            for i, (a, b) in enumerate(zip(sense_f, sense_f[1:], strict=False))
+        )
+        + "".join(
+            f"\t(segment (start {a[0]} {a[1]}) (end {b[0]} {b[1]}) (width 0.2) "
+            f'(layer "B.Cu") (net 1) (uuid "sense-b-{i}"))\n'
+            for i, (a, b) in enumerate(zip(sense_b, sense_b[1:], strict=False))
+        )
+        + '\t(via (at 2 12.6) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") '
+        '(net 1) (uuid "via-s"))\n'
+        "\t)\n"
+    )
+
+
+def test_kelvin_pad_guard_follows_each_segments_layer():
+    """A via-unioned branch spans layers; the pad guard over ``optimize_net``
+    must guard the B.Cu legs against a B.Cu opening even though the branch's
+    first segment is on F.Cu (#9660).
+
+    The proposal re-bends the first B.Cu leg through a foreign-net B.Cu pad's
+    opening; the Kelvin gate itself has no contact to veto (the re-bend
+    touches nothing new), so only the layer-aware pad guard can refuse it.
+    """
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.optimizer.geometry import PadMaskZone, rewrite_keeps_pad_escapes
+    from kicad_tools.router.optimizer.kelvin_gate import KelvinBoardGate
+    from kicad_tools.router.primitives import Segment
+
+    text = mixed_layer_star_pcb()
+    gate = KelvinBoardGate.from_pcb_text(text)
+    assert gate is not None
+    kelvin_names = {name for name, net in gate.net_ids.items() if net in gate.gate.kelvin}
+    assert "ISENSE_TEST" in kelvin_names
+
+    zones = [
+        PadMaskZone(
+            x=4.5,
+            y=13.4,
+            half_w=0.3,
+            half_h=0.3,
+            margin=0.0,
+            layers=frozenset({"B.Cu"}),
+            net_name="N2",
+        )
+    ]
+
+    def re_bent(segments):
+        if not any(s.layer is Layer.B_CU for s in segments):
+            return list(segments)
+        front = [s for s in segments if s.layer is not Layer.B_CU]
+        return [
+            *front,
+            Segment(
+                x1=2.0,
+                y1=12.6,
+                x2=4.5,
+                y2=13.4,
+                width=0.2,
+                layer=Layer.B_CU,
+                net=1,
+                net_name="ISENSE_TEST",
+            ),
+            Segment(
+                x1=4.5,
+                y1=13.4,
+                x2=6.5,
+                y2=11.0,
+                width=0.2,
+                layer=Layer.B_CU,
+                net=1,
+                net_name="ISENSE_TEST",
+            ),
+        ]
+
+    def guard(old, new):
+        return rewrite_keeps_pad_escapes(old, new, zones, 1e-4)
+
+    out = gate.optimize_net(
+        "ISENSE_TEST", parse_segments(text)["ISENSE_TEST"], re_bent, pad_guard=guard
+    )
+    kept = {(s.start, s.end) for s in out}
+    assert ((2.0, 12.6), (6.5, 12.6)) in kept  # original B.Cu leg kept
+    assert ((2.0, 12.6), (4.5, 13.4)) not in kept  # re-bend through the opening refused

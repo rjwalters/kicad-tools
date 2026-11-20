@@ -287,6 +287,9 @@ def _route_auto_one(
                 # Issue #4247: explicit via-geometry overrides (None => board-derived).
                 via_drill=via_drill,
                 via_diameter=via_diameter,
+                # Issue #9620: routing grid -- "auto" (the pad-aware,
+                # memory-capped kct route selector) or an explicit mm pitch.
+                grid=getattr(args, "grid", "auto"),
                 # Issue #6001: classify what a partial / failed net left
                 # unrouted -- JSON only, like ``kct route`` (#5944).
                 diagnose_unrouted_budget=(
@@ -330,6 +333,9 @@ def _route_auto_one(
         # Issue #6001: same entries / summary ``kct route`` emits (#5944).
         doc["unrouted"] = result["unrouted"]
         doc["unrouted_diagnosis"] = result.get("unrouted_diagnosis")
+    if "necked_copper" in result:
+        # Issue #9600 (row 3): route-auto reports necked copper too.
+        doc["necked_copper"] = result["necked_copper"]
 
     if as_json:
         # The caller prints the single document; per-net prose is suppressed.
@@ -360,6 +366,7 @@ def _route_auto_one(
             print(f"  Vias written: {vias_written}")
         for warning in result.get("warnings", []):
             print(f"  Warning: {warning}")
+        _print_necked_copper(result)
         if result.get("output_path"):
             print(f"  Saved to: {result['output_path']}")
         return 0, doc
@@ -396,6 +403,7 @@ def _route_auto_one(
             )
         for warning in result.get("warnings", []):
             print(f"  Warning: {warning}", file=sys.stderr)
+        _print_necked_copper(result, stream=sys.stderr)
         return 1, doc
     else:
         print(f"Routing failed for net '{result['net_name']}'", file=sys.stderr)
@@ -406,6 +414,24 @@ def _route_auto_one(
             reason = alt.get("reason", "")
             print(f"  Try: {strategy_name} - {reason}", file=sys.stderr)
         return 1, doc
+
+
+def _print_necked_copper(result: dict, stream=None) -> None:
+    """Issue #9600 (row 3): report necked copper on the route-auto path.
+
+    ``route_net_auto`` attaches the census entries (with the
+    ``beyond_taper`` verdict decided against the board's rules); render
+    them with the same line format ``kct route``'s Results section uses so
+    the two surfaces stay byte-identical.  A clean net prints nothing.
+    """
+    entries = result.get("necked_copper") or []
+    if not entries:
+        return
+    from kicad_tools.router.neck_report import format_neck_entries
+
+    report = format_neck_entries(entries)
+    if report:
+        print(report, file=stream)
 
 
 def _route_auto_dry_run(args, net_name: str, *, as_json: bool = False) -> dict:

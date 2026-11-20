@@ -1,5 +1,5 @@
 {
-  "source": "https://github.com/rjwalters/kicad-tools/issues/8938",
+  "source": "https://github.com/2AMLogic/kicad-tools/issues/8938",
   "retrieved": "2026-11-14",
   "board": "4-layer 1 oz board, same gerbers to kct and JLCDFM via jlcdfm.com (2026-11-14)",
   "stackup": "4layer_1oz",

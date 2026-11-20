@@ -68,8 +68,8 @@ from shapely.geometry import LineString, Point, box  # type: ignore[import-untyp
 
 from kicad_tools.cli.stitch_cmd import point_in_polygon
 from kicad_tools.core.geometry import point_to_segment_distance
+from kicad_tools.validate.rules.base import WRITER_CLEARANCE_MARGIN_MM
 from kicad_tools.validate.rules.via_pad_geometry import (
-    DRC_TOLERANCE,
     drill_to_mask_aperture_gap,
     is_smd_pad,
     pad_absolute_bbox,
@@ -1643,7 +1643,7 @@ def relocate_pad_edge_vias(
 
     result = RelocationResult()
     dam = float(getattr(design_rules, "min_solder_mask_dam_mm", 0.0) or 0.0)
-    if dam <= DRC_TOLERANCE:
+    if dam <= WRITER_CLEARANCE_MARGIN_MM:
         return result
     setup = getattr(pcb, "setup", None)
     pad_to_mask = float(getattr(setup, "pad_to_mask_clearance", 0.0) or 0.0)
@@ -1682,7 +1682,7 @@ def relocate_pad_edge_vias(
                     )
                 )
                 is not None
-                and gap < dam - DRC_TOLERANCE
+                and gap < dam - WRITER_CLEARANCE_MARGIN_MM
             ),
             None,
         )

@@ -35,8 +35,10 @@ the kernel answer the geometry question it was asked and nothing else.
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
+from kicad_tools.core.geometry import point_in_polygon as _core_point_in_polygon
 from kicad_tools.core.geometry import rotate_pad_offset as _rotate_pad_offset
 from kicad_tools.router.clearance_kernel import (
     ALL_LAYERS,
@@ -54,10 +56,13 @@ from kicad_tools.router.clearance_kernel import (
     hole_gap,
     make_pad,
     pad_outline,
+    ring_edge_crosses_ray,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from kicad_tools.schema.pcb import Footprint, Pad, Segment, Via
+    from collections.abc import Iterable
+
+    from kicad_tools.schema.pcb import FilledOutlineRegion, Footprint, Pad, Segment, Via
 
 __all__ = [
     "ALL_LAYERS",
@@ -72,12 +77,15 @@ __all__ = [
     "KZonePoly",
     "clear",
     "copper_gap",
+    "filled_region_contains",
     "hole_gap",
+    "inside_filled_outline_region",
     "min_gap_to_outline",
     "outline_shapes",
     "pad_center",
     "pad_outline",
     "pad_shape",
+    "ring_edge_crosses_ray",
     "segment_shape",
     "via_shape",
     "zone_shape",
@@ -194,3 +202,32 @@ def min_gap_to_outline(shape: KShape, outline: tuple[KEdge, ...]) -> float:
         if gap < best:
             best = gap
     return best
+
+
+def filled_region_contains(region: FilledOutlineRegion, x: float, y: float) -> bool:
+    """Point-in-filled-region test for an Edge.Cuts cut-out (Issue #9690).
+
+    A circle region is a centre/radius test; a poly/rect region is the
+    shared ray-cast point-in-polygon with the boundary counted as inside --
+    copper exactly on the cut-out boundary is at gap 0, matching the
+    ``actual 0.0 mm`` kicad-cli reports there.
+    """
+    if region.shape_type == "circle":
+        if region.center is None or region.radius is None:
+            return False
+        return math.hypot(x - region.center[0], y - region.center[1]) <= region.radius
+    return _core_point_in_polygon(x, y, region.ring, boundary_inside=True)
+
+
+def inside_filled_outline_region(
+    regions: Iterable[FilledOutlineRegion], x: float, y: float
+) -> FilledOutlineRegion | None:
+    """The first filled Edge.Cuts region containing ``(x, y)``, else ``None``.
+
+    Lets an edge-clearance caller attribute a gap-0 finding to the specific
+    cut-out shape that caused it.
+    """
+    for region in regions:
+        if filled_region_contains(region, x, y):
+            return region
+    return None

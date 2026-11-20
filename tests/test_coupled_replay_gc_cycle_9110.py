@@ -24,7 +24,6 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.router.coupled_capture import _ObjRef, _Struct, replay
-from kicad_tools.router.cpp_backend import is_cpp_available
 
 EXPECTED_DIAGNOSTICS = {
     "success": True,
@@ -150,10 +149,7 @@ def test_replay_raising_leaves_no_cyclic_garbage() -> None:
     assert gc.collect() == 0
 
 
-@pytest.mark.skipif(
-    not is_cpp_available(),
-    reason="C++ router backend not built -- run `uv run kct build-native`",
-)
+@pytest.mark.requires_router_cpp
 def test_replay_board07_fixture_leaves_no_cyclic_garbage() -> None:
     """The #9110 acceptance criterion against a real Board07 capture."""
     from kicad_tools.router.coupled_capture import load_fixture

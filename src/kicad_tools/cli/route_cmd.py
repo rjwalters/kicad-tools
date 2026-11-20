@@ -65,12 +65,19 @@ import re
 import shutil
 import signal
 import sys
+import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from kicad_tools.core.kicad_lock import check_kicad_lock
+from kicad_tools.router.neck_report import (
+    class_width_lookup,
+    collect_necked_copper,
+    format_neck_report,
+)
 from kicad_tools.sexp.scan import has_unquoted
 
 from .route_deadline import record_stage, restore_stage
@@ -736,6 +743,32 @@ def _restore_route_grid(router: "Autorouter", routes: list["Route"]) -> None:
         router.grid.mark_route_usage(route)
 
 
+def _fmt_secs(value: float) -> str:
+    """Format a computed seconds duration for display (:data:`g` rounding).
+
+    Issue #9581 (PR #9603 review): the budget derivation line formatted
+    every term with ``:.0f``, so a fractional ``--timeout`` was rounded
+    away before the user's eyes -- ``--timeout 120.5`` printed
+    ``--timeout 120s`` and ``0.4`` printed ``--timeout 0s``.  Computed
+    durations (setup, reserves, budget) keep this display rounding; the
+    USER-SUPPLIED value uses :func:`_fmt_secs_exact`.
+    """
+    return f"{float(value):g}"
+
+
+def _fmt_secs_exact(value: float) -> str:
+    """Format a user-supplied seconds value round-trippably.
+
+    Issue #9581 (PR #9603 review, round 2): ``:g`` keeps only six
+    significant digits, so a typed ``--timeout 120.0001`` printed
+    ``--timeout 120s``.  The shortest round-trippable repr keeps every
+    digit the user supplied (``120.0001``), with an integral value still
+    printing bare (``100``).
+    """
+    text = repr(float(value))
+    return text[:-2] if text.endswith(".0") else text
+
+
 def _set_wall_clock_deadline(args) -> None:
     """Stamp a monotonic deadline on ``args`` from ``args.timeout``.
 
@@ -757,6 +790,7 @@ def _set_wall_clock_deadline(args) -> None:
     of ``--timeout``.
     """
     timeout = getattr(args, "timeout", None)
+    typed_timeout = float(timeout) if timeout and timeout > 0 else None
     now = time.monotonic()
     from .route_deadline import remaining_deadline
 
@@ -783,6 +817,31 @@ def _set_wall_clock_deadline(args) -> None:
             float(timeout),
             reserve,
         )
+        # Issue #9581: state the derivation on stdout, at the start of a
+        # ``--complete`` run with ``--timeout`` -- the reserves are real time
+        # off the budget the user typed, and until now they were only visible
+        # in the logger.info line above, which never reaches a redirected
+        # log.  Exactly the values stamped on ``args`` below this branch.
+        if (
+            typed_timeout is not None
+            and getattr(args, "complete", False)
+            and not getattr(args, "quiet", False)
+        ):
+            # Issue #9581 (PR #9603 review): under a supervisor-set invocation
+            # deadline the clamp above shrinks the budget by the time the
+            # invocation already consumed.  Lead with the value the user
+            # typed and give the consumed time its own term, so the printed
+            # arithmetic sums to the flag instead of silently relabelling
+            # the clamped remainder as ``--timeout``.
+            setup_consumed = max(0.0, typed_timeout - float(timeout))
+            print(
+                f"--timeout {_fmt_secs_exact(typed_timeout)}s "
+                f"- setup {_fmt_secs(setup_consumed)}s "
+                f"- auto-fix reserve {_fmt_secs(float(reserve))}s "
+                f"- post-route reserve {_fmt_secs(float(post_route))}s "
+                f"= routing budget "
+                f"{_fmt_secs(float(timeout) - float(reserve) - float(post_route))}s"
+            )
     else:
         args._wall_clock_deadline = None
         args._auto_fix_reserve = 0.0
@@ -1852,7 +1911,7 @@ def _write_routed_pcb(
                 "reference dialect the parser could not resolve). The output "
                 f"file {output_path} was left UNCHANGED to prevent data "
                 "loss. Please report this at "
-                "https://github.com/rjwalters/kicad-tools/issues (ref #4413)."
+                "https://github.com/2AMLogic/kicad-tools/issues (ref #4413)."
             )
 
     # Atomic write: tmp file -> fsync -> rename.  Sibling-in-same-dir
@@ -4334,6 +4393,22 @@ def _finalize_routes(
             f"-- have segments, not all pads connected"
         )
         flush_print(f"  Unrouted:        {unrouted_count}/{nets_to_route} -- no segments at all")
+        neck_report = format_neck_report(
+            collect_necked_copper(
+                router.routes,
+                class_width_lookup(
+                    getattr(router, "net_class_map", None),
+                    router.rules.trace_width,
+                    getattr(router, "authored_net_widths", None),
+                ),
+            ),
+            # A contiguous neck longer than the taper distance (plus one
+            # grid cell of placement slack, the same bound the row-3
+            # geometry test uses) is beyond the #1018 taper: call it long.
+            long_threshold_mm=(router.rules.neck_down_distance + router.grid.resolution),
+        )
+        if neck_report:
+            flush_print(neck_report)
 
     return route_sexp, stats, cleanup_stats
 
@@ -9484,11 +9559,18 @@ def _preload_voltage_map(args) -> int:
     Shared by ``kct route`` and ``kct optimize-traces`` so both accept the same
     inputs and fail with the same messages.  Stashes the result on
     ``args._pairwise_voltages`` / ``args._pairwise_required`` (both ``None``
-    when ``--voltage-map`` was not supplied).  Returns 0, or 1 after printing
-    the error to stderr.
+    when ``--voltage-map`` was not supplied) plus the per-net ``[lo, hi]``
+    intervals on ``args._pairwise_intervals`` (#9602) and the parsed
+    ``_pair_bounds`` caps on ``args._pairwise_pair_bounds`` (#8043, consumed by
+    the sub-threshold advisory, and #9644, for ``route-link``'s omitted-net
+    fallback).  Returns 0, or 1 after printing the error to stderr.
     """
     args._pairwise_voltages = None
     args._pairwise_required = None
+    args._pairwise_intervals = None
+    args._pairwise_pair_bounds = None
+    args._pairwise_edge_voltage = None
+    args._pairwise_edge_required = None
     if getattr(args, "voltage_map", None) is not None:
         from kicad_tools.creepage.standards import StandardLookupError
         from kicad_tools.placement.hv_domains import build_required_by_domain_pair
@@ -9496,6 +9578,7 @@ def _preload_voltage_map(args) -> int:
             _norm_net_key,
             load_pair_bounds,
             load_signed_voltage_map,
+            load_voltage_intervals,
         )
 
         vm_path = Path(args.voltage_map).resolve()
@@ -9515,10 +9598,18 @@ def _preload_voltage_map(args) -> int:
             _raw_voltages = load_signed_voltage_map(vm_path)
             # Issue #8043: device-bounded pair caps from the same sidecar.
             _pair_bounds = load_pair_bounds(vm_path)
+            # Issue #9602: keep the full [lo, hi] intervals too, so the table
+            # below differences range-bearing nets end-to-end exactly like the
+            # census (the scalar collapse alone can score a sign-flipping
+            # pair's opposite bank at 0 V and drop it from the matrix).
+            _raw_intervals = load_voltage_intervals(vm_path)
         except (ValueError, OSError) as e:
             print(f"Error: invalid voltage-map: {e}", file=sys.stderr)
             return 1
         _voltages = {_norm_net_key(n): float(v) for n, v in _raw_voltages.items()}
+        _intervals = {
+            _norm_net_key(n): (float(lo), float(hi)) for n, (lo, hi) in _raw_intervals.items()
+        }
         from kicad_tools.creepage.engine import pair_bounds_unmapped_nets
 
         for _n in pair_bounds_unmapped_nets(_pair_bounds, _voltages):
@@ -9534,12 +9625,47 @@ def _preload_voltage_map(args) -> int:
                 material_group=getattr(args, "material_group", "IIIa"),
                 hv_threshold=getattr(args, "hv_threshold", 30.0),
                 pair_bounds=_pair_bounds or None,
+                domain_intervals=_intervals,
             )
         except StandardLookupError as e:
             print(f"Error: voltage-map creepage lookup failed: {e}", file=sys.stderr)
             return 1
+        # Issue #9685: the board-edge column of the same table.  `kct creepage`
+        # scores one copper-vs-Edge.Cuts pair per HV net against the map's
+        # `_edge_voltage` reference; without this the router's audit had no
+        # edge requirement to check committed copper against, and `--complete`
+        # shipped tracks closer to the board edge than the map requires with a
+        # SUCCESS exit.  Raw lookups (not floored at dru -- the DRU floor is
+        # only known once the board's rules load); consumers skip a net at or
+        # below the floor.
+        from kicad_tools.router.pairwise_clearance import (
+            edge_required_clearances,
+            load_edge_voltage,
+        )
+
+        try:
+            _edge_voltage = load_edge_voltage(vm_path)
+            _edge_required = edge_required_clearances(
+                _voltages,
+                edge_voltage=_edge_voltage,
+                standard_id=getattr(args, "creepage_standard", "iec60664"),
+                pollution_degree=getattr(args, "pollution_degree", 2),
+                material_group=getattr(args, "material_group", "IIIa"),
+                hv_threshold=getattr(args, "hv_threshold", 30.0),
+                net_intervals=_intervals,
+            )
+        except StandardLookupError as e:
+            print(f"Error: voltage-map creepage lookup failed: {e}", file=sys.stderr)
+            return 1
+        except (ValueError, TypeError, OSError) as e:
+            print(f"Error: invalid voltage-map: {e}", file=sys.stderr)
+            return 1
         args._pairwise_voltages = _voltages
         args._pairwise_required = _required
+        args._pairwise_intervals = _intervals
+        args._pairwise_pair_bounds = _pair_bounds or None
+        args._pairwise_edge_voltage = _edge_voltage
+        args._pairwise_edge_required = _edge_required
     return 0
 
 
@@ -9644,6 +9770,8 @@ def _warn_subthreshold_coverage_gap(args, voltages, dru: float) -> None:
         pollution_degree=getattr(args, "pollution_degree", 2),
         material_group=getattr(args, "material_group", "IIIa"),
         hv_threshold=hv_threshold,
+        pair_bounds=getattr(args, "_pairwise_pair_bounds", None),
+        net_intervals=getattr(args, "_pairwise_intervals", None),
     )
     if gap.pair_count == 0:
         return
@@ -9821,6 +9949,90 @@ def _pairwise_pad_geometry(router: "Autorouter") -> "tuple[PadGeometry, ...] | N
     with contextlib.suppress(AttributeError):  # exotic router stand-ins
         router._pairwise_pad_geometry_cache = reason if pads is None else pads
     return pads
+
+
+def _pairwise_board_edge_geometry(router: "Autorouter"):
+    """Resolve (and memoise) the board's Edge.Cuts linework for the audit (#9685).
+
+    Built by the census's own
+    :func:`~kicad_tools.creepage.engine.board_edge_geometry` from the SAME
+    recorded source-board path (:func:`_pairwise_pad_geometry`'s
+    ``_pairwise_attach_zone_pcb_path``), then shifted by ``pcb.board_origin``
+    exactly like :func:`~kicad_tools.router.pairwise_clearance.pcb_pad_geometry`
+    shifts pads -- Edge.Cuts graphics parse board-relative, and every Segment
+    this audit compares against is sheet-absolute.
+
+    Returns the shapely geometry, or ``None`` when there is nothing to check:
+    ``None`` is "verified-empty" here (a board with no Edge.Cuts linework gets
+    no edge pairs in ``kct creepage`` either -- the census skips its edge loop
+    on the same condition), never a silent degradation of a live check.  A
+    board path that cannot be read warns once on stderr; the pad audit's
+    unavailable-sentinel already covers the no-path case (pads and edge read
+    the same file), so an edge read failure after pads succeeded is not a
+    realistic degradation path.
+    """
+    cached = getattr(router, "_pairwise_board_edge_geometry_cache", None)
+    if cached is not None:
+        return cached
+    geom = None
+    pcb_path = getattr(router, "_pairwise_attach_zone_pcb_path", None)
+    if pcb_path is not None:
+        try:
+            from kicad_tools.creepage.engine import board_edge_geometry
+            from kicad_tools.schema.pcb import PCB
+
+            pcb = PCB.load(str(pcb_path))
+            geom = board_edge_geometry(pcb)
+            if geom is not None and not geom.is_empty:
+                from shapely.affinity import translate  # type: ignore[import-untyped]
+
+                geom = translate(geom, pcb.board_origin[0], pcb.board_origin[1])
+            else:
+                geom = None
+        except Exception as exc:
+            print(
+                f"Warning: could not read Edge.Cuts geometry from {pcb_path} "
+                f"({type(exc).__name__}: {exc}); the HV pairwise audit cannot "
+                f"check copper-to-board-edge clearance.",
+                file=sys.stderr,
+            )
+            geom = None
+    with contextlib.suppress(AttributeError):  # exotic router stand-ins
+        router._pairwise_board_edge_geometry_cache = geom
+    return geom
+
+
+def _pairwise_board_edge_violations(
+    router: "Autorouter", args, routes, *, id_to_name=None
+) -> "list[PairwiseViolation]":
+    """Copper-vs-board-edge shortfalls of the audited trace copper (#9685).
+
+    The edge column of the #4588 audit: every route in ``routes`` (the same
+    fresh + preserved + oracle copper list :func:`_audit_pairwise_clearance`
+    already scans) whose net carries an edge requirement above the DRU floor
+    is measured against the ``Edge.Cuts`` outline, at the requirement the
+    census computes for that net (worst-case interval endpoint differencing
+    against ``_edge_voltage``, same standard lookup -- see
+    :func:`_preload_voltage_map`).  Strict no-op without ``--voltage-map``.
+    """
+    edge_required = getattr(args, "_pairwise_edge_required", None)
+    if not edge_required:
+        return []
+    rules = getattr(router, "rules", None)
+    table = getattr(rules, "pairwise_clearance", None) if rules is not None else None
+    floor = float(table.dru) if table is not None else 0.0
+    geom = _pairwise_board_edge_geometry(router)
+    if geom is None:
+        return []
+    from kicad_tools.router.pairwise_clearance import board_edge_pairwise_violations
+
+    return board_edge_pairwise_violations(
+        routes,
+        edge_required,
+        edge_geometry=geom,
+        id_to_name=id_to_name,
+        floor=floor,
+    )
 
 
 def _audited_trace_copper(router: "Autorouter", *, id_to_name=None) -> "list[Route]":
@@ -10033,6 +10245,12 @@ def _audit_pairwise_clearance(
     the router never moves them -- so reading them from the input board is
     exact, in the same sheet-absolute frame the attach zones use).
 
+    Issue #9685 added the board-edge column: trace/via copper vs the
+    ``Edge.Cuts`` outline at the per-net requirement the census scores against
+    the map's ``_edge_voltage`` reference (:func:`_pairwise_board_edge_violations`
+    -- the class of the ``gate track vs board edge`` row in the #9685 report,
+    which this audit structurally could not see at all).
+
     That last widening is what closes the gap the #4507 T4 proof measured: 13
     of the 17 residual softstart rev-C census fails were routed trace or via
     copper against a foreign pad, a class this audit structurally could not see
@@ -10060,8 +10278,15 @@ def _audit_pairwise_clearance(
     table = getattr(rules, "pairwise_clearance", None) if rules is not None else None
     if table is None:
         return []
-    # No pair exceeds the scalar floor: no HV pad widening is enabled.
-    if table.max_required_clearance() <= table.dru:
+    # No pair exceeds the scalar floor: no HV pad widening is enabled.  The
+    # edge column (#9685) keeps the audit alive on its own: a single-HV-net
+    # map has no net-net pairs at all, yet its net still owes creepage to the
+    # board edge.
+    from kicad_tools.router.pairwise_clearance import _PASS_TOLERANCE
+
+    _edge_required = getattr(args, "_pairwise_edge_required", None) or {}
+    _edge_active = any(mm > table.dru + _PASS_TOLERANCE for mm in _edge_required.values())
+    if table.max_required_clearance() <= table.dru and not _edge_active:
         return []
     routes = _audited_trace_copper(router, id_to_name=id_to_name)
     if not routes:
@@ -10082,6 +10307,13 @@ def _audit_pairwise_clearance(
         dru=table.dru,
         attach_zones=_pairwise_attach_zones(router),
         foreign_pads=foreign_pads,
+    )
+    # Issue #9685: the board-edge column -- copper vs Edge.Cuts at the same
+    # per-net requirement `kct creepage` scores against `_edge_voltage`.  Both
+    # the rollback and the final exit-code gate run through this function, so
+    # they gain the check together.
+    violations = violations + _pairwise_board_edge_violations(
+        router, args, routes, id_to_name=id_to_name
     )
     # A single conflicting corridor is decomposed into many collinear segment
     # pairs that all report the SAME net pair, gap and location.  Collapse the
@@ -10147,6 +10379,7 @@ def _rollback_complete_creepage(
     """
     refusals: list[dict] = []
     router._complete_creepage_refusals = refusals
+    router._complete_creepage_gate = None
     if not getattr(args, "complete", False) or getattr(args, "_pairwise_required", None) is None:
         return refusals
     fresh = [r for r in (getattr(router, "routes", None) or []) if r.segments or r.vias]
@@ -10166,7 +10399,9 @@ def _rollback_complete_creepage(
     for _ in range(len(saved) + 1):
         violations = _audit_pairwise_clearance(router, args, id_to_name=id_to_name)
         if any(v.net_b == PAD_AUDIT_INCOMPLETE for v in violations):
-            break  # audit could not run; cannot judge, leave copper alone
+            # The audit could not run to completion; claiming a verified-link
+            # count here would be the reassuring-line failure mode again.
+            return refusals
         new = [v for v in violations if _key(v) not in baseline]
         fresh_names = {r.net_name for r in router.routes}
         target = None
@@ -10200,6 +10435,20 @@ def _rollback_complete_creepage(
                 f"  --complete: rolled back a {name} link -- {name} vs {other}: "
                 f"{v.actual_mm:.3f}mm < required {v.required_mm:.3f}mm"
             )
+    # Issue #9685: state what the gate actually verified, so a consumer can
+    # tell a fully-audited completion from one whose links were never checked.
+    verified = sum(1 for r in (getattr(router, "routes", None) or []) if r.segments or r.vias)
+    router._complete_creepage_gate = {
+        "committed_routes_verified": verified,
+        "rolled_back": len(refusals),
+        # The classes this audit covers (#9685 added the board edge).
+        "checks": ["trace/via vs trace/via", "trace/via vs pad", "copper vs board edge"],
+    }
+    if not quiet:
+        print(
+            f"  --complete: voltage-map gate verified {verified} committed route(s) "
+            f"({len(refusals)} rolled back for creepage)"
+        )
     return refusals
 
 
@@ -10241,6 +10490,58 @@ def _print_pairwise_addendum(violations: "Sequence[PairwiseViolation]") -> None:
     print(f"  Additionally, {len(violations)} HV pairwise clearance violation(s) detected:")
     print(_format_pairwise_violations(violations, limit=5))
     print("  (trace/via/pad copper; run 'kct creepage' for the pour-aware full census)")
+
+
+def _print_pairwise_attach_zone_policy(router: "Autorouter", args, output_path) -> None:
+    """Name the attach-zone policy the completed run audited under (issue #9717).
+
+    The post-route HV gate applies the #4506 rated-footprint attach zones
+    unconditionally (there is no ``kct route`` opt-out), while ``kct creepage``
+    grants the same exemption only on an explicit ``--waive-attach-zone``.  A
+    designer who reads a clean route verdict and then censuses the written
+    board without the flag sees new FAILs for exactly the class of copper this
+    gate exempted (#9685's H2).  This note states the policy that WAS used and
+    the flag that reproduces it, without claiming any particular pair was
+    waived -- the audit keeps no per-pair telemetry, and a pair-level claim
+    would need evidence for that pair.
+
+    Strictly a no-op unless the conditions that made the audit consult zones
+    all held: ``--voltage-map`` supplied (``args._pairwise_required`` set), the
+    pairwise table widened past the scalar DRU floor (``_audit_pairwise_clearance``'s
+    own activation test), at least one attach zone resolved on the source
+    board, and copper actually committed (never ``--dry-run``).  Zones resolve
+    from the router's memoised cache, so this adds no board loads.
+    """
+    if getattr(args, "dry_run", False):
+        return
+    if getattr(args, "_pairwise_required", None) is None:
+        return
+    rules = getattr(router, "rules", None)
+    table = getattr(rules, "pairwise_clearance", None) if rules is not None else None
+    if table is None or table.max_required_clearance() <= table.dru:
+        return
+    zones = _pairwise_attach_zones(router)
+    if not zones:
+        return
+    print()
+    print(
+        f"  Attach-zone exemption: ENABLED -- {len(zones)} rated-footprint attach "
+        "zone(s) (#4506) applied by this run's HV audit; copper inside a zone is "
+        "exempt from the pairwise requirement."
+    )
+    print(
+        "  'kct creepage' grants that exemption only with --waive-attach-zone, so "
+        "a census without the flag is stricter and can FAIL pairs this audit "
+        "exempted; copper outside the zones still fails with the flag enabled. "
+        "Match this policy on the written board with:"
+    )
+    vm = getattr(args, "voltage_map", None)
+    print(
+        f"    kct creepage {output_path} --voltage-map {vm} --standard "
+        f"{getattr(args, 'creepage_standard', 'iec60664')} --pollution-degree "
+        f"{getattr(args, 'pollution_degree', 2)} --material-group "
+        f"{getattr(args, 'material_group', 'IIIa')} --waive-attach-zone"
+    )
 
 
 def _pairwise_escalation_exit(rc: int, violations: "Sequence[PairwiseViolation]") -> int:
@@ -10747,7 +11048,11 @@ def _audit_kept_copper_clearance(
     path copies beside the output -- else KiCad's defaults.  At ``error``
     severity (KiCad's default) the near-misses are printed as errors and
     returned so they fail the run; at ``warning`` they are printed and not
-    returned; at ``ignore`` nothing is reported.  Never raises.
+    returned; at ``ignore`` nothing is reported.  Issue #9578: a pair whose
+    verdict hinges on a rule the evaluator cannot decide is printed as
+    UNKNOWN -- naming the rule -- and is never returned as an input defect,
+    under every severity but ``ignore``, which returns before anything is
+    computed or printed.  Never raises.
     """
     from kicad_tools.router.board_clearance_rules import BoardClearanceRules
     from kicad_tools.router.io import kept_copper_clearance_violations, kicad_rule_severity
@@ -10778,9 +11083,38 @@ def _audit_kept_copper_clearance(
                 "input clearance was NOT checked"
             )
         return []
-    if near and not quiet:
-        _print_input_clearance_findings(near, severity)
-    return near if severity == "error" else []
+    # Issue #9578: pairs whose verdict hinges on a rule this tool cannot
+    # decide are named and counted as unknown -- never as input defects, so
+    # they neither fail the run nor imply a KiCad-exact verdict.  kicad-cli
+    # pcb drc remains the authority for them.
+    unknown = [v for v in near if v.unknown_rules]
+    definite = [v for v in near if not v.unknown_rules]
+    if unknown and not quiet:
+        _print_unknown_rule_clearance(unknown)
+    if definite and not quiet:
+        _print_input_clearance_findings(definite, severity)
+    return definite if severity == "error" else []
+
+
+def _print_unknown_rule_clearance(violations: "Sequence[ClearanceViolation]") -> None:
+    """Report kept-copper near-misses an undecided rule keeps in doubt (#9578)."""
+    from kicad_tools.router.io import describe_input_clearance
+
+    rule_names = sorted({name for v in violations for name in v.unknown_rules})
+    print("\n--- Kept Input Copper: unresolved clearance rules ---")
+    print(
+        f"  UNKNOWN: {len(violations)} kept-copper pair(s) could not be judged because "
+        f"these .kicad_dru rule(s) use conditions this tool cannot resolve: "
+        f"{', '.join(repr(name) for name in rule_names)}"
+    )
+    print(
+        "  Counted as unknown, not as input defects (Issue #9578); run "
+        "`kicad-cli pcb drc` for the authoritative verdict on these pairs."
+    )
+    for v in violations[:20]:
+        print(f"    UNKNOWN {describe_input_clearance(v)} (rule(s): {', '.join(v.unknown_rules)})")
+    if len(violations) > 20:
+        print(f"    ... and {len(violations) - 20} more")
 
 
 def _print_input_clearance_findings(
@@ -11680,6 +12014,7 @@ _CLEARANCE_SOURCE_TOKENS: dict[str, str] = {
     "project-min-clearance": "project-min-clearance",
     "project-net-class": "project-net-class",
     "project-dru": "project-dru",
+    "project-dru-conditional": "project-dru-conditional",
 }
 
 
@@ -11751,12 +12086,24 @@ def _decide_route_clearance(
             return "project board minimum clearance"
         if rule_source is RuleSource.PROJECT_NET_CLASS:
             return f'project netclass "{class_name}"' if class_name else "project netclass"
+        if rule_source is RuleSource.PROJECT_DRU_CONDITIONAL:
+            return "board .kicad_dru conditional clearance rule"
         if rule_source is RuleSource.BOARD_NET_CLASS:
             return f'board net_class "{class_name}"'
         return str(rule_source.value)
 
-    if explicit_clearance:
+    if explicit_clearance and resolved.source is RuleSource.EXPLICIT_TARGET:
         banner = f"Clearance: {value:.4g}mm (rules: explicit --clearance flag)"
+    elif explicit_clearance:
+        # The #9578 conditional floor raised the operator's explicit value
+        # (#9588 review): say so instead of crediting the flag with a value
+        # it did not choose.
+        banner = (
+            f"Clearance: {value:.4g}mm (rules: explicit --clearance "
+            f"{clearance:.4g}mm, floored by the "
+            f"{_label(resolved.source, resolved.source_label)} {value:.4g}mm)"
+        )
+        source = "board-clamped"
     elif resolved.source is RuleSource.TARGET_DEFAULT:
         # Nothing the board or the fab declared moved the target: byte-identical
         # to the pre-#4875 silent path.
@@ -11974,6 +12321,8 @@ def _resolve_route_via_clearance(
             return "project board minimum clearance"
         if rule_source is RuleSource.PROJECT_NET_CLASS:
             return f'project netclass "{class_name}"' if class_name else "project netclass"
+        if rule_source is RuleSource.PROJECT_DRU_CONDITIONAL:
+            return "board .kicad_dru conditional clearance rule"
         if rule_source is RuleSource.BOARD_NET_CLASS:
             return f'board net_class "{class_name}"'
         if rule_source is RuleSource.TRACE_BASE:
@@ -14394,6 +14743,9 @@ def route_with_layer_escalation(
                 # Issue #4979: inherited-only findings (any newly created
                 # ones already replaced the banner above).
                 _print_layer_intent_addendum(_layer_intent)
+        # Issue #9717: name the attach-zone policy the audit used, beside the
+        # verdict the designer acts on.
+        _print_pairwise_attach_zone_policy(final_result.router, args, output_path)
 
     # Issue #2881: Stash the final router on args so an outer
     # ``route_with_mfr_tier_escalation`` wrapper can inspect
@@ -15379,6 +15731,9 @@ def route_with_rule_relaxation(
                 # Issue #4979: inherited-only findings (any newly created
                 # ones already replaced the banner above).
                 _print_layer_intent_addendum(_layer_intent)
+        # Issue #9717: name the attach-zone policy the audit used, beside the
+        # verdict the designer acts on.
+        _print_pairwise_attach_zone_policy(final_result.router, args, output_path)
 
     # Issue #7377: pair via-parity summary + --export-failed-nets on every tail.
     _run_post_verdict_reports(
@@ -17936,6 +18291,9 @@ def route_with_combined_escalation(
                 # Issue #4979: inherited-only findings (any newly created
                 # ones already replaced the banner above).
                 _print_layer_intent_addendum(_layer_intent)
+        # Issue #9717: name the attach-zone policy the audit used, beside the
+        # verdict the designer acts on.
+        _print_pairwise_attach_zone_policy(final_result.router, args, output_path)
 
     # Issue #7377: pair via-parity summary + --export-failed-nets on every tail.
     _run_post_verdict_reports(
@@ -18212,6 +18570,10 @@ def _warn_escalation_flags_ignored(args) -> None:
     this warning the run silently behaves as if it was not passed.  Stderr, so
     ``--format json`` stdout is untouched; guarded by a flag on ``args`` so the
     wrappers' repeated ladder entries do not repeat it.
+
+    Issue #9621: ``--group-length-window`` rides on ``--bus-routing`` and is
+    ignored by the same branches; ``0.0`` is a set value, so the check is
+    "is not None / not False", not plain truthiness.
     """
     if getattr(args, "_escalation_flags_warned", False):
         return
@@ -18220,8 +18582,9 @@ def _warn_escalation_flags_ignored(args) -> None:
         for flag, attr in (
             ("--progressive-clearance", "progressive_clearance"),
             ("--bus-routing", "bus_routing"),
+            ("--group-length-window", "group_length_window"),
         )
-        if getattr(args, attr, False)
+        if (value := getattr(args, attr, None)) is not None and value is not False
     ]
     if not ignored:
         return
@@ -18234,6 +18597,105 @@ def _warn_escalation_flags_ignored(args) -> None:
         file=sys.stderr,
         flush=True,
     )
+
+
+def _bus_flags_ignored_reason(
+    args,
+    *,
+    use_adaptive_grid: bool,
+    use_escape_routing: bool = False,
+) -> str | None:
+    """Name the dispatch that will ignore the bus flags, or ``None`` if honoured.
+
+    PR #9633 review: only the single-attempt ``--strategy basic`` dispatch
+    honours ``--bus-routing`` (the ``route_all_with_buses`` branch); every
+    branch that pre-empts it in :func:`route_cmd`'s dispatch order is listed
+    here in the same order, so the reason names the branch that would
+    actually run.  ``use_adaptive_grid`` mirrors ``multi_res_plan is not
+    None`` (the ``--grid auto`` adaptive plan, or its dense-package escape
+    fallback) and ``use_escape_routing`` the escape pre-phase decision --
+    both pre-empt the strategy chain.  ``--two-phase`` only pre-empts under
+    ``--strategy negotiated`` (a basic two-phase run falls through to the
+    bus branch); ``--differential-pairs`` under basic routes diff pairs
+    before the bus branch and never reads ``bus_config``.
+    """
+    if not getattr(args, "bus_routing", False):
+        return None
+    if use_adaptive_grid:
+        return "the adaptive multi-resolution grid"
+    if use_escape_routing:
+        return "the escape pre-phase"
+    if getattr(args, "progressive_clearance", False):
+        return "--progressive-clearance"
+    if getattr(args, "multi_resolution", False):
+        return "--multi-resolution"
+    if getattr(args, "two_phase", False) and args.strategy == "negotiated":
+        return "--two-phase"
+    if args.strategy != "basic":
+        return f"--strategy {args.strategy}"
+    if getattr(args, "differential_pairs", False):
+        return "--differential-pairs"
+    return None
+
+
+def _warn_bus_flags_ignored(args, reason: str) -> None:
+    """Warn once per run that the resolved dispatch ignores the bus flags (#9621).
+
+    PR #9633 review: this used to be called from inside the ``negotiated``
+    dispatch branches, after the cache-hit return, the two-phase return and
+    the adaptive-grid / escape / progressive-clearance / multi-resolution
+    returns -- so those runs printed ``Bus: enabled`` and silently behaved
+    as if ``--bus-routing`` was not passed.  It is now emitted once, before
+    the cache lookup and the strategy dispatch (see
+    :func:`_warn_bus_flags_ignored_early`), with the reason naming the
+    dispatch that ignores the flags.  Stderr, so ``--format json`` stdout is
+    untouched; guarded by a flag on ``args`` so repeated dispatches (the
+    diff-pair pre-pass wrapper) do not repeat it.
+    """
+    if getattr(args, "_bus_flags_warned", False):
+        return
+    ignored = []
+    if getattr(args, "bus_routing", False):
+        ignored.append("--bus-routing")
+    if getattr(args, "group_length_window", None) is not None:
+        ignored.append("--group-length-window")
+    if not ignored:
+        return
+    with contextlib.suppress(AttributeError):  # frozen namespace
+        args._bus_flags_warned = True
+    print(
+        f"warning: {', '.join(ignored)} ignored: {reason} does not support "
+        "bus-aware routing; re-run with --strategy basic and a single-attempt "
+        "dispatch to use it",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _warn_bus_flags_ignored_early(args, router, multi_res_plan=None) -> None:
+    """Emit the bus-flags warning before the cache lookup and strategy dispatch.
+
+    PR #9633 review: resolves, from ``args`` plus the pre-dispatch state
+    that is already computed at this point (the ``--grid auto`` multi-
+    resolution plan and the escape-pre-phase decision), which dispatch this
+    run will take -- then warns when that dispatch does not honour the bus
+    flags.  Running here means the cache-hit branch, the two-phase return
+    and every other early return can no longer skip the warning.  The
+    escape decision is the silent core of :func:`_escape_routing_decision`
+    (its message is still printed exactly once, inside the dispatch, per
+    issue #6666); calling it here adds one ``detect_dense_packages`` scan
+    on ``--bus-routing`` runs only.
+    """
+    if not getattr(args, "bus_routing", False):
+        return
+    use_escape, _ = _escape_routing_decision(router, _resolve_escape_routing_flag(args))
+    reason = _bus_flags_ignored_reason(
+        args,
+        use_adaptive_grid=multi_res_plan is not None,
+        use_escape_routing=use_escape,
+    )
+    if reason is not None:
+        _warn_bus_flags_ignored(args, reason)
 
 
 def _run_post_save_stitching(args, output_path: Path, *, quiet: bool = False):
@@ -19326,12 +19788,26 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
     already exist independently:
 
     * **Timing** -- the lattice netset negotiation's per-connection decline
-      reason (``LatticePathfinder.failure_reasons``, issue #4278) plus the
-      per-link wall-clock budget stats (``LatticeNegotiationStats``,
-      issue #4472): elapsed time, the granted budget, and whether the
-      deadline was hit.  A connection never reached before the deadline is
-      declined with the honest reason ``"deadline-exceeded"`` (see
-      :meth:`~kicad_tools.router.lattice.pathfinder.LatticePathfinder.route_netset`).
+      reason (``LatticePathfinder.failure_reasons``, issue #4278).  The
+      per-link deadline signal IS that reason: ``"deadline-exceeded"``
+      means the deadline cut the best pass before the link reached any
+      decline -- never attempted in ANY pass, or its most recent earlier
+      outcome was a successful route.  A link an earlier pass attempted
+      and declined on its own merits keeps that real reason even when a
+      later truncated pass became the best pass -- unless a still later
+      pass routed it, which clears the record
+      (:meth:`~kicad_tools.router.lattice.pathfinder.LatticePathfinder.route_netset`);
+      any other reason means the link was attempted (and declined or
+      rolled back).  Per link, ``deadline_hit`` is true only for the
+      deadline-exceeded reason; ``attempted`` comes from the negotiation's
+      attempted-keys set (true when the search reached the link in ANY
+      pass), falling back to the reason's complement when the set is
+      absent
+      (issue #9581: they used to be OR-ed with / copied from the
+      whole-run negotiation totals, so once a run hit its deadline every
+      link was flagged as deadline-hit).  Per-link ``elapsed_s`` /
+      ``budget_s`` are ``None`` -- the wall-clock totals are whole-run
+      quantities and stay at report level only.
     * **Blocking copper** -- the SAME obstruction enumeration
       ``kct net-status --why`` prints
       (:func:`~kicad_tools.router.stuck_classifier.classify_stuck_nets`),
@@ -19359,6 +19835,10 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
     if stats is None:
         return None
     reasons: dict[object, str] = dict(getattr(router, "_lattice_failure_reasons", {}) or {})
+    # Issue #9581: keys whose search started in ANY pass of the negotiation.
+    # ``None`` when the router predates the field (duck-typed stand-ins);
+    # the attempted flag then falls back to the reason-derived form below.
+    attempted_keys: frozenset[object] | None = getattr(router, "_lattice_attempted_keys", None)
     # Issue #8396: links committed by the search but rolled back for creepage.
     creepage_refusals: list[dict] = list(getattr(router, "_complete_creepage_refusals", []) or [])
     if not reasons and not creepage_refusals:
@@ -19431,11 +19911,29 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
         net_name = _net_name_for_lattice_key(router, key)
         ep = endpoints.get(key)
         diag = diag_by_net.get(net_name)
+        # Issue #9581: per-link truth.  ``attempted`` is the honest
+        # cross-pass signal -- True when the search reached this link in
+        # ANY pass (the pathfinder's attempted-keys set).  A bare
+        # ``"deadline-exceeded"`` reason cannot carry it: the stamp is
+        # per-PASS, so a link declined on its own merits in an early
+        # pass carries it in a later truncated pass that became the
+        # best pass (the pathfinder now restores the earlier real
+        # reason for such links, as long as that decline is still the
+        # link's most recent outcome -- a pass that routes the link
+        # clears the record, so it reads as the deadline stamp instead;
+        # the set still decides ``attempted`` either way).  ``deadline_hit`` keeps meaning
+        # "this reason is the deadline stamp".  (Both flags used to be
+        # OR-ed with / copied from the whole-run negotiation totals,
+        # so once a run hit its deadline every link was flagged.)
+        deadline_reason = reason == "deadline-exceeded"
         entry: dict = {
             "net": net_name,
             "reason": reason,
             "link": {"start": ep[0], "end": ep[1]} if ep else None,
-            "deadline_hit": bool(reason == "deadline-exceeded" or stats.deadline_hit),
+            "deadline_hit": bool(deadline_reason),
+            "attempted": bool(
+                (key in attempted_keys) if attempted_keys is not None else (not deadline_reason)
+            ),
             # Issue #4979: machine-readable "this residual is layer-
             # constrained" flag.  A link the hard layer intent declined
             # (``layer-constrained-start``/``-end``, or a search the hard
@@ -19446,8 +19944,12 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
             # reason, because the remedy is different (relax/repoint the
             # net-class ``avoid_layers``, or give the net a legal corridor).
             "layer_constrained": _is_layer_constrained_reason(reason),
-            "elapsed_s": round(stats.elapsed_s, 3),
-            "budget_s": round(stats.budget_s, 3) if stats.budget_s is not None else None,
+            # Issue #9581: ``stats.elapsed_s`` / ``stats.budget_s`` are
+            # WHOLE-negotiation totals, not this link's; copying them onto
+            # every entry made a deadline run look like each link burned
+            # the full budget.  Run totals stay at report level only.
+            "elapsed_s": None,
+            "budget_s": None,
             "blocking_copper": list(diag.blocking_nets) if diag else [],
             "nearest_blocker_mm": (
                 round(diag.nearest_blocker_mm, 4)
@@ -19465,10 +19967,15 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
         links.append(
             {
                 **ref,
+                # Issue #9581: a creepage-rolled-back link WAS attempted
+                # (committed by the search, then rolled back for pairwise
+                # creepage) -- attempted, not deadline-hit, and the timing
+                # totals below are run-level quantities, not per link.
                 "deadline_hit": False,
+                "attempted": True,
                 "layer_constrained": False,
-                "elapsed_s": round(stats.elapsed_s, 3),
-                "budget_s": round(stats.budget_s, 3) if stats.budget_s is not None else None,
+                "elapsed_s": None,
+                "budget_s": None,
                 "blocking_copper": [ref["blocking_net"]],
                 "nearest_blocker_mm": ref["measured_mm"],
                 "stuck_classification": None,
@@ -19483,6 +19990,10 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
         "deadline_hit": stats.deadline_hit,
         "elapsed_s": round(stats.elapsed_s, 3),
         "budget_s": round(stats.budget_s, 3) if stats.budget_s is not None else None,
+        # Issue #9685: what the voltage-map creepage gate verified, so a
+        # consumer reading the report can tell an audited completion from an
+        # unchecked one without re-deriving the audit's scope.
+        "creepage_gate": getattr(router, "_complete_creepage_gate", None),
         "unroutable_links": links,
     }
 
@@ -19503,6 +20014,11 @@ def _print_complete_link_report(report: dict) -> None:
         link = entry["link"]
         ep = f"{link['start']} <-> {link['end']}" if link else "(pads unknown)"
         print(f"  [{entry['net']}] {ep} -- {entry['reason']}")
+        # Issue #9581: say explicitly when a link was never attempted
+        # because the run's deadline passed first -- distinct from an
+        # attempted link that the search declined on its own merits.
+        if entry.get("attempted") is False:
+            print("      not attempted: the run's deadline passed before this link was reached")
         if entry.get("required_mm") is not None:
             print(
                 f"      creepage: {entry['net']} vs {entry['blocking_net']}: "
@@ -20147,6 +20663,15 @@ def _list_unverified_sets(output_path: object, *, file=None) -> list[Path]:
 
 
 def _in_process_main(argv: list[str] | None = None) -> int:
+    # Issue #9581: the route command mixes bare print() with flush_print();
+    # with stdout redirected Python block-buffers the bare prints and a
+    # long run shows nothing until exit.  Line-buffer once here -- the
+    # single entry every path shares (CLI, supervised worker, tests) --
+    # rather than sprinkling flush=True over hundreds of call sites.
+    # Guarded: a stream without reconfigure (canned test doubles) keeps
+    # its own buffering.
+    with contextlib.suppress(AttributeError, ValueError):
+        sys.stdout.reconfigure(line_buffering=True)  # type: ignore[union-attr]
     from .route_receipt import run
 
     return run(lambda: _in_process_main_impl(argv))
@@ -20350,8 +20875,8 @@ def _route_parser() -> argparse.ArgumentParser:
         help=(
             "Issue #4477 (epic #4465, Phase 4): write the structured, "
             "machine-readable --complete unroutable-link report to PATH as "
-            "JSON (net, link pad endpoints, elapsed vs the per-link "
-            "deadline, and blocking copper reusing the 'kct net-status "
+            "JSON (run elapsed time and budget, plus each link's net, pad "
+            "endpoints, attempted and deadline_hit flags, and blocking copper from 'kct net-status "
             "--why' obstruction enumeration). Only written when --complete "
             "left one or more links unroutable; a human-readable summary is "
             "always printed regardless of this flag. Ignored without "
@@ -21120,6 +21645,20 @@ def _route_parser() -> argparse.ArgumentParser:
         help="Minimum signals to form a bus group (default: 2)",
     )
     parser.add_argument(
+        "--group-length-window",
+        type=float,
+        default=None,
+        metavar="PCT",
+        help=(
+            "Group non-bus nets whose MST lengths fall within PCT percent of a "
+            "cluster's reference length into synthetic bus groups, and order "
+            "each group by escape feasibility (fewest open pad directions "
+            "first) (Issue #9621).  Requires --bus-routing --strategy basic; "
+            "ignored with a warning on --strategy negotiated and the "
+            "escalation ladders"
+        ),
+    )
+    parser.add_argument(
         "--differential-pairs",
         action="store_true",
         help=(
@@ -21263,8 +21802,9 @@ def _route_parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help=(
             "Path to a JSON per-net voltage map {net_name: volts} (reuses the "
-            "#4371 format; ranges {min,max} per #4411 collapse to the worst-case "
-            "endpoint). Potentials are read SIGNED, exactly as kct creepage "
+            "#4371 format; a range {min,max} per #4411 is differenced "
+            "end-to-end at its worst-case endpoint combination, #9602). "
+            "Potentials are read SIGNED, exactly as kct creepage "
             "reads the same file (#4867): a +150 V net and a -150 V net are a "
             "300 V pair, not 0 V. Enables HV-isolation pairwise clearance (Issue #4431 "
             "Phase 1): the router derives a net-pair required-clearance matrix "
@@ -22518,6 +23058,280 @@ _CHAIN_COMPLETE_ACCEPT_EXITS = frozenset({0, 8})
 # negotiation that ends near the deadline cannot turn into a timeout.
 _CHAIN_COMPLETE_MIN_BUDGET_S = 90.0
 
+# Issue #9620: the budget-only coarser retry runs on the partial-routing exit
+# -- a batch that routed something but ended below --min-completion -- and on
+# the zero-routed exit (1) when THIS invocation saved the board (see the
+# publication gate in _chain_budget_coarser_pass) and every open net's last
+# recorded search failure is budget-labelled.  3/4 (dirty copper --
+# coarsening does not fix shorts), 5 (interrupted), 9 (pre-route gate) and 10
+# (unverified success) all keep their own verdicts; a batch that met its
+# threshold (0) succeeded by contract and is never re-run.
+_BUDGET_RETRY_TRIGGER_EXITS = frozenset({1, 2})
+# Inner-pass exits whose staged board may be promoted: clean (0), still-partial
+# (2 -- the inner exit ladder has already cleared it of seg-seg / short /
+# pairwise / stranded-pour violations by the time it returns 2) and UNVERIFIED
+# (10 -- everything routed, the post-route DRC did not finish).  Dirty-copper
+# exits (3, 4) and fatal (1) discard the retry even when it closed nets.
+_BUDGET_RETRY_ACCEPT_EXITS = frozenset({0, 2, EXIT_UNVERIFIED})
+# Like the chained completion pass: under ``--timeout`` the retry is skipped
+# below this much remaining budget so it cannot turn into a deadline timeout.
+_BUDGET_RETRY_MIN_BUDGET_S = 90.0
+
+# Issue #9620 review: when the coarser-grid retry runs under ``--format json``,
+# the INNER _main_impl holds its JSON document back into this list instead of
+# writing it (a nested json guard would otherwise land it on stderr), so the
+# outer run can publish exactly one document -- the selected result's.
+_route_json_capture: list[str] | None = None
+
+
+def _budget_retry_static_eligible(args) -> bool:
+    """Static (pre-route) eligibility shared by the retry gate and its JSON hold.
+
+    Everything here is knowable before routing starts; the dynamic gates
+    (trigger exit code, ``_grid_selection == "auto"``, budget-only labels,
+    a readable connectivity report) are decided after the run.  ``--format
+    json`` is deliberately NOT an exclusion (Issue #9620 review): the retry
+    applies the same routing decision under JSON, and ``_main_impl`` holds the
+    document so stdout still carries exactly one, describing the selected
+    board.  The chained completion pass keeps its own (unchanged) gate.
+    """
+    return not (
+        getattr(args, "dry_run", False)
+        or getattr(args, "complete", False)
+        or getattr(args, "resume", None)
+        or getattr(args, "checkpoint", None)
+        or getattr(args, "nets", None)
+        or getattr(args, "skip_nets", None)
+        or getattr(args, "region", None)
+        or _resolve_route_engine(args) != "grid"
+        or _interrupt_pending()
+    )
+
+
+def _fresh_staging_dir(output: Path, kind: str) -> Path:
+    """Private per-invocation staging dir for a chained pass (Issue #9620 review).
+
+    ``kind`` ("chain" / "coarser") selects the dot-prefixed prefix beside
+    ``output``.  Staging in a unique private directory -- ``mkdtemp`` alone --
+    guarantees the pass can only ever touch files it created: an input named
+    ``board.coarser.kicad_pcb`` or an unrelated ``board.coarser-notes.txt``
+    next to ``-o board.kicad_pcb`` is never deleted, overwritten or promoted
+    by mistake.  Cleanup (:func:`_discard_staging_dir`) owns exactly the
+    directory this call allocated; a sibling directory matching the prefix --
+    including another invocation's still-live staging dir -- is never removed
+    (Issue #9620 review: the previous glob-and-rmtree deleted both).
+    """
+    prefix = f".{output.stem}.{kind}-"
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=str(output.parent)))
+
+
+def _promotion_protected_inputs(args) -> list[Path]:
+    """Authored input files a promoted run must never overwrite (Issue #9620).
+
+    The staged run derives its sidecars from its staged output, so a sidecar
+    named like the operator's own ``--net-class-map`` / ``--current-paths``
+    input (``<stem>.net_class_map.json``, ``current_paths.json``) is a
+    different file in the staging directory and the same file once promoted
+    beside ``-o``.  The collision has to be resolved at the FINAL destination.
+    """
+    paths: list[Path] = []
+    for name in ("pcb", "net_class_map", "current_paths", "voltage_map"):
+        value = getattr(args, name, None) if args is not None else None
+        if isinstance(value, (str, os.PathLike)) and str(value):
+            paths.append(Path(value))
+    return paths
+
+
+def _staged_artifact_moves(
+    stage_dir: Path,
+    output: Path,
+    staged: Path,
+    protected: list[Path],
+) -> list[tuple[Path, Path]]:
+    """``(destination, staged source)`` pairs for everything the inner run wrote.
+
+    The receipt (``.route.json``) and the ``.kicad_prl`` view state are
+    re-derived by the outer run; every other artifact -- the KiCad project and
+    design-rule files included (Issue #9620 review: the winning board must
+    keep the rules it was checked against) -- travels with the board.  A
+    destination that is one of the operator's authored inputs is diverted to
+    the ``.effective.json`` name the first pass uses for the same collision
+    (or dropped when it has none), never overwritten.
+    """
+    from kicad_tools.router.current_paths import CURRENT_PATHS_SIDECAR_BASENAME
+
+    def _collides(dest: Path) -> bool:
+        return any(_sidecar_collides_with_input(p, dest) for p in protected)
+
+    moves: list[tuple[Path, Path]] = []
+    for f in sorted(stage_dir.iterdir()):
+        if f == staged:
+            continue
+        if f.suffix == ".kicad_prl" or f.name.endswith(".route.json"):
+            continue
+        dest = output.with_name(f.name)
+        if _collides(dest):
+            if f.name == f"{output.stem}.{NET_CLASS_MAP_SIDECAR_BASENAME}":
+                dest = output.with_name(f"{output.stem}.net_class_map.effective.json")
+            elif f.name == CURRENT_PATHS_SIDECAR_BASENAME:
+                dest = output.with_name("current_paths.effective.json")
+            else:
+                continue
+            if _collides(dest):
+                continue
+        moves.append((dest, f))
+    return moves
+
+
+def _retarget_routing_plan(stage_dir: Path, output: Path, staged: Path) -> None:
+    """Point a staged routing plan's ``source.pcb`` at the published board."""
+    import json as _json
+
+    for f in stage_dir.glob("*.routing_plan.json"):
+        try:
+            data = _json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        source = data.get("source") if isinstance(data, dict) else None
+        if isinstance(source, dict) and isinstance(source.get("pcb"), str):
+            if source["pcb"] in {str(staged), str(staged.absolute())}:
+                source["pcb"] = str(output)
+                f.write_text(_json.dumps(data, indent=2))
+
+
+def _publish_transaction(moves: list[tuple[Path, Path | None]]) -> None:
+    """Publish ``(destination, source)`` pairs all-or-nothing (Issue #9620 review).
+
+    ``source=None`` removes the destination.  Every destination is checked
+    up front (an existing non-file, e.g. a directory, refuses before anything
+    moves); each existing destination is preserved by a same-directory backup
+    link before it is touched, and a failure part-way restores every
+    destination -- the first board, its reports and its verdict stay together.
+    Raises :class:`OSError` on failure, after rolling back.
+    """
+    for dest, _src in moves:
+        if dest.is_symlink() or (dest.exists() and not dest.is_file()):
+            raise IsADirectoryError(f"refusing to replace non-file artifact {dest}")
+    backups: dict[Path, Path | None] = {}
+    done: list[Path] = []
+    try:
+        for dest, src in moves:
+            if dest not in backups:
+                if dest.exists():
+                    backup_path = dest.with_name(f".{dest.name}.bak-{uuid.uuid4().hex[:8]}")
+                    try:
+                        os.link(dest, backup_path)
+                    except OSError:
+                        shutil.copy2(dest, backup_path)
+                    backups[dest] = backup_path
+                else:
+                    backups[dest] = None
+            if src is None:
+                dest.unlink(missing_ok=True)
+            else:
+                os.replace(src, dest)
+            done.append(dest)
+    except BaseException:
+        for dest in reversed(done):
+            bak = backups.get(dest)
+            with contextlib.suppress(OSError):
+                if bak is not None:
+                    os.replace(bak, dest)
+                else:
+                    dest.unlink(missing_ok=True)
+        for bak in backups.values():
+            if bak is not None:
+                with contextlib.suppress(OSError):
+                    bak.unlink(missing_ok=True)
+        raise
+    for bak in backups.values():
+        if bak is not None:
+            with contextlib.suppress(OSError):
+                bak.unlink(missing_ok=True)
+
+
+def _promote_staging_dir(
+    stage_dir: Path,
+    output: Path,
+    staged: Path,
+    args=None,
+    extra_moves: list[tuple[Path, Path | None]] | None = None,
+) -> None:
+    """Promote a staged board and its artifacts over ``output`` (Issue #9620 review).
+
+    Publication is one transaction (:func:`_publish_transaction`): *extra_moves*
+    (report publications / removals) first, then the staged artifacts, the
+    board last so ``-o`` only changes once the rest is in place.  Collisions
+    with the operator's authored inputs resolve at the final destination, and
+    the published routing plan names the published board.  Raises
+    :class:`OSError` with everything restored.
+    """
+    _retarget_routing_plan(stage_dir, output, staged)
+    moves: list[tuple[Path, Path | None]] = list(extra_moves or [])
+    moves.extend(
+        _staged_artifact_moves(stage_dir, output, staged, _promotion_protected_inputs(args))
+    )
+    moves.append((output, staged))
+    _publish_transaction(moves)
+
+
+def _adopt_constraint_receipt(output: Path, staged: Path, inner, outer) -> None:
+    """Bind the promoted board to the constraints the retry propagated.
+
+    The receipt is derived from the invocation's records: the first pass may
+    never have written effective constraint files, while the winning run did.
+    """
+    if inner is None or outer is None:
+        return
+    if staged.absolute() in inner.propagated:
+        outer.propagated.add(output.absolute())
+
+
+def _discard_staging_dir(stage_dir: Path) -> None:
+    """Remove a staging directory and everything it owns; never raises."""
+    import shutil as _shutil
+
+    _shutil.rmtree(stage_dir, ignore_errors=True)
+
+
+def _relocate_promoted_json_paths(document: str, stage_dir: Path, output: Path) -> str:
+    """Rewrite a promoted run's JSON document to its published paths (#9620).
+
+    The inner (retry) run derived every artifact path from its staged output
+    inside *stage_dir*; promotion moved those artifacts next to *output* and
+    removed the staging directory, so the document's staged paths are stale.
+    Path strings under the staging prefix are rewritten to the published
+    location when that artifact exists there, and the key is OMITTED when the
+    selected run produced no corresponding artifact (e.g. a fully-routed retry
+    wrote no search-failure sidecar) -- a path to nothing is worse than none.
+    Unparseable input is returned unchanged (the document still publishes).
+    """
+    import json as _json
+
+    prefix = str(stage_dir) + os.sep
+
+    def _walk(node):
+        if isinstance(node, dict):
+            relocated = {}
+            for key, value in node.items():
+                if isinstance(value, str) and value.startswith(prefix):
+                    published = output.with_name(Path(value).name)
+                    if published.is_file():
+                        relocated[key] = str(published)
+                    # else: omit -- no corresponding artifact was published.
+                else:
+                    relocated[key] = _walk(value)
+            return relocated
+        if isinstance(node, list):
+            return [_walk(item) for item in node]
+        return node
+
+    try:
+        data = _json.loads(document)
+    except (ValueError, TypeError):
+        return document
+    return _json.dumps(_walk(data), indent=2)
+
 
 def _restore_supervisor_control(control: str, snapshot: str) -> None:
     """Put the supervisor control record back (JSON sidecar, not PCB text)."""
@@ -22589,6 +23403,35 @@ def _chain_complete_argv(
     they govern an open net.  ``--power-nets``, ``--stitch-power-planes`` and
     ``--auto-fix`` are excluded because the outer run's result already covers them
     (see the guard test).
+
+    Issue #9621 -- the bus family is forwarded together: ``--bus-routing``,
+    ``--bus-mode``, ``--bus-spacing``, ``--bus-min-width`` and
+    ``--group-length-window``.  The length window rides on ``--bus-routing``
+    (without it the pass only draws the "requires --bus-routing" warning), so
+    forwarding the window alone would pin a flag the pass can never honour.
+    Under ``--complete`` the strategy is coerced to basic, so forwarding
+    ``--bus-routing`` flips the pass's basic-strategy dispatch from
+    ``route_all`` to ``route_all_with_buses`` with the outer run's bus
+    configuration -- and that swap is NOT copper-neutral.  The bus driver
+    routes per group member and never runs ``route_all``'s preamble/tail
+    (``_prepare_routing``, ``_filter_pour_nets``,
+    ``_detect_and_apply_matrix_preferences``, ``_interleave_match_groups``,
+    ``_apply_byte_lane_inner_priority``, ``_probe_alone_on_empty_lengths``,
+    ``_run_subgrid_prepass``, and the ``BLOCKED_BY_COMPONENT`` rescue
+    ``_attempt_blocked_component_ripup``), so completion copper measurably
+    differs: on the 6-net row fixture of
+    ``tests/router/test_group_length_window.py`` the bus dispatch measured
+    246.818 mm / 57 segments where ``route_all`` measured 235.310 mm / 53
+    (+4.9% total trace length), both closing 6/6 -- pinned by
+    ``TestCompletionDispatchCopper`` there.  A separate, true fact: on the
+    pass's lattice engine the one-shot netset negotiation
+    (:meth:`Autorouter._negotiate_lattice_netset`) is order-independent, so
+    within either dispatch the operator's bus ordering changes only
+    ``route_net`` call order and logging, not per-net copper -- but that fact
+    says nothing about equality across the two dispatches.  Forwarding is
+    still deliberate: the operator asked for bus treatment, and honouring it
+    on the pass at the disclosed copper cost above beats silently running
+    the flag at its default.
 
     Deliberately not forwarded:
 
@@ -22698,6 +23541,27 @@ def _chain_complete_argv(
     # forwarding, the pass would only auto-tune via ``checker_limit``.
     if getattr(args, "length_match_groups", False):
         chain_argv.append("--length-match-groups")
+    # Issue #9621: the bus family is forwarded together (see the docstring's
+    # Issue #9621 note).  --bus-mode and --bus-min-width carry value defaults
+    # ("parallel" / 2), so only an explicit value is passed on, like
+    # --via-drill above; --bus-spacing and --group-length-window default to
+    # None, so a set value is always the operator's.
+    if getattr(args, "bus_routing", False):
+        chain_argv.append("--bus-routing")
+    for flag, attr in (
+        ("--bus-mode", "bus_mode"),
+        ("--bus-min-width", "bus_min_width"),
+    ):
+        value = getattr(args, attr, None)
+        if value is not None and _flag_passed_explicitly(argv, (flag,)):
+            chain_argv.extend([flag, str(value)])
+    for flag, attr in (
+        ("--bus-spacing", "bus_spacing"),
+        ("--group-length-window", "group_length_window"),
+    ):
+        value = getattr(args, attr, None)
+        if value is not None:
+            chain_argv.extend([flag, str(value)])
     return chain_argv
 
 
@@ -22813,6 +23677,7 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
                 manufacturer=manufacturer,
                 excluded_nets=excluded,
                 include_unrouted=True,
+                strict=True,
             )
         )
 
@@ -22848,20 +23713,16 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
             f"\n--- Chained completion pass: {len(before)} signal net(s) still open "
             f"({', '.join(before)}); disable with --no-chain-complete ---"
         )
-    stage_stem = output.stem + ".chain"
-    staged = output.with_name(stage_stem + output.suffix)
+    # Issue #9620 review: staging lives in a private per-invocation directory
+    # (unique, dot-prefixed), never in ``<stem>.chain*`` siblings -- a glob
+    # there matched unrelated files (an input named ``board.chain.kicad_pcb``,
+    # notes files) and could delete or promote them.
+    stage_dir = _fresh_staging_dir(output, "chain")
+    staged = stage_dir / output.name
     chain_argv = _chain_complete_argv(args, argv, output, staged, excluded)
 
-    def _staged_files() -> list[Path]:
-        import glob
-
-        return sorted(
-            Path(f) for f in glob.glob(glob.escape(str(output.with_name(stage_stem))) + "*")
-        )
-
     def _discard() -> None:
-        for f in _staged_files():
-            f.unlink(missing_ok=True)
+        _discard_staging_dir(stage_dir)
 
     # The inner pass republishes the supervisor's output identity (its staged
     # path); put the real one back so a later timeout quarantines ``-o``.
@@ -22879,23 +23740,31 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
 
     outer_invocation = route_receipt._current.get()
 
-    _discard()
     chain_rc: int | None = None
-    after = before
+    inner_invocation = None
+    after: list[str] | None = before
     try:
         try:
             chain_rc = _main_impl(chain_argv)
             if staged.is_file():
-                after = _open_nets(staged)
+                try:
+                    after = _open_nets(staged)
+                except Exception:
+                    # Issue #9620 review: an unreadable connectivity report
+                    # means the open-net count is unknown, never zero -- never
+                    # promote an unassessed board over the negotiated one.
+                    after = None
         except Exception as exc:
             print(f"  Chained completion pass failed ({exc}); keeping negotiated output")
             chain_rc, after = None, before
         finally:
+            inner_invocation = route_receipt._current.get()
             route_receipt._current.set(outer_invocation)
             if control and control_snapshot is not None:
                 _restore_supervisor_control(control, control_snapshot)
         if (
             chain_rc not in _CHAIN_COMPLETE_ACCEPT_EXITS
+            or after is None
             or len(after) >= len(before)
             or not staged.is_file()
         ):
@@ -22972,23 +23841,20 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
                     "negotiated output kept"
                 )
                 return result
-        # Sidecars first, the board last, so -o only changes once the rest is in place.
-        # The receipt and constraint sidecars (.kicad_pro/.kicad_dru/.kicad_prl)
-        # are not promoted: the outer run republishes the receipt for -o, and the
-        # constraints are derived from the same rules it already wrote.
-        for f in _staged_files():
-            if (
-                f != staged
-                and f.suffix not in {".kicad_pro", ".kicad_dru", ".kicad_prl"}
-                and not f.name.endswith(".route.json")
-            ):
-                os.replace(
-                    f,
-                    output.with_name(
-                        output.name[: -len(output.suffix)] + f.name[len(stage_stem) :]
-                    ),
-                )
-        os.replace(staged, output)
+        # Issue #9620 review: promotion moves only what the inner run wrote
+        # into the private staging directory; the receipt and constraint
+        # sidecars (.kicad_pro/.kicad_dru/.kicad_prl) are not promoted -- the
+        # outer run republishes the receipt for -o, and the constraints are
+        # derived from the same rules it already wrote.
+        try:
+            _promote_staging_dir(stage_dir, output, staged, args)
+        except OSError as exc:
+            print(
+                "  Chained completion pass could not publish its artifacts "
+                f"({exc}); negotiated output kept"
+            )
+            return result
+        _adopt_constraint_receipt(output, staged, inner_invocation, outer_invocation)
     finally:
         # Also runs on RouteDeadlineExpired / KeyboardInterrupt (BaseException):
         # -o was never written before promotion, so only staging needs removing.
@@ -22999,6 +23865,433 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
             f"{len(before)} open signal net(s)"
         )
     return chain_rc if not after and chain_rc == 0 else result
+
+
+def _staged_export_report_path(original: str) -> Path:
+    """Stage the effective failed-nets report in its destination filesystem.
+
+    Issue #9620 review: the staged report must land in the SAME filesystem as
+    the caller's ``--export-failed-nets`` target, so publishing it later is an
+    atomic same-directory ``os.replace`` -- never a cross-device link -- and a
+    publication failure is handled before anything else moves.  The name is
+    unique (dot-prefixed, uuid-suffixed) and the file is created only by the
+    inner run, so an absent staged report still means "the retry produced no
+    report".
+    """
+    target = Path(original)
+    return target.parent / f".{target.name}.coarser-retry-{uuid.uuid4().hex[:8]}{target.suffix}"
+
+
+def _budget_retry_argv(
+    argv: list[str] | None,
+    grid_mm: float,
+    staged: Path,
+    report_map: dict[str, Path] | None = None,
+) -> list[str]:
+    """Argv for the one-shot coarser-grid retry (Issue #9620).
+
+    The operator's own argv is reused verbatim -- every copper-affecting flag
+    (``--seed``, ``--manufacturer``, escalation selectors, budgets, ...) reaches
+    the retry unchanged because it is the same command line -- with exactly
+    these edits:
+
+    * ``--grid`` is replaced with the coarser numeric pitch, so the inner run
+      takes the explicit-grid path (no auto selection, no multi-resolution
+      plan) and, crucially, sets ``args._grid_selection = "explicit"``: the
+      retry can never chain another retry.
+    * ``-o`` / ``--output`` is replaced with the staging path, so the first
+      result stays untouched until the retry is judged better.
+    * ``--lint-gate`` / ``--lint-gate-waivers`` / ``--lint-gate-strict`` are
+      dropped: the OUTER run's gate (which finishes after this pass) judges
+      whatever board ends up at ``--output``, promoted or not.
+    * ``--export-failed-nets PATH`` is redirected to a unique staged path in
+      the target's own filesystem (Issue #9620 review): the inner run must not
+      overwrite the caller's report while the first result is still the
+      selected one, and publishing the winner's report must be a same-device
+      rename.  Only the EFFECTIVE occurrence -- the last one, argparse
+      last-wins -- is redirected; earlier occurrences are inert and dropped
+      (Issue #9620 review: staging every occurrence collided two targets onto
+      one file and let promotion clobber a path this run was never asked to
+      touch).  When *report_map* is given, the original argv value is recorded
+      in it, mapped to the staged path, so promotion can move the winner's
+      report into place (and reconcile its absence) -- a discarded retry
+      leaves the caller's report describing the board that is still at ``-o``.
+    """
+    base = list(sys.argv[1:]) if argv is None else list(argv)
+    parser = _route_parser()
+    actions = parser._option_string_actions  # argparse's own option table
+    long_opts = [o for o in actions if o.startswith("--")]
+
+    def _resolve(tok: str):
+        """(dest, takes_value, inline_value, short_cluster_rest) for an option token.
+
+        Resolution mirrors argparse: exact match, a unique ``--long`` prefix
+        (``--export-failed`` is ``--export-failed-nets``), ``--opt=value`` and
+        an attached short value (``-oout.kicad_pcb``).  ``None`` for anything
+        that is not a recognised option (positional, value, unknown flag).
+        """
+        if tok.startswith("--"):
+            name, eq, val = tok.partition("=")
+            action = actions.get(name)
+            if action is None:
+                hits = {actions[o] for o in long_opts if o.startswith(name)}
+                action = hits.pop() if len(hits) == 1 else None
+            if action is None:
+                return None
+            return action.dest, action.nargs != 0, (val if eq else None), None
+        if tok.startswith("-") and len(tok) > 1:
+            action = actions.get(tok[:2])
+            if action is None:
+                return None
+            if action.nargs == 0:
+                return None if len(tok) > 2 else (action.dest, False, None, None)
+            return action.dest, True, (tok[2:] if len(tok) > 2 else None), None
+        return None
+
+    delimiter = base.index("--") if "--" in base else len(base)
+    head, tail = base[:delimiter], base[delimiter:]
+
+    # The effective --export-failed-nets occurrence: the LAST one by action
+    # (argparse last-wins for a plain path argument), however it is spelled.
+    effective_report_idx: int | None = None
+    j = 0
+    while j < len(head):
+        res = _resolve(head[j])
+        if res is not None and res[0] == "export_failed_nets":
+            effective_report_idx = j
+        j += 2 if (res is not None and res[1] and res[2] is None) else 1
+
+    out: list[str] = []
+    grid_set = False
+    output_set = False
+    i = 0
+    while i < len(head):
+        tok = head[i]
+        res = _resolve(tok)
+        if res is None:
+            out.append(tok)
+            i += 1
+            continue
+        dest, takes_value, inline, _ = res
+        consumed = 1
+        value = inline
+        if takes_value and inline is None:
+            value = head[i + 1] if i + 1 < len(head) else ""
+            consumed = 2
+
+        def _respell(new_value: str) -> list[str]:
+            """The operator's own spelling of this option, value swapped."""
+            if inline is None:
+                return [tok, new_value]
+            if tok.startswith("--"):
+                return [f"{tok.partition('=')[0]}={new_value}"]
+            return [f"{tok[:2]}{new_value}"]
+
+        if dest == "grid":
+            out.extend(_respell(f"{grid_mm:g}"))
+            grid_set = True
+        elif dest == "output":
+            out.extend(_respell(str(staged)))
+            output_set = True
+        elif dest == "export_failed_nets":
+            if i == effective_report_idx and value:
+                staged_report = _staged_export_report_path(value)
+                if report_map is not None:
+                    report_map[value] = staged_report
+                out.extend(["--export-failed-nets", str(staged_report)])
+            # An earlier, inert occurrence is dropped: argparse never reads it,
+            # so it is not staged, not recorded, never touched.
+        elif dest in ("lint_gate", "lint_gate_strict", "lint_gate_waivers"):
+            pass
+        else:
+            out.extend(head[i : i + consumed])
+        i += consumed
+    if not grid_set:
+        out.extend(["--grid", f"{grid_mm:g}"])
+    if not output_set:
+        out.extend(["-o", str(staged)])
+    # Appended BEFORE any end-of-options delimiter, which (with everything
+    # after it) is preserved verbatim.
+    return out + tail
+
+
+def _chain_budget_coarser_pass(args, argv: list[str] | None, result: int) -> int:
+    """One automatic coarser-grid retry after a budget-only failed batch (#9620).
+
+    The PCBJam failure mode: a fine auto-selected lattice makes long nets burn
+    their per-net budget (timeout / iteration cap) with no recourse.  When the
+    batch ended partial (exit 2), the grid was auto-selected, and EVERY open
+    signal net's last recorded search failure is budget-labelled -- the
+    ``.search_failures.json`` sidecar's merged grid+lattice classification,
+    where a geometric reason always beats a budget one -- the whole batch is
+    re-run once at 2x the resolution, capped at the clearance safety ceiling
+    (the explicit-grid DRC bound ``grid <= clearance``, so the retry needs no
+    ``--force``).  The retry reuses the operator's argv via
+    :func:`_budget_retry_argv` and the existing ``_main_impl`` flow, not a new
+    routing loop.
+
+    A strict no-op -- ``result`` untouched, nothing written -- unless every
+    gate passes.  No retry when the user passed an explicit ``--grid`` (#6741
+    semantics: honoured as given), when any failure is geometric (no-path --
+    do not coarsen a board that is genuinely blocked), when an open net has no
+    recorded reason, or under the same ineligibility set as the chained
+    completion pass (``--complete``, ``--resume``/``--checkpoint``,
+    ``--nets``/``--skip-nets``/``--region``, non-grid engines, an interrupt).
+    ``--format json`` is not an exclusion (Issue #9620 review): the same
+    routing decision runs, and ``_main_impl`` publishes one JSON document
+    describing the selected result.  The retry also fires on the zero-routed
+    exit (1) -- every attempted net burning its whole budget is the issue's
+    failure mode even when nothing routed.  Both trigger exits are gated on
+    THIS invocation actually having published ``-o`` (the route receipt's
+    publication record, Issue #9620 review): a stale board left by an earlier
+    run -- however fresh its mtime looks -- describes routing this invocation
+    never did and must not be re-run.  The staged board is promoted over ``-o``
+    only when the retry routes strictly more nets; a retry that routes fewer
+    (or equal), or whose own connectivity report is unreadable, keeps the
+    first result, per the issue's acceptance criteria.  Promotion publishes
+    the retry's diagnostics with its board (sidecars and the effective
+    ``--export-failed-nets`` report are staged per run and reconciled), and
+    returns the retry's own exit code -- the promoted board's threshold
+    verdict.
+    """
+    if (
+        result not in _BUDGET_RETRY_TRIGGER_EXITS
+        or getattr(args, "_grid_selection", None) != "auto"
+        or not _budget_retry_static_eligible(args)
+    ):
+        return result
+    pcb = Path(args.pcb)
+    output = (
+        Path(args.output) if getattr(args, "output", None) else pcb.with_stem(pcb.stem + "_routed")
+    )
+    # Issue #9620 review: both trigger exits must be gated on actual
+    # publication by the first pass of THIS invocation -- the route receipt
+    # records exactly that (its ``record_publication`` is called by every
+    # atomic board writer, and a setup/argument failure never records one).
+    # An mtime comparison accepted a pre-existing board and, with timestamp
+    # skew, even one written before the run started.
+    from . import route_receipt as _route_receipt_gate
+
+    _invocation = _route_receipt_gate._current.get()
+    if _invocation is None or output.absolute() not in _invocation.published:
+        return result
+    quiet = bool(getattr(args, "quiet", False))
+    try:
+        first_grid = float(args.grid)
+        clearance = float(args.clearance)
+    except (TypeError, ValueError):
+        return result
+    retry_grid = round(min(first_grid * 2.0, clearance), 6)
+    if retry_grid <= first_grid + 1e-9:
+        # Already at/over the clearance ceiling -- no coarser legal grid.
+        return result
+
+    from kicad_tools.router.partial_rescue import partially_connected_signal_nets
+    from kicad_tools.router.stuck_classifier import (
+        _search_failures_sidecar_path,
+        is_budget_search_failure,
+        load_search_failures_sidecar,
+    )
+
+    from .route_deadline import CONTROL_ENV, DEADLINE_ENV
+
+    manufacturer = getattr(args, "manufacturer", "jlcpcb") or "jlcpcb"
+    # Issue #9620 review: the retry is judged against the nets THIS batch
+    # attempted.  ``--complete-exclude-nets`` only scopes the completion pass
+    # (the retry re-runs the batch, not the completion), so it must not shrink
+    # the open-net set.  A placement-invalid net (Issue #7922) was never
+    # attempted: it is open by design and must not veto (or gate) the retry.
+    excluded: frozenset[str] = frozenset()
+    disposition = getattr(args, "_initial_placement_disposition", None) or getattr(
+        args, "_placement_disposition", None
+    )
+    if disposition is not None:
+        excluded |= frozenset(disposition.invalid_nets)
+
+    def _open_nets(board: Path) -> list[str]:
+        return list(
+            partially_connected_signal_nets(
+                board,
+                manufacturer=manufacturer,
+                excluded_nets=excluded,
+                include_unrouted=True,
+                strict=True,
+            )
+        )
+
+    deadline = os.environ.get(DEADLINE_ENV)
+    if deadline is not None:
+        remaining = float(deadline) - time.monotonic()
+        if remaining < _BUDGET_RETRY_MIN_BUDGET_S:
+            if not quiet:
+                print(
+                    f"\n--- Coarser-grid retry skipped: {remaining:.0f}s of --timeout "
+                    f"left (< {_BUDGET_RETRY_MIN_BUDGET_S:.0f}s) ---"
+                )
+            return result
+
+    try:
+        before = _open_nets(output)
+    except Exception:
+        return result
+    if not before:
+        return result
+    labels = load_search_failures_sidecar(output) or {}
+    unlabelled = [n for n in before if n not in labels]
+    geometric = [n for n in before if n in labels and not is_budget_search_failure(labels[n])]
+    if unlabelled or geometric:
+        # A geometric give-up means the router PROVED no path exists at this
+        # pitch for at least one net; more budget or a coarser lattice is not
+        # the fix, and an unlabelled open net is treated the same (fail closed).
+        if not quiet:
+            why = (
+                f"{len(geometric)} geometric failure(s) "
+                f"({', '.join(f'{n}:{labels[n]}' for n in geometric[:4])})"
+                if geometric
+                else f"{len(unlabelled)} open net(s) with no recorded reason"
+            )
+            print(f"\n--- Coarser-grid retry skipped: {why}; not a budget-only failure ---")
+        return result
+
+    if not quiet:
+        names = ", ".join(before)
+        capped = " (capped at the clearance ceiling)" if retry_grid < first_grid * 2.0 else ""
+        print(
+            f"\n--- Coarser-grid retry (Issue #9620): all {len(before)} open net(s) "
+            f"({names}) stopped at the search budget (timeout / iteration cap); "
+            f"retrying the batch once on a {retry_grid:g}mm grid "
+            f"({first_grid:g}mm x2{capped}) ---"
+        )
+    # Issue #9620 review: staging lives in a private per-invocation directory
+    # (unique, dot-prefixed) -- a ``<stem>.coarser*`` glob next to -o matched
+    # unrelated files (an input named ``board.coarser.kicad_pcb`` was deleted
+    # before the retry could read it; a ``board.coarser-notes.txt`` was lost).
+    stage_dir = _fresh_staging_dir(output, "coarser")
+    staged = stage_dir / output.name
+    staged_reports: dict[str, Path] = {}
+    retry_argv = _budget_retry_argv(argv, retry_grid, staged, staged_reports)
+    # The effective report stages in its DESTINATION filesystem (Issue #9620
+    # review), so the staging directory's removal does not own it.
+    staged_report_paths = list(staged_reports.values())
+
+    def _discard() -> None:
+        _discard_staging_dir(stage_dir)
+        for report in staged_report_paths:
+            with contextlib.suppress(OSError):
+                report.unlink(missing_ok=True)
+
+    # Same supervisor / receipt restoration contract as the chained completion
+    # pass: the inner run republishes the output identity and receipt context;
+    # put the outer invocation's back so a later timeout quarantines -o and the
+    # outer run still owns the receipt.
+    control = os.environ.get(CONTROL_ENV)
+    control_snapshot: str | None = None
+    if control:
+        try:
+            control_snapshot = Path(control).read_text()
+        except OSError:
+            control_snapshot = None
+    from . import route_receipt
+
+    outer_invocation = route_receipt._current.get()
+
+    global _route_json_capture
+    json_format = getattr(args, "format", "text") == "json"
+    json_capture: list[str] | None = [] if json_format else None
+    retry_rc: int | None = None
+    inner_invocation = None
+    after: list[str] | None = before
+    try:
+        try:
+            if json_capture is not None:
+                _route_json_capture = json_capture
+            retry_rc = _main_impl(retry_argv)
+            if staged.is_file():
+                try:
+                    after = _open_nets(staged)
+                except Exception:
+                    # Issue #9620 review: an unreadable connectivity report
+                    # means the open-net count is unknown, never zero -- an
+                    # unassessed board must not replace the first result.
+                    after = None
+        except Exception as exc:
+            # Exception only: RouteDeadlineExpired and KeyboardInterrupt
+            # subclass BaseException on purpose (route_deadline.py) and must
+            # keep unwinding -- the finally below still restores the receipt
+            # and supervisor control, and the outer finally discards staging.
+            if not quiet:
+                print(
+                    f"  Coarser-grid retry failed ({type(exc).__name__}: {exc}); "
+                    "keeping the first result"
+                )
+            retry_rc, after = None, before
+        finally:
+            if json_capture is not None:
+                _route_json_capture = None
+            inner_invocation = route_receipt._current.get()
+            route_receipt._current.set(outer_invocation)
+            if control and control_snapshot is not None:
+                _restore_supervisor_control(control, control_snapshot)
+        if (
+            retry_rc not in _BUDGET_RETRY_ACCEPT_EXITS
+            or not staged.is_file()
+            or after is None
+            or len(after) >= len(before)
+        ):
+            if not quiet:
+                why = (
+                    "open-net count unknown (unreadable connectivity report)"
+                    if after is None
+                    else f"{len(after)} open vs {len(before)}"
+                )
+                print(
+                    "  Coarser-grid retry did not route more nets "
+                    f"(exit {retry_rc}, {why}); first result kept"
+                )
+            return result
+        # Promotion: the retry's diagnostics travel with its board, as ONE
+        # transaction (Issue #9620 review): the effective --export-failed-nets
+        # reports, the sidecars and the board publish together, and any
+        # failure restores everything -- the first board, its reports and its
+        # verdict stay together.  A first-pass sidecar or report whose staged
+        # twin the retry did not write describes a board no longer at -o (an
+        # empty failure map removes the sidecar by contract) -- it is removed
+        # inside the same transaction.
+        extra_moves: list[tuple[Path, Path | None]] = []
+        for original, staged_report in staged_reports.items():
+            extra_moves.append((Path(original), staged_report if staged_report.is_file() else None))
+        if not _search_failures_sidecar_path(staged).is_file():
+            extra_moves.append((_search_failures_sidecar_path(output), None))
+        try:
+            _promote_staging_dir(stage_dir, output, staged, args, extra_moves)
+        except OSError as exc:
+            if not quiet:
+                print(
+                    f"  Coarser-grid retry could not publish its artifacts ({exc}); "
+                    "first result kept"
+                )
+            return result
+        _adopt_constraint_receipt(output, staged, inner_invocation, outer_invocation)
+        if json_capture:
+            # _main_impl publishes exactly one JSON document describing the
+            # selected result -- here, the promoted retry's own document, with
+            # its artifact paths translated to the published locations.
+            args._budget_retry_json_document = _relocate_promoted_json_paths(
+                json_capture[0], stage_dir, output
+            )
+    finally:
+        # Also runs on RouteDeadlineExpired / KeyboardInterrupt: -o was never
+        # touched before promotion, so only staging needs removing.
+        _discard()
+    if not quiet:
+        print(
+            f"  Coarser-grid retry routed {len(before) - len(after)} more net(s) "
+            f"on the {retry_grid:g}mm grid; promoted"
+        )
+    # The selected board is the retry's, so its own threshold verdict (0, 2,
+    # or UNVERIFIED 10) is the run's -- not the first pass's exit, and not
+    # gated on 100% connectivity (Issue #9620 review).
+    return retry_rc
 
 
 def _main_impl(argv: list[str] | None = None) -> int:
@@ -23051,55 +24344,84 @@ def _main_impl(argv: list[str] | None = None) -> int:
                     return 1
             capture = (
                 json_stream.capture()
-                if gate is not None and json_stream is not None
+                if json_stream is not None
+                and (
+                    gate is not None
+                    or _route_json_capture is not None
+                    or _budget_retry_static_eligible(args)
+                )
                 else contextlib.nullcontext(None)
             )
+            handed_off = False
             with capture as held:
                 try:
-                    if gate is not None:
-                        # Issue #6090: route into a staging file next to
-                        # --output and promote it only once judged, so no kill
-                        # -- SIGTERM, SIGKILL -- can leave an unjudged board at
-                        # --output.  Staged inside the guard: a SIGTERM right
-                        # after the handler is installed still cleans up.
-                        staged = gate.stage()
-                        if staged is not None:
-                            args._lint_gate_output = str(gate.output)
-                            args.output = str(staged)
-                    result = _run_main_impl(args, parser, argv)
-                    result = _chain_complete_pass(args, argv, result)
-                except BaseException:
-                    if gate is not None:
-                        # Never leave an unjudged board at --output.
-                        gate.abort()
-                        _lint_gate_unstage_args(args, gate, requested_output)
-                    raise
-                outcome = None
-                if gate is not None:
                     try:
-                        outcome = gate.finish()
-                    finally:
-                        _lint_gate_unstage_args(args, gate, requested_output)
-                    result = outcome.exit_code(result)
-                exit_code = finish(args, result)
-                if json_stream is not None and not json_stream.written:
-                    # The layer/rule-escalation paths (the default) never reached
-                    # the direct-route JSON emitter; publish the same document
-                    # for the final router so --format json always yields one.
-                    _emit_route_json_fallback(args, exit_code)
-            if (
-                held is not None
-                and json_stream is not None
-                and outcome is not None
-                and gate is not None
-            ):
-                from .route_lint_gate import merge_into_json_document
+                        if gate is not None:
+                            # Issue #6090: route into a staging file next to
+                            # --output and promote it only once judged, so no kill
+                            # -- SIGTERM, SIGKILL -- can leave an unjudged board at
+                            # --output.  Staged inside the guard: a SIGTERM right
+                            # after the handler is installed still cleans up.
+                            staged = gate.stage()
+                            if staged is not None:
+                                args._lint_gate_output = str(gate.output)
+                                args.output = str(staged)
+                        result = _run_main_impl(args, parser, argv)
+                        # Issue #9620: the budget-only coarser retry re-routes the
+                        # whole batch before the chained completion pass, so its
+                        # classification reads the grid pass's own give-up labels
+                        # (a completion pass would overwrite them with lattice
+                        # declines), and a promoted fully-routed board makes the
+                        # completion pass a no-op.
+                        result = _chain_budget_coarser_pass(args, argv, result)
+                        result = _chain_complete_pass(args, argv, result)
+                    except BaseException:
+                        if gate is not None:
+                            # Never leave an unjudged board at --output.
+                            gate.abort()
+                            _lint_gate_unstage_args(args, gate, requested_output)
+                        raise
+                    outcome = None
+                    if gate is not None:
+                        try:
+                            outcome = gate.finish()
+                        finally:
+                            _lint_gate_unstage_args(args, gate, requested_output)
+                        result = outcome.exit_code(result)
+                    exit_code = finish(args, result)
+                    if json_stream is not None and not json_stream.written:
+                        # The layer/rule-escalation paths (the default) never reached
+                        # the direct-route JSON emitter; publish the same document
+                        # for the final router so --format json always yields one.
+                        _emit_route_json_fallback(args, exit_code)
+                finally:
+                    if _route_json_capture is not None and held is not None:
+                        # Issue #9620 review: an inner (retry) run hands its
+                        # JSON document to the requesting outer run -- consumed
+                        # exactly once there; the inner never also writes it
+                        # locally (its nested json guard would land the
+                        # document on stderr).
+                        _route_json_capture.append(held.getvalue())
+                        handed_off = True
+            retry_json = getattr(args, "_budget_retry_json_document", None)
+            if held is not None and json_stream is not None and not handed_off:
+                if gate is not None and outcome is not None:
+                    from .route_lint_gate import merge_into_json_document
 
-                json_stream.write(
-                    merge_into_json_document(
-                        held.getvalue(), outcome, exit_code, relocate=gate.relocate
+                    json_stream.write(
+                        merge_into_json_document(
+                            retry_json if retry_json else held.getvalue(),
+                            outcome,
+                            exit_code,
+                            relocate=gate.relocate,
+                        )
                     )
-                )
+                elif retry_json:
+                    # The coarser retry promoted its board (Issue #9620): its
+                    # document, not the first pass's, describes -o now.
+                    json_stream.write(retry_json)
+                else:
+                    json_stream.write(held.getvalue())
                 json_stream.flush()
             return exit_code
     except DRCConstraintPropagationError as exc:
@@ -24384,6 +25706,8 @@ def _run_main_impl(args, parser, argv) -> int:
             print(f"Skip:     {', '.join(skip_nets)}")
         if args.bus_routing:
             print(f"Bus:      enabled ({args.bus_mode} mode)")
+            if getattr(args, "group_length_window", None) is not None:
+                print(f"          length window: {args.group_length_window}% (Issue #9621)")
         if args.differential_pairs:
             print("DiffPair: enabled")
 
@@ -24884,6 +26208,7 @@ def _run_main_impl(args, parser, argv) -> int:
             mode=bus_mode_map[args.bus_mode],
             spacing=args.bus_spacing,
             min_bus_width=args.bus_min_width,
+            length_window=getattr(args, "group_length_window", None),
         )
 
         # Show detected buses
@@ -24896,6 +26221,15 @@ def _run_main_impl(args, parser, argv) -> int:
                     print(f"    - {group['name']}: {group['width']} bits ({status})")
             else:
                 print("\n  No bus signals detected")
+
+    elif getattr(args, "group_length_window", None) is not None:
+        # Issue #9621: the window rides on bus routing; without --bus-routing
+        # there is no bus_config to carry it.
+        print(
+            "warning: --group-length-window ignored: it requires --bus-routing",
+            file=sys.stderr,
+            flush=True,
+        )
 
     # Configure differential pair routing if enabled
     diffpair_config = None
@@ -24946,6 +26280,13 @@ def _run_main_impl(args, parser, argv) -> int:
 
     _rss = RSSTracer()
     _rss.mark("route-start")
+
+    # PR #9633 review: the bus-flags-ignored warning must fire BEFORE the
+    # cache lookup and the strategy dispatch -- a cache hit or an early
+    # dispatch return (two-phase, adaptive grid, escape, progressive
+    # clearance, multi-resolution) used to skip it while still printing
+    # ``Bus: enabled``.
+    _warn_bus_flags_ignored_early(args, router, multi_res_plan)
 
     # Check cache for existing routing result (unless --no-cache)
     cache_key = None
@@ -25427,6 +26768,8 @@ def _run_main_impl(args, parser, argv) -> int:
                 # The negotiated loop honors prerouted nets via the new skip
                 # logic in route_all_negotiated.  coupled_only=True so
                 # unsupported pad configurations fall through cleanly.
+                # (Bus-flags warning: emitted before the cache lookup, see
+                # _warn_bus_flags_ignored_early.)
                 def _neg_strategy():
                     return router.route_all_negotiated(
                         **_negotiated_kwargs(
@@ -25451,6 +26794,8 @@ def _run_main_impl(args, parser, argv) -> int:
                 diffpair_budget_exit_pairs.extend(router.diffpair_budget_exit_pair_names())
                 return result
             elif args.strategy == "negotiated":
+                # (Bus-flags warning: emitted before the cache lookup, see
+                # _warn_bus_flags_ignored_early.)
                 return router.route_all_negotiated(
                     **_negotiated_kwargs(
                         args, timeout=_budgeted_timeout(args), checkpoint_callback=_checkpoint_cb
@@ -26312,6 +27657,9 @@ def _run_main_impl(args, parser, argv) -> int:
                     nets_to_route_ids=multi_pad_net_ids,
                     single_pad_count=len(single_pad_nets),
                 )
+        # Issue #9717: name the attach-zone policy the audit used, beside the
+        # verdict the designer acts on.
+        _print_pairwise_attach_zone_policy(router, args, output_path)
 
     # Issue #6277: the JSON summary must not depend on the text banner chain
     # (``if not quiet``) or on the outcome being PARTIAL, so every direct-route
