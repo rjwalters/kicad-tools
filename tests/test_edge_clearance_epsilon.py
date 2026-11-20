@@ -622,31 +622,43 @@ class TestCheckPadsRotationSignConvention:
 
 
 class TestAllMethodsUseEpsilon:
-    """Verify that the source code of all four check methods references epsilon."""
+    """Verify that the source code of all four check methods references epsilon.
+
+    Since Issue #9689 the comparison slack is computed by
+    ``_outline_comparison_slack`` (the straight-edge epsilon plus the
+    certified curve-tessellation bound), so each method must reference
+    that helper -- which itself is defined in terms of
+    ``_CLEARANCE_EPSILON_MM``.
+    """
+
+    def _uses_slack(self, method_name: str) -> None:
+        import inspect
+
+        src = inspect.getsource(getattr(EdgeClearanceRule, method_name))
+        assert "_outline_comparison_slack" in src, method_name
 
     def test_check_segments_uses_epsilon(self):
-        import inspect
-
-        src = inspect.getsource(EdgeClearanceRule._check_segments)
-        assert "_CLEARANCE_EPSILON_MM" in src
+        self._uses_slack("_check_segments")
 
     def test_check_vias_uses_epsilon(self):
-        import inspect
-
-        src = inspect.getsource(EdgeClearanceRule._check_vias)
-        assert "_CLEARANCE_EPSILON_MM" in src
+        self._uses_slack("_check_vias")
 
     def test_check_pads_uses_epsilon(self):
-        import inspect
-
-        src = inspect.getsource(EdgeClearanceRule._check_pads)
-        assert "_CLEARANCE_EPSILON_MM" in src
+        self._uses_slack("_check_pads")
 
     def test_check_zones_uses_epsilon(self):
+        self._uses_slack("_check_zones")
+
+    def test_slack_helper_is_defined_from_straight_edge_epsilon(self):
         import inspect
 
-        src = inspect.getsource(EdgeClearanceRule._check_zones)
+        from kicad_tools.validate.rules import edge as edge_module
+
+        src = inspect.getsource(edge_module._outline_comparison_slack)
         assert "_CLEARANCE_EPSILON_MM" in src
+        # A plain list (straight edges only, and the mocked-PCB fixtures)
+        # certifies no curve error, so the slack is exactly the epsilon.
+        assert edge_module._outline_comparison_slack([]) == _CLEARANCE_EPSILON_MM
 
 
 @pytest.mark.parametrize("net_number", [0, 2])

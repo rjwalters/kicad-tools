@@ -1,5 +1,6 @@
 """Tests for kicad_tools.validate module (pure Python DRC)."""
 
+import math
 from pathlib import Path
 
 import pytest
@@ -1277,6 +1278,188 @@ class TestBoardOutline:
         assert min(ys) == pytest.approx(0.0, abs=0.01)
         assert max(xs) == pytest.approx(50.0, abs=0.01)
         assert max(ys) == pytest.approx(30.0, abs=0.01)
+
+
+class TestArcOutlineSegments:
+    """Curved Edge.Cuts geometry in ``get_board_outline_segments`` (Issue #9689).
+
+    The old two-chord arc approximation ignored the arc's sagitta (about
+    ``0.29 * r`` for a 180-degree sweep), so ``EdgeClearanceRule`` measured
+    copper against chords that can sit millimetres from the true arc.  These
+    tests pin the certified replacement: the chain preserves the authored
+    points and sweep, stays within the advertised Hausdorff bound of the
+    true circle, is board-relative for a nonzero origin, and carries the
+    bound on ``OutlineSegments.max_error_mm`` for consumers to charge
+    against their comparisons.
+    """
+
+    # Authored arc: start (73, 38), mid (80.04, 49), end (73, 60) -- the
+    # Issue #9689 repro geometry.  Circumcentre by symmetry on y = 49;
+    # coordinates below are sheet-absolute, subtracted to board-relative
+    # like the returned chain (origin (55, 38)).
+    ARC = ((73.0, 38.0), (80.04, 49.0), (73.0, 60.0))
+    CENTER_SHEET = (67.926243, 49.0)
+    RADIUS = 80.04 - 67.926243
+
+    def _load(self, tmp_path: Path, content: str):
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_file = tmp_path / "arc_outline.kicad_pcb"
+        pcb_file.write_text(content)
+        return PCB.load(str(pcb_file))
+
+    def _outline_pcb(self) -> str:
+        start, mid, end = self.ARC
+        return (
+            '(kicad_pcb (version 20240108) (generator "test")\n'
+            '  (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))\n'
+            '  (net 0 "")\n'
+            '  (gr_line (start 73 38) (end 55 38) (layer "Edge.Cuts"))\n'
+            '  (gr_line (start 55 38) (end 55 60) (layer "Edge.Cuts"))\n'
+            '  (gr_line (start 55 60) (end 73 60) (layer "Edge.Cuts"))\n'
+            f"  (gr_arc (start {start[0]} {start[1]}) (mid {mid[0]} {mid[1]}) "
+            f'(end {end[0]} {end[1]}) (layer "Edge.Cuts"))\n'
+            ")"
+        )
+
+    def _line_edges(self, ox: float, oy: float) -> set:
+        return {
+            ((73.0 - ox, 38.0 - oy), (55.0 - ox, 38.0 - oy)),
+            ((55.0 - ox, 38.0 - oy), (55.0 - ox, 60.0 - oy)),
+            ((55.0 - ox, 60.0 - oy), (73.0 - ox, 60.0 - oy)),
+        }
+
+    def test_arc_chain_is_tessellated_not_two_chords(self, tmp_path: Path):
+        pcb = self._load(tmp_path, self._outline_pcb())
+        segments = pcb.get_board_outline_segments()
+
+        ox, oy = pcb.board_origin
+        assert (ox, oy) == (55.0, 38.0)  # nonzero origin exercises the translation
+        arc_edges = [e for e in segments if e not in self._line_edges(ox, oy)]
+        # The two-chord approximation produced exactly two arc edges.
+        assert len(arc_edges) > 2
+        assert len(segments) == 3 + len(arc_edges)
+
+    def test_arc_chain_preserves_authored_points_and_sweep(self, tmp_path: Path):
+        pcb = self._load(tmp_path, self._outline_pcb())
+        segments = pcb.get_board_outline_segments()
+        ox, oy = pcb.board_origin
+
+        # The arc sub-chain is emitted as one contiguous directed run from
+        # the authored start to the authored end.
+        start = (self.ARC[0][0] - ox, self.ARC[0][1] - oy)
+        end = (self.ARC[2][0] - ox, self.ARC[2][1] - oy)
+        arc_edges = [e for e in segments if e not in self._line_edges(ox, oy)]
+        chain = [start]
+        while chain[-1] != end:
+            tail = chain[-1]
+            edge = next(e for e in arc_edges if e[0] == tail and e[1] not in chain)
+            chain.append(edge[1])
+        assert len(chain) - 1 == len(arc_edges)
+
+        # The authored midpoint is interior to the directed chain, so the
+        # sweep runs through it rather than around the major arc.
+        assert (self.ARC[1][0] - ox, self.ARC[1][1] - oy) in chain
+
+    def test_arc_chain_stays_within_certified_bound_of_true_circle(self, tmp_path: Path):
+        pcb = self._load(tmp_path, self._outline_pcb())
+        segments = pcb.get_board_outline_segments()
+        bound = getattr(segments, "max_error_mm", 0.0)
+        assert 0.0 < bound <= 1e-5
+
+        cx = self.CENTER_SHEET[0] - pcb.board_origin[0]
+        cy = self.CENTER_SHEET[1] - pcb.board_origin[1]
+        for point in {p for edge in segments for p in edge}:
+            # Only the arc's vertices must lie on the authored circle; the
+            # closing lines sit at board-relative x <= 18.
+            if point[0] > 17.0:
+                radius_error = abs(math.hypot(point[0] - cx, point[1] - cy) - self.RADIUS)
+                assert radius_error <= bound + 1e-9, (point, radius_error)
+
+    def test_straight_outline_carries_no_curve_error(self, tmp_path: Path):
+        pcb = self._load(
+            tmp_path,
+            """(kicad_pcb
+              (version 20240108)
+              (generator "test")
+              (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))
+              (net 0 "")
+              (gr_rect (start 0 0) (end 50 30)
+                (stroke (width 0.1) (type default))
+                (fill none)
+                (layer "Edge.Cuts"))
+            )""",
+        )
+        segments = pcb.get_board_outline_segments()
+        assert isinstance(segments, list)
+        assert len(segments) == 4
+        assert getattr(segments, "max_error_mm", 0.0) == 0.0
+
+    def test_reversed_and_major_arcs_preserve_authored_geometry(self, tmp_path: Path):
+        # The same authored circle with start/end swapped, and a major arc
+        # running the long way around through the left side: both must keep
+        # all three authored points and a consistently turning chain.
+        cases = (
+            ((73.0, 38.0), (80.04, 49.0), (73.0, 60.0)),  # as authored (minor)
+            ((73.0, 60.0), (80.04, 49.0), (73.0, 38.0)),  # reversed
+            ((73.0, 38.0), (67.9262, 36.8866), (73.0, 60.0)),  # major, left side
+        )
+        for start, mid, end in cases:
+            content = (
+                '(kicad_pcb (version 20240108) (generator "test")\n'
+                '  (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))\n'
+                '  (net 0 "")\n'
+                f"  (gr_arc (start {start[0]} {start[1]}) (mid {mid[0]} {mid[1]}) "
+                f'(end {end[0]} {end[1]}) (layer "Edge.Cuts"))\n'
+                ")"
+            )
+            pcb = self._load(tmp_path, content)
+            segments = pcb.get_board_outline_segments()
+            ox, oy = pcb.board_origin
+            vertices = [p for edge in segments for p in edge]
+            for ax, ay in (start, mid, end):
+                assert (ax - ox, ay - oy) in vertices, (start, mid, end, ax, ay)
+            assert 0.0 < getattr(segments, "max_error_mm", 0.0) <= 1e-5
+            # Every chord turns the same way: a correctly oriented circle
+            # walk, including for the major arc.
+            signs = set()
+            for (a, b), (b2, c) in zip(segments, segments[1:], strict=False):
+                cross = (b[0] - a[0]) * (c[1] - b2[1]) - (b[1] - a[1]) * (c[0] - b2[0])
+                if cross:
+                    signs.add(1 if cross > 0 else -1)
+            assert signs <= {1} or signs <= {-1}
+
+    def test_malformed_board_arc_is_skipped_footprint_arc_is_fail_loud(self, tmp_path: Path):
+        # Board-level arcs keep the tolerant in-memory parsing contract: a
+        # collinear "arc" that cannot be certified is skipped, not fatal.
+        pcb = self._load(
+            tmp_path,
+            """(kicad_pcb
+              (version 20240108)
+              (generator "test")
+              (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))
+              (net 0 "")
+              (gr_line (start 0 0) (end 10 0) (layer "Edge.Cuts"))
+              (gr_line (start 10 0) (end 10 10) (layer "Edge.Cuts"))
+              (gr_arc (start 0 0) (mid 5 0) (end 10 0) (layer "Edge.Cuts"))
+            )""",
+        )
+        assert len(pcb.get_board_outline_segments()) == 2
+
+        # Footprint graphics stay fail-loud (the #9593 contract).
+        pcb = self._load(
+            tmp_path,
+            """(kicad_pcb
+              (version 20240108)
+              (generator "test")
+              (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))
+              (net 0 "")
+              (footprint "ARC" (layer "F.Cu") (at 5 5)
+                (fp_arc (start -5 0) (mid 0 0) (end 5 0) (layer "Edge.Cuts")))
+            )""",
+        )
+        with pytest.raises(ValueError):
+            pcb.get_board_outline_segments()
 
 
 class TestEdgeClearanceRule:

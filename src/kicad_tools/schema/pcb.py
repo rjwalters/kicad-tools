@@ -21,14 +21,16 @@ logger = logging.getLogger(__name__)
 from kicad_tools.sexp import SExp
 
 from ..core.board_outline import (
+    OutlineSegments,
     board_outline_bounds,
+    circle_sagitta,
     footprint_outline_graphics,
     is_degenerate_closed_curve,
     legacy_arc_points,
     outline_graphics,
     outline_node_points,
 )
-from ..core.outline_tessellation import tessellate_cubic
+from ..core.outline_tessellation import tessellate_arc, tessellate_cubic
 from ..core.schematic_uuids import UuidMinter
 from ..core.sexp_file import load_footprint, load_pcb, save_pcb
 from ..core.version import KICAD_BOARD_FORMAT_VERSION, KICAD_GENERATOR_VERSION
@@ -65,6 +67,14 @@ def _is_footprint_tag(tag: str | None) -> bool:
     editable (position sync, rename, remove, translate) and not just readable.
     """
     return tag in FOOTPRINT_TAGS
+
+
+# Hausdorff bound for the tessellated Edge.Cuts chains emitted by
+# ``PCB.get_board_outline_segments`` (Issue #9689).  Below the helper's own
+# 0.0001 mm default and below the router's 100 nm slack, so the certified
+# chain error carried on ``OutlineSegments.max_error_mm`` stays an order of
+# magnitude under every consumer's floating-point comparison tolerance.
+_EDGE_OUTLINE_TESSELLATION_MAX_ERROR_MM = 1e-5
 
 
 def _find_all_footprints(doc: SExp) -> list[SExp]:
@@ -5505,10 +5515,23 @@ class PCB:
         """Get board outline as a list of line segments.
 
         Returns all Edge.Cuts graphic elements as line segments: lines,
-        two-chord arcs, rects, polygon boundaries (with their authored
-        closing edge), tessellated cubics (no implicit closing edge -- see
-        :meth:`_edge_cuts_curve_chains_sexp`) and certified circle rings.
-        More useful for distance calculations than the polygon.
+        certified bounded-error arc tessellations, rects, polygon
+        boundaries (with their authored closing edge), tessellated cubics
+        (no implicit closing edge -- see :meth:`_edge_cuts_curve_chains_sexp`)
+        and certified circle rings.  More useful for distance calculations
+        than the polygon.
+
+        Arcs (board-level ``gr_arc`` and footprint ``fp_arc`` alike) are
+        tessellated by the certified helper with a Hausdorff bound of
+        ``_EDGE_OUTLINE_TESSELLATION_MAX_ERROR_MM`` (Issue #9689): the old
+        two-chord approximation ignored the arc's sagitta -- about
+        ``0.29 * r`` for a 180-degree arc, far beyond any edge clearance --
+        which made ``EdgeClearanceRule`` both miss copper near an arc's
+        bulge and flag copper that clears the true arc.  The returned
+        value is an :class:`~kicad_tools.core.board_outline.OutlineSegments`
+        (a plain ``list`` subclass) carrying the bound on
+        ``max_error_mm``; distance-measuring consumers must widen their
+        comparisons by it in the conservative direction.
 
         Footprint-local Edge.Cuts graphics (``fp_*``, which KiCad treats
         as board outline) participate with the same treatment as their
@@ -5518,12 +5541,27 @@ class PCB:
         footprint graphics raise ``ValueError`` (fail-loud, like
         :attr:`board_size`); malformed board-level poly/curve/circle
         graphics are skipped, matching the tolerant in-memory parsing of
-        the board-level line/arc collections.
+        the board-level line/arc collections (a board-level arc whose
+        points cannot be certified -- collinear/coincident -- is skipped
+        the same way, never silently flattened).
 
         Returns:
             List of ((x1, y1), (x2, y2)) tuples representing line segments.
         """
-        segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
+        segments = OutlineSegments()
+
+        def _tessellated_arc_edges(
+            start: tuple[float, float],
+            mid: tuple[float, float],
+            end: tuple[float, float],
+        ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+            chain = tessellate_arc(
+                start, mid, end, max_error=_EDGE_OUTLINE_TESSELLATION_MAX_ERROR_MM
+            )
+            segments.max_error_mm = max(
+                segments.max_error_mm, _EDGE_OUTLINE_TESSELLATION_MAX_ERROR_MM
+            )
+            return list(zip(chain[:-1], chain[1:], strict=True))
 
         for line in self._graphic_lines:
             if line.layer == "Edge.Cuts":
@@ -5531,9 +5569,14 @@ class PCB:
 
         for arc in self._graphic_arcs:
             if arc.layer == "Edge.Cuts":
-                # Approximate arc with two segments through midpoint
-                segments.append((arc.start, arc.mid))
-                segments.append((arc.mid, arc.end))
+                # Certified tessellation preserving start, mid, end and
+                # sweep (Issue #9689).  A board-level arc that cannot be
+                # certified is skipped, matching the tolerant parsing of
+                # the other board-level graphics below.
+                try:
+                    segments.extend(_tessellated_arc_edges(arc.start, arc.mid, arc.end))
+                except ValueError:
+                    continue
 
         for graphic in self._graphics:
             if graphic.layer == "Edge.Cuts" and graphic.graphic_type == "rect":
@@ -5570,6 +5613,7 @@ class PCB:
                     "Malformed Edge.Cuts gr_circle: zero-radius circle has no boundary"
                 )
             ring = circle_tessellation_points(center, radius)
+            segments.max_error_mm = max(segments.max_error_mm, circle_sagitta(radius, len(ring)))
             return list(zip(ring, ring[1:] + ring[:1], strict=True))
 
         def _outline_segments_of(
@@ -5586,7 +5630,15 @@ class PCB:
                     )
                 if is_degenerate_closed_curve(chain):
                     return []
-                return _curve_edges(tessellate_cubic(chain))
+                # Same explicit bound as the arc/circle branches, so the
+                # whole chain's certified error stays an order below every
+                # consumer's comparison epsilon (the helper's 0.0001 mm
+                # default would collide with ``_CLEARANCE_EPSILON_MM``).
+                curve = tessellate_cubic(chain, max_error=_EDGE_OUTLINE_TESSELLATION_MAX_ERROR_MM)
+                segments.max_error_mm = max(
+                    segments.max_error_mm, _EDGE_OUTLINE_TESSELLATION_MAX_ERROR_MM
+                )
+                return _curve_edges(curve)
             if tag == "gr_circle":
                 center, end = outline_node_points(node)
                 return _circle_edges(center, end)
@@ -5598,8 +5650,9 @@ class PCB:
             if tag == "gr_line":
                 segments.append((points[0], points[1]))
             elif tag == "gr_arc":
-                segments.append((points[0], points[1]))
-                segments.append((points[1], points[2]))
+                # Footprint arcs share the certified board-arc path, fed
+                # with their transformed start/mid/end (Issue #9689).
+                segments.extend(_tessellated_arc_edges(points[0], points[1], points[2]))
             elif tag in ("gr_poly", "gr_curve", "gr_circle"):
                 segments.extend(_outline_segments_of(node))
 
@@ -5620,10 +5673,15 @@ class PCB:
 
         # Transform from sheet-absolute to board-relative coordinates
         # so that outline segments match footprint positions (which are
-        # converted to board-relative in _detect_board_origin).
+        # converted to board-relative in _detect_board_origin).  The
+        # certified ``max_error_mm`` bound survives the translation (a
+        # pure translation cannot change a Hausdorff distance).
         ox, oy = self._board_origin
         if ox != 0.0 or oy != 0.0:
-            segments = [((x1 - ox, y1 - oy), (x2 - ox, y2 - oy)) for (x1, y1), (x2, y2) in segments]
+            segments = OutlineSegments(
+                [((x1 - ox, y1 - oy), (x2 - ox, y2 - oy)) for (x1, y1), (x2, y2) in segments],
+                max_error_mm=segments.max_error_mm,
+            )
 
         return segments
 
