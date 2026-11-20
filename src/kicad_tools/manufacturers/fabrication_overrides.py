@@ -184,7 +184,7 @@ def load_fabrication_overrides(path: str | Path) -> list[FabricationOverride]:
               "manufacturer": "jlcpcb-tier1",
               "source": "https://jlcpcb.com/capabilities/pcb-capabilities/",
               "reason": "Published pad-hole minimum; matches reviewed geometry",
-              "tracking_issue": "https://github.com/rjwalters/kicad-tools/issues/5006"
+              "tracking_issue": "https://github.com/2AMLogic/kicad-tools/issues/5006"
             }
           }
         }

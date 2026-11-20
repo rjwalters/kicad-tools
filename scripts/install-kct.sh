@@ -236,7 +236,7 @@ ok "KCT_VERSION=$KCT_VERSION"
 # Source checkout short SHA (empty if not a git checkout — tolerated).
 KCT_COMMIT="$(git -C "$KCT_ROOT" rev-parse --short HEAD 2>/dev/null || echo "")"
 INSTALL_DATE="$(date +%Y-%m-%d)"
-KCT_GIT_URL="https://github.com/rjwalters/kicad-tools"
+KCT_GIT_URL="https://github.com/2AMLogic/kicad-tools"
 
 # ----- Stage 2: resolve and validate TARGET ---------------------------------
 info "Stage 2: resolve and validate target"
@@ -949,7 +949,7 @@ if [[ "$CLIENT_WANTS_CLAUDE" == true ]]; then
   NEW_CLAUDE_BLOCK="$KCT_MARK_BEGIN
 ## kicad-tools ($KCT_VERSION)
 
-This repo uses [kicad-tools](https://github.com/rjwalters/kicad-tools) (\`kct\`)
+This repo uses [kicad-tools](https://github.com/2AMLogic/kicad-tools) (\`kct\`)
 for PCB design/routing/DRC. Skills: \`/kct:<name>\` (see
 \`.claude/commands/kct/README.md\`). **Load-bearing conventions (native backend
 build, cross-gate DRC, artifact-first): \`.kct/CONVENTIONS.md\` — read before
@@ -973,7 +973,7 @@ if [[ "$CLIENT_WANTS_CODEX" == true ]]; then
   NEW_AGENTS_BLOCK="$KCT_MARK_BEGIN
 ## kicad-tools ($KCT_VERSION)
 
-This repo uses [kicad-tools](https://github.com/rjwalters/kicad-tools) (\`kct\`)
+This repo uses [kicad-tools](https://github.com/2AMLogic/kicad-tools) (\`kct\`)
 for PCB design/routing/DRC. Skills: \`.agents/skills/kct-<name>/SKILL.md\`.
 **Load-bearing conventions (native backend build, cross-gate DRC,
 artifact-first): \`.kct/CONVENTIONS.md\` — read before routing or sign-off.**

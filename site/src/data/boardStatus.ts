@@ -77,7 +77,7 @@ export function displayStatusExplanation(board: Board): string {
 
 /** Issue tracker link for a recorded known issue (#7261). */
 export function knownIssueHref(issue: number): string {
-  return `https://github.com/rjwalters/kicad-tools/issues/${issue}`;
+  return `https://github.com/2AMLogic/kicad-tools/issues/${issue}`;
 }
 
 /** Heading text for cards and detail pages: human title, else file stem, else slug (#7666). */

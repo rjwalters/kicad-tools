@@ -67,7 +67,7 @@ from .foreign_copper import (
     find_conflicts,
     summarize_conflicts,
 )
-from .global_router import GlobalRouter
+from .global_router import GlobalRouter, UnderBodyAvoidArea
 from .region_graph import RegionGraph
 from .strategies import (
     AlternativeStrategy,
@@ -1515,7 +1515,16 @@ class RoutingOrchestrator:
         else:
             net_id = pads[0].net if pads[0].net else 0
 
-        assignment = self.global_router.route_net(net_id, pad_positions)
+        # Issue #9622 (review of #9635): price the under-body surcharge
+        # into the coarse corridor search too.  Without this the corridor
+        # centreline went straight through a fine-pitch body at zero cost
+        # and the waypoints below materialised that copper directly --
+        # every corridor-materialising strategy accepted it because the
+        # detailed A* cost model was never consulted.
+        under_body_areas = self._under_body_avoid_areas(net_id)
+        assignment = self.global_router.route_net(
+            net_id, pad_positions, under_body_areas=under_body_areas
+        )
 
         if assignment is None:
             return RoutingResult(
@@ -1590,6 +1599,134 @@ class RoutingOrchestrator:
                 layer_changes=0,
             ),
         )
+
+    def _under_body_avoid_areas(self, net_id: int) -> list[UnderBodyAvoidArea] | None:
+        """Coarse under-body avoid areas for ``net_id`` (Issue #9622).
+
+        Derives the board's qualifying fine-pitch bodies (the shared
+        ``body_surcharge.identify_under_body_footprints`` qualification, so
+        the coarse corridor prices exactly the bodies the fine-grid
+        surcharge prices) and converts each into a world-space
+        :class:`UnderBodyAvoidArea` rectangle for the global router's
+        corridor search.  Without this the corridor centreline went
+        straight through a fine-pitch body at zero cost and the waypoint
+        emission materialised that copper directly -- every
+        corridor-materialising strategy accepted it because the detailed
+        A* cost model was never consulted (review of #9635).
+
+        Pad source: the routing grid's registered pads when a grid is
+        attached (in-process ``Autorouter`` flows); otherwise the schema
+        PCB's footprints (the ``route-auto`` path, whose lightweight PCB
+        has no routing grid).  The pad-ring bbox is grown by one
+        ``BODY_BBOX_MARGIN_CELLS``-equivalent halo (the grid resolution,
+        or the design trace clearance when no grid exists).
+
+        The per-area penalty scales like the fine-grid surcharge summed
+        over a crossing: ``cost_under_body * cost_straight`` per cell step
+        times the body diagonal in cells equals ``cost_under_body`` times
+        the diagonal in mm (the grid resolution cancels), so bigger bodies
+        divert more strongly and a finite penalty always preserves the
+        soft fallback when the under-body strip is the only corridor.
+
+        Regions the net has a pad on are exempt (the net is local to that
+        component).  ``None`` -- no pads, no qualifying fine-pitch
+        component, or only local bodies -- leaves the corridor search
+        unchanged.
+        """
+        pads, margin = self._under_body_pad_source()
+        if not pads:
+            return None
+
+        from .body_surcharge import identify_under_body_footprints
+
+        footprints = identify_under_body_footprints(pads)
+        if not footprints:
+            return None
+
+        areas: list[UnderBodyAvoidArea] = []
+        for footprint in footprints:
+            if net_id in footprint.local_nets:
+                continue
+            min_x = footprint.min_x - margin
+            min_y = footprint.min_y - margin
+            max_x = footprint.max_x + margin
+            max_y = footprint.max_y + margin
+            penalty = (
+                self.rules.cost_under_body
+                * self.rules.cost_straight
+                * math.hypot(max_x - min_x, max_y - min_y)
+            )
+            areas.append(
+                UnderBodyAvoidArea(
+                    min_x=min_x,
+                    min_y=min_y,
+                    max_x=max_x,
+                    max_y=max_y,
+                    local_nets=footprint.local_nets,
+                    penalty=penalty,
+                )
+            )
+        return areas or None
+
+    def _under_body_pad_source(self) -> tuple[list, float]:
+        """``(all board pads, body-bbox margin mm)`` for the avoid areas.
+
+        Preferred source: the routing grid's registered pads (includes the
+        net-0 obstacle pads the loaders add) with the one-cell surcharge
+        margin.  Fallback: the schema PCB's footprints, converted to router
+        pads with the same rotation/net-number semantics as
+        ``route_net_auto``'s pad builder, with the design trace clearance
+        as the margin.  ``([], ...)`` when neither source exists (mock
+        PCBs).
+        """
+        from .body_surcharge import BODY_BBOX_MARGIN_CELLS
+
+        grid = getattr(self.pcb, "grid", None)
+        grid_pads = getattr(grid, "pads", None) if grid is not None else None
+        if grid_pads:
+            resolution = getattr(grid, "resolution", 0.1)
+            return list(grid_pads), BODY_BBOX_MARGIN_CELLS * resolution
+
+        footprints = getattr(self.pcb, "footprints", None)
+        if not footprints:
+            return [], 0.0
+
+        from .layers import Layer
+        from .primitives import Pad as RouterPad
+
+        pads: list[RouterPad] = []
+        for fp in footprints:
+            reference = getattr(fp, "reference", "")
+            if not reference or reference.startswith("#"):
+                continue
+            fp_x, fp_y = fp.position
+            # KiCad applies the footprint orientation as a NEGATED angle
+            # vs standard CCW math (issue #3739) -- same conversion as
+            # ``route_net_auto``'s pad builder.
+            rot_rad = math.radians(-getattr(fp, "rotation", 0.0))
+            cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
+            for pad in fp.pads:
+                px, py = pad.position
+                pad_layers = pad.layers or []
+                pad_layer = (
+                    Layer.B_CU
+                    if ("B.Cu" in pad_layers and "F.Cu" not in pad_layers)
+                    else Layer.F_CU
+                )
+                pads.append(
+                    RouterPad(
+                        x=fp_x + px * cos_r - py * sin_r,
+                        y=fp_y + px * sin_r + py * cos_r,
+                        width=pad.size[0] if pad.size else 1.0,
+                        height=pad.size[1] if pad.size else 1.0,
+                        net=pad.net_number,
+                        net_name=pad.net_name or "",
+                        layer=pad_layer,
+                        ref=reference,
+                        pin=pad.number,
+                    )
+                )
+        return pads, self.rules.trace_clearance
 
     def _route_escape_then_global(self, net: str | int, pads: list[Pad] | None) -> RoutingResult:
         """Execute escape routing followed by global routing.

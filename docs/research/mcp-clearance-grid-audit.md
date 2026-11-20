@@ -37,7 +37,7 @@ However, this does **not** establish that every grid pad model is conservative:
 the consumers infer circular pads from nearly equal width and height, which
 under-covers square rectangular corners. Discarded noncardinal orientation also
 under-covers real copper. Those distinct correctness risks are tracked in
-[#5229](https://github.com/rjwalters/kicad-tools/issues/5229), covering shape/rotation
+[#5229](https://github.com/2AMLogic/kicad-tools/issues/5229), covering shape/rotation
 propagation, Python/C++ agreement, and finalization regressions. #5194's other router consumers do not cover these grid sites.
 
 No grid geometry, manufacturing thresholds, clearance floors, routing guards,
