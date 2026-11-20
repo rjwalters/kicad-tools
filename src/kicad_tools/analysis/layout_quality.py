@@ -104,6 +104,15 @@ _CORNER_CLASSES = ("right_angle", "acute", "turn_back")
 # Vertex keys round coordinates to 2 decimals, the same granularity the
 # sharp-trace-corner rule uses to group findings at one vertex.
 _VERTEX_DECIMALS = 2
+# Junction-candidate lattice for ``_count_corners`` (issue #9658), in
+# cells per mm.  The cell size (1/100 mm) equals the per-axis 0.01 mm
+# tolerance ``AcidTrapCheck._find_junction`` joins endpoints with, so two
+# endpoints it would pair can never land more than one lattice cell apart
+# on an axis and each occupied cell only needs its 3x3 neighbourhood to
+# enumerate every candidate pair.  Keep the cell size <= that tolerance
+# (i.e. this value >= 100); the bucketing is a pure candidate filter and
+# ``_find_junction`` still decides every junction.
+_JUNCTION_LATTICE_PER_MM = 100
 # Endpoint-join tolerance for Edge.Cuts polygonization, in mm. KiCad writes
 # coordinates at 1e-6 mm (1 nm) precision, so the two copies of one shared
 # corner -- a board graphic's written value and a rotated footprint endpoint
@@ -195,6 +204,14 @@ def _count_corners(pcb: PCB) -> tuple[dict[str, int], dict[str, dict[str, int]]]
     junction vertex (``AcidTrapCheck._find_junction``), skips vertices
     buried under same-net pad/via copper, dedupes stacked duplicate
     segments, and classifies every distinct-leg pair angle.
+
+    Junction candidates are bucketed per endpoint on the
+    :data:`_JUNCTION_LATTICE_PER_MM` lattice instead of comparing every
+    same-group pair (issue #9658): the walk below still visits candidate
+    pairs in ``(i, j)`` index order and still lets ``_find_junction``
+    decide every junction, so the vertices, their legs and the published
+    counts are exactly what the all-pairs search produced -- at roughly
+    linear cost per group instead of quadratic.
     """
     from kicad_tools.explain.checks.acid_trap import AcidTrapCheck
     from kicad_tools.validate.rules.sharp_trace_corner import _copper_discs, _is_buried
@@ -213,22 +230,50 @@ def _count_corners(pcb: PCB) -> tuple[dict[str, int], dict[str, dict[str, int]]]
     # pair sharing an endpoint contributes both legs to it.
     vertices: dict[tuple, tuple[tuple[float, float], list[Any]]] = {}
     for key, segments in groups.items():
-        for i, seg1 in enumerate(segments):
-            for seg2 in segments[i + 1 :]:
-                junction = check._find_junction(seg1, seg2)
-                if junction is None:
-                    continue
-                vkey = (
-                    key,
-                    round(junction[0], _VERTEX_DECIMALS),
-                    round(junction[1], _VERTEX_DECIMALS),
-                )
-                entry = vertices.setdefault(vkey, (junction, []))
-                legs = entry[1]
-                if seg1 not in legs:
-                    legs.append(seg1)
-                if seg2 not in legs:
-                    legs.append(seg2)
+        # Bucket endpoint indices on the lattice: two endpoints within
+        # _find_junction's per-axis 0.01 mm tolerance land in cells at
+        # most one apart on each axis, so pairing each occupied cell
+        # with its 3x3 neighbourhood reaches every junction candidate.
+        cells: dict[tuple[int, int], list[int]] = {}
+        for idx, seg in enumerate(segments):
+            for point in (seg.start, seg.end):
+                cells.setdefault(
+                    (
+                        round(point[0] * _JUNCTION_LATTICE_PER_MM),
+                        round(point[1] * _JUNCTION_LATTICE_PER_MM),
+                    ),
+                    [],
+                ).append(idx)
+        candidates: set[tuple[int, int]] = set()
+        for (cx, cy), idxs in cells.items():
+            for i, a in enumerate(idxs):
+                for b in idxs[i + 1 :]:
+                    candidates.add((a, b) if a < b else (b, a))
+            # The four forward neighbours cover every unordered pair of
+            # cells within Chebyshev distance 1 exactly once.
+            for dx, dy in ((-1, 1), (0, 1), (1, 1), (1, 0)):
+                for a in idxs:
+                    for b in cells.get((cx + dx, cy + dy), ()):
+                        candidates.add((a, b) if a < b else (b, a))
+        # (i, j) order over the candidates reproduces the all-pairs
+        # walk's pair order, so first-junction wins and leg order match
+        # the previous implementation exactly.
+        for i, j in sorted(candidates):
+            seg1, seg2 = segments[i], segments[j]
+            junction = check._find_junction(seg1, seg2)
+            if junction is None:
+                continue
+            vkey = (
+                key,
+                round(junction[0], _VERTEX_DECIMALS),
+                round(junction[1], _VERTEX_DECIMALS),
+            )
+            entry = vertices.setdefault(vkey, (junction, []))
+            legs = entry[1]
+            if seg1 not in legs:
+                legs.append(seg1)
+            if seg2 not in legs:
+                legs.append(seg2)
 
     totals: dict[str, int] = dict.fromkeys(_CORNER_CLASSES, 0)
     per_net: dict[str, dict[str, int]] = {}
