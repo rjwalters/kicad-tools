@@ -234,7 +234,21 @@ public:
     // A* sees the same plane-zone cells the Python pathfinder costs.
     void mark_zone_cells(const std::vector<int>& xs, const std::vector<int>& ys,
                          const std::vector<int>& layers, const std::vector<int>& nets);
-    void clear_zone_cells();
+    // Issue #9826: ``layer < 0`` (default) clears every layer, otherwise
+    // only ``layer``.  Former zone cells that are neither blocked nor an
+    // obstacle get ``net = 0``, matching ``RoutingGrid.clear_zones``.
+    void clear_zone_cells(int layer = -1);
+
+    // Issue #9826: grid-layer indices the resolved stack types as ``PLANE``.
+    // A foreign zone cell on a plane layer is soft-costed
+    // (``cost_zone_foreign_plane``); on any other layer it is blocked --
+    // the same split the Python pathfinder makes.  Empty (the default)
+    // means no plane layers, so every foreign zone blocks.
+    void set_plane_layers(const std::vector<int>& layers);
+    bool is_plane_layer(int layer) const {
+        return layer >= 0 && static_cast<size_t>(layer) < plane_layer_.size() &&
+               plane_layer_[static_cast<size_t>(layer)] != 0;
+    }
 
     // Airwire-separation cost plane (Issue #8999).  ``set_airwire_cells``
     // writes the weighted sparse plane (same count column on every layer
@@ -740,6 +754,7 @@ private:
     // skip the per-cell reservation read entirely when this is false, so
     // boards without active reservations keep byte-identical behaviour.
     bool has_reservations_ = false;
+    std::vector<uint8_t> plane_layer_;  // Issue #9826: per-layer PLANE flag
     int cols_, rows_, layers_;
     float resolution_;
     float origin_x_, origin_y_;

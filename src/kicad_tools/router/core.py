@@ -21067,6 +21067,13 @@ class Autorouter:
         # Issue #6008: the fresh grid has no keepout rule areas yet -- replay
         # them, after the pads so pad metal keeps its own-net ownership.
         self._install_grid_rule_area_keepouts()
+        # Issue #9826: the load path marked plane zones on the grid discarded
+        # above; re-mark them (after pads/keepouts, as on load) so the next
+        # trial still pays ``cost_zone_foreign_plane`` on both backends.
+        # ``add_zone_cells`` mirrors the marks onto the paired CppGrid.
+        from .layer_advisories import remark_plane_zones
+
+        remark_plane_zones(self, self.grid)
         self.routes = []
 
     def _shuffle_within_tiers(self, net_order: list[int], promotion_rate: float = 0.0) -> list[int]:
@@ -27568,6 +27575,11 @@ class Autorouter:
         # Issue #6008: keepout rule areas on the fine grid too (after the pads,
         # so pad metal keeps its own-net ownership).
         self._install_grid_rule_area_keepouts(fine_grid)
+        # Issue #9826: plane zones too -- marked before the router below is
+        # built, so ``CppGrid.from_routing_grid`` copies them to C++.
+        from .layer_advisories import remark_plane_zones
+
+        remark_plane_zones(self, fine_grid)
 
         # Create a fine-grid router
         fine_router = create_hybrid_router(

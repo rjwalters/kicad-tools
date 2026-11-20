@@ -8232,11 +8232,13 @@ class RoutingGrid:
                     del self._zone_ids[key]
 
             # Issue #9597: mirror the clear onto the paired C++ grid so its
-            # zone-cost marks cannot outlive the Python ones.
+            # zone-cost marks cannot outlive the Python ones.  Issue #9826:
+            # same layer scope, and the C++ clear resets ``net`` on unblocked
+            # former zone cells exactly as the loop above does.
             cpp_grid = getattr(self, "_cpp_grid", None)
             impl = getattr(cpp_grid, "_impl", None) if cpp_grid is not None else None
             if impl is not None and hasattr(impl, "clear_zone_cells"):
-                impl.clear_zone_cells()
+                impl.clear_zone_cells(-1 if layer_index is None else int(layer_index))
 
     def get_zone_cells(self, layer_index: int, zone_id: str | None = None) -> set[tuple[int, int]]:
         """Get all cells belonging to zones on a layer.
