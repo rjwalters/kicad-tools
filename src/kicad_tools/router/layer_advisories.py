@@ -341,9 +341,7 @@ def plane_zone_outlines(
     if not plane_names:
         return ()
 
-    name_to_number: dict[str, int] = {
-        n.name: n.number for n in pcb.nets.values() if n.name
-    }
+    name_to_number: dict[str, int] = {n.name: n.number for n in pcb.nets.values() if n.name}
 
     def resolve(number: int, name: str) -> int:
         if number == 0 and name:
