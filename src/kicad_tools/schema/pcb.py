@@ -20,7 +20,11 @@ logger = logging.getLogger(__name__)
 
 from kicad_tools.sexp import SExp
 
-from ..core.board_outline import board_outline_bounds, legacy_arc_points
+from ..core.board_outline import (
+    board_outline_bounds,
+    circle_tessellation_points,
+    legacy_arc_points,
+)
 from ..core.schematic_uuids import UuidMinter
 from ..core.sexp_file import load_footprint, load_pcb, save_pcb
 from ..core.version import KICAD_BOARD_FORMAT_VERSION, KICAD_GENERATOR_VERSION
@@ -5402,9 +5406,22 @@ class PCB:
     ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
         """Get board outline as a list of line segments.
 
-        Returns all Edge.Cuts graphic elements as line segments.
-        Handles gr_line, gr_arc, and gr_rect elements.
-        More useful for distance calculations than the polygon.
+        Returns all Edge.Cuts graphic elements as line segments: lines,
+        two-chord arcs, rect edges, circle rings and closed polygon
+        boundaries.  More useful for distance calculations than the polygon.
+
+        Issue #9690 review: a ``gr_circle`` / ``gr_poly`` on Edge.Cuts is
+        board edge for **any** fill resolution -- kicad-cli measures
+        ``copper_edge_clearance`` to the boundary of a filled cut-out and of
+        a stroke-only shape alike -- so both contribute their boundary
+        strokes here.  A circle becomes the core reader's certified
+        tessellated ring (sagitta bounded by
+        ``core.board_outline._CIRCLE_TESSELLATION_MAX_ERROR_MM``, never
+        looser than kicad-cli's true circle by more than 1e-5 mm); a poly
+        becomes its authored vertex chain closed back to its first vertex.
+        Malformed shapes (a circle without a resolvable positive radius, a
+        poly with fewer than three points) are skipped, matching the
+        tolerant in-memory parsing of the line/arc/rect collections.
 
         Returns:
             List of ((x1, y1), (x2, y2)) tuples representing line segments.
@@ -5422,8 +5439,33 @@ class PCB:
                 segments.append((arc.mid, arc.end))
 
         for graphic in self._graphics:
-            if graphic.layer == "Edge.Cuts" and graphic.graphic_type == "rect":
+            if graphic.layer != "Edge.Cuts":
+                continue
+            if graphic.graphic_type == "rect":
                 segments.extend(self._rect_to_segments(graphic.start, graphic.end))
+            elif graphic.graphic_type == "circle":
+                if graphic.center is None:
+                    continue
+                cx, cy = graphic.center
+                # ``end`` is a point on the circumference (#8540).
+                radius = math.hypot(graphic.end[0] - cx, graphic.end[1] - cy)
+                if radius <= 0.0:
+                    continue
+                try:
+                    ring = circle_tessellation_points((cx, cy), radius)
+                except ValueError:
+                    # Radius beyond the certified chord budget (~1.2 m):
+                    # skip, like every other malformed shape here, rather
+                    # than crash a tolerant consumer such as kct check.
+                    continue
+                segments.extend(zip(ring, ring[1:] + ring[:1], strict=True))
+            elif graphic.graphic_type == "poly":
+                chain = graphic.points
+                if len(chain) >= 3:
+                    # A polygon is authored closed; drop zero-length edges
+                    # (an authored repeat of a vertex carries no boundary).
+                    edges = list(zip(chain, chain[1:] + chain[:1], strict=True))
+                    segments.extend(edge for edge in edges if edge[0] != edge[1])
 
         # Transform from sheet-absolute to board-relative coordinates
         # so that outline segments match footprint positions (which are
@@ -5445,9 +5487,11 @@ class PCB:
         short: an explicit filled token always fills; with the token absent
         only a zero-stroke-width circle/rect fills, never a poly).
 
-        Stroke-only (unfilled) shapes keep exactly the reading they had
-        before this method existed: a rect's four outline segments from
-        :meth:`get_board_outline_segments`, and no interior semantics.
+        Stroke-only (unfilled) shapes get no interior semantics from this
+        method; their boundary is still board edge through
+        :meth:`get_board_outline_segments`, which emits a rect's four edges,
+        a poly's closed vertex chain and a circle's tessellated ring for
+        every fill resolution (Issue #9690 review).
 
         Returns:
             List of :class:`FilledOutlineRegion` in **board-relative**

@@ -16,13 +16,16 @@ no fill token, stroke width == 0   filled        stroke-only
 ==========================  ============  ===========
 
 The "width == 0 means filled" default is KiCad's legacy convention for
-circle/rect; ``gr_poly`` never defaults to filled.  A shape that resolves to
-stroke-only keeps exactly the outline reading it had before this issue (rect
-strokes; circle/poly contribute no stroke segments on main).
+circle/rect; ``gr_poly`` never defaults to filled.  Independently of fill,
+every closed shape's boundary is board edge: ``get_board_outline_segments``
+emits a circle's tessellated ring and a poly's closed vertex chain alongside
+a rect's edges (#9690 review), so copper straddling or just outside a
+cut-out boundary is measured exactly as kicad-cli measures it.
 """
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -300,9 +303,9 @@ class TestEdgeClearanceFilledCutouts:
         assert _rule_ids(results) == []
 
     def test_board_with_only_a_bare_circle_still_checks(self, tmp_path):
-        # No outline *segments* at all -- the early "no outline" return must
-        # not swallow the filled-region check (a lone circle is the issue's
-        # own reproducer).
+        # A lone circle is the issue's own reproducer: its tessellated ring
+        # is now the outline stroke geometry, and the filled-region check
+        # must not be swallowed by any "no outline" early return.
         path = tmp_path / "only_circle.kicad_pcb"
         path.write_text(
             BOARD_TMPL.format(
@@ -321,7 +324,16 @@ class TestEdgeClearanceFilledCutouts:
             )
         )
         pcb = PCB.load(path)
-        assert pcb.get_board_outline_segments() == []
+        segments = pcb.get_board_outline_segments()
+        # A certified ring: every segment endpoint sits on the r=20 circle.
+        # The lone circle is also the whole outline, so the board origin is
+        # its bbox corner and the ring is emitted board-relative.
+        assert segments
+        ox, oy = pcb.board_origin
+        cx, cy = 60.0 - ox, 50.0 - oy
+        for (x1, y1), (x2, y2) in segments:
+            for x, y in ((x1, y1), (x2, y2)):
+                assert math.hypot(x - cx, y - cy) == pytest.approx(20.0, abs=1e-3)
         results = _run_rule(pcb)
         assert "edge_clearance_trace" in _rule_ids(results)
 
@@ -332,6 +344,51 @@ class TestEdgeClearanceFilledCutouts:
         traces = [v for v in results.errors if v.rule_id == "edge_clearance_trace"]
         assert len(traces) == 1
         assert traces[0].actual_value == pytest.approx(0.0)
+
+    def test_near_outside_track_flagged_by_circle_boundary(self, tmp_path):
+        # Copper 0.125 mm outside the circle's top point: every sample point
+        # is outside the region, so only the boundary stroke can flag it
+        # (#9690 review probe -- kicad-cli flags it).
+        near = '(segment (start 59 29.75) (end 61 29.75) (width 0.25) (layer "F.Cu") (net 1))'
+        pcb = _write_board(tmp_path, BARE_CIRCLE, near + "\n  " + FAR_EXTERIOR_TRACK)
+        results = _run_rule(pcb)
+        traces = [v for v in results.errors if v.rule_id == "edge_clearance_trace"]
+        assert len(traces) == 1
+        assert traces[0].actual_value == pytest.approx(0.125, abs=1e-3)
+
+    def test_crossing_track_with_outside_samples_flagged(self, tmp_path):
+        # Crosses the circle with start, end and midpoint all outside it
+        # (end is 0.52 mm outside the ring): the stroke gap reports the
+        # copper's penetration past the boundary (kernel signed gap, <= 0),
+        # which the interior test alone would have missed (#9690 review
+        # probe).
+        cross = '(segment (start 5 35) (end 74 35) (width 0.25) (layer "F.Cu") (net 1))'
+        pcb = _write_board(tmp_path, BARE_CIRCLE, cross + "\n  " + FAR_EXTERIOR_TRACK)
+        results = _run_rule(pcb)
+        traces = [v for v in results.errors if v.rule_id == "edge_clearance_trace"]
+        assert len(traces) == 1
+        assert traces[0].actual_value <= 0.0
+
+    def test_fillno_circle_boundary_tracks_flagged(self, tmp_path):
+        # The boundary of a stroke-only circle is board edge too: both
+        # review probes stay flagged without any interior semantics
+        # (kicad-cli parity for ``(fill no)``; most of #9695).
+        near = '(segment (start 59 29.75) (end 61 29.75) (width 0.25) (layer "F.Cu") (net 1))'
+        cross = '(segment (start 5 35) (end 74 35) (width 0.25) (layer "F.Cu") (net 1))'
+        pcb = _write_board(
+            tmp_path, FILLNO_CIRCLE, near + "\n  " + cross + "\n  " + FAR_EXTERIOR_TRACK
+        )
+        results = _run_rule(pcb)
+        traces = [v for v in results.errors if v.rule_id == "edge_clearance_trace"]
+        assert len(traces) == 2
+
+    def test_fillno_poly_near_outside_track_flagged(self, tmp_path):
+        near = '(segment (start 59 29.75) (end 61 29.75) (width 0.25) (layer "F.Cu") (net 1))'
+        pcb = _write_board(tmp_path, FILLNO_POLY, near + "\n  " + FAR_EXTERIOR_TRACK)
+        results = _run_rule(pcb)
+        traces = [v for v in results.errors if v.rule_id == "edge_clearance_trace"]
+        assert len(traces) == 1
+        assert traces[0].actual_value == pytest.approx(0.125, abs=1e-3)
 
     def test_interior_via_flagged(self, tmp_path):
         pcb = _write_board(tmp_path, BARE_CIRCLE, INTERIOR_VIA + "\n  " + EXTERIOR_VIA)

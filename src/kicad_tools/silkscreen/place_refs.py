@@ -510,7 +510,6 @@ def _board_material(pcb: _SilkscreenPCB, Polygon: Any) -> tuple[list, Any | None
     if pcb.outline_error:
         return [], None, pcb.outline_error
     segments = pcb.get_board_outline_segments()
-    ox, oy = pcb._board_origin
     for node in pcb._sexp.children:
         if node.is_atom:
             continue
@@ -542,12 +541,16 @@ def _board_material(pcb: _SilkscreenPCB, Polygon: Any) -> tuple[list, Any | None
                     x, y = xy.get_float(0), xy.get_float(1)
                     if x is None or y is None or not math.isfinite(x) or not math.isfinite(y):
                         return segments, None, "board outline unavailable: malformed polygon"
-                    vertices.append((x - ox, y - oy))
+                    vertices.append((x, y))
             if len(vertices) > 1 and vertices[-1] == vertices[0]:
                 vertices.pop()
+            # The poly's boundary edges already come from
+            # ``get_board_outline_segments`` (Issue #9690 review); re-adding
+            # them here would double every edge and break the strict
+            # one-mate-per-endpoint contour walk below.  Only the vertex
+            # validation runs here.
             if len(vertices) < 3:
                 return segments, None, "board outline unavailable: malformed polygon"
-            segments.extend(zip(vertices, vertices[1:] + vertices[:1], strict=True))
     if not segments:
         return segments, None, "board outline unavailable: missing Edge.Cuts"
     if any(not math.isfinite(v) for segment in segments for point in segment for v in point):

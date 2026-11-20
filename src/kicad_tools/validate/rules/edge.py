@@ -117,8 +117,10 @@ class EdgeClearanceRule(DRCRule):
         # These are now in board-relative coordinates.
         outline_segments = pcb.get_board_outline_segments()
         # Filled Edge.Cuts shapes are cut-out regions: copper inside one is
-        # at gap 0 (Issue #9690).  A board whose only Edge.Cuts shape is a
-        # filled circle has no outline *segments* but must still be checked.
+        # at gap 0 (Issue #9690).  The stroke geometry carries every
+        # shape's boundary (rect edges, poly chains, circle rings), so
+        # copper that only straddles a cut-out boundary -- all sample
+        # points outside -- is measured by the gap below.
         filled_regions = pcb.get_board_outline_filled_regions()
         if not outline_segments and not filled_regions:
             # No board outline defined, can't check edge clearances
