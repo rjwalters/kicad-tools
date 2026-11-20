@@ -20,6 +20,10 @@ Examples:
     # After routing: clip silk lines/polygons off every drilled hole (opt-in)
     kct fix-silkscreen board.kicad_pcb --clip-to-holes
 
+    # One shared pass: widen, rescale, thicken, clip off pads and PTH/NPTH
+    # holes (vias untouched) and relocate obscured references
+    kct fix-silkscreen board.kicad_pcb --all
+
     # Preview changes without applying
     kct fix-silkscreen board.kicad_pcb --dry-run
 
@@ -38,12 +42,13 @@ from pathlib import Path
 from kicad_tools.drc.repair_silkscreen import (
     HoleClearanceRepairResult,
     PadClearanceRepairResult,
+    SilkLegalizeReport,
     SilkscreenRepairer,
     SilkscreenRepairResult,
     TextHeightRepairResult,
 )
 from kicad_tools.manufacturers import get_all_manufacturer_names
-from kicad_tools.manufacturers.base import load_design_rules_from_yaml
+from kicad_tools.manufacturers.base import DesignRules, load_design_rules_from_yaml
 
 
 def _get_min_width(
@@ -135,6 +140,25 @@ def _get_min_pad_clearance(mfr: str | None, layers: int, copper: float) -> float
     return next(iter(rules_dict.values())).min_silk_to_pad_clearance_mm
 
 
+def _resolve_design_rules(mfr: str | None, layers: int, copper: float) -> DesignRules | None:
+    """Resolve the whole manufacturer ruleset for the shared legalisation pass.
+
+    Issue #9797: ``legalize_silk`` reads every silk value (width, height,
+    pad and hole clearance, solder-mask margin) from one :class:`DesignRules`
+    instead of the per-value lookups above.
+    """
+    if not mfr:
+        return None
+    try:
+        rules_dict = load_design_rules_from_yaml(mfr)
+    except FileNotFoundError:
+        return None
+    for key in (f"{layers}layer_{int(copper)}oz", f"{layers}layer_1oz"):
+        if key in rules_dict:
+            return rules_dict[key]
+    return next(iter(rules_dict.values()))
+
+
 def _print_results(
     line_result: SilkscreenRepairResult,
     text_result: TextHeightRepairResult,
@@ -212,6 +236,34 @@ def _clip_dicts(clip_result: PadClearanceRepairResult) -> dict:
     }
 
 
+def _line_dicts(line_result: SilkscreenRepairResult) -> list[dict]:
+    return [
+        {
+            "element_type": f.element_type,
+            "layer": f.layer,
+            "footprint_ref": f.footprint_ref,
+            "old_width_mm": f.old_width,
+            "new_width_mm": f.new_width,
+        }
+        for f in line_result.fixes
+    ]
+
+
+def _text_dicts(text_result: TextHeightRepairResult) -> list[dict]:
+    return [
+        {
+            "element_type": f.element_type,
+            "layer": f.layer,
+            "footprint_ref": f.footprint_ref,
+            "old_height_mm": f.old_height,
+            "new_height_mm": f.new_height,
+            "old_width_mm": f.old_width,
+            "new_width_mm": f.new_width,
+        }
+        for f in text_result.fixes
+    ]
+
+
 def _print_json(
     line_result: SilkscreenRepairResult,
     text_result: TextHeightRepairResult,
@@ -231,28 +283,8 @@ def _print_json(
         + text_result.total_fixed
         + (clip_result.total_fixed if clip_result else 0)
         + (hole_result.total_fixed if hole_result else 0),
-        "line_width_fixes": [
-            {
-                "element_type": f.element_type,
-                "layer": f.layer,
-                "footprint_ref": f.footprint_ref,
-                "old_width_mm": f.old_width,
-                "new_width_mm": f.new_width,
-            }
-            for f in line_result.fixes
-        ],
-        "text_height_fixes": [
-            {
-                "element_type": f.element_type,
-                "layer": f.layer,
-                "footprint_ref": f.footprint_ref,
-                "old_height_mm": f.old_height,
-                "new_height_mm": f.new_height,
-                "old_width_mm": f.old_width,
-                "new_width_mm": f.new_width,
-            }
-            for f in text_result.fixes
-        ],
+        "line_width_fixes": _line_dicts(line_result),
+        "text_height_fixes": _text_dicts(text_result),
     }
     if clip_result is not None:
         data.update(_clip_dicts(clip_result))
@@ -404,6 +436,141 @@ def _print_text(
             print(f"  pin-1 / polarity marker lost (re-add clear of the hole): {ref}")
 
 
+def _legalize_json(report: SilkLegalizeReport, mfr: str | None) -> dict:
+    data = {
+        "mode": "all",
+        "manufacturer": mfr,
+        "dry_run": report.dry_run,
+        "min_width_mm": report.min_width_mm,
+        "min_height_mm": report.min_height_mm,
+        "min_pad_clearance_mm": report.min_pad_clearance_mm,
+        "min_hole_clearance_mm": report.min_hole_clearance_mm,
+        "total_fixed": report.total_fixed,
+        "total_line_width_fixed": report.width.total_fixed,
+        "total_text_height_fixed": report.heights.total_fixed,
+        "total_text_stroke_fixed": report.strokes.total_fixed,
+        "total_refs_moved": report.total_moved,
+        "line_width_fixes": _line_dicts(report.width),
+        "text_height_fixes": _text_dicts(report.heights),
+        "text_stroke_fixes": [
+            {
+                "element_type": f.element_type,
+                "layer": f.layer,
+                "footprint_ref": f.footprint_ref,
+                "old_thickness_mm": f.old_thickness,
+                "new_thickness_mm": f.new_thickness,
+            }
+            for f in report.strokes.fixes
+        ],
+    }
+    data.update(_clip_dicts(report.pads))
+    data.update(_hole_dicts(report.holes))
+    data["reference_placements"] = (
+        [p.to_dict() for p in report.refs.placements] if report.refs is not None else []
+    )
+    data["unresolved"] = [u.to_dict() for u in report.unresolved]
+    return data
+
+
+def _print_legalize_text(report: SilkLegalizeReport, mfr: str | None) -> None:
+    action = "Would legalize" if report.dry_run else "Legalized"
+    source = f" to {mfr.upper()} minimums" if mfr else ""
+    print(
+        f"{action} silkscreen{source}: {report.total_fixed} edit(s)"
+        f" ({report.total_moved} reference(s) moved)"
+    )
+    if report.width.total_fixed:
+        print(f"  widened {report.width.total_fixed} line(s) to {report.min_width_mm}mm")
+    if report.heights.total_fixed:
+        print(
+            f"  scaled {report.heights.total_fixed} text element(s) to {report.min_height_mm}mm height"
+        )
+    if report.strokes.total_fixed:
+        print(f"  thickened {report.strokes.total_fixed} text stroke(s) to {report.min_width_mm}mm")
+    if report.pads.total_fixed:
+        print(
+            f"  clipped {report.pads.total_fixed} line(s) to {report.min_pad_clearance_mm}mm pad clearance"
+        )
+    if report.holes.total_fixed:
+        print(
+            f"  clipped {report.holes.total_fixed} graphic(s) off drilled holes"
+            f" (vias untouched, {report.min_hole_clearance_mm}mm clearance)"
+        )
+    if report.unresolved:
+        print("Unresolved (left illegal; no waiver created, kct check still reports them):")
+        for u in report.unresolved:
+            detail = f" -- {u.detail}" if u.detail else ""
+            print(f"  [{u.kind}] {u.item}{detail}")
+    elif not report.dry_run:
+        print("No unresolved silk findings.")
+    if report.output_path:
+        print(f"\nSaved to: {report.output_path}")
+
+
+def _print_legalize_results(
+    report: SilkLegalizeReport, output_format: str, mfr: str | None
+) -> None:
+    if output_format == "json":
+        print(json.dumps(_legalize_json(report, mfr), indent=2))
+    elif output_format == "summary":
+        action = "Would legalize" if report.dry_run else "Legalized"
+        source = f" to {mfr.upper()} minimums" if mfr else ""
+        unresolved = f"; {len(report.unresolved)} unresolved item(s)" if report.unresolved else ""
+        print(
+            f"{action} {report.total_fixed} silk edit(s){source}"
+            f" ({report.total_moved} reference(s) moved{unresolved})"
+        )
+    else:
+        _print_legalize_text(report, mfr)
+
+
+def _run_legalize(args, pcb_path: Path) -> int:
+    """Run the shared ``legalize_silk`` pass for ``--all`` (Issue #9797)."""
+    from dataclasses import replace
+
+    from kicad_tools.drc.repair_silkscreen import legalize_silk
+
+    rules = _resolve_design_rules(args.mfr, args.layers, args.copper)
+    if rules is None:
+        print(
+            f"Error: --all needs manufacturer design rules, but no configuration "
+            f"found for '{args.mfr}'",
+            file=sys.stderr,
+        )
+        return 1
+    if args.min_width is not None:
+        rules = replace(rules, min_silkscreen_width_mm=args.min_width)
+    if args.min_height is not None:
+        rules = replace(rules, min_silkscreen_height_mm=args.min_height)
+    if args.hole_clearance is not None:
+        rules = replace(rules, min_silk_to_hole_clearance_mm=args.hole_clearance)
+
+    try:
+        report = legalize_silk(pcb_path, rules, output=args.output, dry_run=args.dry_run)
+    except ImportError as e:
+        print(f"Error: --all requires shapely: {e}", file=sys.stderr)
+        return 1
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error legalizing silkscreen: {e}", file=sys.stderr)
+        return 1
+
+    if not args.quiet:
+        _print_legalize_results(report, args.format, args.mfr)
+
+    if report.hole_residual:
+        # Graphics still over a hole (an arc/circle, or a shape no clip could
+        # save): fail loud rather than ship silk the fab will remove.
+        print(
+            f"Error: {len(report.hole_residual)} silk graphic(s) still overlap a drilled hole",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for fix-silkscreen command."""
     parser = argparse.ArgumentParser(
@@ -475,7 +642,16 @@ Examples:
         type=float,
         default=None,
         metavar="MM",
-        help="Silk-to-hole clearance for --clip-to-holes (default: the silk_hole_overlap rule's, 0)",
+        help="Silk-to-hole clearance for --clip-to-holes/--all (default: the silk_hole_overlap rule's, 0)",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "One shared legalisation pass (legalize_silk, #9795 phase 1): widen, "
+            "rescale, thicken, clip off pads and PTH/NPTH holes (vias untouched) "
+            "and relocate obscured references"
+        ),
     )
     parser.add_argument(
         "-o",
@@ -511,6 +687,9 @@ Examples:
     if pcb_path.suffix.lower() != ".kicad_pcb":
         print(f"Error: Expected .kicad_pcb file, got: {pcb_path.suffix}", file=sys.stderr)
         return 1
+
+    if args.all:
+        return _run_legalize(args, pcb_path)
 
     # Resolve minimums
     min_width = _get_min_width(args.mfr, args.layers, args.copper, args.min_width)

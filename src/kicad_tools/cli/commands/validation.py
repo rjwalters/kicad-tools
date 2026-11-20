@@ -125,6 +125,8 @@ def run_fix_silkscreen_command(args) -> int:
         sub_argv.append("--clip-to-holes")
     if getattr(args, "hole_clearance", None) is not None:
         sub_argv.extend(["--hole-clearance", str(args.hole_clearance)])
+    if getattr(args, "all", False):
+        sub_argv.append("--all")
     if args.output:
         sub_argv.extend(["-o", args.output])
     if args.dry_run:
