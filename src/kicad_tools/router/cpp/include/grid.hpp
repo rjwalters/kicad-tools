@@ -229,6 +229,13 @@ public:
                            int radius_cells, float amount);
     void clear_avoidance_costs();
 
+    // Issue #9597: bulk zone (copper pour) marking -- mirrors the Python
+    // ``RoutingGrid.add_zone_cells`` / ``clear_zones`` sync so the native
+    // A* sees the same plane-zone cells the Python pathfinder costs.
+    void mark_zone_cells(const std::vector<int>& xs, const std::vector<int>& ys,
+                         const std::vector<int>& layers, const std::vector<int>& nets);
+    void clear_zone_cells();
+
     // Airwire-separation cost plane (Issue #8999).  ``set_airwire_cells``
     // writes the weighted sparse plane (same count column on every layer
     // -- a desire line is layer-less) in one call; a full

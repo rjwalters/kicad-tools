@@ -384,7 +384,13 @@ namespace router {
 // (``own_net_band_rejects``) so the caller retries only gate-caused failures.
 // A v71 .so refused every planar pad exit and pushed routes through pad-edge
 // via pairs.
-constexpr int ROUTER_CPP_BUILD_VERSION = 72;
+// v73 (Issue #9597, rebased over v71/v72 of #9019): ``DesignRules::cost_zone_foreign_plane`` plus
+// ``Grid3D::mark_zone_cells`` / ``clear_zone_cells`` -- the soft foreign
+// plane-zone crossing cost both A* step-cost loops now charge.  A v70 .so
+// has neither the rules field nor the verbs, so the Python grid's zone
+// marks would be invisible to the native search (cost parity breaks
+// silently); it must be rejected.
+constexpr int ROUTER_CPP_BUILD_VERSION = 73;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -818,6 +824,12 @@ struct DesignRules {
     // querying net, clamped at 0 so g_scores stay non-negative (A*
     // admissibility preserved).  ``0.0`` disables the attractor.
     float cost_corridor_attractor = 3.0f;
+    // Issue #9597: per-cell added cost for entering a foreign net's zone on
+    // a plane layer the routing net may use (Python
+    // ``DesignRules.cost_zone_foreign_plane``).  Soft cost, never a block --
+    // both backends charge it from the same zone-cell marks
+    // (``Grid3D::mark_zone_cells`` mirrors ``RoutingGrid.add_zone_cells``).
+    float cost_zone_foreign_plane = 10.0f;
 };
 
 // Issue #6272: the trace-vs-via copper floor, ``max(trace, via)``.  Native

@@ -94,6 +94,8 @@ NB_MODULE(router_cpp, m) {
         .def_rw("cost_via", &DesignRules::cost_via)
         .def_rw("cost_congestion", &DesignRules::cost_congestion)
         .def_rw("congestion_threshold", &DesignRules::congestion_threshold)
+        // Issue #9597: soft foreign plane-zone crossing cost.
+        .def_rw("cost_zone_foreign_plane", &DesignRules::cost_zone_foreign_plane)
         .def_rw("min_drill_clearance", &DesignRules::min_drill_clearance)
         .def_rw("min_hole_to_hole", &DesignRules::min_hole_to_hole)
         .def_rw("min_via_pad_edge_gap", &DesignRules::min_via_pad_edge_gap)
@@ -354,6 +356,10 @@ NB_MODULE(router_cpp, m) {
         .def("clear_airwire_costs", &Grid3D::clear_airwire_costs)
         .def("set_airwire_cells", &Grid3D::set_airwire_cells,
              "xs"_a, "ys"_a, "costs"_a)
+        // Issue #9597: zone (copper pour) marking verbs (see grid.hpp).
+        .def("mark_zone_cells", &Grid3D::mark_zone_cells,
+             "xs"_a, "ys"_a, "layers"_a, "nets"_a)
+        .def("clear_zone_cells", &Grid3D::clear_zone_cells)
         // Congestion
         .def("get_congestion", &Grid3D::get_congestion, "x"_a, "y"_a, "layer"_a)
         .def("update_congestion", &Grid3D::update_congestion,

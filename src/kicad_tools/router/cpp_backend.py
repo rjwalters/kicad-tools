@@ -160,7 +160,12 @@ STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
 # every planar pad exit and pushed routes through pad-edge via pairs) and
 # ``own_net_band_rejects()`` counts refusals so the Python side retries only
 # gate-caused failures and logs every gate-off fallback.
-_REQUIRED_CPP_BUILD_VERSION = 72
+# v73 (Issue #9597, rebased over v71/v72 of #9019): ``DesignRules::cost_zone_foreign_plane`` plus the
+# ``Grid3D::mark_zone_cells`` / ``clear_zone_cells`` verbs -- the soft
+# foreign plane-zone crossing cost both A* step-cost loops charge.  A v70
+# .so has neither, so the native search would cross plane zones for free
+# while the Python pathfinder pays the cost (silent parity break); reject.
+_REQUIRED_CPP_BUILD_VERSION = 73
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -1526,6 +1531,8 @@ class CppPathfinder:
         cpp_rules.congestion_threshold = rules.congestion_threshold
         # Issue #4071: soft corridor-attractor bonus (default 3.0).
         cpp_rules.cost_corridor_attractor = rules.cost_corridor_attractor
+        # Issue #9597: soft foreign plane-zone crossing cost (default 10.0).
+        cpp_rules.cost_zone_foreign_plane = rules.cost_zone_foreign_plane
 
         self._impl = router_cpp.Pathfinder(grid._impl, cpp_rules, diagonal_routing)
         self._grid = grid
