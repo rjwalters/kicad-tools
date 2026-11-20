@@ -447,9 +447,8 @@ class Reconciler:
 
         # Build component lookup maps
         sch_components = self._get_schematic_components(checker)
-        pcb_components = self._get_pcb_components(checker)
-
         sch_refs = set(sch_components.keys())
+        pcb_components = self._get_pcb_components(checker, sch_refs)
         pcb_refs = set(pcb_components.keys())
 
         # Exact matches (same reference in both)
@@ -929,15 +928,18 @@ class Reconciler:
                 }
         return components
 
-    def _get_pcb_components(self, checker) -> dict[str, dict[str, str]]:
+    def _get_pcb_components(
+        self, checker, sch_refs: set[str] | frozenset[str] = frozenset()
+    ) -> dict[str, dict[str, str]]:
         """Extract component info from PCB via the checker."""
         components: dict[str, dict[str, str]] = {}
         for fp in checker.pcb.footprints:
             if fp.reference and not fp.reference.startswith("#"):
-                # Mechanical mounting holes have no schematic symbol by
-                # convention; excluding them keeps them from registering as
-                # benign-but-noisy PCB-only drift (issue #3496).
-                if _is_mounting_hole(
+                # Mechanical mounting holes usually have no schematic symbol;
+                # excluding them keeps them from registering as
+                # benign-but-noisy PCB-only drift (issue #3496).  One that
+                # does have a symbol is matched like any other part.
+                if fp.reference not in sch_refs and _is_mounting_hole(
                     fp.reference,
                     fp.name or "",
                     has_netted_pads=any(p.net_name for p in fp.pads),
