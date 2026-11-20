@@ -127,17 +127,17 @@ def test_clean_nets_match_summed_length_and_stay_silent(tmp_path: Path, caplog):
 def test_sub_epsilon_off_path_stays_silent(tmp_path: Path, caplog):
     """Off-path copper at or below the epsilon is neither reported nor special."""
     rows = {1: ("DQ0", 10.0, 25.0), 2: ("DQ1", 20.0, 25.0), 3: ("DQ2", 30.0, 25.5)}
-    # DQ0 carries a 0.2 mm dead-end stub: real off-path copper, below the
+    # DQ0 carries a 2.0 mm dead-end stub: real off-path copper, below the
     # reporting epsilon, so derivation is log-silent.
     body = (
         _seg(5, 10, 25, 10, 1)
-        + _seg(15, 10, 15.2, 10, 1)
+        + _seg(15, 10, 17, 10, 1)
         + _seg(5, 20, 25, 20, 2)
         + _seg(5, 30, 25.5, 30, 3)
     )
     pcb = _write(tmp_path, body, rows)
     lengths = [measure_pcb_net(pcb, n) for n in (1, 2, 3)]
-    assert lengths[0] == pytest.approx(lengths[1] + 0.2, abs=0.05)  # premise
+    assert lengths[0] == pytest.approx(lengths[1] + 2.0, abs=0.05)  # premise
 
     with caplog.at_level(logging.WARNING, logger="kicad_tools.validate.match_group_skew"):
         skew_data, _g, _t = derive_group_skew_data(pcb, NET_CLASS_MAP)
@@ -149,19 +149,20 @@ def test_sub_epsilon_off_path_stays_silent(tmp_path: Path, caplog):
 def test_member_above_old_threshold_measured_by_same_ruler_as_siblings(tmp_path: Path, caplog):
     """The review's cliff regression: no ruler switch at any off-path amount.
 
-    One member carries 2.5 mm of dead-end stub (above the 2.0 mm cutoff an
-    earlier iteration of this change switched rulers at), a sibling 1.0 mm,
-    the third is clean.  Every member is measured with the same summed
-    ruler, so the group's skew is exactly the summed spread -- the 2 mm
-    step an earlier per-member threshold injected into ``max - min`` is
-    gone -- and both stubs are reported.
+    One member carries 6.0 mm of dead-end stub (above both the 2.0 mm
+    cutoff an earlier iteration of this change switched rulers at and
+    the landed reporting epsilon), a sibling 5.0 mm, the third is
+    clean.  Every member is measured with the same summed ruler, so
+    the group's skew is exactly the summed spread -- the 2 mm step an
+    earlier per-member threshold injected into ``max - min`` is gone
+    -- and both stubs are reported.
     """
     rows = {1: ("DQ0", 10.0, 25.0), 2: ("DQ1", 20.0, 25.0), 3: ("DQ2", 30.0, 25.5)}
     body = (
         _seg(5, 10, 25, 10, 1)
-        + _seg(15, 10, 17.5, 10, 1)  # 2.5 mm stub on DQ0
+        + _seg(15, 10, 21, 10, 1)  # 6.0 mm stub on DQ0
         + _seg(5, 20, 25, 20, 2)
-        + _seg(15, 20, 16, 20, 2)  # 1.0 mm stub on DQ1
+        + _seg(15, 20, 20, 20, 2)  # 5.0 mm stub on DQ1
         + _seg(5, 30, 25.5, 30, 3)
     )
     pcb = _write(tmp_path, body, rows)
@@ -171,11 +172,11 @@ def test_member_above_old_threshold_measured_by_same_ruler_as_siblings(tmp_path:
         skew_data, _g, _t = derive_group_skew_data(pcb, NET_CLASS_MAP)
 
     assert skew_data["DDR_DATA"] == pytest.approx(max(lengths) - min(lengths), abs=1e-6)
-    assert skew_data["DDR_DATA"] == pytest.approx(2.0, abs=0.05)
+    assert skew_data["DDR_DATA"] == pytest.approx(5.5, abs=0.05)
     messages = [r.getMessage() for r in caplog.records if "off-path" in r.getMessage()]
     assert len(messages) == 2
-    assert any("DQ0" in m and "2.5" in m for m in messages)
-    assert any("DQ1" in m and "1.0" in m for m in messages)
+    assert any("DQ0" in m and "6.0" in m for m in messages)
+    assert any("DQ1" in m and "5.0" in m for m in messages)
 
 
 def test_via_net_keeps_summed_accounting_and_stays_silent(tmp_path: Path, caplog):

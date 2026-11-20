@@ -96,8 +96,8 @@ logger = logging.getLogger(__name__)
 
 # Off-path copper above this is reported alongside the derived skew
 # (Issue #9138 AC 2): a warning naming the group, the net and the
-# excluded--from-nothing amount, so a stub or loop inflating a member's
-# length is visible instead of silently masking real skew.  It gates
+# amount, so copper that inflates a member's length and can mask
+# real skew is visible instead of silently doing so.  It gates
 # REPORTING only -- never the measurement.  The measurement stays the
 # summed kicad-cli figure for every member (the ruler the router's own
 # match-group tuner length-matches against), because both ways of
@@ -106,16 +106,23 @@ logger = logging.getLogger(__name__)
 # on which ruler each member got (the 2.0 mm cliff put ADDR_BUS at
 # 2.030 mm against a 0.500 mm tolerance on the seed-42 re-route), and a
 # uniform path ruler sheds a different per-net slice of the #9117
-# residual.  Measured on the fresh seed-42 re-route of board 07: every
-# ADDR_BUS member carries 1.3-3.4 mm of cycle copper the tuner itself
-# left (rejoined length-matching bumps), zero dead-end branches, and a
-# shortest-path ruler sheds 0.2-2.35 mm of it asymmetrically per net.
-# Deciding which copper is truly defect -- and repairing the tuner's
-# cycle copper and board 07's DQ7/LDQM stubs (#9118) so shedding the
-# real ones cannot fire committed-artifact gates -- is split out of
-# Issue #9138; until it lands, an inflated member is loud instead of
+# residual.  The epsilon sits above the benign off-path residual this
+# repo's own boards carry and below the smallest measured anomaly, so
+# the warning names anomalies rather than the population: on the
+# committed board 07 artifact, 32 of 38 match-group members carry
+# 0.50-2.08 mm of benign residual (tuner cycle copper -- rejoined
+# length-matching bumps, zero dead-end branches -- plus barrel overlap
+# under pads/vias and in-pad joints, which is not a routing defect),
+# the seed-42 re-route's ADDR_BUS members carry 1.3-3.4 mm of it, and
+# the four genuine anomalies (the DQ7/LDQM branch stubs of #9138's
+# Notes / #9118 and BYTE1's UDQM/DQ13) sit at 6.7-10.25 mm.  4.0 mm
+# clears both benign bands and reports exactly those four.  Deciding
+# which copper is truly defect -- and repairing the tuner's cycle
+# copper and board 07's DQ7/LDQM stubs (#9118) so shedding the real
+# ones cannot fire committed-artifact gates -- is split out of
+# Issue #9138; until it lands, an anomalous member is loud instead of
 # corrected.
-OFF_PATH_REPORT_EPSILON_MM = 0.5
+OFF_PATH_REPORT_EPSILON_MM = 4.0
 
 
 def derive_group_skew_data(
@@ -406,16 +413,20 @@ def _warn_off_path_copper(
 ) -> None:
     """Report a member net's off-path copper when it exceeds the epsilon.
 
-    Off-path copper is same-net copper on no pad-to-pad path -- a
-    dead-end loop, an overlapping duplicate or a stub (Issue #9138,
-    via :meth:`TraceLengthAnalyzer.measure_net_path`).  Above
+    Off-path copper is same-net copper on no pad-to-pad path, as
+    measured by :meth:`TraceLengthAnalyzer.measure_net_path` (Issue
+    #9138).  On this repo's boards it is usually benign residual --
+    tuner cycle copper (rejoined length-matching bumps) or barrel
+    overlap under pads/vias -- though it also captures genuine
+    dead-end branches and stubs; the warning therefore states what
+    was measured, not a cause.  Above
     :data:`OFF_PATH_REPORT_EPSILON_MM` it inflates this member's summed
     length and can mask real group skew, so it is reported; it is NOT
     excluded from the figure (see the constant's rationale for the
-    measured evidence that shedding it manufactures skew).  Nets with no
-    path-based figure -- unnamed net, a PCB stand-in without
-    ``get_net_by_name``, no shapely, an open net, fewer than two pads --
-    report nothing and simply keep their summed length.
+    measured evidence that shedding it manufactures skew).  Nets with
+    no path-based figure -- unnamed net, a PCB stand-in without
+    ``get_net_by_name``, no shapely, an open net, fewer than two pads
+    -- report nothing and simply keep their summed length.
     """
     if not net_name or not callable(getattr(pcb, "get_net_by_name", None)):
         return
@@ -427,7 +438,7 @@ def _warn_off_path_copper(
     if off_path_mm is not None and off_path_mm > OFF_PATH_REPORT_EPSILON_MM:
         logger.warning(
             "[match-group-skew] %s: net %s carries %.3f mm of off-path copper "
-            "(dead-end loop, duplicate or stub) included in its length",
+            "(same-net copper on no pad-to-pad path) included in its length",
             group_name,
             net_name,
             off_path_mm,
