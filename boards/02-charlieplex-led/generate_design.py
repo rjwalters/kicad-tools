@@ -126,6 +126,258 @@ def run_erc(sch_path: Path) -> bool:
 AMPACITY_TARGETS_A = {"VCC": 0.1}
 
 
+def _copper_signature(path: Path) -> tuple:
+    """Uuid-insensitive geometry signature of a board's segments and vias."""
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.load(str(path))
+    segments = sorted(
+        (
+            seg.layer,
+            seg.net_number,
+            round(seg.start[0], 6),
+            round(seg.start[1], 6),
+            round(seg.end[0], 6),
+            round(seg.end[1], 6),
+            seg.width,
+        )
+        for seg in pcb.segments
+    )
+    vias = sorted(
+        (
+            via.net_number,
+            round(via.position[0], 6),
+            round(via.position[1], 6),
+            via.size,
+        )
+        for via in pcb.vias
+    )
+    return (segments, vias)
+
+
+def _graft_copper(base: Path, donor: Path) -> bool:
+    """Copy *donor*'s copper (segments and vias) into *base* when it differs.
+
+    ``kct optimize-traces`` re-mints unrelated uuids every run, so its saved
+    file is not byte-stable even when the copper is.  The recipe therefore
+    grafts only the donor's copper into its own file -- and skips the graft
+    entirely once the copper is geometry-identical, so the fixed point keeps
+    its own stable uuids (#9467).
+    """
+    from copy import deepcopy
+
+    from kicad_tools.sexp import parse_file, serialize_sexp
+
+    if _copper_signature(base) == _copper_signature(donor):
+        return False
+    base_doc = parse_file(base)
+    donor_doc = parse_file(donor)
+    for tag in ("segment", "via"):
+        for node in [child for child in base_doc.children if child.name == tag]:
+            base_doc.remove(node)
+    for tag in ("segment", "via"):
+        for node in [child for child in donor_doc.children if child.name == tag]:
+            base_doc.append(deepcopy(node))
+    base.write_text(serialize_sexp(base_doc))
+    return True
+
+
+def _canonicalize_copper(routed_path: Path) -> None:
+    """Rewrite track uuids and ordering deterministically (Issue #9467).
+
+    The cleanup chain's rewrites serialize segments in hash-seed-dependent
+    iteration order, so two regenerations of the same route would differ
+    byte-wise.  Sorting segments by geometry and deriving each uuid from that
+    key makes the cleanup's fixed point byte-identical across runs.
+    """
+    import uuid as uuidlib
+
+    from kicad_tools.schema.pcb import PCB
+
+    def key(seg):
+        return (
+            seg.layer,
+            seg.net_number,
+            round(seg.start[0], 6),
+            round(seg.start[1], 6),
+            round(seg.end[0], 6),
+            round(seg.end[1], 6),
+            seg.width,
+        )
+
+    pcb = PCB.load(str(routed_path))
+    ordered = sorted(pcb.segments, key=key)
+    pcb.segments[:] = ordered
+    for index, seg in enumerate(ordered):
+        seg.uuid = str(uuidlib.uuid5(uuidlib.NAMESPACE_OID, f"board02-copper:{index}:{key(seg)}"))
+    pcb.save(str(routed_path))
+
+
+def _restamp_uuids(routed_path: Path) -> None:
+    """Derive every uuid from its subtree's uuid-stripped serialization.
+
+    ``kicad-cli pcb drc --refill-zones --save-board`` mints fresh random
+    uuids for any node that lacks one (footprint properties, graphics
+    points, ...).  Re-deriving each uuid from the serialized shape of the
+    subtree it belongs to (uuid values stripped, so the stamp is idempotent)
+    makes the refill's output byte-stable across runs; pcbnew preserves
+    existing uuids, so the release's own refill rewrites nothing (#9467).
+    """
+    import uuid as uuidlib
+
+    from kicad_tools.sexp import parse_file, serialize_sexp
+
+    doc = parse_file(routed_path)
+
+    def strip_uuids(node):
+        return "".join(line for line in serialize_sexp(node).splitlines() if "(uuid " not in line)
+
+    seen: dict[str, int] = {}
+
+    def walk(node, ref):
+        if node.name == "footprint":
+            for child in node.children:
+                if (
+                    child.name == "property"
+                    and child.get_first_atom() == "Reference"
+                    and len(child.children) > 1
+                ):
+                    ref = f"{ref}/{child.children[1].get_first_atom()}"
+        for child in node.children:
+            walk(child, ref)
+        uuid_node = node.find_child("uuid")
+        if uuid_node is not None:
+            key = f"board02:{ref}:{strip_uuids(node)}"
+            seen[key] = seen.get(key, 0) + 1
+            if seen[key] > 1:
+                key = f"{key}#{seen[key]}"
+            uuid_node.set_atom(0, str(uuidlib.uuid5(uuidlib.NAMESPACE_OID, key)))
+
+    walk(doc, "board")
+    routed_path.write_text(serialize_sexp(doc))
+
+
+def stabilize_release_copper(routed_path: Path) -> None:
+    """Step 5.5 (#9467): ship the release cleanup chain's fixed point.
+
+    ``kct readiness --generate`` re-runs ``dedupe -> prune -> optimize-traces
+    --drc-aware`` and ``kicad-cli pcb drc --refill-zones --save-board`` on
+    the shipped board (the refill re-serializes the file and stamps uuids on
+    uuid-less nodes, so the shipped board must already be in that form or
+    the package's renders gate sees it as changed).  The recipe first
+    iterates the python-side cleanup chain to a byte-stable fixed point,
+    then normalizes through one refill, re-derives the uuids the refill
+    minted, and refills once more -- packaging's own run then rewrites
+    nothing and the committed renders stay valid.  The optimizer runs on a
+    scratch copy and only its copper is grafted back, because its serializer
+    re-mints unrelated uuids each run.
+    """
+    import hashlib
+    import os
+    import shutil
+    import tempfile
+
+    from kicad_tools.cli.runner import run_refill_zones
+    from kicad_tools.pcb_prune import cleanup_copper
+
+    env = {**os.environ, "PYTHONHASHSEED": "42"}
+    for _ in range(4):
+        before = hashlib.sha256(routed_path.read_bytes()).hexdigest()
+        print(f"   Copper cleanup: {cleanup_copper(routed_path)}")
+        with tempfile.TemporaryDirectory(prefix="board02-optimize-") as scratch:
+            donor = Path(scratch) / routed_path.name
+            shutil.copy2(routed_path, donor)
+            for suffix in (".kicad_pro", ".kicad_dru"):
+                sidecar = routed_path.with_suffix(suffix)
+                if sidecar.exists():
+                    shutil.copy2(sidecar, donor.with_suffix(suffix))
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "kicad_tools.cli",
+                    "optimize-traces",
+                    str(donor),
+                    "--drc-aware",
+                    "--mfr",
+                    "jlcpcb",
+                    "--project",
+                    str(donor.with_suffix(".kicad_pro")),
+                    "--format",
+                    "json",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                env=env,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"optimize-traces failed ({result.returncode}): {result.stdout}{result.stderr}"
+                )
+            _graft_copper(routed_path, donor)
+        _canonicalize_copper(routed_path)
+        after = hashlib.sha256(routed_path.read_bytes()).hexdigest()
+        if after == before:
+            break
+    else:
+        raise RuntimeError("Board02 release copper cleanup did not reach a fixed point in 4 passes")
+    # Phase 2: adopt the optimizer's own serialization (footprint order and
+    # uuid stamps the release's in-run pass will reproduce), then make its
+    # uuids deterministic and normalize through one refill.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
+            "optimize-traces",
+            str(routed_path),
+            "--drc-aware",
+            "--mfr",
+            "jlcpcb",
+            "--project",
+            str(routed_path.with_suffix(".kicad_pro")),
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env=env,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"optimize-traces failed ({result.returncode}): {result.stdout}{result.stderr}"
+        )
+    _restamp_uuids(routed_path)
+    refill = run_refill_zones(routed_path)
+    if not refill.success:
+        raise RuntimeError(f"zone refill failed: {refill.stderr}")
+
+
+#: What ``kct route`` leaves beside the routed board (#8156 stem-keyed
+#: sidecars, the #5639 access witness, the routing plan and decisions log).
+#: Board 02 commits the authored ``net_class_map.json``/``fab_profile.json``
+#: only: a stem-keyed net-class map would shadow the authored one for every
+#: reader (``resolve_committed_net_class_map``), dropping its
+#: ``preferred_layers`` and ampacity declarations, and the routing plan
+#: records an absolute host path (#6532).
+ROUTER_SIDECAR_SUFFIXES = (
+    ".net_class_map.json",
+    ".fab_profile.json",
+    ".routing_plan.json",
+    ".decisions.json",
+    ".access_witness.json",
+    ".route.json",
+)
+
+
+def drop_router_sidecars(routed_path: Path) -> None:
+    """Remove ``kct route``'s byproduct sidecars next to ``routed_path`` (#9467)."""
+    for suffix in ROUTER_SIDECAR_SUFFIXES:
+        routed_path.with_name(routed_path.stem + suffix).unlink(missing_ok=True)
+
+
 def declare_ampacity_targets(output_dir: Path) -> None:
     """Declare the spec's supply currents as ``target_ampacity`` (Issue #7206).
 
@@ -249,6 +501,24 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     from finalize_routing import finalize_routing
 
     return finalize_routing(output_path, input_path.with_suffix(".kicad_sch"))
+
+
+def clear_silk_over_holes(routed_path: Path) -> None:
+    """Clip footprint silk off drilled holes and move reference text that sits on one.
+
+    ``fix-silkscreen --clip-to-holes`` handles lines/polygons; text is left for
+    ``place-silk-refs --over-holes`` (#9061).  Both are the generic commands --
+    no board-local silk edit and no acknowledgement of ``silk_hole_overlap``.
+    """
+    for command in (
+        ["fix-silkscreen", "--mfr", "jlcpcb", "--clip-to-holes", "--format", "summary"],
+        ["place-silk-refs", "--over-holes"],
+    ):
+        subprocess.run(
+            [sys.executable, "-m", "kicad_tools.cli", command[0], str(routed_path), *command[1:]],
+            check=True,
+            timeout=120,
+        )
 
 
 def run_drc(pcb_path: Path) -> bool:
@@ -394,6 +664,7 @@ def main() -> int:
         # Step 5: Route PCB
         routed_path = output_dir / "charlieplex_3x3_routed.kicad_pcb"
         route_success = route_pcb(pcb_path, routed_path)
+        drop_router_sidecars(routed_path)
         declare_ampacity_targets(output_dir)
 
         # Finalization can reject physical DRC failures as well as incomplete
@@ -404,12 +675,6 @@ def main() -> int:
                 "Board02 routing/finalization failed; see the route and native DRC "
                 "diagnostics above. The PCB has not qualified for manufacturing export."
             )
-
-        # Step 5.5 (#8399): remove avoidable router copper (``redundant_copper_*``
-        # warnings) with dedupe + DRC-verified prune, never ``--unverified``.
-        from kicad_tools.pcb_prune import cleanup_copper
-
-        print(f"   Copper cleanup: {cleanup_copper(routed_path)}")
 
         # Step 5.6 (#8532 / #8759): global fiducials and a board-ID silkscreen
         # (the default-on ``fiducials_missing`` / ``board_id_missing`` rules).
@@ -422,6 +687,17 @@ def main() -> int:
             raise RuntimeError("pcb add-fiducials failed")
         if run_add_board_info(routed_path, auto=True) != 0:
             raise RuntimeError("pcb add-board-info failed")
+
+        # Step 5.7 (#9467 / #9061): clear ``silk_hole_overlap`` through the recipe,
+        # after every copper edit (finalize, cleanup, fiducials) so the drilled
+        # holes it clips against are the shipped ones.  Never acknowledged away.
+        clear_silk_over_holes(routed_path)
+
+        # Step 5.8 (#9467): ship the release cleanup chain's fixed point --
+        # last board-writing step, so the serializers the packaging run will
+        # replay (optimize-traces, the refill) find nothing to rewrite and
+        # the committed renders keep matching the shipped board.
+        stabilize_release_copper(routed_path)
 
         # Step 6: Run DRC
         drc_success = run_drc(routed_path)

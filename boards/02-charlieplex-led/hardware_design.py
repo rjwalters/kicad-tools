@@ -47,7 +47,9 @@ def components():
         ),
         ("C1", "Device:C", "100nF", C_FP, {"1": "VCC", "2": "GND"}, (31, 40), (25.4, 38.1)),
         ("C2", "Device:C", "4.7uF", C_FP, {"1": "VCC", "2": "GND"}, (7, 42), (50.8, 38.1)),
-        ("R5", "Device:R", "10k", R_FP, {"1": "VCC", "2": "RESET"}, (17, 40), (76.2, 38.1)),
+        # Issue #8979: x=16 keeps R5.2 >= 2 mm (copper edge) from U1.1's THT
+        # pad (``tht_smd_spacing``); at x=17 it was 1.872 mm.
+        ("R5", "Device:R", "10k", R_FP, {"1": "VCC", "2": "RESET"}, (16, 40), (76.2, 38.1)),
     ]
     for i, resistor in enumerate(RESISTOR_CONNECTIONS):
         parts.append(
