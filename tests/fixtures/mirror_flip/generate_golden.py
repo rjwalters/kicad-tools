@@ -22,8 +22,8 @@ the outputs are committed):
     /Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/\
 Versions/Current/bin/python3 tests/fixtures/mirror_flip/generate_golden.py
 
-Originally generated with KiCad 10.0.5; the custom pad 5 (Issue #9530) was
-added and the pair regenerated with the KiCad release named in the commit/PR.
+Originally generated with KiCad 10.0.5; the custom pads 5 and 6 (Issue #9530)
+were added and the pair regenerated with KiCad 10.0.6 (the CI-pinned image).
 """
 
 from __future__ import annotations
@@ -85,6 +85,14 @@ def add_pad(
     fp.Add(pad)
 
 
+def _poly_set(poly_mm: list[tuple[float, float]]) -> pcbnew.SHAPE_POLY_SET:
+    poly = pcbnew.SHAPE_POLY_SET()
+    poly.NewOutline()
+    for px, py in poly_mm:
+        poly.Append(mm(px), mm(py))
+    return poly
+
+
 def add_custom_pad(
     fp: pcbnew.FOOTPRINT,
     number: str,
@@ -106,10 +114,53 @@ def add_custom_pad(
     pad.SetSize(VECTOR2I(mm(0.4), mm(0.4)))
     pad.SetLayerSet(pad.SMDMask())
     pad.SetFPRelativePosition(VECTOR2I(mm(x_mm), mm(y_mm)))
-    outline = pcbnew.VECTOR_VECTOR2I()
-    for px, py in poly_mm:
-        outline.append(VECTOR2I(mm(px), mm(py)))
-    pad.AddPrimitivePoly(pcbnew.F_Cu, outline, 0, True)
+    pad.AddPrimitivePoly(pcbnew.F_Cu, _poly_set(poly_mm), 0, True)
+    fp.Add(pad)
+
+
+def add_padstack_custom_pad(
+    fp: pcbnew.FOOTPRINT,
+    number: str,
+    x_mm: float,
+    y_mm: float,
+    poly_mm: list[tuple[float, float]],
+) -> None:
+    """Add a through-hole custom pad with a ``front_inner_back`` padstack.
+
+    The same asymmetric polygon is added on F.Cu, In1.Cu and B.Cu so each
+    layer's nested ``(primitives ...)`` block must be y-mirrored (Issue #9530).
+    Each layer block also carries a three-point ``gr_arc`` whose endpoint order
+    KiCad's Flip reverses.
+    """
+    pad = pcbnew.PAD(fp)
+    pad.SetNumber(number)
+    pad.SetAttribute(PAD_ATTRIB_PTH)
+    pad.SetShape(pcbnew.PAD_SHAPE_CUSTOM)
+    pad.SetSize(VECTOR2I(mm(0.6), mm(0.6)))
+    pad.SetDrillSize(VECTOR2I(mm(0.3), mm(0.3)))
+    pad.SetLayerSet(pad.PTHMask())
+    pad.Padstack().SetMode(pcbnew.PADSTACK.MODE_FRONT_INNER_BACK)
+    for layer in (pcbnew.F_Cu, pcbnew.In1_Cu, pcbnew.B_Cu):
+        pad.SetShape(layer, pcbnew.PAD_SHAPE_CUSTOM)
+        pad.SetSize(layer, VECTOR2I(mm(0.6), mm(0.6)))
+        pad.SetAnchorPadShape(layer, PAD_SHAPE_CIRCLE)
+    pad.SetFPRelativePosition(VECTOR2I(mm(x_mm), mm(y_mm)))
+    for layer in (pcbnew.F_Cu, pcbnew.In1_Cu, pcbnew.B_Cu):
+        pad.AddPrimitivePoly(layer, _poly_set(poly_mm), 0, True)
+    # The arc is added on every layer: KiCad's Flip also swaps the F.Cu and
+    # B.Cu padstack blocks, and a layer-symmetric padstack keeps this golden
+    # about the per-layer y-mirror and the endpoint order only.
+    for layer in (pcbnew.F_Cu, pcbnew.In1_Cu, pcbnew.B_Cu):
+        arc = pcbnew.PCB_SHAPE(fp)
+        arc.SetShape(pcbnew.SHAPE_T_ARC)
+        arc.SetArcGeometry(
+            VECTOR2I(mm(0.3), mm(0.2)), VECTOR2I(mm(0.2), mm(0.5)), VECTOR2I(mm(-0.1), mm(0.6))
+        )
+        arc.SetWidth(mm(0.1))
+        arc.SetFilled(False)
+        arc.SetLayer(layer)
+        pad.AddPrimitiveShape(layer, arc)
+        arc.thisown = False  # the pad now owns the shape; do not let Python free it
     fp.Add(pad)
 
 
@@ -156,6 +207,16 @@ def main() -> int:
         "5",
         0.4,
         1.6,
+        [(-0.3, -0.2), (0.9, -0.2), (0.9, 0.3), (0.2, 0.3), (0.2, 1.1), (-0.3, 1.1)],
+    )
+
+    # Layer-specific padstack custom pad: nested per-layer primitives plus a
+    # three-point arc (Issue #9530 review).
+    add_padstack_custom_pad(
+        fp,
+        "6",
+        -0.3,
+        -2.8,
         [(-0.3, -0.2), (0.9, -0.2), (0.9, 0.3), (0.2, 0.3), (0.2, 1.1), (-0.3, 1.1)],
     )
 

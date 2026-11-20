@@ -546,9 +546,25 @@ class StrategyApplicator:
         pad_node = getattr(pad, "_sexp_node", None)
         if pad_node is None:
             return
-        primitives = pad_node.find_child("primitives")
-        if primitives is not None:
+        # Layer-specific padstacks (``(padstack (layer "F.Cu" ... (primitives
+        # ...)))``) nest the blocks one level down, so walk the whole pad.
+        for primitives in StrategyApplicator._iter_primitives(pad_node):
             _mirror_local_y(primitives)
+            # KiCad's Flip also reverses a three-point arc's endpoint order
+            # (start <-> end after the y negation); the arc is unchanged.
+            for arc in primitives.find_children("gr_arc"):
+                start, end = arc.find_child("start"), arc.find_child("end")
+                if start is not None and end is not None and arc.find_child("mid") is not None:
+                    start.children, end.children = end.children, start.children
+
+    @staticmethod
+    def _iter_primitives(node):
+        """Yield every ``(primitives ...)`` block under a pad node."""
+        for child in node.iter_children():
+            if child.tag == "primitives":
+                yield child
+            else:
+                yield from StrategyApplicator._iter_primitives(child)
 
     @staticmethod
     def _mirror_cosmetic_node(node) -> None:
