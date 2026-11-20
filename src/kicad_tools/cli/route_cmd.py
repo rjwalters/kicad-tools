@@ -10262,6 +10262,58 @@ def _print_pairwise_addendum(violations: "Sequence[PairwiseViolation]") -> None:
     print("  (trace/via/pad copper; run 'kct creepage' for the pour-aware full census)")
 
 
+def _print_pairwise_attach_zone_policy(router: "Autorouter", args, output_path) -> None:
+    """Name the attach-zone policy the completed run audited under (issue #9717).
+
+    The post-route HV gate applies the #4506 rated-footprint attach zones
+    unconditionally (there is no ``kct route`` opt-out), while ``kct creepage``
+    grants the same exemption only on an explicit ``--waive-attach-zone``.  A
+    designer who reads a clean route verdict and then censuses the written
+    board without the flag sees new FAILs for exactly the class of copper this
+    gate exempted (#9685's H2).  This note states the policy that WAS used and
+    the flag that reproduces it, without claiming any particular pair was
+    waived -- the audit keeps no per-pair telemetry, and a pair-level claim
+    would need evidence for that pair.
+
+    Strictly a no-op unless the conditions that made the audit consult zones
+    all held: ``--voltage-map`` supplied (``args._pairwise_required`` set), the
+    pairwise table widened past the scalar DRU floor (``_audit_pairwise_clearance``'s
+    own activation test), at least one attach zone resolved on the source
+    board, and copper actually committed (never ``--dry-run``).  Zones resolve
+    from the router's memoised cache, so this adds no board loads.
+    """
+    if getattr(args, "dry_run", False):
+        return
+    if getattr(args, "_pairwise_required", None) is None:
+        return
+    rules = getattr(router, "rules", None)
+    table = getattr(rules, "pairwise_clearance", None) if rules is not None else None
+    if table is None or table.max_required_clearance() <= table.dru:
+        return
+    zones = _pairwise_attach_zones(router)
+    if not zones:
+        return
+    print()
+    print(
+        f"  Attach-zone exemption: ENABLED -- {len(zones)} rated-footprint attach "
+        "zone(s) (#4506) applied by this run's HV audit; copper inside a zone is "
+        "exempt from the pairwise requirement."
+    )
+    print(
+        "  'kct creepage' grants that exemption only with --waive-attach-zone, so "
+        "a census without the flag is stricter and can FAIL pairs this audit "
+        "exempted; copper outside the zones still fails with the flag enabled. "
+        "Match this policy on the written board with:"
+    )
+    vm = getattr(args, "voltage_map", None)
+    print(
+        f"    kct creepage {output_path} --voltage-map {vm} --standard "
+        f"{getattr(args, 'creepage_standard', 'iec60664')} --pollution-degree "
+        f"{getattr(args, 'pollution_degree', 2)} --material-group "
+        f"{getattr(args, 'material_group', 'IIIa')} --waive-attach-zone"
+    )
+
+
 def _pairwise_escalation_exit(rc: int, violations: "Sequence[PairwiseViolation]") -> int:
     """Map an escalation wrapper's exit code through the #4588 gate.
 
@@ -14461,6 +14513,9 @@ def route_with_layer_escalation(
                 # Issue #4979: inherited-only findings (any newly created
                 # ones already replaced the banner above).
                 _print_layer_intent_addendum(_layer_intent)
+        # Issue #9717: name the attach-zone policy the audit used, beside the
+        # verdict the designer acts on.
+        _print_pairwise_attach_zone_policy(final_result.router, args, output_path)
 
     # Issue #2881: Stash the final router on args so an outer
     # ``route_with_mfr_tier_escalation`` wrapper can inspect
@@ -15446,6 +15501,9 @@ def route_with_rule_relaxation(
                 # Issue #4979: inherited-only findings (any newly created
                 # ones already replaced the banner above).
                 _print_layer_intent_addendum(_layer_intent)
+        # Issue #9717: name the attach-zone policy the audit used, beside the
+        # verdict the designer acts on.
+        _print_pairwise_attach_zone_policy(final_result.router, args, output_path)
 
     # Issue #7377: pair via-parity summary + --export-failed-nets on every tail.
     _run_post_verdict_reports(
@@ -18003,6 +18061,9 @@ def route_with_combined_escalation(
                 # Issue #4979: inherited-only findings (any newly created
                 # ones already replaced the banner above).
                 _print_layer_intent_addendum(_layer_intent)
+        # Issue #9717: name the attach-zone policy the audit used, beside the
+        # verdict the designer acts on.
+        _print_pairwise_attach_zone_policy(final_result.router, args, output_path)
 
     # Issue #7377: pair via-parity summary + --export-failed-nets on every tail.
     _run_post_verdict_reports(
@@ -26553,6 +26614,9 @@ def _run_main_impl(args, parser, argv) -> int:
                     nets_to_route_ids=multi_pad_net_ids,
                     single_pad_count=len(single_pad_nets),
                 )
+        # Issue #9717: name the attach-zone policy the audit used, beside the
+        # verdict the designer acts on.
+        _print_pairwise_attach_zone_policy(router, args, output_path)
 
     # Issue #6277: the JSON summary must not depend on the text banner chain
     # (``if not quiet``) or on the outcome being PARTIAL, so every direct-route

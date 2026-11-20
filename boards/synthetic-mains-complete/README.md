@@ -28,6 +28,25 @@ kct creepage <pcb> --net-class-map net_class_map.json --voltage-map voltage_map.
     --waive-same-footprint --waive-attach-zone
 ```
 
+## `--waive-attach-zone` in the replay census (#9717)
+
+`kct route --voltage-map` applies the #4506 rated-footprint attach zones
+unconditionally: copper inside a zone is exempt from its post-route HV audit,
+and the completion output says so — an `Attach-zone exemption: ENABLED` note
+naming `kct creepage --waive-attach-zone` as the way to match that aspect of
+the audit. The census side of the exemption is opt-in:
+
+- **Flag omitted (stricter):** every pair whose gap lies inside an attach zone
+  is scored on its raw clearance/creepage, so a written board the route gate
+  passed can census FAIL. That is not a routing defect — it is the census
+  refusing an exemption it was not asked to grant.
+- **Flag given:** a pair is waived only when its binding gap lies inside the
+  zone AND the residual — the pair re-measured with the zone's copper clipped
+  away — still clears the requirement. A failing residual keeps the row FAIL,
+  so the flag cannot wave through copper that leaves the zone and creeps
+  (#8277's regression pins exactly that case: a trace skimming a rated pad's
+  zone edge is reported, not waived).
+
 ## Recorded run
 
 Tools: kicad-tools 0.28.0 at `995b75b9d`, Python 3.12.3, C++ router backend built,
