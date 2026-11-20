@@ -139,3 +139,20 @@ def test_recipe_prepare_copies_fixture_spec(tmp_path: Path) -> None:
     (fx / "project.kct").write_text("x")
     out = mod.recipe_output_dir(tmp_path, prepare=True)
     assert (out / "project.kct").read_text() == "x"
+
+
+def test_sibling_revision_is_not_held_to_the_named_boards_spec(board: Path, tmp_path: Path) -> None:
+    """Issue #9637: a sibling revision under the same project.kct is not the
+    spec's board -- coverage is skipped with a reason and nothing is reported."""
+    # Spec demands a layer count the board does not have, so the named board fails.
+    _edit(board, ("preferred: 2", "preferred: 6"))
+    assert _ids(_run(board, "jlcpcb"), "error") == ["spec_conformance_layers"]
+    assert coverage_for("spec_conformance", board).state != "skipped"
+
+    other = tmp_path / "output_rev_b"
+    other.mkdir()
+    pcb_b = other / PCB_NAME
+    shutil.copy(board, pcb_b)
+    cov = coverage_for("spec_conformance", pcb_b)
+    assert cov.status == "skipped:board_not_spec_artifact"
+    assert _run(pcb_b, "jlcpcb").violations == []

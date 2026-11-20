@@ -1,12 +1,12 @@
 # Corpus benchmark feasibility: capacity calibration and route-vs-human
 
-*Point-in-time working document — issue [#4830](https://github.com/rjwalters/kicad-tools/issues/4830),
+*Point-in-time working document — issue [#4830](https://github.com/2AMLogic/kicad-tools/issues/4830),
 slice 4 of 4. Measured on 2026-08-16 against the 22 PCB entries of
 `scripts/corpus/manifests/open-schematics-sample.json` (revision-pinned
 `bshada/open-schematics` payloads) plus this repo's own 8 routed boards.*
 
 > **Update — the biggest lever has landed.**
-> [#4873](https://github.com/rjwalters/kicad-tools/issues/4873) taught
+> [#4873](https://github.com/2AMLogic/kicad-tools/issues/4873) taught
 > `PCB._parse()` to read the pre-KiCad-6 `(module …)` spelling as a footprint.
 > Re-running the census below on the same pinned payload cache:
 >
@@ -24,7 +24,7 @@ slice 4 of 4. Measured on 2026-08-16 against the 22 PCB entries of
 > `no-net-binding` ×2 and `no-reference-copper` ×2 are properties of those
 > designs, `no-outline` ×1 and `outline-not-polygonal` ×1 (the legacy
 > centre+angle `gr_arc` form, tracked as
-> [#4874](https://github.com/rjwalters/kicad-tools/issues/4874)) are the
+> [#4874](https://github.com/2AMLogic/kicad-tools/issues/4874)) are the
 > remaining parser work.
 
 Slices 1–3 answered *"can our parsers read real-world KiCad files?"* (yes:
@@ -33,7 +33,7 @@ follow-on capabilities actually depend on: **is the corpus usable as benchmark
 input at all?**
 
 - **Capability A — capacity-predictor calibration** (feeds
-  [#4799](https://github.com/rjwalters/kicad-tools/issues/4799)): needs, per
+  [#4799](https://github.com/2AMLogic/kicad-tools/issues/4799)): needs, per
   board, a feature vector *and* a routability label.
 - **Capability B — route-vs-human benchmark harness**: needs all of that plus
   reference copper to diff our router's output against.

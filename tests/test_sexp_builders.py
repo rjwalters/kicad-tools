@@ -557,7 +557,7 @@ class TestViaNode:
 
         KiCad vias do not support a rotation parameter. Including rotation
         (e.g., (at X Y 0)) causes KiCad to fail loading the PCB file.
-        See: https://github.com/rjwalters/kicad-tools/issues/1104
+        See: https://github.com/2AMLogic/kicad-tools/issues/1104
         """
         node = via_node(162.5, 97.25, 0.6, 0.3, ("F.Cu", "B.Cu"), 12, "via-uuid")
         at_node = node.get("at")

@@ -235,6 +235,37 @@ def test_route_understated_pairs_flags_sign_flipping_pairs():
         assert route_dv == 0.0
 
 
+def test_route_understated_pairs_slash_prefixed_map_honours_bounds():
+    """``/``-prefixed maps must key ``_pair_bounds`` and normalise results (#9608).
+
+    ``voltage_map_from_dict`` keeps as-authored keys while
+    ``pair_bounds_from_dict`` normalises them, so the detector's bounds lookup
+    missed on a KiCad-style map and a declared same-potential pair was falsely
+    reported as understated.
+    """
+    slashed = {
+        "/A": {"min": -170, "max": 170},
+        "/B": {"min": -170, "max": 170},
+        "_pair_bounds": [{"nets": ["/A", "/B"], "max_dv": 0, "why": "same potential"}],
+    }
+    assert route_understated_pairs(slashed) == {}
+
+    bare = {
+        "A": {"min": -170, "max": 170},
+        "B": {"min": -170, "max": 170},
+        "_pair_bounds": [{"nets": ["A", "B"], "max_dv": 0, "why": "same potential"}],
+    }
+    assert route_understated_pairs(bare) == {}
+
+    # Without the bound the pair is genuinely understated, and the returned
+    # keys are normalised (dropping the leading ``/``), per the docstring.
+    flagged = route_understated_pairs(
+        {"/A": {"min": -170, "max": 170}, "/B": {"min": -170, "max": 170}}
+    )
+    assert set(flagged) == {frozenset({"A", "B"})}
+    assert flagged[frozenset({"A", "B"})] == (pytest.approx(340.0), pytest.approx(0.0))
+
+
 def test_route_understated_pairs_clean_without_sign_spans():
     # All-scalar maps: the collapse is the identity, nothing is understated.
     assert route_understated_pairs({"/A": 150, "/B": -150}) == {}

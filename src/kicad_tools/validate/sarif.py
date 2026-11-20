@@ -45,7 +45,7 @@ SARIF_VERSION = "2.1.0"
 SARIF_SCHEMA_URI = (
     "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json"
 )
-INFORMATION_URI = "https://github.com/rjwalters/kicad-tools"
+INFORMATION_URI = "https://github.com/2AMLogic/kicad-tools"
 
 KEY_FINGERPRINT = "kctFindingKey/v1"
 

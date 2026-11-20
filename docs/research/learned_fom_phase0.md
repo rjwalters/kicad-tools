@@ -1,6 +1,6 @@
 # Learned FOM residual -- Phase 0 feasibility study
 
-**Issue**: [#3187](https://github.com/rjwalters/kicad-tools/issues/3187)
+**Issue**: [#3187](https://github.com/2AMLogic/kicad-tools/issues/3187)
 **Status**: complete (Phase 0)
 **Followup**: see [Recommendation](#recommendation) below.
 
