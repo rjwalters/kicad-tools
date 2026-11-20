@@ -506,9 +506,10 @@ terminal stays in the same component and no joint becomes overlap-only;
 copper that touches other same-net copper away from a shared endpoint (a
 spur beside a via) is removed only when connectivity also holds over those
 body-touching neighbours; straight end-to-end runs of same-width segments
-are merged into one; locked tracks are never touched. One invocation
-iterates to a fixed point — a pass can expose more redundant copper, so the
-board is re-planned until a pass changes nothing (#8730). With kicad-cli
+are merged into one; locked tracks are never touched. When applying edits,
+prune repeats until a pass makes no changes or it reaches the 10-pass limit
+(#8730). A dry run previews only the first pass, so it can undercount edits
+when that pass exposes more redundant copper. With kicad-cli
 available each net's edits are checked with `pcb drc --refill-zones` and
 dropped if they add violations; without that check the file is only written
 with `--unverified`. In-place by default; use `-o` to write elsewhere.
@@ -524,7 +525,7 @@ kct pcb prune board.kicad_pcb --current-paths current_paths.json --wide 1.0
 | `BOARD` | Path to `.kicad_pcb` file |
 | `-o`, `--output` `PATH` | Output file path (default: overwrite the board in place) |
 | `--format` `{text,json}` | Output format (default: `text`) |
-| `--dry-run` | Report changes without modifying files |
+| `--dry-run` | Preview first-pass edits without writing the board |
 | `--nets` `NET[,NET...]` | Only prune these nets (comma-separated names); other copper is untouched |
 | `--region` `x1,y1,x2,y2` | Only apply a net's plan when every edit lies inside this box (board-relative mm); plans straddling it are skipped and reported as `region_skipped` |
 | `--no-drc` | Skip kicad-cli DRC verification |
@@ -540,8 +541,10 @@ The `--no-current-paths` row mirrors the parser help as corrected in #9777
 [Declared branch current paths](#declared-branch-current-paths---current-paths)).
 A loop whose segments are all at or above `--wide` is reported, not cut, as
 is any loop the current-path audit still sees afterwards (with its witness).
-Exit codes: `0` pruned (or nothing to remove); `1` a bad argument, a load
-error, or an unverified edit refused rather than written.
+Prune exits with `0` on success, including a dry run or a board with nothing
+to remove. Command-level validation errors, I/O failures and refused writes
+return `1`. Argument parsing errors such as an invalid `--format` choice or
+a nonnumeric `--wide` value return `2`.
 
 ---
 
@@ -1699,8 +1702,8 @@ results are unchanged.
 | `--current-paths PATH` | Declared branch current-path sidecar. Auto-discovered next to the board as `<board-stem>.current_paths.json` or `current_paths.json` (board dir, then `output/`, then `../output/`) when omitted. |
 | `--no-current-paths` | Suppress auto-discovery; `path_ampacity` stays inactive. Cannot be combined with `--current-paths`. |
 
-The same flags exist on `kct check`, `kct pcb reinforce` and `kct pcb prune`,
-so one sidecar drives all four consumers:
+All four commands accept the same sidecar via `--current-paths`. Only
+`kct route`, `kct check` and `kct pcb prune` accept `--no-current-paths`.
 
 - **`kct route`** runs the `path_ampacity` rule in the post-route DRC against
   each declared branch's *own* current, then re-emits the declarations as
