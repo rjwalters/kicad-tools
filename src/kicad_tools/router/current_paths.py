@@ -732,8 +732,8 @@ def _sexp_matches_net(node: SExp, net: Net | None, net_name: str) -> bool:
     )
 
 
-def _matches_net(obj: Pad | Via | Zone, net: Net | None, net_name: str) -> bool:
-    """True if a parsed ``Pad``/``Via``/``Zone`` object sits on ``net_name``."""
+def _matches_net(obj: Pad | Via | Zone | Segment, net: Net | None, net_name: str) -> bool:
+    """True if a parsed ``Pad``/``Via``/``Zone``/``Segment`` object sits on ``net_name``."""
     return obj.net_name == net_name or (net is not None and obj.net_number == net.number)
 
 
