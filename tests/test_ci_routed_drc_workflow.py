@@ -167,6 +167,32 @@ class TestWorkflowYAML:
             "the per-board allowlist and emits ::error:: annotations)."
         )
 
+    def test_ordinary_step_pins_native_toolchain(self, workflow: dict) -> None:
+        """Issue #9706: the ordinary-board kct check step must run with
+        ``KCT_KICAD_DOCKER: "1"`` so the native ``mask_to_copper`` pass
+        completes inside the pinned KiCad image. Without it (bare
+        ubuntu-latest, no kicad-cli) the rule emits only an info
+        ``mask_to_copper_incomplete`` record with zero findings, and the
+        identity-allowance gate mis-read every allowance entry as stale on
+        scheduled main runs."""
+        steps = workflow["jobs"][JOB_NAME]["steps"]
+        ordinary_step = next(
+            (
+                s
+                for s in steps
+                if isinstance(s, dict) and "routed-pcb-drc-check.sh" in str(s.get("run", ""))
+            ),
+            None,
+        )
+        assert ordinary_step is not None, (
+            "Expected the ordinary-board step invoking scripts/ci/jobs/routed-pcb-drc-check.sh."
+        )
+        assert ordinary_step.get("env", {}).get("KCT_KICAD_DOCKER") == "1", (
+            "The ordinary-board kct check step must set env "
+            'KCT_KICAD_DOCKER: "1" so mask_to_copper runs to completion '
+            "on the pinned KiCad toolchain (Issue #9706)."
+        )
+
     def test_job_has_short_circuit_on_no_files(self, workflow: dict) -> None:
         """Per the issue's acceptance criteria, the job must complete in
         <60s on PRs that don't touch routed PCBs. The implementation

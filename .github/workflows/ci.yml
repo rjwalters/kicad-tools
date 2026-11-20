@@ -1187,12 +1187,15 @@ jobs:
     # that allowed PR #2538 to ship with 5 DRC errors despite a "0 errors"
     # claim at merge time.
     #
-    # The ORDINARY-board path (below) is pure-Python DRC (no kicad-cli, no
-    # Docker container) so it piggybacks on the same cheap ubuntu-latest + uv
-    # pattern as lint/typecheck. File detection is in-job (no `paths:` filter)
-    # so the check is safe to mark as a required status check on branch
-    # protection -- it always runs and short-circuits to green on PRs that
-    # don't touch routed PCBs.
+    # The ORDINARY-board path (below) stays on the cheap ubuntu-latest + uv
+    # pattern (no job-level container; #5349), but since #9706 it opts into
+    # KCT_KICAD_DOCKER=1 so kct check's native mask_to_copper pass runs in
+    # the pinned KiCad image via docker -- without it the pass reports
+    # mask_to_copper_incomplete and zero findings, which the identity
+    # allowance gate must refuse rather than read as stale/clean. File
+    # detection is in-job (no `paths:` filter) so the check is safe to mark
+    # as a required status check on branch protection -- it always runs and
+    # short-circuits to green on PRs that don't touch routed PCBs.
     #
     # Issue #5349: Board04 (and any future board dispatched through a native
     # validator -- see scripts/ci/select_routed_pcbs.py's
@@ -1275,6 +1278,15 @@ jobs:
 
       - name: Run kct check on each modified routed PCB
         if: steps.changed.outputs.ordinary_files != ''
+        # Issue #9706: the identity-allowance gate must judge mask_to_copper
+        # from a pass that actually ran. Bare ubuntu-latest has no kicad-cli,
+        # so kct check emitted mask_to_copper_incomplete (info) and zero
+        # findings, and every allowance entry read as stale on scheduled main
+        # runs. KCT_KICAD_DOCKER=1 routes the native mask passes through the
+        # same pinned image the board04 step below docker-runs (resolved from
+        # this workflow's KICAD_IMAGE pin by kicad_toolchain.pinned_kicad_image).
+        env:
+          KCT_KICAD_DOCKER: "1"
         run: |
           set -euo pipefail
           # Pass each file as a separate arg; the job script runs

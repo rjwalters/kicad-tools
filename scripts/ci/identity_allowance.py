@@ -64,6 +64,33 @@ def error_identities(violations: Iterable[Any]) -> dict[str, set[str]]:
     return found
 
 
+#: Suffix marking a "rule did not run to completion" record (info severity,
+#: e.g. ``mask_to_copper_incomplete`` from ``mask_copper.py`` / Issue #8914).
+INCOMPLETE_RULE_SUFFIX = "_incomplete"
+
+
+def incomplete_rules(violations: Iterable[Any]) -> set[str]:
+    """Rule ids the report marks as not-run via an ``<rule>_incomplete`` record.
+
+    Severity-agnostic on purpose (Issue #9706): the marker record is ``info``
+    and :func:`error_identities` filters to errors, so a completeness check
+    that reused it would never see it.  ``mask_to_copper_incomplete`` yields
+    ``{"mask_to_copper"}``; a report with no marker records yields ``set()``.
+    """
+    out: set[str] = set()
+    for v in violations:
+        if not isinstance(v, dict):
+            continue
+        rule = v.get("rule_id")
+        if (
+            isinstance(rule, str)
+            and rule.endswith(INCOMPLETE_RULE_SUFFIX)
+            and len(rule) > len(INCOMPLETE_RULE_SUFFIX)
+        ):
+            out.add(rule[: -len(INCOMPLETE_RULE_SUFFIX)])
+    return out
+
+
 def unlisted_findings(allowance: Allowance, rule: str, identities: Iterable[str]) -> list[str]:
     """Identities of ``rule`` findings that no allowance entry covers."""
     return sorted(i for i in identities if (rule, i) not in allowance)
