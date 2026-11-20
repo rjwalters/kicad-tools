@@ -154,6 +154,9 @@ class RoutingOrchestrator:
         self.enable_repair = enable_repair
         self.enable_via_conflict_resolution = enable_via_conflict_resolution
         self.net_class_map: dict[str, NetClassRouting] = net_class_map or {}
+        # Issue #9716: authored ``.kicad_pro`` netclass widths, read once
+        # per orchestrator (``None`` = not read yet; ``{}`` = read/unavailable).
+        self._authored_widths_cache: dict[str, float] | None = None
         self.max_strategy_retries = max_strategy_retries
 
         # Issue #3432 (mirrors ``Autorouter.paired_escape_coupling`` from
@@ -819,6 +822,61 @@ class RoutingOrchestrator:
         """
         if isinstance(net, str) and net in self.net_class_map:
             return self.net_class_map[net]
+        return None
+
+    def _authored_net_widths(self) -> dict[str, float]:
+        """Authored ``.kicad_pro`` netclass widths, read once per orchestrator.
+
+        Issue #9716: best-effort by design (mirrors
+        :func:`~kicad_tools.router.io.authored_net_widths`, which the neck
+        census uses) -- an unresolvable project must not fail routing, it
+        just falls back to the classification map / rule default.  A
+        missing board path (PCB-like objects without ``path``) or a read
+        error caches as ``{}`` so the project file is read at most once.
+        """
+        if self._authored_widths_cache is None:
+            widths: dict[str, float] = {}
+            pcb_path = getattr(self.pcb, "path", None)
+            if pcb_path:
+                try:
+                    from .io import authored_net_widths
+
+                    names = [
+                        name
+                        for name in (
+                            getattr(net, "name", "") or ""
+                            for net in (getattr(self.pcb, "nets", None) or {}).values()
+                        )
+                        if name
+                    ]
+                    widths = authored_net_widths(pcb_path, names)
+                except Exception:  # noqa: BLE001 - width resolution is best-effort
+                    logger.debug("authored netclass widths unavailable; using class map/default")
+            self._authored_widths_cache = widths
+        return self._authored_widths_cache
+
+    def _net_class_trace_width(self, net_name: str) -> float | None:
+        """The net's intended trace width, or ``None`` for the rule default.
+
+        Issue #9716: the corridor materialisation emitted every net at the
+        board-default ``DesignRules.trace_width`` even when the net's class
+        is wider -- an authored ``.kicad_pro`` ``Wide`` class (0.6 mm) or a
+        name-classified ``HIGH_CURRENT_SIGNAL`` (0.4 mm) both came back at
+        0.2 mm, a current-capacity defect.  Priority mirrors the neck
+        census's ``class_width_lookup`` (#9600 row 3): the authored
+        netclass assignment first (explicit designer intent beats name
+        heuristics), then the classification map, then the caller's rule
+        default.
+        """
+        if not net_name:
+            return None
+        authored = self._authored_net_widths().get(net_name)
+        if authored is not None and authored > 0:
+            return authored
+        nc = self._get_net_class_routing(net_name)
+        width: float | None = getattr(nc, "trace_width", None)
+        if width is not None and width > 0:
+            return width
         return None
 
     def _get_diff_pair_map(self) -> dict[str, str]:
@@ -1542,7 +1600,19 @@ class RoutingOrchestrator:
         # coordinates becomes a trace segment on the assignment's layer
         # (defaults to F.Cu when ``assignment.layer == 0``).
         waypoints = assignment.waypoint_coords
-        trace_width = getattr(self.rules, "trace_width", 0.2)
+        net_name = ""
+        if pads and pads[0].net_name:
+            net_name = pads[0].net_name
+        elif isinstance(net, str):
+            net_name = net
+        # Issue #9716: materialise at the net's class width (authored
+        # ``.kicad_pro`` netclass, else the classification map), not the
+        # board default -- a wide power class routed at the default width
+        # is a current-capacity defect, not a cosmetic one.
+        class_width = self._net_class_trace_width(net_name)
+        trace_width = (
+            class_width if class_width is not None else getattr(self.rules, "trace_width", 0.2)
+        )
         # Map the GlobalRouter's integer layer index to a router Layer enum.
         try:
             from .layers import Layer as RouterLayer
@@ -1554,12 +1624,6 @@ class RoutingOrchestrator:
             )
         except Exception:  # pragma: no cover - import safety
             seg_layer = None  # type: ignore[assignment]
-
-        net_name = ""
-        if pads and pads[0].net_name:
-            net_name = pads[0].net_name
-        elif isinstance(net, str):
-            net_name = net
 
         segments: list = []
         total_length = 0.0

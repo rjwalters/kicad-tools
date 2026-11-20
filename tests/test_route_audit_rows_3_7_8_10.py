@@ -244,20 +244,28 @@ def _wide_bus_project() -> dict:
 
 
 @pytest.mark.parametrize(
-    ("command", "extra"),
+    ("command", "extra", "corridor_at_class_width"),
     [
-        (["route", "--layers", "2", "--force"], []),
-        (["route-auto", "--net", "BUS"], []),
+        (["route", "--layers", "2", "--force"], [], False),
+        (["route-auto", "--net", "BUS"], [], True),
     ],
     ids=["kct-route", "route-auto"],
 )
-def test_row3_census_uses_authored_netclass_assignment(tmp_path: Path, capsys, command, extra):
+def test_row3_census_uses_authored_netclass_assignment(
+    tmp_path: Path, capsys, command, extra, corridor_at_class_width
+):
     """Row 3 review: an authored netclass assignment defines the class width.
 
     The reviewer's case: ``BUS`` assigned to ``Wide`` (0.6 mm) in a
     schema-3 ``.kicad_pro``, emitted copper at the 0.2 mm board default.
     Name classification knows nothing about ``BUS``, so a census that only
     consults the router's class map stays silent -- on both commands.
+
+    Issue #9716 splits the verdict per command: ``route-auto``'s corridor
+    now materialises at the authored class width (0.6 mm), so its census
+    has nothing sub-class to report and the written copper is wide; the
+    ``kct route`` grid path still emits at the 0.2 mm rule default and
+    keeps reporting the neck (out of scope for #9716).
     """
     from kicad_tools.cli import main as kct_main
 
@@ -269,6 +277,17 @@ def test_row3_census_uses_authored_netclass_assignment(tmp_path: Path, capsys, c
     rc = kct_main([*command, str(board), "-o", str(out_path), "--format", "json", *extra])
     assert rc == 0
     doc = json.loads(capsys.readouterr().out)
+    if corridor_at_class_width:
+        [net_entry] = doc["nets"]
+        assert net_entry["success"] is True
+        assert "necked_copper" not in net_entry, (
+            f"copper at the authored class width must not census as necked: {net_entry}"
+        )
+        widths = _net_segment_widths(out_path, "BUS")
+        assert widths and all(w == pytest.approx(0.6) for w in widths), (
+            f"the corridor must materialise at the authored 0.6 mm Wide width: {widths}"
+        )
+        return
     entries = doc["necked_copper"] if "necked_copper" in doc else doc["nets"][0]["necked_copper"]
     [neck] = entries
     assert neck["net_name"] == "BUS"
@@ -277,6 +296,19 @@ def test_row3_census_uses_authored_netclass_assignment(tmp_path: Path, capsys, c
         f"authored 0.6 mm Wide class, not ignored: {neck}"
     )
     assert neck["beyond_taper"] is True
+
+
+def _net_segment_widths(board_path: Path, net_name: str) -> list[float]:
+    """Widths of every track segment a written board carries for one net."""
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.load(str(board_path))
+    net_number = next(
+        (number for number, net in pcb.nets.items() if net.name == net_name),
+        None,
+    )
+    assert net_number is not None, f"net {net_name!r} missing from {board_path}"
+    return [float(seg.width) for seg in pcb.segments_in_net(net_number)]
 
 
 def test_row3_class_width_lookup_priority():
@@ -570,12 +602,12 @@ def test_row10_summary_reports_partial_progress_per_net(capsys, tmp_path: Path):
 
 
 def _high_current_board_text() -> str:
-    """Two-pad ``PHASE_A`` net in open space (route-auto neck fixture).
+    """Two-pad ``PHASE_A`` net in open space (route-auto class-width fixture).
 
     ``PHASE_A`` auto-classifies as HIGH_CURRENT_SIGNAL (0.4 mm class
     width) while the board declares no track constraints, so the rules
-    default to a 0.2 mm trace width -- route-auto's global corridor emits
-    the net at 0.2 mm, i.e. half its class width: real necked copper.
+    default to a 0.2 mm trace width -- since #9716 the corridor emits the
+    net at its 0.4 mm class width, born wide.
     """
     header = _HEADER.replace('(net 1 "BUS")\n  (net 2 "GND")', '(net 1 "PHASE_A")')
     header = header.replace("(end 24 28)", "(end 40 40)")
@@ -595,14 +627,16 @@ def _high_current_board_text() -> str:
     )
 
 
-def test_row3_route_auto_reports_necked_copper(tmp_path: Path, capsys):
-    """Row 3 on route-auto: sub-class-width copper is reported, not silent.
+def test_row3_route_auto_emits_name_class_width(tmp_path: Path, capsys):
+    """Issue #9716: the corridor materialises at the net's class width.
 
-    The orchestrator never calls the CLI's ``_finalize_routes`` (where
-    ``kct route`` prints its neck report), so without this the route-auto
-    surface can emit necked copper and say nothing -- the audit's failure
-    mode, on the second code path.  Asserted on both surfaces route-auto
-    owns: the ``--format json`` document and the text report.
+    ``PHASE_A`` auto-classifies as HIGH_CURRENT_SIGNAL (0.4 mm class
+    width) while the board declares no track constraints, so the rules
+    default to a 0.2 mm trace width.  The corridor used to emit the whole
+    net at that 0.2 mm default -- half its class width, a current-capacity
+    defect -- and the census reported it as necked beyond the taper.  The
+    corridor now resolves the class width, so the copper is born wide and
+    the census stays silent on both surfaces.
     """
     from kicad_tools.cli import main as kct_main
     from kicad_tools.router.net_class import classify_and_apply_rules
@@ -615,7 +649,7 @@ def test_row3_route_auto_reports_necked_copper(tmp_path: Path, capsys):
     class_width = classify_and_apply_rules({1: "PHASE_A"})["PHASE_A"].trace_width
     assert class_width > 0.3, f"PHASE_A must classify wide, got {class_width}"
 
-    # JSON surface: the per-net document carries the neck census.
+    # JSON surface: copper at class width, so no neck census entry exists.
     out_json = tmp_path / "out_json.kicad_pcb"
     rc = kct_main(
         ["route-auto", str(board), "--net", "PHASE_A", "-o", str(out_json), "--format", "json"]
@@ -624,10 +658,94 @@ def test_row3_route_auto_reports_necked_copper(tmp_path: Path, capsys):
     doc = json.loads(capsys.readouterr().out)
     [entry] = doc["nets"]
     assert entry["success"] is True
+    assert "necked_copper" not in entry, (
+        f"corridor copper at the class width must not census as necked: {entry}"
+    )
+    widths = _net_segment_widths(out_json, "PHASE_A")
+    assert widths and all(w == pytest.approx(class_width) for w in widths), (
+        f"the corridor must materialise at the {class_width} mm class width: {widths}"
+    )
+
+    # Text surface: nothing to report, and the run says so by staying quiet.
+    out_text = tmp_path / "out_text.kicad_pcb"
+    rc = kct_main(["route-auto", str(board), "--net", "PHASE_A", "-o", str(out_text)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Necked copper:" not in out, f"full-class-width copper is not necked:\n{out}"
+
+
+def test_row3_route_auto_default_width_without_class_override(tmp_path: Path, capsys):
+    """Issue #9716: nets with no class override keep the default width.
+
+    Same two-pad ``BUS`` board as the authored fixture, but with no
+    ``.kicad_pro`` beside it: nothing authored, nothing classified.  The
+    corridor must keep emitting the board's default width -- widening
+    every net "to be safe" would break clearance, not fix it.
+    """
+    from kicad_tools.cli import main as kct_main
+
+    board = tmp_path / "bus_two_pad.kicad_pcb"
+    board.write_text(_two_pad_bus_board_text())
+
+    out_path = tmp_path / "out.kicad_pcb"
+    rc = kct_main(
+        ["route-auto", str(board), "--net", "BUS", "-o", str(out_path), "--format", "json"]
+    )
+    assert rc == 0
+    doc = json.loads(capsys.readouterr().out)
+    [entry] = doc["nets"]
+    assert entry["success"] is True
+    assert "necked_copper" not in entry, f"default-width copper is not necked: {entry}"
+    widths = _net_segment_widths(out_path, "BUS")
+    assert widths and all(w == pytest.approx(0.2) for w in widths), (
+        f"a net with no class override must keep the 0.2 mm default width: {widths}"
+    )
+
+
+def test_row3_route_auto_reports_necked_copper(tmp_path: Path, capsys):
+    """Row 3 on route-auto: sub-class-width copper is reported, not silent.
+
+    The orchestrator never calls the CLI's ``_finalize_routes`` (where
+    ``kct route`` prints its neck report), so without this the route-auto
+    surface can emit necked copper and say nothing -- the audit's failure
+    mode, on the second code path.  Since #9716 the global corridor emits
+    at the net's class width, so the necking route is the ``hierarchical``
+    strategy: it routes on the ``kct route`` grid machinery at the rule
+    default, and a ``BUS`` authored at 0.6 mm comes back at 0.2 mm --
+    route-auto must still say so.  Asserted on both surfaces route-auto
+    owns: the ``--format json`` document and the text report.
+    """
+    from kicad_tools.cli import main as kct_main
+
+    board = tmp_path / "bus_two_pad.kicad_pcb"
+    board.write_text(_two_pad_bus_board_text())
+    (tmp_path / "bus_two_pad.kicad_pro").write_text(json.dumps(_wide_bus_project()))
+
+    # JSON surface: the per-net document carries the neck census.
+    out_json = tmp_path / "out_json.kicad_pcb"
+    rc = kct_main(
+        [
+            "route-auto",
+            str(board),
+            "--net",
+            "BUS",
+            "--strategy",
+            "hierarchical",
+            "-o",
+            str(out_json),
+            "--format",
+            "json",
+        ]
+    )
+    assert rc == 0
+    doc = json.loads(capsys.readouterr().out)
+    [entry] = doc["nets"]
+    assert entry["success"] is True
     [neck] = entry["necked_copper"]
-    assert neck["net_name"] == "PHASE_A"
+    assert neck["net_name"] == "BUS"
     assert neck["min_width_mm"] == pytest.approx(0.2), (
-        "the corridor runs at the 0.2 mm board default, below the 0.4 mm class width"
+        "the hierarchical grid route runs at the 0.2 mm board default, "
+        "below the authored 0.6 mm Wide width"
     )
     assert neck["segment_count"] >= 1
     # A 25 mm corridor necked along its whole length is far beyond the
@@ -636,11 +754,22 @@ def test_row3_route_auto_reports_necked_copper(tmp_path: Path, capsys):
 
     # Text surface: the same census, rendered in the run's report.
     out_text = tmp_path / "out_text.kicad_pcb"
-    rc = kct_main(["route-auto", str(board), "--net", "PHASE_A", "-o", str(out_text)])
+    rc = kct_main(
+        [
+            "route-auto",
+            str(board),
+            "--net",
+            "BUS",
+            "--strategy",
+            "hierarchical",
+            "-o",
+            str(out_text),
+        ]
+    )
     assert rc == 0
     out = capsys.readouterr().out
     assert "Necked copper:" in out, f"route-auto text output is silent about necks:\n{out}"
-    assert "PHASE_A" in out and "long, verify intent" in out
+    assert "BUS" in out and "long, verify intent" in out
 
 
 def test_rows_8_10_route_auto_partial_progress_is_reported(tmp_path: Path):
