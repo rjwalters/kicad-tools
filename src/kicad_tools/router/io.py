@@ -6451,13 +6451,17 @@ def load_pcb_for_routing(
     # crossing report and the --protect-plane-zones hard refusal.  A strict
     # no-op (no outlines, no marks) on a stack with no PLANE layers or a
     # board with no plane-layer zones.
-    # The second parse is only paid when the stack declares a PLANE layer.
+    # The second parse is only paid when the stack declares a PLANE layer AND
+    # the file text actually contains a zone (cheap substring check on the
+    # already-read ``pcb_text``).
     from .layers import LayerType as _ZoneLayerType
 
-    _has_plane_layers = router.layer_stack is not None and any(
-        layer.layer_type == _ZoneLayerType.PLANE for layer in router.layer_stack.layers
-    )
-    if _has_plane_layers:
+    _zone_stack = router.layer_stack
+    if (
+        _zone_stack is not None
+        and "(zone" in pcb_text
+        and any(layer.layer_type == _ZoneLayerType.PLANE for layer in _zone_stack.layers)
+    ):
         try:
             from kicad_tools.schema.pcb import PCB as _ZoneSchemaPCB
 
@@ -6465,7 +6469,7 @@ def load_pcb_for_routing(
 
             _zone_pcb = _ZoneSchemaPCB.load(pcb_path)
             router.plane_zones = plane_zone_outlines(
-                _zone_pcb, router.layer_stack, (origin_x, origin_y)
+                _zone_pcb, _zone_stack, (origin_x, origin_y)
             )
             router._plane_zone_source_pcb = str(pcb_path)
             if router.plane_zones:
