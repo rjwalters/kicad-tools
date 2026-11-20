@@ -67,9 +67,9 @@ def _seg(x1, y1, x2, y2, net, layer="F.Cu") -> str:
     )
 
 
-def _write(tmp_path: Path, body: str, rows) -> PCB:
+def _write(tmp_path: Path, body: str, rows, header: str = HEADER) -> PCB:
     path = tmp_path / "board.kicad_pcb"
-    path.write_text(HEADER + _pads(rows) + body + ")\n")
+    path.write_text(header + _pads(rows) + body + ")\n")
     return PCB.load(str(path))
 
 
@@ -118,6 +118,33 @@ def test_loop_is_reported_and_excluded_from_figure(tmp_path: Path, caplog):
     assert "DQ0" in messages[0]
     assert "20.0" in messages[0]
     assert "excluded from the measured length" in messages[0]
+
+
+def test_partially_routed_group_emits_no_off_path_warning(tmp_path: Path, caplog):
+    """Issue #9726: a group the eligibility check omits reports nothing.
+
+    The loop board minus DQ2's only segment: DQ2 is unrouted, so the
+    group is omitted from both result maps -- and must not report DQ0's
+    20 mm loop either.  Before the reporting pass moved after the
+    eligibility check, DQ0 was warned about beside no derived skew at
+    all (#9138 AC 2 asks for the warning alongside the derived skew).
+    """
+    rows = {1: ("DQ0", 10.0, 25.0), 2: ("DQ1", 20.0, 25.0), 3: ("DQ2", 30.0, 25.5)}
+    body = (
+        _seg(5, 10, 25, 10, 1)
+        + _seg(25, 10, 35, 10, 1)
+        + _seg(35, 10, 25, 10, 1)
+        + _seg(5, 20, 25, 20, 2)
+        # DQ2 unrouted: its segment is omitted.
+    )
+    pcb = _write(tmp_path, body, rows)
+
+    with caplog.at_level(logging.WARNING, logger="kicad_tools.validate.match_group_skew"):
+        skew_data, _g, thresholds = derive_group_skew_data(pcb, NET_CLASS_MAP)
+
+    assert skew_data == {}
+    assert thresholds == {}
+    assert not [r for r in caplog.records if "off-path" in r.getMessage()]
 
 
 def test_connected_third_pad_reports_difference_from_selected_path(tmp_path: Path, caplog):
@@ -254,4 +281,78 @@ def test_open_net_keeps_summed_length_and_reports_nothing(tmp_path: Path, caplog
         skew_data, _g, _t = derive_group_skew_data(pcb, NET_CLASS_MAP)
 
     assert skew_data["DDR_DATA"] == pytest.approx(10.0, abs=0.05)
+    assert not [r for r in caplog.records if "off-path" in r.getMessage()]
+
+
+# ---------------------------------------------------------------------------
+# Reporting order vs the eligibility check (Issue #9726)
+# ---------------------------------------------------------------------------
+
+PAIR_NET_CLASS_MAP = dict.fromkeys(("CLK_P", "CLK_N", "DAT_P", "DAT_N"), NET_CLASS)
+
+
+def _pair_board(tmp_path: Path, *, route_dat_n: bool = True) -> PCB:
+    """Two differential pairs in DDR_DATA; loops on one leg per pair.
+
+    Every leg is 20.0 mm pad-to-pad.  CLK_P carries a 20 mm same-net
+    loop and DAT_N a 6 mm dead-end stub -- off-path copper above the
+    reporting epsilon on exactly one leg of each pair, so a fully
+    eligible group reports both pairs' qualifying legs.  With
+    ``route_dat_n=False`` DAT_N has no geometry at all, so the group is
+    omitted by the unrouted-leg gate (Issue #3916) while every other
+    member keeps its off-path copper.
+    """
+    rows = {
+        4: ("CLK_P", 10.0, 25.0),
+        5: ("CLK_N", 20.0, 25.0),
+        6: ("DAT_P", 30.0, 25.0),
+        7: ("DAT_N", 40.0, 25.0),
+    }
+    header = HEADER.replace(
+        '  (net 3 "DQ2")\n',
+        '  (net 4 "CLK_P")\n  (net 5 "CLK_N")\n  (net 6 "DAT_P")\n  (net 7 "DAT_N")\n',
+    )
+    body = (
+        _seg(5, 10, 25, 10, 4)
+        + _seg(25, 10, 35, 10, 4)
+        + _seg(35, 10, 25, 10, 4)  # 20 mm loop on CLK_P
+        + _seg(5, 20, 25, 20, 5)
+        + _seg(5, 30, 25, 30, 6)
+    )
+    if route_dat_n:
+        body += _seg(5, 40, 25, 40, 7) + _seg(15, 40, 21, 40, 7)  # 6 mm stub on DAT_N
+    return _write(tmp_path, body, rows, header=header)
+
+
+def test_routed_pair_group_reports_both_qualifying_legs(tmp_path: Path, caplog):
+    """A fully routed group visits both net IDs of each differential pair.
+
+    Lane entries stay pair-averaged: CLK = (40 + 20) / 2 = 30 mm,
+    DAT = (20 + 26) / 2 = 23 mm, so the skew is 7.0 mm with the default
+    tolerance, while the off-path reporting names each qualifying leg
+    (CLK_P's loop, DAT_N's stub) individually.
+    """
+    pcb = _pair_board(tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger="kicad_tools.validate.match_group_skew"):
+        skew_data, _g, thresholds = derive_group_skew_data(pcb, PAIR_NET_CLASS_MAP)
+
+    assert skew_data["DDR_DATA"] == pytest.approx(7.0, abs=0.05)
+    assert thresholds["DDR_DATA"] == pytest.approx(0.5)
+    messages = [r.getMessage() for r in caplog.records if "off-path" in r.getMessage()]
+    assert len(messages) == 2
+    assert any("CLK_P" in m and "20.0" in m for m in messages)
+    assert any("DAT_N" in m and "6.0" in m for m in messages)
+
+
+def test_group_skipped_for_unrouted_pair_leg_emits_no_warning(tmp_path: Path, caplog):
+    """Issue #9726: an unrouted pair leg omits the group, so nothing is
+    reported for its already-visited siblings either."""
+    pcb = _pair_board(tmp_path, route_dat_n=False)
+
+    with caplog.at_level(logging.WARNING, logger="kicad_tools.validate.match_group_skew"):
+        skew_data, _g, thresholds = derive_group_skew_data(pcb, PAIR_NET_CLASS_MAP)
+
+    assert skew_data == {}
+    assert thresholds == {}
     assert not [r for r in caplog.records if "off-path" in r.getMessage()]

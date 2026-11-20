@@ -32,7 +32,8 @@ This module provides the producer side -- a thin shim that:
    byte-for-byte like the summed figure.  When total track length
    exceeds the selected pad-to-pad path length by more than
    :data:`OFF_PATH_REPORT_EPSILON_MM` (Issue #9138), a warning names
-   the group, net, difference and the excluded defect amount.
+   the group, net, difference and the excluded defect amount -- reported
+   only for groups that produced a skew figure (Issue #9726).
 3. Builds the ``group_skew_data`` (``max(L) - min(L)`` across the
    group), the detected ``tracker_match_groups`` list, and the per-group
    ``threshold_map`` from each group's net class
@@ -201,7 +202,11 @@ def derive_group_skew_data(
         property tested in ``tests/test_validate_match_group_skew.py``.
         A warning reports the difference between total track length and
         the selected pad-to-pad path length when the difference exceeds
-        :data:`OFF_PATH_REPORT_EPSILON_MM` (Issue #9138). Every member
+        :data:`OFF_PATH_REPORT_EPSILON_MM` (Issue #9138), for every
+        single-ended member and both legs of each differential pair of a
+        group that produced a skew figure; a group omitted by the
+        eligibility check (any unrouted member, or fewer than two
+        measured lanes) reports nothing (Issue #9726). Every member
         contributes its summed kicad-cli length minus its defect copper
         (Issue #9304) to the skew figure; defect-free members contribute
         the summed length byte-for-byte.
@@ -295,13 +300,18 @@ def derive_group_skew_data(
         # the single-ended unrouted-member gating).
         any_unrouted = False
         measured: list[float] = []
+        measurements: dict[int, NetPathMeasurement | None] = {}
 
         # Single-ended members contribute their own length directly.
+        # Measurement only -- the off-path reporting pass runs after the
+        # eligibility check below, so a group that contributes no skew
+        # figure never reports either (Issue #9726).
         for net_id in grp.net_ids:
             if not _net_has_geometry(pcb, net_id):
                 any_unrouted = True
                 break
-            measurement = _measure_member_copper(pcb, net_names.get(net_id), grp.name)
+            measurement = _measure_member_copper(pcb, net_names.get(net_id))
+            measurements[net_id] = measurement
             length = MatchGroupTracker.measure_net_from_pcb(
                 pcb,
                 net_id,
@@ -324,8 +334,10 @@ def derive_group_skew_data(
                 if not _net_has_geometry(pcb, p_id) or not _net_has_geometry(pcb, n_id):
                     any_unrouted = True
                     break
-                measurement_p = _measure_member_copper(pcb, net_names.get(p_id), grp.name)
-                measurement_n = _measure_member_copper(pcb, net_names.get(n_id), grp.name)
+                measurement_p = _measure_member_copper(pcb, net_names.get(p_id))
+                measurement_n = _measure_member_copper(pcb, net_names.get(n_id))
+                measurements[p_id] = measurement_p
+                measurements[n_id] = measurement_n
                 l_p = MatchGroupTracker.measure_net_from_pcb(
                     pcb,
                     p_id,
@@ -354,6 +366,18 @@ def derive_group_skew_data(
                 grp.name,
             )
             continue
+
+        # Off-path reporting pass (Issue #9138 AC 2, ordering per Issue
+        # #9726): the group contributed a skew figure, so its members'
+        # off-path copper is reported alongside that figure.  Visiting
+        # every single-ended net and BOTH legs of each pair only after
+        # the eligibility check keeps a partially-routed group from
+        # warning about members beside no derived skew at all.
+        for net_id in grp.net_ids:
+            _warn_off_path_copper(measurements[net_id], net_names.get(net_id), grp.name)
+        for p_id, n_id in grp.pair_ids:
+            _warn_off_path_copper(measurements[p_id], net_names.get(p_id), grp.name)
+            _warn_off_path_copper(measurements[n_id], net_names.get(n_id), grp.name)
 
         skew_mm = max(measured) - min(measured)
         group_skew_data[grp.name] = skew_mm
@@ -420,7 +444,6 @@ def resolve_group_tolerance_mm(
 def _measure_member_copper(
     pcb: PCB,
     net_name: str | None,
-    group_name: str,
 ) -> NetPathMeasurement | None:
     """Measure one member net's path + defect copper (Issue #9304).
 
@@ -428,18 +451,35 @@ def _measure_member_copper(
     residual the warning reports and the defect track copper the skew
     figure excludes.  Returns ``None`` when the path model cannot run
     (stub PCB without ``get_net_by_name``); the caller then keeps the
-    summed kicad-cli figure byte-for-byte.
+    summed kicad-cli figure byte-for-byte.  Measurement only: the
+    off-path warning is emitted by :func:`_warn_off_path_copper`, which
+    the caller invokes only for groups that passed the eligibility
+    check (Issue #9726).
     """
     if not net_name or not callable(getattr(pcb, "get_net_by_name", None)):
         return None
 
     from kicad_tools.analysis.trace_length import TraceLengthAnalyzer
 
-    measurement = TraceLengthAnalyzer().measure_net_path(
+    return TraceLengthAnalyzer().measure_net_path(
         pcb,
         net_name,
         defect_epsilon_mm=OFF_PATH_REPORT_EPSILON_MM,
     )
+
+
+def _warn_off_path_copper(
+    measurement: NetPathMeasurement | None,
+    net_name: str | None,
+    group_name: str,
+) -> None:
+    """Report a member's off-path copper when it exceeds the epsilon.
+
+    Called only for groups that passed the caller's eligibility check
+    (Issue #9726).  Members with no path measurement stay silent.
+    """
+    if measurement is None or not net_name:
+        return
     off_path_mm = measurement.off_path_length_mm
     if off_path_mm is not None and off_path_mm > OFF_PATH_REPORT_EPSILON_MM:
         defect_mm = measurement.defect_track_mm or 0.0
@@ -457,7 +497,6 @@ def _measure_member_copper(
             off_path_mm,
             excluded,
         )
-    return measurement
 
 
 def _defect_corrected_figure_mm(
