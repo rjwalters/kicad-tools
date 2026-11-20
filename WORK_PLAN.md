@@ -34,7 +34,6 @@ Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a h
 Human-approved issues ready for implementation (`loom:issue`).
 
 - **#9467**: Board 02: clear mask_to_copper + silk_hole_overlap through the recipe, then re-issue the release (unblocks #9053)
-- **#9724**: Probe copper-to-edge clearance against pinned KiCad and move edge.py onto the measured band
 - **#9746**: Creepage cross-face paths ignore (general (thickness)): thin boards get an optimistic bore depth
 
 ## In Progress
@@ -54,16 +53,17 @@ Issues currently being built (`loom:building`).
 - **#9692**: Footprint-local filled Edge.Cuts shapes (fp_circle/fp_poly/fp_rect) are cut-outs natively but kct checks only their stroke
 - **#9706**: CI red on main: Routed PCB DRC Check reads an incomplete mask_to_copper pass as stale identity allowances (no native toolchain in the job, #9410)
 - **#9716**: route-auto emits board-default track width for a wide-class net (row 3's 'limit the neck' half)
+- **#9724**: Probe copper-to-edge clearance against pinned KiCad and move edge.py onto the measured band
 - **#9725**: current paths / pcb reinforce: a tripled layer change (three vias in a row with a short bar on both layers) makes the whole path 'ambiguous'
 - **#9726**: Harden _warn_off_path_copper integration: unguarded cross-boundary call and warn-before-skip ordering
 - **#9734**: router: board 05 VCP unrouted again at main - finalize safety net demotes the net after negotiation connects it
 - **#9748**: optimize-traces --drc-aware --mfr jlcpcb introduces mask_to_copper errors at pad entries that the un-optimised board does not have
-- **#9750**: mask_to_copper: a same-net track wider than its own pad, and any track entering a stock custom pad (SOT-89 tab), are errors with no clean layout available
-- **#9755**: Consolidate the three near-identical voltage-map sidecar loaders
-- **#9766**: test flake: test_stranded_pour_unknown_is_unverified[direct] times out (>60s) on Test (sibling of #9115)
+- **#9767**: diffpair_skew: apply the #9304 defect-copper classifier to intra-pair skew
+- **#9773**: Padstack front/back primitive exchange is skipped when only one side has a primitives block (probe first)
 - **#9775**: pcb prune: --no-current-paths also disables the post-plan current-path audit gate, which the pre-#9747 default kept
-- **#9779**: CI red in Test (extended): test_two_domain_keepout_segregation fails on an HV_A-vs-board-edge pairwise finding (2.900 vs 3.200 mm)
 - **#9781**: test docstring: test_one_ruler_across_mixed_members states the summed-ruler skew as "42 - 26 = 5"; measured 22.0
+- **#9788**: Fixture comment in tests/test_lattice_keepout_areas.py states trace half-width 0.05 mm; measured routed width is 0.2 mm (half-width 0.1 mm)
+- **#9789**: docs/reference/cli.md: pcb prune is absent, and the --current-paths consumer list omits it
 
 ## PRs Awaiting Review
 
@@ -72,12 +72,14 @@ PRs waiting on Judge (`loom:review-requested`).
 - **#9083**: fix(board03): clip silk off drilled holes in the recipe and gate silk_hole_overlap = 0
 - **#9645**: fix(route): start completion links from kept copper and stop sibling pads walling a pad in
 - **#9669**: feat: charge, report and optionally refuse plane-zone crossings in kct route
-- **#9760**: refactor: share the voltage-map sidecar read and non-object check in creepage.engine
-- **#9776**: test: give the remaining _route() verdict tests the 180s timeout cap
-- **#9777**: docs: say pcb prune --no-current-paths also disables the audit gate
-- **#9780**: test: widen lattice keepout fixture outline to clear board-edge creepage gate
 - **#9782**: fix: route-auto corridor emits at the net's class width
 - **#9783**: docs: correct summed-ruler arithmetic in one_ruler test docstring
+- **#9785**: fix: snap C++ router coordinates onto the 0.1um lattice at the backend boundary
+- **#9787**: fix(validate): shed defect copper from the diff-pair skew figures
+- **#9790**: fix: exchange whole front/back padstack definition for one-sided custom pads
+- **#9791**: test: align lattice keepout corridor assertions and edge-margin comment with 0.1 mm trace half-width
+- **#9792**: docs: add kct pcb prune section and fix --current-paths consumer count in cli.md
+- **#9793**: fix: ride KiCad's probed 500nm band for copper-to-edge verdicts
 
 ## Approved (Awaiting Merge)
 
@@ -90,7 +92,7 @@ PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 - **#9721**: fix: treat filled footprint-local Edge.Cuts shapes as cut-out regions
 - **#9739**: fix(validate): report match-group off-path copper only for eligible groups
 - **#9749**: fix: resolve tripled layer changes and anchor loop-free lanes (#9725)
-- **#9753**: fix(mask): excuse wide same-net bars on their own pad and custom-pad entries
+- **#9777**: docs: say pcb prune --no-current-paths also disables the audit gate
 
 ## Proposed
 
@@ -143,12 +145,12 @@ Issues carrying `loom:curated`.
 - **#9726**: Harden _warn_off_path_copper integration: unguarded cross-boundary call and warn-before-skip ordering *(curated)*
 - **#9734**: router: board 05 VCP unrouted again at main - finalize safety net demotes the net after negotiation connects it *(curated)*
 - **#9748**: optimize-traces --drc-aware --mfr jlcpcb introduces mask_to_copper errors at pad entries that the un-optimised board does not have *(curated)*
-- **#9750**: mask_to_copper: a same-net track wider than its own pad, and any track entering a stock custom pad (SOT-89 tab), are errors with no clean layout available *(curated)*
-- **#9755**: Consolidate the three near-identical voltage-map sidecar loaders *(curated)*
-- **#9766**: test flake: test_stranded_pour_unknown_is_unverified[direct] times out (>60s) on Test (sibling of #9115) *(curated)*
+- **#9767**: diffpair_skew: apply the #9304 defect-copper classifier to intra-pair skew *(curated)*
+- **#9773**: Padstack front/back primitive exchange is skipped when only one side has a primitives block (probe first) *(curated)*
 - **#9775**: pcb prune: --no-current-paths also disables the post-plan current-path audit gate, which the pre-#9747 default kept *(curated)*
-- **#9779**: CI red in Test (extended): test_two_domain_keepout_segregation fails on an HV_A-vs-board-edge pairwise finding (2.900 vs 3.200 mm) *(curated)*
 - **#9781**: test docstring: test_one_ruler_across_mixed_members states the summed-ruler skew as "42 - 26 = 5"; measured 22.0 *(curated)*
+- **#9788**: Fixture comment in tests/test_lattice_keepout_areas.py states trace half-width 0.05 mm; measured routed width is 0.2 mm (half-width 0.1 mm) *(curated)*
+- **#9789**: docs/reference/cli.md: pcb prune is absent, and the --current-paths consumer list omits it *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -168,9 +170,9 @@ _None._
 | Operator merge-risk holds | 4 |
 | Very important | 1 |
 | Important | 2 |
-| Ready (`loom:issue`) | 3 |
-| In Progress (`loom:building`) | 23 |
-| PRs awaiting review | 9 |
+| Ready (`loom:issue`) | 2 |
+| In Progress (`loom:building`) | 24 |
+| PRs awaiting review | 11 |
 | Approved PRs awaiting merge | 8 |
 | Curated | 53 |
 | Architect / Hermit proposals | 0 |
