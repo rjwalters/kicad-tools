@@ -290,8 +290,8 @@ def _coupled_four_layer_routes(monkeypatch, backend: str):
         grid=grid, rules=rules, target_spacing_cells=6, min_spacing_cells=6
     )
     result = pathfinder.route_coupled(p_start, p_end, n_start, n_end, max_iterations_budget=200000)
-    if backend == "cpp" and pathfinder.last_coupled_backend != "cpp":
-        pytest.skip("C++ coupled backend not built")
+    if backend == "cpp":
+        require_router_cpp()
     assert pathfinder.last_coupled_backend == backend
     assert result is not None, "the fixture must route"
     # Issue #6543: the route lands on the pad's own layer -- the pads are

@@ -26,11 +26,13 @@ from dataclasses import dataclass
 ROUTER_CPP_MODULE = "kicad_tools.router.router_cpp"
 
 _FROM_ROUTER_CPP_BACKEND = re.compile(
-    r"^\s*from\s+kicad_tools\.router\.cpp_backend\s+import\s+(?P<names>[^\n#]+)",
+    r"^[ \t]*from\s+kicad_tools\.router\.cpp_backend\s+import\s+"
+    r"(?P<names>\([^)]*\)|[^\n#]+)",
     re.MULTILINE,
 )
 _FROM_ROUTER_PKG = re.compile(
-    r"^\s*from\s+kicad_tools\.router\s+import\s+(?P<names>[^\n#]+)",
+    r"^[ \t]*from\s+kicad_tools\.router\s+import\s+"
+    r"(?P<names>\([^)]*\)|[^\n#]+)",
     re.MULTILINE,
 )
 _IMPORT_AS = re.compile(
@@ -47,6 +49,7 @@ _ALIAS_FROM_PROBE = re.compile(
 
 def _names_from_import_list(names: str) -> list[tuple[str, str]]:
     """``[(imported_name, local_name), ...]`` from an import list body."""
+    names = re.sub(r"#[^\n]*", "", names)
     stripped = names.strip().strip("()").strip()
     result: list[tuple[str, str]] = []
     for chunk in stripped.split(","):
@@ -112,6 +115,21 @@ def router_probe_refs(source: str) -> set[str]:
     return refs
 
 
+def router_info_refs(source: str) -> set[str]:
+    """Expressions bound to the router ``get_backend_info`` (``["available"]`` probe)."""
+    refs: set[str] = set()
+    for pattern in (_FROM_ROUTER_CPP_BACKEND, _FROM_ROUTER_PKG):
+        for match in pattern.finditer(source):
+            for imported, local in _names_from_import_list(match.group("names")):
+                if imported == "get_backend_info":
+                    refs.add(local)
+                elif imported == "cpp_backend":
+                    refs.add(f"{local}.get_backend_info")
+    for match in _IMPORT_AS.finditer(source):
+        refs.add(f"{match.group('alias')}.get_backend_info")
+    return refs
+
+
 def references_router_module(source: str) -> bool:
     """Whether the source names the router extension module at all."""
     return ROUTER_CPP_MODULE in source
@@ -156,8 +174,9 @@ def scan_source(source: str, path: str = "<source>") -> list[Violation]:
       variables assigned from the probe).
     """
     refs = router_probe_refs(source)
+    info_refs = router_info_refs(source)
     module_ref = references_router_module(source)
-    if not refs and not module_ref:
+    if not refs and not info_refs and not module_ref and "router_cpp" not in source:
         return []
 
     violations: list[Violation] = []
@@ -199,12 +218,21 @@ def scan_source(source: str, path: str = "<source>") -> list[Violation]:
                 )
             )
 
-    # 3. pytest.skip guarded by a negated probe reference.
-    if refs:
-        negated = re.compile(
-            r"not\s+(?:" + "|".join(re.escape(ref) for ref in refs) + r")\s*\(|"
-            r"not\s+(?:" + "|".join(re.escape(ref) for ref in refs) + r")\b(?!\s*\()"
-        )
+    # 3. pytest.skip guarded by a negated probe reference
+    #    (``not is_cpp_available()``, ``not get_backend_info()["available"]``).
+    if refs or info_refs:
+        alternatives = []
+        if refs:
+            joined = "|".join(re.escape(ref) for ref in refs)
+            alternatives.append(rf"not\s+(?:{joined})\s*\(")
+            alternatives.append(rf"not\s+(?:{joined})\b(?!\s*\()")
+        if info_refs:
+            joined = "|".join(re.escape(ref) for ref in info_refs)
+            alternatives.append(
+                rf"not\s+(?:{joined})\s*\(\s*\)\s*"
+                r"(?:\[\s*[\"']available[\"']\s*\]|\.get\(\s*[\"']available[\"']\s*\))"
+            )
+        negated = re.compile("|".join(alternatives))
         lines = source.splitlines()
         for index, line in enumerate(lines):
             if negated.search(line) is None:
@@ -230,6 +258,27 @@ def scan_source(source: str, path: str = "<source>") -> list[Violation]:
                             "require_router_cpp() instead (Issue #9705)",
                         )
                     )
+    # 4. ``try: from kicad_tools.router import router_cpp`` /
+    #    ``except ImportError: pytest.skip(...)``.
+    for match in re.finditer(
+        r"except\s+(?:\(?\s*)?(?:ImportError|ModuleNotFoundError)[^\n]*:[ \t]*\n", source
+    ):
+        lines_before = source[: match.start()]
+        try_at = lines_before.rfind("try:")
+        if try_at == -1 or "router_cpp" not in source[try_at : match.start()]:
+            continue
+        indent = match.start() - (source.rfind("\n", 0, match.start()) + 1)
+        rest = source[match.end() :].splitlines()
+        block_skip = _first_skip_in_block(rest, 0, indent)
+        if block_skip is not None:
+            violations.append(
+                Violation(
+                    path,
+                    line_of(match.end()) + block_skip,
+                    "pytest.skip on ImportError of the router extension: call "
+                    "require_router_cpp() instead (Issue #9705)",
+                )
+            )
     return violations
 
 

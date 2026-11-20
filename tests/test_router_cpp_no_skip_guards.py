@@ -139,6 +139,74 @@ def test_compliant_forms_are_not_flagged():
     assert scan_source(source) == []
 
 
+_SKIPIF = (
+    "@pytest.mark.skipif(not is_cpp_available(), reason='no cpp')\ndef test_native():\n    pass\n"
+)
+
+
+def test_flags_skipif_with_one_line_import_from_cpp_backend():
+    source = "from kicad_tools.router.cpp_backend import is_cpp_available\n" + _SKIPIF
+    assert len(scan_source(source)) == 1
+
+
+def test_flags_skipif_with_parenthesised_multiline_cpp_backend_import():
+    source = (
+        "from kicad_tools.router.cpp_backend import (\n"
+        "    CppPathfinder,\n"
+        "    is_cpp_available,\n"
+        ")\n" + _SKIPIF
+    )
+    assert len(scan_source(source)) == 1
+
+
+def test_flags_skipif_with_parenthesised_multiline_router_package_import():
+    source = (
+        "from kicad_tools.router import (\n"
+        "    Autorouter,\n"
+        "    is_cpp_available,  # probe\n"
+        ")\n" + _SKIPIF
+    )
+    assert len(scan_source(source)) == 1
+
+
+def test_flags_backend_info_available_skip():
+    source = (
+        "import pytest\n"
+        "from kicad_tools.router.cpp_backend import get_backend_info\n"
+        "\n"
+        "def test_native():\n"
+        '    if not get_backend_info()["available"]:\n'
+        '        pytest.skip("C++ extension unavailable")\n'
+    )
+    assert _lines(scan_source(source)) == [6]
+
+
+def test_flags_import_error_followed_by_pytest_skip():
+    source = (
+        "import pytest\n"
+        "\n"
+        "def test_native():\n"
+        "    try:\n"
+        "        from kicad_tools.router import router_cpp\n"
+        "    except ImportError:\n"
+        '        pytest.skip("C++ extension not built")\n'
+    )
+    assert _lines(scan_source(source)) == [7]
+
+
+def test_unrelated_import_error_skip_is_not_flagged():
+    source = (
+        "import pytest\n"
+        "\n"
+        "def test_other():\n"
+        "    try:\n"
+        "        import shapely\n"
+        "    except ImportError:\n"
+        '        pytest.skip("no shapely")\n'
+    )
+    assert scan_source(source) == []
+
+
 def test_no_router_cpp_skip_guards_anywhere_in_the_test_tree():
     violations = scan_tree(str(TESTS_ROOT), skip=SELF_EXEMPT)
     assert not violations, (

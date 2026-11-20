@@ -1533,9 +1533,7 @@ class TestCppBuildVersionGuard:
         # Snapshot the live router_cpp module (None if backend already disabled)
         router_cpp_mod = original.router_cpp
         if router_cpp_mod is None:
-            import pytest
-
-            pytest.skip("C++ backend not available - guard already engaged")
+            require_router_cpp()
 
         # Force BUILD_VERSION to a mismatched value before re-importing
         monkeypatch.setattr(router_cpp_mod, "BUILD_VERSION", 999_999, raising=False)
@@ -1570,9 +1568,7 @@ class TestCppBuildVersionGuard:
 
         router_cpp_mod = original.router_cpp
         if router_cpp_mod is None:
-            import pytest
-
-            pytest.skip("C++ backend not available - guard already engaged")
+            require_router_cpp()
 
         # Remove the attribute entirely
         if hasattr(router_cpp_mod, "BUILD_VERSION"):

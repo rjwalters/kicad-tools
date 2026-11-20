@@ -1464,8 +1464,8 @@ def _require_backend(router: Autorouter, force_python: bool) -> None:
     from kicad_tools.router.cpp_backend import CppPathfinder
 
     is_cpp = isinstance(router.router, CppPathfinder)
-    if not force_python and not is_cpp:
-        pytest.skip("C++ router extension not built")
+    if not force_python:
+        require_router_cpp()
     assert is_cpp is not force_python
 
 

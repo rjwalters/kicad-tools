@@ -275,7 +275,11 @@ def _item_needs_router_cpp(item: pytest.Item) -> bool:
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Auto-``xfail`` every ``consumer`` item whose group is not yet migrated."""
     del config
-    from kicad_tools.router.cpp_backend import is_cpp_available
+    # The adapter's own probe, not a direct ``kicad_tools`` import: the truth
+    # side of the harness must not import the code it measures.
+    from tests.conformance.adapters.grid_cpp import GridCppAdapter
+
+    router_cpp_built = GridCppAdapter().available()
 
     for item in items:
         if item.get_closest_marker("consumer") is None:
@@ -284,7 +288,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             # Switched to the kernel in its own epic phase: the whole point of
             # that phase is that this row stops being allowed to disagree.
             continue
-        if _item_needs_router_cpp(item) and not is_cpp_available():
+        if _item_needs_router_cpp(item) and not router_cpp_built:
             # Issue #9705: the row's ``requires_router_cpp`` marker fails it
             # with the build hint at setup. A plain xfail would absorb that
             # ``Failed`` (it is a ``BaseException``, matched by ``raises is
