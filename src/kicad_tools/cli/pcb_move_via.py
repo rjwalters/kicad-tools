@@ -207,7 +207,7 @@ def _via_hole_violations(pcb, via, pcb_path: Path) -> Counter:
     from kicad_tools._shapely import require_shapely
     from kicad_tools.core.layers import via_spans_layer
     from kicad_tools.router.board_clearance_rules import BoardClearanceRules, ItemProps
-    from kicad_tools.validate.rules.base import DRC_TOLERANCE
+    from kicad_tools.validate.rules.base import WRITER_CLEARANCE_MARGIN_MM
     from kicad_tools.validate.rules.clearance import (
         ClearanceRule,
         _arc_copper_geom,
@@ -256,7 +256,7 @@ def _via_hole_violations(pcb, via, pcb_path: Path) -> Counter:
         )
         for geom, kind, net_name, ref in candidates:
             required = rules.hole_clearance(me, ItemProps(kind, net_name), layer.name)
-            if hole.distance(geom) + DRC_TOLERANCE < required:
+            if hole.distance(geom) + WRITER_CLEARANCE_MARGIN_MM < required:
                 nets = tuple(sorted({via.net_name, net_name}))
                 counter[("hole_clearance", layer.name, nets, tuple(sorted((me_id, ref))))] += 1
 
@@ -276,7 +276,7 @@ def _via_hole_violations(pcb, via, pcb_path: Path) -> Counter:
                 props = ItemProps("Pad", pad.net_name, plated=True, pad_type="Through-hole")
                 drills.append((props, geom, pad.net_name, f"{fp.reference}-{pad.number} hole"))
     for props, geom, net_name, ref in drills:
-        if hole.distance(geom) + DRC_TOLERANCE < rules.hole_to_hole(me, props):
+        if hole.distance(geom) + WRITER_CLEARANCE_MARGIN_MM < rules.hole_to_hole(me, props):
             nets = tuple(sorted({via.net_name, net_name}))
             counter[("hole_to_hole", "*", nets, tuple(sorted((me_id, ref))))] += 1
     return counter
