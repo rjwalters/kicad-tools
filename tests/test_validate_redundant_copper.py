@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
+
+import pytest
 
 from kicad_tools.validate.rules.redundant_copper import RedundantCopperRule
 
@@ -216,3 +220,188 @@ def test_staircase_message_uses_sheet_absolute_coordinates_with_origin():
 def test_staircase_message_unchanged_at_zero_origin():
     (v,) = _stair_findings(_run(_staircase()))
     assert "from (0.00, 0.00) to (24.00, 10.00)" in v.message
+
+
+# --- staircase legality (Issue #9817) ---------------------------------------
+#
+# Each case reproduces one row of the issue's board-02 evidence table as a
+# small synthetic board, with a non-vacuous control showing the same chain is
+# reported when the defect's cause is absent.
+
+_BOARD_HEAD = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (37 "F.SilkS" user)
+    (38 "B.Mask" user) (39 "F.Mask" user) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0.05))
+  (net 0 "")
+  (net 1 "SIG")
+  (net 2 "OTHER")
+"""
+
+
+def _pad_fp(ref, x, y, net=1, size=1.0, mask=True):
+    layers = '"F.Cu" "F.Mask"' if mask else '"F.Cu"'
+    net_name = {1: "SIG", 2: "OTHER"}[net]
+    return (
+        f'  (footprint "t:pad" (layer "F.Cu") (at {x} {y})\n'
+        f'    (property "Reference" "{ref}" (at 0 0) (layer "F.SilkS"))\n'
+        f'    (pad "1" smd rect (at 0 0) (size {size} {size}) (layers {layers}) '
+        f'(net {net} "{net_name}"))\n'
+        f"  )\n"
+    )
+
+
+def _seg_text(points, width=0.25, net=1, start_uuid=0):
+    return "".join(
+        f"  (segment (start {a[0]} {a[1]}) (end {b[0]} {b[1]}) (width {width}) "
+        f'(layer "F.Cu") (net {net}) (uuid "s{start_uuid + i}"))\n'
+        for i, (a, b) in enumerate(zip(points, points[1:], strict=False))
+    )
+
+
+def _board(tmp_path: Path, body: str):
+    from kicad_tools.schema.pcb import PCB
+
+    path = tmp_path / "board.kicad_pcb"
+    path.write_text(_BOARD_HEAD + body + ")\n")
+    return PCB.load(path)
+
+
+def _checker_stairs(pcb):
+    """Run through ``DRCChecker`` as ``kct check --mfr jlcpcb`` does."""
+    from kicad_tools.validate.checker import DRCChecker
+
+    return _stair_findings(
+        DRCChecker(pcb, manufacturer="jlcpcb", layers=2).check_redundant_copper()
+    )
+
+
+def _power_project(pcb_path: Path, pattern: str) -> None:
+    from tests.router.test_authored_netclass_board import _netclass
+
+    project = {
+        "meta": {"filename": pcb_path.with_suffix(".kicad_pro").name, "version": 3},
+        "net_settings": {
+            "meta": {"version": 4},
+            "classes": [_netclass("Default", 0.127, 2147483647), _netclass("Power", 0.2, 0)],
+            "netclass_assignments": None,
+            "netclass_patterns": [{"netclass": "Power", "pattern": pattern}],
+        },
+    }
+    pcb_path.with_suffix(".kicad_pro").write_text(json.dumps(project))
+
+
+# A 4-segment / 3-bend chain; its fewer-bend candidates are
+# (0,0)->(4,4)->(8,4) and (0,0)->(4,0)->(8,4).
+_NC_CHAIN = [(0, 0), (2, 0), (4, 2), (6, 2), (8, 4)]
+# Foreign tracks 0.16 mm (copper to copper) from each candidate's new leg:
+# clear of JLCPCB's 0.127 mm floor, short of a 0.2 mm Power class, and far
+# (> 0.4 mm) from the chain itself.
+_OFF = 0.125 + 0.16 + 0.1
+_NC_BLOCKERS = [
+    ((2.5, -_OFF), (3.5, -_OFF)),
+    (
+        (1 - _OFF / 2**0.5, 1 + _OFF / 2**0.5),
+        (2 - _OFF / 2**0.5, 2 + _OFF / 2**0.5),
+    ),
+]
+
+
+def _netclass_board(tmp_path):
+    body = _seg_text(_NC_CHAIN)
+    for i, blocker in enumerate(_NC_BLOCKERS):
+        body += _seg_text(list(blocker), width=0.2, net=2, start_uuid=100 + 10 * i)
+    return _board(tmp_path, body)
+
+
+def test_netclass_case_control_fab_floor_alone_reports(tmp_path):
+    """Control: without a Power class the 0.16 mm gaps are legal and reported."""
+    assert len(_checker_stairs(_netclass_board(tmp_path))) == 1
+
+
+@pytest.mark.parametrize("power_net", ["SIG", "OTHER"])
+def test_shortcut_inside_netclass_clearance_not_reported(tmp_path, power_net):
+    """Board 02 [VCC]: the shortcut clears the fab floor but not the class.
+
+    The requirement is ``max(class[a], class[b])``, so the obstacle's class
+    counts as much as the chain's own (``netclass_clearance_copper``).
+    """
+    pcb = _netclass_board(tmp_path)
+    _power_project(pcb.path, power_net)
+    from kicad_tools.schema.pcb import PCB
+
+    assert _checker_stairs(PCB.load(pcb.path)) == []
+
+
+# Board 02 [NODE_D]: a 4-bend chain between two pads, entering both
+# horizontally at the pad centres.  Both 1-bend candidates put their bend
+# inside a pad (0.4 mm from its centre), so the shortcut leg straddles the
+# pad's edge: copper under mask beside the opening.
+_MASK_CHAIN = [(0, 0), (3, 0), (3.2, 0.2), (6, 0.2), (6.2, 0.4), (10, 0.4)]
+
+
+def _mask_board(tmp_path, mask=True):
+    body = _pad_fp("D9", 0, 0, mask=mask) + _pad_fp("D10", 10, 0.4, mask=mask)
+    return _board(tmp_path, body + _seg_text(_MASK_CHAIN))
+
+
+def test_mask_case_control_pads_without_mask_opening_report(tmp_path):
+    """Control: the same chain between mask-less pads is reported."""
+    assert len(_checker_stairs(_mask_board(tmp_path, mask=False))) == 1
+
+
+def test_shortcut_with_new_copper_in_mask_zone_not_reported(tmp_path):
+    assert _checker_stairs(_mask_board(tmp_path)) == []
+
+
+def test_mask_zone_uses_policy_clearance(tmp_path):
+    """Rule-level: the zone is the opening grown by ``mask_clearance_mm``."""
+    pcb = _mask_board(tmp_path)
+    assert _stair_findings(RedundantCopperRule(mask_clearance_mm=0.15).check(pcb, None)) == []
+
+
+# Board 02 [NODE_A]: the chain runs through the centre of a same-net pad.
+# Each half has one bend; only the walk through the pad made it a "3-bend
+# staircase" whose shortcut would bypass (and disconnect) the pad.
+_THROUGH_CHAIN = [(0, 0), (2, 0), (4, 2), (6, 2), (8, 4)]
+
+
+def test_pass_through_case_control_without_pad_reports(tmp_path):
+    assert len(_checker_stairs(_board(tmp_path, _seg_text(_THROUGH_CHAIN)))) == 1
+
+
+def test_chain_through_same_net_pad_centre_not_reported(tmp_path):
+    pcb = _board(tmp_path, _pad_fp("D1", 4, 2) + _seg_text(_THROUGH_CHAIN))
+    assert _checker_stairs(pcb) == []
+
+
+def test_chain_through_same_net_via_centre_not_reported():
+    segs = [_Seg(a, b) for a, b in zip(_THROUGH_CHAIN, _THROUGH_CHAIN[1:], strict=False)]
+    assert len(_stair_findings(_run(segs))) == 1  # control
+    assert _stair_findings(_run(segs, [_Via((4, 2))])) == []
+
+
+def test_foreign_pad_on_chain_vertex_does_not_split_chain(tmp_path):
+    """Only a same-net pad is a terminal (a foreign one is clearance's job)."""
+    pcb = _board(tmp_path, _pad_fp("Q1", 4, 2, net=2) + _seg_text(_THROUGH_CHAIN))
+    assert len(_stair_findings(RedundantCopperRule().check(pcb, None))) == 1
+
+
+def test_genuine_staircase_between_pads_still_reported(tmp_path):
+    """A free, class-clear, mask-clean shortcut is still flagged.
+
+    The chain leaves pad A horizontally and enters pad B on a diagonal; the
+    shortcut (0,0)->(6,0)->(10,4) is collinear with both end legs, so it adds
+    no copper near either opening.  The diagonal-first candidate would leave
+    A at 45 degrees through its mask zone and is skipped.
+    """
+    chain = [(0, 0), (2, 0), (4, 2), (8, 2), (10, 4)]
+    pcb = _board(tmp_path, _pad_fp("A1", 0, 0) + _pad_fp("B1", 10, 4) + _seg_text(chain))
+    _power_project(pcb.path, "SIG")
+    from kicad_tools.schema.pcb import PCB
+
+    (finding,) = _checker_stairs(PCB.load(pcb.path))
+    assert "(0.00, 0.00) -> (6.00, 0.00) -> (10.00, 4.00)" in finding.message
