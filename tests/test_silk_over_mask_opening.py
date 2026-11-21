@@ -86,13 +86,16 @@ def test_no_mask_graphics_no_findings(tmp_path: Path) -> None:
     assert not res.violations
 
 
-def test_pad_aperture_still_silk_over_copper_warning(tmp_path: Path) -> None:
+def test_pad_aperture_still_silk_over_copper_error(tmp_path: Path) -> None:
+    # #9798: the geometric pass keeps its per-pair counting model, but the
+    # pad hit now grades as an error under the jlcpcb profiles (operator
+    # ruling on #9795).
     fp = """  (footprint "R" (layer "F.Cu") (at 20 20)
     (pad "1" smd rect (at 0 0) (size 2 2) (layers "F.Cu" "F.Mask" "F.Paste")))
 """
     res, copper = _check(tmp_path, fp + _silk("F", (20, 80, 90)))
     assert not res.violations
-    assert [v.severity for v in copper.violations] == ["warning"]
+    assert [v.severity for v in copper.violations] == ["error"]
 
 
 def test_footprint_mask_graphic_opening_is_error(tmp_path: Path) -> None:

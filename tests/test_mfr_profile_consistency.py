@@ -352,7 +352,13 @@ def test_explicit_base_tier_overrides_sidecar_via_real_cli(tmp_path: Path) -> No
         "Sanity: with no --mfr flag the fab_profile.json sidecar should "
         f"auto-resolve to jlcpcb-tier1, got {auto['manufacturer']!r}."
     )
-    assert auto["summary"]["errors"] == 0
+    # Issue #9798 regraded silk_ref_obscured to an error under the jlcpcb
+    # profiles (operator ruling on #9795), so this pre-#6394 witness now
+    # carries its six buried designators as errors at tier1.  The sanity
+    # this test needs is that the *copper* verdict is clean: no non-silk
+    # error may appear at tier1.
+    auto_error_rules = {v["rule_id"] for v in auto["violations"] if v["severity"] == "error"}
+    assert auto_error_rules <= {"silk_ref_obscured"}, sorted(auto_error_rules)
 
     # Explicit base tier: must override the sidecar via the real dispatcher.
     forced = _run_check(staged_pcb, "jlcpcb", cwd=tmp_path)

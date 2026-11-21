@@ -43,7 +43,7 @@ def _board_text() -> str:
     ]:
         parts.append(
             f'(footprint "test" (layer "F.Cu") (at {x} {y})\n'
-            f'  (property "Reference" "{ref}" (at 0 0) (layer "F.SilkS"))\n'
+            f'  (property "Reference" "{ref}" (at 0 -2) (layer "F.SilkS"))\n'
             f'  (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net {net} "{name}")))'
         )
     return (

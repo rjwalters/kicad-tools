@@ -39,8 +39,9 @@ def test_hidden_reference_is_flagged(rules):
     pcb = PCB.load(BOARD02)
     _ref(pcb, "D1").hidden = True
     found = check_silk_ref_obscured(pcb, rules).violations
+    # #9798: an error under the jlcpcb profiles (operator ruling on #9795).
     assert [(v.rule_id, v.severity, v.items) for v in found] == [
-        ("silk_ref_obscured", "warning", ("D1 (reference)", "hidden"))
+        ("silk_ref_obscured", "error", ("D1 (reference)", "hidden"))
     ]
 
 

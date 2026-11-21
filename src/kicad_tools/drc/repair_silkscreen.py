@@ -61,6 +61,41 @@ GR_GRAPHIC_TYPES = ("gr_line", "gr_rect", "gr_circle", "gr_arc")
 
 
 @dataclass
+class KeepoutClipFix:
+    """Record of one silk graphic clipped (or removed) out of a keepout."""
+
+    owner: str  # footprint reference, or "board" for gr_* graphics
+    element_type: str  # "fp_line" | "fp_poly" | "fp_rect" | "gr_line" | ...
+    layer: str
+    action: str  # "trimmed" or "removed"
+    areas: list[str] = field(default_factory=list)  # keepout labels it crossed
+    #: Printed ink area (mm^2) before and after the clip, from the same
+    #: geometry ``silk_in_keepout`` measures.
+    old_area: float = 0.0
+    new_area: float = 0.0
+    pieces: int = 0  # graphics left in the file in its place
+
+
+@dataclass
+class KeepoutClipRepairResult:
+    """Aggregate result of a silk-out-of-keepout clip pass (Issue #9798)."""
+
+    fixes: list[KeepoutClipFix] = field(default_factory=list)
+    skipped: list[PadClearanceSkip] = field(default_factory=list)
+    #: Text inside a silk keepout, with its area -- never clipped; move or
+    #: rephrase it by hand (``kct place-silk-refs`` for references).
+    text_residual: list[str] = field(default_factory=list)
+    #: ``silk_in_keepout`` findings still present after the pass, re-measured
+    #: with the real rule (empty on a dry run).  Unfixable silk stays an
+    #: error; these are its names.
+    residual: list[str] = field(default_factory=list)
+
+    @property
+    def total_fixed(self) -> int:
+        return len(self.fixes)
+
+
+@dataclass
 class SilkscreenFix:
     """Record of a single silkscreen element that was (or would be) fixed."""
 
@@ -229,6 +264,9 @@ _MIN_POLY_AREA_MM2 = 1e-3
 # Deterministic UUIDs for graphics the hole clip has to split, so the same
 # input always yields byte-identical output (uuid4 would not).
 _HOLE_CLIP_NAMESPACE = _uuid.UUID("9054c1ea-0000-4000-8000-000000009054")
+
+# Same contract for the keepout clip (Issue #9798).
+_KEEPOUT_CLIP_NAMESPACE = _uuid.UUID("9798c1ea-0000-4000-8000-000000009798")
 
 # Extra margin (mm) added to the keep-out so clipped endpoints land strictly
 # on the clear side of the check's tolerance despite polygonal buffers.
@@ -778,6 +816,330 @@ class SilkscreenRepairer:
                 result.marker_lost = sorted(self._pin1_marker_refs() - markers_before)
         return result
 
+    def repair_keepout_clearance(
+        self,
+        dry_run: bool = False,
+    ) -> KeepoutClipRepairResult:
+        """Clip silk graphics out of keepouts that forbid silk (Issue #9798).
+
+        The areas are :func:`~kicad_tools.validate.rules.silkscreen.resolve_silk_keepouts`
+        -- rule areas the board's sibling ``.kicad_dru`` forbids ``graphic``
+        in -- resolved once and shared with the ``silk_in_keepout`` check, so
+        a clipped board passes that check.  Both footprint silk
+        (``fp_line`` / ``fp_poly`` / ``fp_rect``) and board-level silk
+        (``gr_line`` / ``gr_poly`` / ``gr_rect``) are clipped; the printed
+        ink must clear the area by half the stroke width (plus a 1 um safety
+        margin), and both printable portions of a line crossed by the area
+        survive, exactly as :meth:`repair_hole_clearance` clips against
+        drills.  Graphics that do not reach an area are left byte-identical;
+        the pass is idempotent.
+
+        Arcs and circles are not clipped and are reported in
+        ``result.skipped``.  Text is never touched: text inside a keepout
+        lands in ``result.text_residual`` as ``"<item> in <area>"`` -- the
+        surviving item and its area -- and stays an ``silk_in_keepout``
+        error (see ``result.residual``, re-measured with the real rule on a
+        real run).
+
+        This is the clip operation the silk legalisation pass (#9797)
+        consumes; the router never calls it (#5744).
+
+        Args:
+            dry_run: If ``True``, collect fixes but do not mutate the tree.
+        """
+        from kicad_tools._shapely import require_shapely
+
+        require_shapely("silk keepout clip")
+        from shapely import STRtree  # type: ignore[import-untyped]
+        from shapely.affinity import translate  # type: ignore[import-untyped]
+        from shapely.geometry import LineString, Polygon
+        from shapely.ops import linemerge, unary_union
+
+        from kicad_tools.schema.pcb import PCB, BoardGraphic, Footprint, FootprintGraphic
+        from kicad_tools.sexp.parser import parse_string, serialize_sexp
+        from kicad_tools.validate.rules.silkscreen import (
+            SilkKeepoutArea,
+            _fp_transform,
+            _iter_silk_typed,
+            _silk_side,
+            _stroke_geometry,
+            check_silk_in_keepout,
+            resolve_silk_keepouts,
+        )
+
+        result = KeepoutClipRepairResult()
+        dru_path = self.path.with_suffix(".kicad_dru")
+        scratch = PCB(parse_string(serialize_sexp(self.doc)))
+        board_areas = [
+            area
+            for area in resolve_silk_keepouts(scratch, dru_path=dru_path)
+            if area.disallow_graphic
+        ]
+        if not board_areas:
+            return result
+
+        # Text residuals first, in the board frame the resolver speaks:
+        # report the surviving item and its area, clip nothing.
+        for side, kind, geom, label, _owner, _layer, uuid, _location in _iter_silk_typed(scratch):
+            if kind != "text":
+                continue
+            for area in board_areas:
+                if side in area.sides and geom.intersects(area.polygon):
+                    item = f"{label} {{{uuid}}}" if uuid else label
+                    result.text_residual.append(f"{item} in {area.label}")
+
+        # Graphics are clipped in the file's own frame (sheet-absolute),
+        # like the hole clip: shift the resolved polygons by the origin.
+        ox, oy = getattr(scratch, "_board_origin", (0.0, 0.0))
+        areas = [
+            SilkKeepoutArea(
+                polygon=translate(area.polygon, xoff=ox, yoff=oy),
+                sides=area.sides,
+                disallow_text=area.disallow_text,
+                disallow_graphic=area.disallow_graphic,
+                label=area.label,
+            )
+            for area in board_areas
+        ]
+        tree = STRtree([area.polygon for area in areas])
+
+        def clip(kind: str, graphic, outline: list[tuple[float, float]], filled: bool, hits):
+            """Shared clip math: returns (new_lines, new_polys, keepout)."""
+            width = max(graphic.stroke_width, 0.0)
+            keepout = unary_union([area.polygon for area in hits]).buffer(
+                width / 2.0 + _CLIP_EPSILON_MM, quad_segs=16
+            )
+            new_lines: list[list[tuple[float, float]]] = []
+            new_polys: list[list[tuple[float, float]]] = []
+            if filled:
+                shape = Polygon(outline)
+                if not shape.is_valid:
+                    shape = shape.buffer(0)
+                kept = shape.difference(keepout)
+                for part in getattr(kept, "geoms", [kept]):
+                    if part.geom_type == "Polygon" and part.area >= _MIN_POLY_AREA_MM2:
+                        ring = _keyhole_ring(part)
+                        if ring is None:
+                            return None, None, keepout
+                        new_polys.append(ring)
+            else:
+                closed = kind != "line"
+                path = LineString(outline + [outline[0]] if closed else outline)
+                kept = path.difference(keepout)
+                if closed and kept.geom_type == "MultiLineString":
+                    kept = linemerge(kept)
+                for part in getattr(kept, "geoms", [kept]):
+                    if part.geom_type != "LineString" or part.is_empty:
+                        continue
+                    if part.length < max(width, 1e-6):
+                        continue
+                    new_lines.append(list(part.coords))
+            return new_lines, new_polys, keepout
+
+        def graphic_hits(ink, silk_side: str):
+            return [
+                areas[int(i)]
+                for i in tree.query(ink)
+                if silk_side in areas[int(i)].sides and ink.intersects(areas[int(i)].polygon)
+            ]
+
+        def outline_of(kind: str, graphic, xf) -> tuple[list[tuple[float, float]], bool]:
+            if kind == "line":
+                return [xf(graphic.start), xf(graphic.end)], False
+            if kind == "rect":
+                (sx, sy), (ex, ey) = graphic.start, graphic.end
+                return [xf(p) for p in ((sx, sy), (ex, sy), (ex, ey), (sx, ey))], graphic.is_filled
+            return [xf(p) for p in graphic.points], graphic.is_filled
+
+        # --- footprint silk -------------------------------------------------
+        footprints = [(node, Footprint.from_sexp(node)) for node in _find_all_footprints(self.doc)]
+        for fp_node, fp in footprints:
+            fp_ref = self._footprint_reference(fp_node)
+            fwd = _fp_transform(fp)
+            theta = math.radians(fp.rotation)
+            cos_t, sin_t = math.cos(theta), math.sin(theta)
+
+            def inverse(pt, fp=fp, cos_t=cos_t, sin_t=sin_t):
+                dx, dy = pt[0] - fp.position[0], pt[1] - fp.position[1]
+                return (dx * cos_t - dy * sin_t, dx * sin_t + dy * cos_t)
+
+            for node in [
+                n
+                for n in fp_node.children
+                if not n.is_atom and n.name in _FP_GRAPHIC_KINDS and self._is_silkscreen(n)
+            ]:
+                kind = _FP_GRAPHIC_KINDS[str(node.name)]
+                graphic = FootprintGraphic.from_sexp(node, kind)
+                silk_side = _silk_side(graphic.layer)
+                if silk_side is None:
+                    continue
+                ink = _stroke_geometry(graphic, fwd)
+                if ink is None or ink.is_empty:
+                    continue
+                hits = graphic_hits(ink, silk_side)
+                if not hits:
+                    continue
+                labels = sorted(area.label for area in hits)
+                if kind not in ("line", "poly", "rect"):
+                    result.skipped.append(
+                        PadClearanceSkip(
+                            footprint_ref=fp_ref,
+                            element_type=str(node.name),
+                            layer=graphic.layer,
+                            reason=f"fp_{kind} is not clipped (inside {', '.join(labels)})",
+                        )
+                    )
+                    continue
+                outline, filled = outline_of(kind, graphic, fwd)
+                new_lines, new_polys, _keepout = clip(kind, graphic, outline, filled, hits)
+                if new_lines is None:
+                    result.skipped.append(
+                        PadClearanceSkip(
+                            footprint_ref=fp_ref,
+                            element_type=str(node.name),
+                            layer=graphic.layer,
+                            reason="clipped shape has a hole no bridge can reach",
+                        )
+                    )
+                    continue
+                self._record_keepout_fix(
+                    result,
+                    node,
+                    fp_ref,
+                    kind,
+                    ink,
+                    new_lines,
+                    new_polys,
+                    graphic.stroke_width,
+                    labels,
+                    dry_run,
+                    fp_node,
+                    inverse,
+                    "fp",
+                )
+
+        # --- board-level silk ------------------------------------------------
+        identity = None
+        for node in [
+            n
+            for n in self.doc.children
+            if not n.is_atom
+            and n.name in ("gr_line", "gr_rect", "gr_poly", "gr_circle", "gr_arc")
+            and self._is_silkscreen(n)
+        ]:
+            kind = str(node.name)[3:]
+            board_graphic = BoardGraphic.from_sexp(node, kind)
+            silk_side = _silk_side(board_graphic.layer)
+            if silk_side is None:
+                continue
+            ink = _stroke_geometry(board_graphic, identity)
+            if ink is None or ink.is_empty:
+                continue
+            hits = graphic_hits(ink, silk_side)
+            if not hits:
+                continue
+            labels = sorted(area.label for area in hits)
+            if kind not in ("line", "poly", "rect"):
+                result.skipped.append(
+                    PadClearanceSkip(
+                        footprint_ref="board",
+                        element_type=str(node.name),
+                        layer=board_graphic.layer,
+                        reason=f"gr_{kind} is not clipped (inside {', '.join(labels)})",
+                    )
+                )
+                continue
+            outline, filled = outline_of(kind, board_graphic, lambda p: p)
+            new_lines, new_polys, _keepout = clip(kind, board_graphic, outline, filled, hits)
+            if new_lines is None:
+                result.skipped.append(
+                    PadClearanceSkip(
+                        footprint_ref="board",
+                        element_type=str(node.name),
+                        layer=graphic.layer,
+                        reason="clipped shape has a hole no bridge can reach",
+                    )
+                )
+                continue
+            self._record_keepout_fix(
+                result,
+                node,
+                "board",
+                kind,
+                ink,
+                new_lines,
+                new_polys,
+                board_graphic.stroke_width,
+                labels,
+                dry_run,
+                self.doc,
+                lambda p: p,
+                "gr",
+            )
+
+        if not dry_run:
+            pcb_after = PCB(parse_string(serialize_sexp(self.doc)))
+            for violation in check_silk_in_keepout(pcb_after, dru_path=dru_path).violations:
+                result.residual.append(violation.message)
+        return result
+
+    def _record_keepout_fix(
+        self,
+        result: KeepoutClipRepairResult,
+        node: SExp,
+        owner: str,
+        kind: str,
+        ink,
+        new_lines: list[list[tuple[float, float]]],
+        new_polys: list[list[tuple[float, float]]],
+        width: float,
+        labels: list[str],
+        dry_run: bool,
+        parent: SExp,
+        inverse,
+        prefix: str,
+    ) -> None:
+        """Append the fix record and swap ``node`` for its clipped pieces."""
+        from shapely.geometry import LineString, Polygon
+        from shapely.ops import unary_union
+
+        new_ink = unary_union(
+            [LineString(c).buffer(width / 2.0) for c in new_lines]
+            + [Polygon(c).buffer(0).buffer(width / 2.0) for c in new_polys]
+        )
+        pieces = len(new_lines) + len(new_polys)
+        result.fixes.append(
+            KeepoutClipFix(
+                owner=owner,
+                element_type=str(node.name),
+                layer=(
+                    str(layer_atom.get_first_atom())
+                    if (layer_node := node.find("layer")) is not None
+                    and (layer_atom := layer_node.children[0] if layer_node.children else None)
+                    is not None
+                    else ""
+                ),
+                action="trimmed" if pieces else "removed",
+                areas=labels,
+                old_area=float(ink.area),
+                new_area=float(new_ink.area) if not new_ink.is_empty else 0.0,
+                pieces=pieces,
+            )
+        )
+        if dry_run:
+            return
+        replacements = self._hole_clip_nodes(
+            node,
+            owner,
+            kind,
+            [[inverse(p) for p in c] for c in new_lines],
+            [[inverse(p) for p in c] for c in new_polys],
+            prefix=prefix,
+            namespace=_KEEPOUT_CLIP_NAMESPACE,
+        )
+        index = parent.children.index(node)
+        parent.children[index : index + 1] = replacements
+
     def _pin1_marker_refs(self) -> set[str]:
         """Refs the ``pin1_marker`` rule flags on the current tree."""
         from kicad_tools.schema.pcb import PCB
@@ -827,12 +1189,19 @@ class SilkscreenRepairer:
         kind: str,
         lines: list[list[tuple[float, float]]],
         polys: list[list[tuple[float, float]]],
+        prefix: str = "fp",
+        namespace: _uuid.UUID = _HOLE_CLIP_NAMESPACE,
     ) -> list[SExp]:
         """Build the graphics that replace ``node`` (footprint-local coords).
 
         A clipped ``fp_line`` keeps its own node (and UUID) for its first
         piece; everything else is new, with a UUID derived from the source
         UUID and the piece geometry so the output is reproducible.
+
+        ``prefix`` selects the emitted element family (Issue #9798): ``fp``
+        writes ``fp_line`` / ``fp_poly`` inside a footprint, ``gr`` writes
+        ``gr_line`` / ``gr_poly`` at board level, in the file's own sheet
+        coordinates.
         """
         from kicad_tools.sexp.parser import parse_string, serialize_sexp
 
@@ -850,7 +1219,7 @@ class SilkscreenRepairer:
 
         def new_uuid(tag: str, coords: list[tuple[float, float]]) -> str:
             key = f"{fp_ref}:{source_uuid}:{tag}:{[(fmt(x), fmt(y)) for x, y in coords]}"
-            return str(_uuid.uuid5(_HOLE_CLIP_NAMESPACE, key))
+            return str(_uuid.uuid5(namespace, key))
 
         out: list[SExp] = []
         for index, coords in enumerate(lines):
@@ -867,7 +1236,7 @@ class SilkscreenRepairer:
                     continue
                 out.append(
                     parse_string(
-                        f"(fp_line (start {fmt(start[0])} {fmt(start[1])}) "
+                        f"({prefix}_line (start {fmt(start[0])} {fmt(start[1])}) "
                         f"(end {fmt(end[0])} {fmt(end[1])}) {stroke_text} "
                         f'(layer "{layer}") (uuid "{new_uuid("line", [start, end])}"))'
                     )
@@ -876,7 +1245,7 @@ class SilkscreenRepairer:
             xys = " ".join(f"(xy {fmt(x)} {fmt(y)})" for x, y in coords)
             out.append(
                 parse_string(
-                    f"(fp_poly (pts {xys}) {stroke_text} (fill yes) "
+                    f"({prefix}_poly (pts {xys}) {stroke_text} (fill yes) "
                     f'(layer "{layer}") (uuid "{new_uuid("poly", coords)}"))'
                 )
             )

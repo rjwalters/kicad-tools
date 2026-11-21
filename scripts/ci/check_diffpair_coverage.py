@@ -331,6 +331,25 @@ DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("mask_to_copper", "USB3_TX2+"): 8858,
     ("mask_to_copper", "USB_CC1"): 8858,
     ("mask_to_copper", "USB_CC2"): 8858,
+    # Issue #9798 (operator ruling on #9795): jlcpcb grades silk on exposed
+    # copper, below-minimum silk and silk under a body as errors.  The
+    # regenerated recipe board's designators (0.80 mm / thin stroke, sitting
+    # on pads) are the residual population the #9795 silk-legalisation
+    # epic repairs; each identity is allowed against that OPEN epic, never by
+    # count, and goes stale (forcing its entry out) once the recipe is legal.
+    # Measured on CI run 44810362630 at 97ebaac9.
+    ("silk_over_copper", "U1 (reference)/U1 pad 12"): 9795,
+    ("silk_over_copper", "U1 (reference)/U1 pad 13"): 9795,
+    ("silk_over_copper", "U2 (reference)/U2 pad A4"): 9795,
+    ("silk_over_copper", "U3 (reference)/U3 pad 18"): 9795,
+    ("silk_over_copper", "U3 (reference)/U3 pad 19"): 9795,
+    ("silk_over_copper", "U4 (reference)/U4 pad 10"): 9795,
+    ("silk_over_copper", "U4 (reference)/U4 pad 9"): 9795,
+    ("silkscreen_over_pad", "U2/pad A4"): 9795,
+    ("silkscreen_text_height", "J4 (reference)"): 9795,
+    ("silkscreen_text_height", "U4 (reference)"): 9795,
+    ("silkscreen_text_thickness", "J4 (reference)"): 9795,
+    ("silkscreen_text_thickness", "U4 (reference)"): 9795,
 }
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key
