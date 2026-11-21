@@ -16,6 +16,9 @@ import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
+from kicad_tools.router import core as router_core
 from kicad_tools.router import wall_deadline
 from kicad_tools.router.algorithms.mst import MSTRouter
 from kicad_tools.router.core import Autorouter, DesignRules
@@ -28,6 +31,27 @@ from kicad_tools.router.subgrid import SubGridAnalysis
 # expires.  The stalls below are 0.25 s per step, so 1.0 s is generous while
 # still far below the unbounded cost (10 s).
 SLACK_S = 1.0
+
+
+class _ControlledTime:
+    """Issue #9849: deterministic ``time`` stand-in for ``router.core``.
+
+    ``monotonic`` reads a hand-advanced counter so the via-conflict
+    resolver's budget arithmetic cannot depend on host-scheduler jitter;
+    every other attribute falls through to the real :mod:`time` module.
+    """
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+    def __getattr__(self, name: str):
+        return getattr(time, name)
 
 
 def _fake_off_grid_pads(n: int) -> list:
@@ -239,7 +263,7 @@ def test_subgrid_retry_keeps_failure_records_when_budget_spent_after_apply():
     assert marked == [] and fake.routes == []
 
 
-def test_via_conflict_resolver_stops_iterating_conflicts_on_spent_budget():
+def test_via_conflict_resolver_stops_iterating_conflicts_on_spent_budget(monkeypatch):
     calls: list = []
     blocker = SimpleNamespace(blocking_type="via")
     failure = SimpleNamespace(
@@ -252,9 +276,11 @@ def test_via_conflict_resolver_stops_iterating_conflicts_on_spent_budget():
     manager.find_blocking_vias.return_value = conflicts
     manager.try_relocate.return_value = SimpleNamespace(success=False)
 
+    clock = _ControlledTime()
+
     def _stalled_rip(_conflict, route_net_fn):
         route_net_fn(1)
-        time.sleep(0.25)
+        clock.advance(0.25)
         return SimpleNamespace(success=False)
 
     manager.try_rip_reroute.side_effect = _stalled_rip
@@ -267,15 +293,15 @@ def test_via_conflict_resolver_stops_iterating_conflicts_on_spent_budget():
         route_net=lambda net, **kw: calls.append(kw["per_net_timeout"]) or [],
     )
 
-    t0 = time.monotonic()
+    monkeypatch.setattr(router_core, "time", clock)
     Autorouter._resolve_via_conflicts_for_net(fake, 1, per_net_timeout=0.4)
-    elapsed = time.monotonic() - t0
 
-    assert manager.try_rip_reroute.call_count < 5
-    assert elapsed < 0.4 + SLACK_S
+    # Two rip-and-reroutes fit in the 0.40 s budget (0.25 s of simulated
+    # work each); the third conflict starts at t=0.50 s on a spent budget,
+    # so the last three are never attempted.
+    assert manager.try_rip_reroute.call_count == 2
     # Each nested route_net got what was LEFT, not the entry budget.
-    assert calls == sorted(calls, reverse=True)
-    assert calls[-1] < 0.4
+    assert calls == pytest.approx([0.40, 0.15])
 
 
 def test_drc_precheck_reports_dirty_when_stopped():
