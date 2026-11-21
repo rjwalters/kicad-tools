@@ -1105,7 +1105,9 @@ class DRCChecker:
         Staircase shortcuts must keep new copper out of pad mask-opening
         zones grown by the active ``mask_to_copper`` policy's strictest
         clearance -- the explicit request, else the ``--mfr`` default
-        (Issue #9817).
+        (Issue #9817) -- and, when a physical-gap policy is active, must
+        open no ``physical_copper_gap`` slit against the copper that
+        remains (Issue #9862).
         """
         from .mask_copper import default_request_for_manufacturer
 
@@ -1116,7 +1118,14 @@ class DRCChecker:
             if policy is not None
             else 0.0
         )
-        rule = RedundantCopperRule(mask_clearance_mm=mask_clearance)
+        rule = RedundantCopperRule(
+            mask_clearance_mm=mask_clearance,
+            # Issue #9862: the staircase gate mirrors check_physical_copper_gap
+            # -- the explicit threshold wins, the fab bands apply only in fab
+            # view; with neither active there is no slit floor to match.
+            physical_copper_gap_mm=self.physical_copper_gap_mm,
+            fab_view_gap_policy=self.fab_view_gap_policy if self.fab_view else None,
+        )
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_diffpair_clearance_intra(self) -> DRCResults:
