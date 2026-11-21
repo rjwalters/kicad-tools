@@ -4413,6 +4413,24 @@ def _add_zones_parser(subparsers) -> None:
     )
     add_format_flag(zones_fill)
 
+    # zones relieve (Issue #9808: reachable from the unified CLI, matching zones_cmd.py)
+    zones_relieve = zones_subparsers.add_parser(
+        "relieve",
+        help="Retry thermal relief on stale solid pad overrides, then refill",
+    )
+    zones_relieve.add_argument("pcb", help="Path to .kicad_pcb file")
+    zones_relieve.add_argument(
+        "-o", "--output", help="Output file path (default: overwrites input)"
+    )
+    zones_relieve.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress progress output (also accepted after the command; "
+        "the leading global -q works too)",
+    )
+    add_format_flag(zones_relieve)
+
 
 def _add_stitch_parser(subparsers) -> None:
     """Add stitch subcommand parser for stitching vias."""

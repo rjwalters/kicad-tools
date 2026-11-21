@@ -83,7 +83,7 @@ def run_zones_command(args) -> int:
     """Handle zones command."""
     if not args.zones_command:
         print("Usage: kicad-tools zones <command> [options] <file>")
-        print("Commands: add, list, batch, hv-keepout, fill")
+        print("Commands: add, list, batch, hv-keepout, fill, relieve")
         return 1
 
     from ..zones_cmd import main as zones_main
@@ -173,6 +173,17 @@ def run_zones_command(args) -> int:
             sub_argv.append("--dry-run")
         # Use global quiet flag
         if getattr(args, "global_quiet", False):
+            sub_argv.append("--quiet")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
+        return zones_main(sub_argv) or 0
+
+    elif args.zones_command == "relieve":
+        sub_argv = ["relieve", args.pcb]
+        if args.output:
+            sub_argv.extend(["-o", args.output])
+        # Both the leading global -q and a trailing --quiet reach the handler.
+        if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
             sub_argv.append("--quiet")
         if getattr(args, "format", "text") != "text":
             sub_argv.extend(["--format", args.format])

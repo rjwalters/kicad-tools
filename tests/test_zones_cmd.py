@@ -1978,3 +1978,85 @@ class TestRelieveAndAsymmetryWarning:
         ):
             main(["fill", str(tmp_pcb)])
         assert "rose" not in capsys.readouterr().err
+
+
+class TestRelieveUnifiedCli:
+    """Issue #9808: ``kct zones relieve`` is reachable from the unified CLI."""
+
+    def test_unified_zones_help_lists_relieve(self, capsys):
+        from kicad_tools.cli import main as cli_main
+
+        with pytest.raises(SystemExit) as exc:
+            cli_main(["zones", "--help"])
+        assert exc.value.code == 0
+        assert "relieve" in capsys.readouterr().out
+
+    def test_unified_bare_zones_lists_relieve(self, capsys):
+        from kicad_tools.cli import main as cli_main
+
+        assert cli_main(["zones"]) == 1
+        assert "relieve" in capsys.readouterr().out
+
+    def test_unified_relieve_help_exits_0(self, capsys):
+        from kicad_tools.cli import main as cli_main
+
+        with pytest.raises(SystemExit) as exc:
+            cli_main(["zones", "relieve", "--help"])
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        assert "pcb" in out
+        assert "--output" in out
+        assert "--format" in out
+
+    def test_unified_relieve_in_place_default(self):
+        from kicad_tools.cli import main as cli_main
+
+        with patch("kicad_tools.cli.zones_cmd.main", return_value=7) as zones_main:
+            assert cli_main(["zones", "relieve", "board.kicad_pcb"]) == 7
+        zones_main.assert_called_once_with(["relieve", "board.kicad_pcb"])
+
+    def test_unified_relieve_forwards_output_and_format(self):
+        from kicad_tools.cli import main as cli_main
+
+        with patch("kicad_tools.cli.zones_cmd.main", return_value=0) as zones_main:
+            assert (
+                cli_main(
+                    [
+                        "zones",
+                        "relieve",
+                        "board.kicad_pcb",
+                        "-o",
+                        "out.kicad_pcb",
+                        "--format",
+                        "json",
+                    ]
+                )
+                == 0
+            )
+        zones_main.assert_called_once_with(
+            ["relieve", "board.kicad_pcb", "-o", "out.kicad_pcb", "--format", "json"]
+        )
+
+    def test_unified_relieve_quiet_before_command(self):
+        from kicad_tools.cli import main as cli_main
+
+        with patch("kicad_tools.cli.zones_cmd.main", return_value=0) as zones_main:
+            cli_main(["-q", "zones", "relieve", "board.kicad_pcb"])
+        zones_main.assert_called_once_with(["relieve", "board.kicad_pcb", "--quiet"])
+
+    def test_unified_relieve_quiet_after_command(self):
+        from kicad_tools.cli import main as cli_main
+
+        with patch("kicad_tools.cli.zones_cmd.main", return_value=0) as zones_main:
+            cli_main(["zones", "relieve", "board.kicad_pcb", "--quiet"])
+        zones_main.assert_called_once_with(["relieve", "board.kicad_pcb", "--quiet"])
+
+    def test_unified_relieve_missing_pcb_json(self, tmp_path, capsys):
+        import json
+
+        from kicad_tools.cli import main as cli_main
+
+        missing = tmp_path / "missing.kicad_pcb"
+        assert cli_main(["zones", "relieve", str(missing), "--format", "json"]) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert str(missing) in payload["error"]

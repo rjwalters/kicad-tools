@@ -240,6 +240,9 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "zones batch": ["{pcb}", "--power-nets", "GND:B.Cu", "--dry-run"],
     "zones hv-keepout": ["{pcb}", "--clearance", "2.0", "--dry-run"],
     "zones fill": ["{pcb}"],
+    # Issue #9808: the missing-board refusal is one JSON error document and
+    # needs neither kicad-cli nor a board mutation.
+    "zones relieve": ["{dir}/missing.kicad_pcb"],
     "stitch": ["{pcb}", "--dry-run"],
     # -- routing / repair drivers ------------------------------------------
     # Issue #5994: the default route run spends ~45 s in kicad-cli (oracle
