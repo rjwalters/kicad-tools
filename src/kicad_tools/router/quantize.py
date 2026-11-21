@@ -42,6 +42,8 @@ __all__ = [
     "SERIALIZE_QUANTUM_MM",
     "off_angle_degrees",
     "is_45_aligned",
+    "normalize_direction",
+    "same_direction",
     "snap_direction_8",
     "dogleg_points",
     "segment_angle_census",
@@ -121,6 +123,34 @@ def snap_direction_8(dx: float, dy: float) -> tuple[float, float]:
     ang = math.atan2(dy, dx)
     idx = round(ang / (math.pi / 4.0)) % 8
     return EIGHT_DIRECTIONS[idx]
+
+
+def normalize_direction(dx: float, dy: float) -> tuple[float, float] | None:
+    """Unit vector of displacement (dx, dy), or None for no movement.
+
+    Shared by both route converters' straight-run formation (#972/#9851):
+    a displacement shorter than 0.001 mm is float jitter, not a step.
+    """
+    length = (dx * dx + dy * dy) ** 0.5
+    if length < 0.001:
+        return None
+    return (dx / length, dy / length)
+
+
+def same_direction(d1: tuple[float, float] | None, d2: tuple[float, float] | None) -> bool:
+    """True when two :func:`normalize_direction` vectors are collinear.
+
+    The tolerance is 0.01 on each normalized component (~0.57 deg): wide
+    enough to absorb float jitter between consecutive grid steps, narrow
+    enough that any turn between two of the 8 routing directions starts a
+    new straight run.  ``PathFinder._convert_path_to_route`` and
+    ``CppPathfinder._convert_result_to_route`` both merge steps into runs
+    through this predicate so the two backends form identical runs
+    (#9851).
+    """
+    if d1 is None or d2 is None:
+        return False
+    return abs(d1[0] - d2[0]) < 0.01 and abs(d1[1] - d2[1]) < 0.01
 
 
 def dogleg_points(
