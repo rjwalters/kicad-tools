@@ -207,3 +207,198 @@ def test_hv_pad_blocks_shortcut_with_voltage_map(pad_pcb, vmap, tmp_path, capsys
     assert any(s.y1 == 90 or s.y2 == 90 for s in segs if s.x1 < 120 and s.x2 < 120)
     assert not any(s.y1 == 90 or s.y2 == 90 for s in segs if s.x1 > 120 and s.x2 > 120)
     assert {(r["net_a"], r["net_b"]) for r in data["creepage_skipped"]} == {("HV", "LV")}
+
+
+# ---------------------------------------------------------------------------
+# Issue #9640: a range map must not let a rewrite deepen an already-failing pair
+# ---------------------------------------------------------------------------
+
+
+def _shaped_board() -> str:
+    """As :func:`_board`, plus a second LV stub that already sits short of 1.6 mm.
+
+    Under the envelope map both nets swing ``0..150 V``: the per-edit table
+    collapses each to its largest endpoint (150 V), differences them to 0 V and
+    gates nothing, while the census scores ``dV = 150 V`` (1.6 mm).  The extra
+    stub runs 1.0 mm (edge to edge) from the HV stub, so ``HV|LV|F.Cu`` already
+    fails in the input; the detour-1 shortcut would take it to 0.8 mm.  The
+    failing *key* is unchanged -- only its shortfall grows.
+    """
+    board = _board()
+    near = _seg(111.3, 98, 111.3, 108, 2)
+    return board[: board.rindex(")")] + "\t" + near.lstrip("\t") + ")\n"
+
+
+@pytest.fixture
+def shaped_pcb(tmp_path: Path) -> Path:
+    p = tmp_path / "shaped.kicad_pcb"
+    p.write_text(_shaped_board())
+    return p
+
+
+@pytest.fixture
+def range_vmap(tmp_path: Path) -> Path:
+    p = tmp_path / "range.json"
+    p.write_text(
+        json.dumps(
+            {
+                "HV": {"min": 0.0, "max": 150.0},
+                "LV": {"min": 0.0, "max": 150.0},
+                "_pair_bounds": [{"nets": ["HV", "LV"], "max_dv": 150.0, "why": "test"}],
+            }
+        )
+    )
+    return p
+
+
+def _detour1_shortcut_taken(segs) -> bool:
+    return not any(s.y1 == 90 or s.y2 == 90 for s in segs if s.x1 < 120 and s.x2 < 120)
+
+
+def test_range_map_baseline_takes_shortcut_without_gate(shaped_pcb, tmp_path, capsys):
+    segs = _run(shaped_pcb, tmp_path)
+    capsys.readouterr()
+    assert _detour1_shortcut_taken(segs)
+
+
+def test_range_map_rolls_back_rewrite_that_deepens_failing_pair(
+    shaped_pcb, range_vmap, tmp_path, capsys
+):
+    segs = _run(shaped_pcb, tmp_path, "--voltage-map", str(range_vmap))
+    data = json.loads(capsys.readouterr().out)
+    # The shaped detour survives: the shortcut would put the pair 0.2 mm deeper.
+    assert not _detour1_shortcut_taken(segs)
+    assert data["creepage_audit"] == "ran"
+    # Main's interval-aware per-edit table now refuses the shortcut up front
+    # (``creepage_skipped``); the whole-board audit stays as the backstop and
+    # must at worst roll the net back.
+    blocked_per_edit = any(
+        {r["net_a"], r["net_b"]} == {"HV", "LV"} for r in data.get("creepage_skipped", [])
+    )
+    assert blocked_per_edit or data["output_verify_rolled_back"].get("creepage") == ["LV"]
+    assert data["creepage_unwaived_failures_after"] <= data["creepage_unwaived_failures_before"]
+
+
+def test_range_map_json_lists_pairs_checked(shaped_pcb, range_vmap, tmp_path, capsys):
+    _run(shaped_pcb, tmp_path, "--voltage-map", str(range_vmap))
+    data = json.loads(capsys.readouterr().out)
+    checked = data["creepage_pairs_checked"]
+    assert any({r["net_a"], r["net_b"]} == {"HV", "LV"} for r in checked)
+    row = next(r for r in checked if {r["net_a"], r["net_b"]} == {"HV", "LV"})
+    assert row["margin_mm_before"] is not None
+    # Rolled back: the written board is no worse than the input.
+    assert row["margin_mm_after"] >= row["margin_mm_before"] - 1e-6
+    assert data["creepage_pairs_unchecked"] == []
+
+
+def test_json_lists_voltage_map_pair_absent_from_board(pcb, tmp_path, capsys):
+    vm = tmp_path / "ghost.json"
+    vm.write_text(json.dumps({"HV": 150.0, "LV": 0.0, "GHOST": 300.0}))
+    _run(pcb, tmp_path, "--voltage-map", str(vm))
+    data = json.loads(capsys.readouterr().out)
+    ghost = {frozenset((r["net_a"], r["net_b"])) for r in data["creepage_pairs_unchecked"]}
+    assert frozenset(("GHOST", "HV")) in ghost
+
+
+def _lock_stub(board_text: str) -> str:
+    """Mark the shaped LV detour-1 run as locked (KiCad 8+ ``(locked yes)``)."""
+    return board_text.replace(
+        _seg(105, 90, 115, 90, 2),
+        _seg(105, 90, 115, 90, 2).replace("(net 2))", "(net 2) (locked yes))"),
+    )
+
+
+def test_locked_track_net_is_left_untouched(tmp_path, capsys):
+    p = tmp_path / "locked.kicad_pcb"
+    p.write_text(_lock_stub(_board()))
+    segs = _run(p, tmp_path)
+    data = json.loads(capsys.readouterr().out)
+    # Without any voltage map the shortcut would be taken, but the net is locked.
+    assert not _detour1_shortcut_taken(segs)
+    # The whole net is left alone, so the unrelated detour 2 stays too.
+    assert any(s.y1 == 90 or s.y2 == 90 for s in segs if s.x1 > 120 and s.x2 > 120)
+    assert data["locked_nets_skipped"] == ["LV"]
+
+
+def test_unlocked_board_reports_no_locked_nets(pcb, tmp_path, capsys):
+    _run(pcb, tmp_path)
+    assert json.loads(capsys.readouterr().out)["locked_nets_skipped"] == []
+
+
+# --- Issue #9640 review round 3 ------------------------------------------
+
+
+def test_locked_arc_locks_its_net():
+    from kicad_tools.router.optimizer.pcb import locked_segment_nets
+
+    text = (
+        '(kicad_pcb (net 0 "") (net 1 "LV")\n'
+        '(arc (start 0 0) (mid 1 1) (end 2 0) (width 0.2) (layer "F.Cu") (net 1) (locked yes)))\n'
+    )
+    assert locked_segment_nets(text) == {"LV"}
+
+
+def test_net_name_containing_locked_does_not_lock():
+    from kicad_tools.router.optimizer.pcb import locked_segment_nets
+
+    text = (
+        '(kicad_pcb (net 0 "") (net 1 "sense locked rail")\n'
+        '(segment (start 0 0) (end 2 0) (width 0.2) (layer "F.Cu") (net "sense locked rail")))\n'
+    )
+    assert locked_segment_nets(text) == set()
+
+
+def test_public_optimize_traces_help_mentions_locked(capsys):
+    from kicad_tools.cli import main as kct_main
+
+    with pytest.raises(SystemExit):
+        kct_main(["optimize-traces", "--help"])
+    assert "locked" in capsys.readouterr().out
+
+
+def test_shortfall_resolution_distinguishes_one_micron():
+    from kicad_tools.creepage.output_audit import failing_units
+
+    def row(m):
+        return [{"net_a": "A", "net_b": "B", "layer": "F.Cu", "pass": False, "margin_mm": m}]
+
+    assert failing_units(row(-0.8)) != failing_units(row(-0.799))
+    assert failing_units(row(-0.8))["A|B|F.Cu"] > failing_units(row(-0.799))["A|B|F.Cu"]
+
+
+def test_ranged_ghost_net_pairs_are_reported_unchecked(pcb, tmp_path, capsys):
+    vm = tmp_path / "ghost_range.json"
+    vm.write_text(
+        json.dumps(
+            {
+                "HV": {"min": 0.0, "max": 150.0},
+                "LV": {"min": 0.0, "max": 150.0},
+                "GHOST": {"min": 0.0, "max": 150.0},
+                "_pair_bounds": [{"nets": ["HV", "GHOST"], "max_dv": 150.0, "why": "t"}],
+            }
+        )
+    )
+    _run(pcb, tmp_path, "--voltage-map", str(vm))
+    data = json.loads(capsys.readouterr().out)
+    ghost = {frozenset((r["net_a"], r["net_b"])) for r in data["creepage_pairs_unchecked"]}
+    assert {frozenset(("GHOST", "HV")), frozenset(("GHOST", "LV"))} <= ghost
+
+
+def test_finished_board_that_regresses_after_refill_reverts_to_input(pcb, vmap, tmp_path, capsys):
+    """A post-write step (zone refill) that breaks creepage must not ship."""
+    out = tmp_path / "out.kicad_pcb"
+    original = pcb.read_text()
+
+    def fake_refill(path):
+        text = Path(path).read_text()
+        # An LV stub 0.5 mm from the HV stub: a new failing pair at 1.6 mm.
+        Path(path).write_text(text[: text.rindex(")")] + _seg(110.5, 98, 110.5, 108, 2) + ")\n")
+        return True, None
+
+    with patch("kicad_tools.cli.optimize_cmd._refill_written_board", side_effect=fake_refill):
+        assert main([str(pcb), "-o", str(out), "--format", "json", "--voltage-map", str(vmap)]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert out.read_text() == original
+    assert data["creepage_final_reverted_to_input"] is True
+    assert data["output_verify_rolled_back"]["creepage_final"]
+    assert data["creepage_unwaived_failures_after"] == data["creepage_unwaived_failures_before"]

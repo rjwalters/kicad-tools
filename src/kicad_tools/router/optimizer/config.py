@@ -163,6 +163,8 @@ class OptimizationStats:
     output_verify_rolled_back: dict[str, list[str]] = field(default_factory=dict)
     # Issue #8632: verifier name -> "ran" | "unchanged" | "unavailable".
     output_checks: dict[str, str] = field(default_factory=dict)
+    # Issue #9640: nets left untouched because they own a locked track.
+    locked_nets_skipped: list[str] = field(default_factory=list)
     # Issue #7065: one row per optimized net, built after any DRC rollback.
     per_net: list[NetOptimizationStats] = field(default_factory=list)
 

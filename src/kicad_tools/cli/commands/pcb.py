@@ -900,6 +900,30 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         print(region_err, file=sys.stderr)
         return 1
 
+    # Issue #9640: with --voltage-map each net's plan is also vetted by the
+    # whole-board creepage audit, against the board as it was handed in (so
+    # successive passes cannot ratchet a pair under its requirement).
+    creepage_kwargs: dict[str, Any] = {}
+    if getattr(args, "voltage_map", None):
+        from kicad_tools.cli.route_cmd import _preload_voltage_map
+        from kicad_tools.creepage.output_audit import CreepageAudit
+
+        rc = _preload_voltage_map(args)
+        if rc != 0:
+            return rc
+        _audit = CreepageAudit(
+            voltage_map=args.voltage_map,
+            standard=getattr(args, "creepage_standard", "iec60664"),
+            pollution_degree=getattr(args, "pollution_degree", 2),
+            material_group=getattr(args, "material_group", "IIIa"),
+            hv_threshold=getattr(args, "hv_threshold", 30.0),
+        )
+        creepage_kwargs = {
+            "creepage_audit": _audit,
+            "creepage_baseline_text": pcb_path.read_text(),
+            "creepage_required_pairs": _audit.required_pairs(),
+        }
+
     from dataclasses import replace as _replace
 
     unverified = getattr(args, "unverified", False)
@@ -926,6 +950,7 @@ def _run_prune_command(args, pcb_path: Path) -> int:
                 project=getattr(args, "project", None),
                 allow_default_rules=getattr(args, "allow_default_rules", False),
                 current_paths=specs,
+                **creepage_kwargs,
             )
             if res is None:
                 res = step
@@ -937,6 +962,7 @@ def _run_prune_command(args, pcb_path: Path) -> int:
                     step,
                     plans=[*res.plans, *step.plans],
                     accepted=[*res.accepted, *step.accepted],
+                    creepage_rejected=[*res.creepage_rejected, *step.creepage_rejected],
                     stats=stats,
                 )
             step_changed = (
@@ -956,6 +982,47 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         print(f"Error pruning PCB: {e}", file=sys.stderr)
         return 1
     assert res is not None  # _PRUNE_MAX_PASSES >= 1, so the loop ran at least once
+
+    # Issue #9640 review: the report is the whole run's, computed once here
+    # from the board this command actually writes.  Folding the passes kept
+    # only the last pass's report, and the last pass of a board-changing run
+    # is the no-op one ("unchanged", no pairs block), so the output lost
+    # creepage_pairs_checked/_unchecked and the before/after counts exactly
+    # when edits landed.  The per-pass gate above is untouched: it still
+    # vets every edit against the input baseline.
+    if creepage_kwargs:
+        import tempfile
+
+        from kicad_tools.creepage.output_audit import audit_summary
+
+        after_pcb = pcb
+        if dry_run:
+            # Nothing is written; report the would-be board instead (this
+            # run's single pass with its kept plans applied).
+            from kicad_tools.pcb_prune import apply_plans
+            from kicad_tools.schema.pcb import PCB
+
+            after_pcb = PCB.load(pcb_path)
+            if res.accepted:
+                apply_plans(after_pcb, res.accepted)
+        with tempfile.TemporaryDirectory(prefix="kct_prune_creep_") as tmp:
+            after_path = Path(tmp) / "final.kicad_pcb"
+            after_pcb.save(after_path)
+            after_text = after_path.read_text()
+        summary = audit_summary(
+            creepage_kwargs["creepage_audit"],
+            creepage_kwargs["creepage_baseline_text"],
+            after_text,
+            creepage_kwargs["creepage_required_pairs"],
+        )
+        whole_run: dict[str, Any] = {
+            "creepage_gate": "active",
+            "creepage_audit": (
+                "unavailable" if summary["creepage_pairs_checked"] is None else "ran"
+            ),
+        }
+        whole_run.update(summary)
+        res = _replace(res, creepage=whole_run)
 
     # Quote sheet positions like the sibling commands and kct check (#8954);
     # the library's plans and uncut loops stay board-relative.
@@ -1027,6 +1094,9 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         },
         "region_skipped": [_net(p) for p in res.region_skipped],
     }
+    if res.creepage is not None:
+        result["creepage"] = res.creepage
+        result["rejected_by_creepage"] = [_net(p) for p in res.creepage_rejected]
     if output_format == "json":
         print(json.dumps(result, indent=2))
     else:
@@ -1054,6 +1124,13 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         for n in result["rejected_by_drc"]:
             why = n.get("reject_reason") or "edit would add DRC violations"
             print(f"    {n['net']}: kept ({why})")
+        for n in result.get("rejected_by_creepage", []):
+            print(f"    {n['net']}: kept ({n.get('reject_reason') or 'creepage'})")
+        if res.creepage is not None:
+            print(
+                f"  Creepage: audit {res.creepage['creepage_audit']}, "
+                f"{len(res.creepage_rejected)} net(s) kept as-is"
+            )
         for n in result["region_skipped"]:
             print(f"    {n['net']}: region_skipped (edits extend outside --region)")
         for u in res.uncut_loops:
@@ -1061,6 +1138,14 @@ def _run_prune_command(args, pcb_path: Path) -> int:
                 f"    {u['net']}: loop left in place ({u.get('reason', 'all segments >= --wide')}, "
                 f"min width {u['min_width']} mm, {len(u['segments'])} segments)"
             )
+
+    if res.creepage is not None and res.creepage.get("creepage_audit") == "unavailable":
+        print(
+            "Refusing to write: the creepage audit could not run, so no edit was "
+            "verified against --voltage-map. Run `kct creepage` on the board to see why.",
+            file=sys.stderr,
+        )
+        return 1
 
     if not dry_run and changed and not res.drc_verified and not getattr(args, "unverified", False):
         # Never write an unverified edit by default (issue #8216 review).
