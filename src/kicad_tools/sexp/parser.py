@@ -631,6 +631,15 @@ class SExp:
             # Format floats without unnecessary decimals
             if self.value == int(self.value):
                 return str(int(self.value))
+            # Issue #9818: ``.6g`` keeps 6 *significant* digits, which at
+            # 100-999 mm leaves only 3 decimals and rounds the router's
+            # 0.0001 mm quantum away (147.5625 -> 147.562), tilting exact
+            # 45-degree copper.  For |v| >= 1 write up to 6 decimals (1 nm,
+            # KiCad's own convention, trailing zeros trimmed) -- never fewer
+            # digits than ``.6g`` gave.  Below 1, ``.6g`` already carries at
+            # least 6 decimals and keeps tiny values like 1e-8 representable.
+            if abs(self.value) >= 1:
+                return f"{self.value:.6f}".rstrip("0").rstrip(".")
             return f"{self.value:.6g}"
         return str(self.value)
 
