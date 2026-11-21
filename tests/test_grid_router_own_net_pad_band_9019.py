@@ -425,6 +425,109 @@ def _assert_band_safe_taper(route, c: Pad) -> None:
     assert any(s.width < WIDTH for s in clear), "the taper must still narrow off the pad"
 
 
+class TestConversionSegmentParity:
+    """Python and C++ route conversions emit identical segment bytes (#9851).
+
+    The native adapter used to taper each per-cell segment independently
+    while the Python converter merged collinear steps into straight runs
+    and tapered each run once (#972/#1018), so identical A* paths emitted
+    different cut positions, piece counts and widths near every fine-pitch
+    pad (43 vs 57 pieces on this fixture at `7d95adab3`).  Byte-compare
+    the ordered ``Segment.to_sexp`` output of the two converters over the
+    same vertex list -- sorting, or the collinear-merging ``_signature``,
+    would hide exactly that defect.  The fixture is fine-pitch at both
+    ends and the guard off, so the taper (and nothing else) drives the
+    difference.
+    """
+
+    BASE_W = 0.225
+    MIN_W = 0.1016
+
+    def _rules(self) -> DesignRules:
+        return DesignRules(
+            trace_width=self.BASE_W,
+            trace_clearance=0.15,
+            min_trace_width=self.MIN_W,
+            grid_resolution=0.05,
+        )
+
+    def _vertices(self) -> list[tuple[float, float]]:
+        """A 20-step row east from (1, 3.1), then a 10-step 45-degree leg.
+
+        The reproduction shape from the #9851 curation: coordinates on the
+        0.05 mm grid, each rounded to two decimals.
+        """
+        verts = [(1.0, 3.1)]
+        for _ in range(20):
+            x, y = verts[-1]
+            verts.append((round(x + 0.05, 2), y))
+        for _ in range(10):
+            x, y = verts[-1]
+            verts.append((round(x + 0.05, 2), round(y + 0.05, 2)))
+        return verts
+
+    def _pads(self) -> tuple[Pad, Pad]:
+        a = _pad(1.0, 3.1, w=0.7, h=0.3)
+        b = Pad(
+            x=2.5,
+            y=3.6,
+            width=0.7,
+            height=0.3,
+            net=NET,
+            net_name=f"N{NET}",
+            layer=Layer.F_CU,
+            ref="U2",
+            pin="1",
+        )
+        return a, b
+
+    @staticmethod
+    def _sexps(route) -> list[str]:
+        return [s.to_sexp(uuid=f"parity-{i}") for i, s in enumerate(route.segments)]
+
+    def test_same_path_emits_identical_ordered_segments(self) -> None:
+        from kicad_tools.router.cpp_backend import CppPathfinder
+
+        rules = self._rules()
+        verts = self._vertices()
+        a, b = self._pads()
+        pitches = {"U1": 0.5, "U2": 0.5}
+        index_to_layer = lambda i: (Layer.F_CU.value, Layer.B_CU.value)[i]  # noqa: E731
+
+        py_finder = SimpleNamespace(
+            rules=rules,
+            grid=SimpleNamespace(num_layers=2, index_to_layer=index_to_layer),
+            component_pitches=pitches,
+            _get_trace_width_for_net=lambda _: self.BASE_W,
+            _get_net_class=lambda _: None,
+        )
+        py_route = _new_route(a)
+        Router._convert_path_to_route(
+            py_finder, [(x, y, 0, False) for x, y in verts], py_route, a, b
+        )
+
+        cpp_finder = SimpleNamespace(
+            _rules=rules,
+            _grid=SimpleNamespace(num_layers=2, index_to_layer=index_to_layer, resolution=0.05),
+            _get_component_pitches=lambda: pitches,
+        )
+        segments = [
+            SimpleNamespace(x1=p[0], y1=p[1], x2=q[0], y2=q[1], layer=0, net=NET)
+            for p, q in zip(verts, verts[1:], strict=False)
+        ]
+        cpp_route = CppPathfinder._convert_result_to_route(
+            cpp_finder, SimpleNamespace(segments=segments, vias=[]), a, b, None
+        )
+
+        py_sexps = self._sexps(py_route)
+        assert py_sexps, "the fixture must emit segments"
+        assert len(py_route.segments) > 4, "the fixture must produce multiple taper pieces"
+        assert len({round(s.width, 6) for s in py_route.segments}) > 1, (
+            "the fixture must actually exercise the taper (multiple widths)"
+        )
+        assert self._sexps(cpp_route) == py_sexps
+
+
 class TestBandFallbackRetry:
     """The gate-off retry fires only on gate-caused failures, and is counted
     (#9019 review, section 3).
