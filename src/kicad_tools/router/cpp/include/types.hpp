@@ -395,7 +395,14 @@ namespace router {
 // foreign zone elsewhere (Python parity), and a layer-scoped
 // ``clear_zone_cells(layer)`` that resets ``net`` on former zone cells.  A v73
 // .so charges every foreign zone and its clear leaves stale zone nets.
-constexpr int ROUTER_CPP_BUILD_VERSION = 74;
+// v75: reserved by open PR #9839 (Issue #9461, rotation-aware own-net band
+// pad boxes).
+// v76 (Issue #9424): ``same_net_pad_gap_in_band`` accepts a via annulus as a
+// union with its own SMD pad only when it overlaps the AABB's inscribed
+// stadium at least the union depth deep.  A v74 .so accepts any overlap of
+// the box, seating vias in a rounded pad's corner air or a shallow wedge the
+// fab-view checker grades as ``physical_copper_gap``.
+constexpr int ROUTER_CPP_BUILD_VERSION = 76;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -934,10 +941,10 @@ inline void same_net_pad_aabb_half_extents(const PadInfo& pad, float& half_w,
 // Issue #8994: the same-net pad slit-band verdict, the faithful C++ mirror of
 // Python ``via_clearance.same_net_pad_gap_acceptable`` for a via ANNULUS of
 // radius ``annulus_half_mm`` at world ``(wx, wy)`` against one same-net SMD
-// pad.  Two acceptable regions, not a floor: ``gap < 0`` (annulus overlaps
-// its own pad -- one copper body, no slit) and ``gap >= edge_mm`` are both
-// ACCEPTED; only ``[0, edge_mm)`` in between is rejected, tangent ``gap == 0``
-// included (#9124: touch-at-a-point is not a union).
+// pad.  Two acceptable regions, not a floor: a union (the annulus overlaps
+// its own pad's copper at least the union depth deep -- one copper body, no
+// slit; #9424) and ``gap >= edge_mm`` are both ACCEPTED; everything in
+// between is rejected, tangent and shallow overlaps included (#9124, #9424).
 // The 1e-9 slack on both band edges mirrors the Python predicate's
 // float-noise tolerance for a gap computed as exactly 0 or exactly the edge.
 // Computed in double: Python measures in float64, and a float32 gap could
@@ -953,17 +960,34 @@ inline bool same_net_pad_gap_in_band(double wx, double wy, double annulus_half_m
         {static_cast<double>(pad.y - half_h) - wy,
          wy - static_cast<double>(pad.y + half_h), 0.0});
     const double gap = std::hypot(dx, dy) - annulus_half_mm;
-    // Issue #9124: the lower edge is the TANGENT tolerance, not ``0``.  An
-    // annulus whose centre sits exactly one radius from a pad face or corner
-    // (``gap == 0``) touches the pad at a single point; the receding arc
-    // leaves a sub-edge wedge the fab-view checker grades, so it is a slit,
-    // not a union -- only real overlap (``gap`` below ``-tangent_eps``) is
-    // accepted.  Mirrors the Python point branch's ``-1e-9``, widened to
-    // ``kTangentEpsMm`` because the pad box edges arrive as float32 (ulp
-    // ~1.5e-5 mm at 174 mm), so an exactly-tangent seat measures a few
-    // 1e-5 off 0 here where Python's float64 reads ~1e-14.
-    constexpr double kTangentEpsMm = 1e-4;
-    return -kTangentEpsMm < gap && gap < edge_mm - 1e-9;
+    if (!(gap < edge_mm - 1e-9)) return false;  // clear of the detection edge
+    // Issue #9424 (supersedes the #9124 tangent epsilon): inside the edge the
+    // seat is a union only when the annulus overlaps REAL copper by at least
+    // the union depth.  Overlap is measured against the stadium inscribed in
+    // the AABB (corner radius min(half_w, half_h)), which every rect,
+    // roundrect, oval and circle pad of that box contains -- a seat that only
+    // overlaps the box's square corner of a rounded pad is air beside the
+    // copper.  A shallow overlap is not a union either: the lens leaves a
+    // wedge the checker still grades.  Mirror of Python
+    // ``via_clearance.same_net_pad_union_depth_mm`` (keep the two in step):
+    //   d = r - sqrt(r^2 - c^2), c = max(0, r * sin(60 deg) - edge), + slack,
+    // where 60 deg is the checker's ``FACING_COS_SECOND`` (cosine 0.5).
+    // The slack (1e-3 mm) also absorbs the float32 pad edges (ulp ~1.5e-5 mm).
+    const double r = std::max(annulus_half_mm, 0.0);
+    constexpr double kSin60 = 0.86602540378443864676;  // sqrt(1 - 0.5^2)
+    constexpr double kUnionDepthSlackMm = 1e-3;
+    const double lens = std::max(0.0, r * kSin60 - std::max(edge_mm, 0.0));
+    const double depth =
+        (lens < r ? r - std::sqrt(std::max(0.0, r * r - lens * lens)) : r) + kUnionDepthSlackMm;
+    const double corner = std::min(static_cast<double>(half_w), static_cast<double>(half_h));
+    const double core_hw = static_cast<double>(half_w) - corner;
+    const double core_hh = static_cast<double>(half_h) - corner;
+    const double cdx = std::max({static_cast<double>(pad.x) - core_hw - wx,
+                                 wx - (static_cast<double>(pad.x) + core_hw), 0.0});
+    const double cdy = std::max({static_cast<double>(pad.y) - core_hh - wy,
+                                 wy - (static_cast<double>(pad.y) + core_hh), 0.0});
+    const double stadium_gap = std::hypot(cdx, cdy) - corner - annulus_half_mm;
+    return stadium_gap > -depth;
 }
 
 // Stored segment for validation (Issue #2439)

@@ -169,7 +169,13 @@ STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
 # PLANE layers only and a foreign zone on any other layer is blocked (Python
 # parity) -- plus a layer-scoped ``clear_zone_cells(layer)`` that zeroes the
 # net of unblocked former zone cells like ``RoutingGrid.clear_zones``.
-_REQUIRED_CPP_BUILD_VERSION = 74
+# v75: reserved by open PR #9839 (Issue #9461).
+# v76 (Issue #9424): ``same_net_pad_gap_in_band`` takes a via annulus as a
+# union with its own SMD pad only at the union depth into the AABB's inscribed
+# stadium (``via_clearance.same_net_pad_union_depth_mm``).  A v74 .so seats
+# vias in a roundrect pad's corner air and in shallow overlap wedges that the
+# fab-view checker grades as ``physical_copper_gap``; reject it.
+_REQUIRED_CPP_BUILD_VERSION = 76
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``

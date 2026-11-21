@@ -51,6 +51,38 @@ signal nets and leaves VCP open; the chained `--complete` pass closes it.
 
 Linux (the pinned `kicad/kicad` image, amd64): see "CI / Linux" below.
 
+### Re-measured 2026-11-20 (Issue #9424)
+
+Same flags and host, pinned kicad-cli 10.0.6 (`KCT_KICAD_DOCKER=1`), the
+gate's #8532 fiducial + board-ID prep, three seeds run in parallel (load
+average 10-20). No `[deterministic-budget] per-net wall clock bound` or
+`stage deadline fired` line appeared in any route log. All three seeds were
+byte-identical again in both columns, so the figures below hold for each of
+42, 7 and 1337.
+
+| | `origin/main` @ `e56ea23dd` | + #9424 via union depth |
+|---|---|---|
+| `kct route` exit / nets | 0 / 37 of 37 | 0 / 37 of 37 |
+| copper / label LVS | clean / clean | clean / clean |
+| kicad-cli DRC err / warn / unconnected, ERC | 0 / 0 / 0, 0 | 0 / 0 / 0, 0 |
+| `kct check` errors (`--skip mask_to_copper`) | 8 `physical_copper_gap` | 1 `physical_copper_gap` |
+| `kct check` warnings | 74 (48 `pour_slot`, 13 `silk_hole_overlap`, 13 `redundant_copper_*`) | 85 (62 `pour_slot`, 9 `silk_hole_overlap`, 14 `redundant_copper_*`) |
+| `mask_to_copper` err / warn / info (pass on) | 33 / 18 / 224 | 22 / 19 / 218 |
+| `kct check` wall time, pass off / on | 5.2 s / 24.4 s | 5.2 s / 24.0 s |
+| vias / route wall time | 117 / 315 s | 115 / 283 s |
+
+The route itself is green: VCP, the net #9517 and #9734 left open, connects. Five of
+the eight errors were vias the C++ A* seated beside their own SMD pad as a
+"union": three overlapped only the bounding box's square corner of a
+`roundrect` pad (air beside the rounded copper), and one overlapped a flat face
+by 5 um, too shallow for the checker's shoulder exemption. #9424 requires the
+union to reach `same_net_pad_union_depth_mm` into the box's inscribed stadium
+(0.0218 mm for the 0.6 mm via at the 0.15 mm edge). The one remaining error is
+a different class: a trace that leaves its own via in a 0.46 mm stub and then
+turns 90 degrees back past the via (RESET, B.Cu). The warning count rose
+because the moved vias re-shaped neighbouring routes (`pour_slot` 48 -> 62). The gate's
+0-error / 0-warning bar is still not met, and `--skip mask_to_copper` stays.
+
 ### Negative run
 
 The gate was checked against a known-bad board. The seed-42 board had all 20

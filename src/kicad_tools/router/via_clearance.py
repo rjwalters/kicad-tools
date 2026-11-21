@@ -31,6 +31,7 @@ Design notes:
 
 from __future__ import annotations
 
+import functools
 import logging
 import math
 from typing import Any, Protocol
@@ -454,6 +455,72 @@ def point_clear_of_copper(
 #: Far below the 0.05 mm grid pitch, so no grid-reachable position is affected.
 OWN_NET_BAND_STEP_TOL_MM = 5e-5
 
+#: Safety margin (mm) added to :func:`same_net_pad_union_depth_mm`'s geometric
+#: depth.  Positions are written at 3 decimals (0.0005 mm per axis) and the
+#: native search measures from float32 grid coordinates, so a seat accepted a
+#: hair past the derived depth must still be a union on disk (issue #9424).
+SAME_NET_PAD_UNION_DEPTH_SLACK_MM = 1e-3
+
+
+@functools.lru_cache(maxsize=64)
+def same_net_pad_union_depth_mm(annulus_half_mm: float, edge_mm: float) -> float:
+    """How deep a via annulus must overlap its own SMD pad to be one copper union.
+
+    Issue #9424: the slit band used to accept *any* overlap (``gap < 0``) as a
+    union.  A shallow overlap is not one: the annulus crosses the pad edge at
+    a narrow lens, and the two boundaries leave that lens as a wedge.  The
+    fab-view checker (``validate/rules/physical_gap.py``) exempts a joined
+    pair's shoulder only within ``edge_mm`` of the pair's intersection, and it
+    grades a boundary pair only while the annulus outline still faces the gap
+    within ``acos(FACING_COS_SECOND)`` (60 degrees).  Against a straight pad
+    face, with the annulus centre at height ``h = r - d`` outside it, the
+    outline point at lateral offset ``x`` faces the pad within that angle up
+    to ``x = r * sin(60 deg)``; the lens reaches ``c = sqrt(r^2 - h^2)``.  The
+    wedge is fully exempt when ``c >= r * sin(60 deg) - edge``, so the minimum
+    depth is ``d = r - sqrt(r^2 - c^2)`` with ``c = max(0, r sin60 - edge)``.
+
+    A convex pad outline (a rounded corner) recedes faster than a straight
+    face, so the straight-face depth is the worst case for the shapes the
+    predicate models.  Measured on the checker itself for a 0.6 mm annulus at
+    a 0.15 mm edge: the deepest overlap it still graded was ~0.016 mm against
+    the derived 0.0208 mm (straight faces of rect and roundrect pads; circle
+    and fully rounded pads were only graded at no overlap).
+
+    Returns:
+        The depth in mm (always > 0: a tangent seat is never a union, #9124),
+        including :data:`SAME_NET_PAD_UNION_DEPTH_SLACK_MM`.
+    """
+    from kicad_tools.validate.rules.physical_gap import FACING_COS_SECOND
+
+    r = max(0.0, float(annulus_half_mm))
+    facing_reach = r * math.sqrt(max(0.0, 1.0 - FACING_COS_SECOND * FACING_COS_SECOND))
+    lens = max(0.0, facing_reach - max(0.0, float(edge_mm)))
+    depth = r - math.sqrt(max(0.0, r * r - lens * lens)) if lens < r else r
+    return depth + SAME_NET_PAD_UNION_DEPTH_SLACK_MM
+
+
+def _stadium_signed_gap_mm(x: float, y: float, half: float, bbox: tuple[float, ...]) -> float:
+    """Signed annulus gap to the stadium inscribed in a pad's bounding box.
+
+    The stadium is the box with corner radius ``min(half_w, half_h)``: every
+    ``rect``, ``roundrect``, ``oval`` and ``circle`` pad whose (unrotated)
+    bounding box this is contains it, so overlap with it is overlap with real
+    copper (issue #9424).  A roundrect's bounding box does not have that
+    property: a seat that overlaps only the box's square corner is an air gap
+    beside the rounded copper.  Negative values are overlap depth.  Inside the
+    stadium's core the value is ``-(radius + half)`` or less -- deep union, not an
+    exact signed distance, which is all the union test needs.
+
+    Rotation: the box is the same rotated-AABB model as the clearance side,
+    so for a pad at a non-cardinal angle the stadium may extend past the copper;
+    the AABB model is no more exact there for either side.
+    """
+    min_x, min_y, max_x, max_y = bbox[0], bbox[1], bbox[2], bbox[3]
+    radius = max(0.0, min(max_x - min_x, max_y - min_y) / 2.0)
+    core_dx = max(0.0, (min_x + radius) - x, x - (max_x - radius))
+    core_dy = max(0.0, (min_y + radius) - y, y - (max_y - radius))
+    return math.hypot(core_dx, core_dy) - radius - half
+
 
 def same_net_segment_pad_gap_acceptable(
     a: tuple[float, float],
@@ -546,12 +613,25 @@ def same_net_segment_pad_gap_acceptable(
     # overlap, a union for both populations), so the segment branch always
     # keeps ``1e-9``.
     lower = 1e-9 if (tangent_is_union or not is_point) else -1e-9
+    # Issue #9424: the pad population's annulus is a union only when it
+    # overlaps real copper deeply enough to close the wedge beside the lens.
+    union_depth = (
+        same_net_pad_union_depth_mm(half_width, min_gap_mm)
+        if (is_point and not tangent_is_union)
+        else 0.0
+    )
     for bbox in same_net_pad_bboxes:
         if is_point:
             # Point primitive: the annulus form's arithmetic exactly.
             dx = max(0.0, bbox[0] - ax, ax - bbox[2])
             dy = max(0.0, bbox[1] - ay, ay - bbox[3])
             gap = math.hypot(dx, dy) - half_width
+            if union_depth > 0.0 and gap < min_gap_mm - 1e-9:
+                # Clearance stays measured against the (outer) box; the union
+                # side against the inscribed stadium, at the union depth.
+                if _stadium_signed_gap_mm(ax, ay, half_width, bbox) > -union_depth:
+                    return False
+                continue
         else:
             gap = _segment_box_gap_mm(ax, ay, bx, by, half_width, bbox)
         # The two acceptable regions: unioned with the pad, or clear of the
@@ -678,12 +758,15 @@ def same_net_pad_gap_acceptable(
 
     The constraint is two acceptable regions, not one floor:
 
-    * ``gap < 0`` -- the annulus overlaps its own pad, so the copper is one
-      union and there is no slit (the drill must still clear the pad bbox,
-      which is what ``--avoid-pad-overlap`` enforces).  Issue #9124: a
-      TANGENT seat (``gap == 0``: centre exactly one radius from a pad face
-      or corner) is NOT a union -- the disc touches the pad at one point and
-      the receding arc leaves a sub-edge wedge -- so it is rejected;
+    * the annulus overlaps its own pad's real copper by at least
+      :func:`same_net_pad_union_depth_mm`, so the copper is one union and
+      there is no slit (the drill must still clear the pad bbox, which is
+      what ``--avoid-pad-overlap`` enforces).  Issue #9124: a TANGENT seat
+      (``gap == 0``) is NOT a union.  Issue #9424: neither is a shallow
+      overlap (its lens leaves a wedge the checker grades) nor an overlap
+      with only the bounding box's square corner of a rounded pad (air
+      beside the copper) -- the overlap is measured against the box's
+      inscribed stadium, which every rect/roundrect/oval/circle pad contains;
     * ``gap >= min_gap_mm`` -- the fab's detection edge for the pad
       population, read from the resolved stackup (the ``pad_spacing`` dfm
       entry's ``GapBand.detection_edge_mm``; e.g. 0.15 mm on the jlcpcb
@@ -740,13 +823,13 @@ def same_net_pad_gap_band_ring(
     Issue #8974: the region form of the slit-band predicate, for rasterised
     legality masks (:func:`kicad_tools.router.link_router.route_link`'s
     via mask) that pre-ban the band instead of testing seats one point at
-    a time.  ``gap`` is measured to ``bbox`` exactly as the point predicate
-    measures it -- axis-aligned, ``hypot(dx, dy) - radius`` -- so ONE band
+    a time.  The outer edge is measured to ``bbox`` exactly as the point
+    predicate measures it -- axis-aligned, ``hypot(dx, dy) - radius`` -- and
+    the inner edge to the box's inscribed stadium at
+    :func:`same_net_pad_union_depth_mm` (Issue #9424), so ONE band
     definition feeds both forms: a seat this ring covers is exactly a seat
     the predicate rejects.  The predicate's 1e-9 float-noise epsilon is
-    finer than any rasteriser's cell, so the geometric boundary is the
-    shared band ``[0, min_gap_mm)`` -- tangent locus included (Issue #9124,
-    the inner buffer's ``-1e-9`` keeps it inside the ring).
+    finer than any rasteriser's cell.
 
     Args:
         bbox: Same-net SMD pad bounding box ``(min_x, min_y, max_x, max_y)``.
@@ -762,20 +845,33 @@ def same_net_pad_gap_band_ring(
     if min_gap_mm <= 0:
         return Polygon()
     radius = via_size / 2
-    pad = box(*bbox)
+    pad = box(*bbox[:4])
+    # Issue #9424: the accepted inner region is the inscribed stadium grown by
+    # ``radius - union_depth`` (a seat at least ``union_depth`` deep into real
+    # copper), not the box grown by ``radius``.  The stadium is its core box
+    # (the bbox shrunk by its corner radius) buffered by that radius, so the
+    # grown stadium is the core buffered by ``corner + radius - depth``.
+    union_depth = same_net_pad_union_depth_mm(radius, min_gap_mm)
+    min_x, min_y, max_x, max_y = bbox[0], bbox[1], bbox[2], bbox[3]
+    corner = max(0.0, min(max_x - min_x, max_y - min_y) / 2.0)
+    core = box(min_x + corner, min_y + corner, max_x - corner, max_y - corner)
+    if core.is_empty or core.area == 0.0:
+        from shapely.geometry import LineString, Point
+
+        cx0, cy0, cx1, cy1 = min_x + corner, min_y + corner, max_x - corner, max_y - corner
+        core = (
+            Point(cx0, cy0)
+            if (abs(cx1 - cx0) < 1e-12 and abs(cy1 - cy0) < 1e-12)
+            else LineString([(cx0, cy0), (cx1, cy1)])
+        )
     # ``quad_segs=64`` keeps GEOS's arc approximation ~1e-5 mm inside the
     # true disk, so the ring agrees with the point predicate finer than any
     # rasterised mask can resolve (the default 8 segments sag ~1.5e-3 mm at
-    # the corners, which IS visible at mask resolution).
-    #
-    # Issue #9124: the inner boundary sits ``1e-9`` INSIDE the radius so the
-    # ring covers the tangent locus (``gap == 0``, centre exactly one radius
-    # from a pad face) the point predicate now rejects -- the ring's
-    # difference would otherwise leave that one-point-wide locus on the
-    # inner polygon's boundary, where a mask can read it either way.
-    return pad.buffer(radius + min_gap_mm, quad_segs=64).difference(
-        pad.buffer(radius - 1e-9, quad_segs=64)
-    )
+    # the corners, which IS visible at mask resolution).  The union depth is
+    # always > 0, so the tangent locus (Issue #9124) stays inside the ring.
+    inner_reach = corner + radius - union_depth
+    inner = core.buffer(inner_reach, quad_segs=64) if inner_reach > 0 else Polygon()
+    return pad.buffer(radius + min_gap_mm, quad_segs=64).difference(inner)
 
 
 # ---------------------------------------------------------------------------
