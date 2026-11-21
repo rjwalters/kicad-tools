@@ -144,6 +144,57 @@ class TestFormatBackendStatus:
         status = format_backend_status(info, grid_cells=0)
         assert "Tip" in status
 
+    def test_unavailable_python_mentions_centerline_rescue_fallback(self):
+        """Extension absent: status names the C++-only centerline trunk rescue
+        and its independent-legs fallback, next to the build tip (Issue #9853)."""
+        info = {
+            "backend": "python",
+            "version": "pure-python",
+            "available": False,
+            "active": "python",
+        }
+        status = format_backend_status(info, grid_cells=0)
+        assert "centerline trunk rescue requires C++" in status
+        assert "falls back to independent legs" in status
+        assert "kct build-native" in status
+
+    def test_unavailable_python_large_grid_keeps_rescue_note(self):
+        """Extension absent, large grid: the rescue note appears alongside the
+        slow-grid warning and build command (Issue #9853)."""
+        info = {
+            "backend": "python",
+            "version": "pure-python",
+            "available": False,
+            "active": "python",
+        }
+        status = format_backend_status(info, grid_cells=LARGE_GRID_THRESHOLD + 1)
+        assert "WARNING" in status
+        assert "kct build-native" in status
+        assert "centerline trunk rescue requires C++" in status
+        assert "falls back to independent legs" in status
+
+    def test_available_forced_python_no_false_rescue_warning(self):
+        """Extension present, Python forced: no missing-rescue claim, because
+        the coupled search and pose rescue stay eligible (Issue #9853)."""
+        info = {
+            "backend": "cpp",
+            "version": "1.0.0",
+            "available": True,
+            "active": "python",
+        }
+        status = format_backend_status(info)
+        assert "python" in status.lower()
+        assert "C++ backend not installed" not in status
+        assert "centerline trunk rescue" not in status
+
+    def test_available_cpp_status_has_no_rescue_warning(self):
+        """Native backend: version label stands, no missing-rescue note."""
+        info = {"backend": "cpp", "version": "1.0.0", "available": True, "active": "cpp"}
+        status = format_backend_status(info)
+        assert "native" in status
+        assert "1.0.0" in status
+        assert "centerline trunk rescue" not in status
+
     def test_large_grid_threshold_constant(self):
         """Test that the large grid threshold is a reasonable value."""
         assert LARGE_GRID_THRESHOLD > 10_000

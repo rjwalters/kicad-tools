@@ -975,7 +975,10 @@ def format_backend_status(backend_info: dict, grid_cells: int = 0) -> str:
     """Format a human-readable backend status string for CLI output.
 
     Provides actionable guidance when the C++ backend is not available,
-    especially when routing large grids where performance matters.
+    especially when routing large grids where performance matters.  When the
+    extension is absent the status also names the capability gap, not just the
+    speed gap: the differential-pair centerline trunk rescue (Issue #5786) is
+    C++-only, and without it the router falls back to independent legs.
 
     Args:
         backend_info: Dictionary from get_backend_info().
@@ -997,6 +1000,10 @@ def format_backend_status(backend_info: dict, grid_cells: int = 0) -> str:
 
     if not available:
         parts.append("C++ backend not installed")
+        parts.append(
+            "Differential-pair centerline trunk rescue requires C++. "
+            "If the coupled search fails, routing falls back to independent legs"
+        )
         if grid_cells > LARGE_GRID_THRESHOLD:
             parts.append(
                 f"WARNING: Routing {grid_cells:,} grid cells with Python backend "
