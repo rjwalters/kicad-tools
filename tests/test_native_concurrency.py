@@ -159,6 +159,45 @@ def test_gate_bounds_native_launches_across_processes(fake_native, tmp_path, lim
     assert _overlap(log) <= limit
 
 
+def test_queued_launch_emits_waiting_heartbeats(fake_native, tmp_path):
+    """Issue #9803: an in-flight queue wait must be visible in the permit log.
+
+    ``acquire`` records only exist once a permit is granted, so a watcher
+    reading the log while a launch is still queued (the stdout-contract
+    helper, whose subprocess deadline charges that queue) would see nothing.
+    The gate now appends periodic ``waiting`` heartbeats whose ``waited_s``
+    grows up to the eventual ``acquire.waited_s``.
+    """
+    permit_log = tmp_path / "permits"
+    # One process, two concurrent launches, one slot: the second queues for
+    # ~the first's hold, which must exceed the heartbeat interval.
+    _run_workload(
+        fake_native,
+        tmp_path,
+        processes=1,
+        per_process=2,
+        limit=1,
+        hold="1.5",
+        **{native_concurrency.ENV_LOG: str(permit_log)},
+    )
+    records = [
+        json.loads(line)
+        for path in permit_log.glob("slots-*.jsonl")
+        for line in path.read_text().splitlines()
+    ]
+    waiting = [r for r in records if r["event"] == "waiting"]
+    acquires = [r for r in records if r["event"] == "acquire"]
+    queued = [r for r in acquires if r["waited_s"] >= 1.0]
+    assert queued, f"expected one launch to queue past the heartbeat interval: {records}"
+    assert waiting, "a queued launch must emit waiting heartbeats"
+    assert all(r["waited_s"] > 0 for r in waiting)
+    # The heartbeat never claims more wait than the acquire that ended it.
+    assert all(r["waited_s"] <= queued[0]["waited_s"] + 0.05 for r in waiting)
+    # Every heartbeat precedes its acquire.
+    last_waiting_ns = max(r["time_ns"] for r in waiting)
+    assert last_waiting_ns < queued[0]["time_ns"]
+
+
 def test_control_workload_really_overlaps_without_the_gate(fake_native, tmp_path):
     """Negative control: the same workload exceeds the bound when ungated."""
     log = _run_workload(fake_native, tmp_path, processes=3, per_process=2, limit=None)
