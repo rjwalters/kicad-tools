@@ -166,10 +166,10 @@
       "copper_by_arch": {
         "arm64": {
           "present": true,
-          "segments": 11,
-          "vias": 4,
+          "segments": 5,
+          "vias": 2,
           "arcs": 0,
-          "sha256": "d5d2e22103dab1b587e0270ef4466cd629548d156350ef023fd460c026dd239b"
+          "sha256": "f693f832109afb258f8269df2a9811d28fcd4f3ba4d04f3c026658cfe6d66677"
         },
         "x86_64": {
           "present": true,
@@ -212,10 +212,10 @@
       "copper_by_arch": {
         "arm64": {
           "present": true,
-          "segments": 11,
-          "vias": 4,
+          "segments": 5,
+          "vias": 2,
           "arcs": 0,
-          "sha256": "d5d2e22103dab1b587e0270ef4466cd629548d156350ef023fd460c026dd239b"
+          "sha256": "f693f832109afb258f8269df2a9811d28fcd4f3ba4d04f3c026658cfe6d66677"
         },
         "x86_64": {
           "present": true,
@@ -259,10 +259,10 @@
       "copper_by_arch": {
         "arm64": {
           "present": true,
-          "segments": 11,
-          "vias": 4,
+          "segments": 5,
+          "vias": 2,
           "arcs": 0,
-          "sha256": "d5d2e22103dab1b587e0270ef4466cd629548d156350ef023fd460c026dd239b"
+          "sha256": "f693f832109afb258f8269df2a9811d28fcd4f3ba4d04f3c026658cfe6d66677"
         },
         "x86_64": {
           "present": true,
@@ -313,10 +313,10 @@
       "copper_by_arch": {
         "arm64": {
           "present": true,
-          "segments": 11,
-          "vias": 4,
+          "segments": 5,
+          "vias": 2,
           "arcs": 0,
-          "sha256": "d5d2e22103dab1b587e0270ef4466cd629548d156350ef023fd460c026dd239b"
+          "sha256": "f693f832109afb258f8269df2a9811d28fcd4f3ba4d04f3c026658cfe6d66677"
         },
         "x86_64": {
           "present": true,

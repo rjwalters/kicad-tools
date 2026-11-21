@@ -450,6 +450,14 @@ def _acquire(limit: int, environ: Any) -> _Permit:
     # is still sleeping between polls (until its per-test cap is spent).
     accounted = 0.0
     credited = 0.0
+    # Issue #9803: an "acquire" record only exists once the permit is granted,
+    # so a watcher reading the log mid-wait (the stdout-contract helper, whose
+    # 50 s subprocess deadline charges this queue) sees nothing while the
+    # launch is still queued. A periodic "waiting" heartbeat -- only written
+    # when permit logging is already enabled -- makes the in-flight wait
+    # observable without granting anything.
+    heartbeat_s = 1.0
+    next_heartbeat = heartbeat_s
 
     def settle(waited: float) -> float:
         """Credit any wait not yet offered; return the total granted."""
@@ -508,6 +516,11 @@ def _acquire(limit: int, environ: Any) -> _Permit:
                 }
             )
             return _Permit(None, None, waited)
+        if waited >= next_heartbeat:
+            # Issue #9803: surface the still-unsatisfied wait to whoever reads
+            # the permit log, then hold one record per further heartbeat slice.
+            _record({"event": "waiting", "waited_s": round(waited, 6)})
+            next_heartbeat += heartbeat_s
         # Pre-pay the sleep we are about to take: ``time.sleep`` never returns
         # early (PEP 475), so by the next poll the test really has waited at
         # least this long and the running total still equals the measured

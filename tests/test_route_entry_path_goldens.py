@@ -352,11 +352,20 @@ def _host_arch() -> str:
 
 
 def _resolve_for_host(golden: dict) -> dict:
-    """Select the copper observation recorded on this architecture."""
+    """Select the copper observation recorded on this architecture.
+
+    A host with no recorded entry gets a placeholder that names the arches
+    present, so the golden assertion's field diff says what is missing
+    instead of a bare ``KeyError`` during resolution (#9816).
+    """
     if "copper_by_arch" not in golden:
         return golden
     resolved = golden.copy()
-    resolved["copper"] = resolved.pop("copper_by_arch")[_host_arch()]
+    by_arch = resolved.pop("copper_by_arch")
+    arch = _host_arch()
+    resolved["copper"] = by_arch.get(
+        arch, {"missing": f"<no golden for host arch {arch!r}; have {sorted(by_arch)}>"}
+    )
     return resolved
 
 
@@ -402,6 +411,25 @@ def test_field_diff_names_each_differing_field() -> None:
     assert "exit_code" not in out
     assert "files: missing=['y'] unexpected=['z']" in out
     assert field_diff(golden, golden) == ""
+
+
+def test_resolve_for_host_unknown_arch_is_legible() -> None:
+    """An unrecorded host arch resolves to a placeholder, not a ``KeyError`` (#9816)."""
+    golden = {
+        "exit_code": 2,
+        "copper_by_arch": {"arm64": {"segments": 5}, "x86_64": {"segments": 5}},
+    }
+    with mock.patch(f"{__name__}._host_arch", return_value="riscv64"):
+        resolved = _resolve_for_host(golden)
+    assert "copper_by_arch" not in resolved
+    assert resolved["copper"] == {
+        "missing": "<no golden for host arch 'riscv64'; have ['arm64', 'x86_64']>"
+    }
+    assert "copper.missing: golden=\"<no golden for host arch 'riscv64'" in field_diff(
+        {"exit_code": 2, "copper": {"segments": 5}}, resolved
+    )
+    with mock.patch(f"{__name__}._host_arch", return_value="arm64"):
+        assert _resolve_for_host(golden)["copper"] == {"segments": 5}
 
 
 def test_goldens_cover_every_case() -> None:
