@@ -17,6 +17,8 @@ sidecar's anchor list) and checks two things:
   :data:`HOLE_FILLET_MM`) against courtyards on *both* sides of the board: the
   hole is a through hole, so the tail and fillet exit opposite the run. A
   footprint the hole itself terminates in is not an obstacle for that hole.
+  :func:`hole_courtyard_overlaps` is that test, shared with ``kct pcb
+  reinforce`` so its end anchors are vetted the same way (Issue #9815).
 
 Findings are always errors; waive through ``.kct_waivers.json`` like any rule.
 """
@@ -126,6 +128,68 @@ def run_courtyard_overlaps(
         zone = poly.buffer(inflate)
         if line.intersects(zone):
             found.append((fp, zone.intersection(line).length))
+    return found
+
+
+def _pad_pos(fp: Footprint, pad: Any) -> _Point:
+    from kicad_tools.core.geometry import rotate_pad_offset
+
+    off = rotate_pad_offset(pad.position[0], pad.position[1], fp.rotation)
+    return (fp.position[0] + off[0], fp.position[1] + off[1])
+
+
+def _pad_radius(pad: Any) -> float:
+    try:
+        return max(float(pad.size[0]), float(pad.size[1])) / 2.0
+    except (TypeError, ValueError, IndexError):
+        return 0.0
+
+
+def _terminates_in(fp: Footprint, net_number: int, pos: _Point) -> bool:
+    """True when ``pos`` lies inside a same-net pad of ``fp``."""
+    for pad in fp.pads:
+        if pad.net_number != net_number:
+            continue
+        if math.dist(pos, _pad_pos(fp, pad)) <= _pad_radius(pad):
+            return True
+    return False
+
+
+def hole_courtyard_overlaps(
+    pos: _Point,
+    radius: float,
+    footprints: Any,
+    net_number: int,
+    body: Any | None = None,
+    owner: Any | None = None,
+) -> list[tuple[Footprint, str]]:
+    """Courtyards an end hole's envelope intersects: ``[(footprint, side), ...]``.
+
+    The single hole-vs-courtyard test shared by :class:`ReinforcementCourtyardRule`
+    and ``kct pcb reinforce`` (Issue #9815), so the generator can never anchor a
+    wire in a courtyard the check then rejects. The envelope is ``radius`` (the
+    hole's pad annulus) + :data:`HOLE_FILLET_MM`, tested against the body on
+    *both* sides: the tail and fillet exit opposite the run. A footprint the
+    hole terminates in (``pos`` inside one of its pads on ``net_number``), or
+    ``owner``, is not an obstacle. ``body(fp, side)`` optionally supplies a
+    cached polygon lookup.
+    """
+    from shapely.geometry import Point, Polygon, box
+
+    if body is None:
+
+        def body(fp: Footprint, s: str) -> Any | None:
+            return _body_polygon(fp, s, Polygon, box)
+
+    env = Point(pos).buffer(radius + HOLE_FILLET_MM)
+    found: list[tuple[Footprint, str]] = []
+    for fp in footprints:
+        if fp is owner or _terminates_in(fp, net_number, pos):
+            continue
+        for side in ("F", "B"):
+            poly = body(fp, side)
+            if poly is not None and env.intersects(poly):
+                found.append((fp, side))
     return found
 
 
@@ -293,44 +357,24 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
             for pos, radius, owner in self._leg_holes(
                 holes, leg, drill, tol, is_change_via, rotate_pad_offset
             ):
-                env = Point(pos).buffer(radius + HOLE_FILLET_MM)
-                for fp in pcb.footprints:
-                    if self._terminates_in(fp, net_number, pos, rotate_pad_offset) or fp is owner:
+                for fp, hside in hole_courtyard_overlaps(
+                    pos, radius, pcb.footprints, net_number, body, owner
+                ):
+                    key = (round(pos[0] * 1000), round(pos[1] * 1000), f"{fp.reference}{hside}")
+                    if key in reported_holes:
                         continue
-                    for hside in ("F", "B"):
-                        poly = body(fp, hside)
-                        if poly is None or not env.intersects(poly):
-                            continue
-                        key = (round(pos[0] * 1000), round(pos[1] * 1000), f"{fp.reference}{hside}")
-                        if key in reported_holes:
-                            continue
-                        reported_holes.add(key)
-                        self._emit_hole(results, net, leg.layer, pos, fp, hside, side)
+                    reported_holes.add(key)
+                    self._emit_hole(results, net, leg.layer, pos, fp, hside, side)
 
     # ------------------------------------------------------------- helpers
 
     @staticmethod
     def _pad_pos(fp: Footprint, pad: Any, rotate_pad_offset: Any) -> _Point:
-        off = rotate_pad_offset(pad.position[0], pad.position[1], fp.rotation)
-        return (fp.position[0] + off[0], fp.position[1] + off[1])
+        return _pad_pos(fp, pad)
 
     @staticmethod
     def _pad_radius(pad: Any) -> float:
-        try:
-            return max(float(pad.size[0]), float(pad.size[1])) / 2.0
-        except (TypeError, ValueError, IndexError):
-            return 0.0
-
-    def _terminates_in(
-        self, fp: Footprint, net_number: int, pos: _Point, rotate_pad_offset: Any
-    ) -> bool:
-        """True when ``pos`` lies inside a same-net pad of ``fp``."""
-        for pad in fp.pads:
-            if pad.net_number != net_number:
-                continue
-            if math.dist(pos, self._pad_pos(fp, pad, rotate_pad_offset)) <= self._pad_radius(pad):
-                return True
-        return False
+        return _pad_radius(pad)
 
     def _leg_holes(
         self,
