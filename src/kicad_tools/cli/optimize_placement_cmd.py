@@ -1295,6 +1295,7 @@ def run_optimize_placement(
     route_check_budget: int = DEFAULT_ROUTE_CHECK_BUDGET,
     route_check_timeout: float | None = None,
     require_outline: bool = False,
+    silk_fix: bool = True,
 ) -> int:
     """Run placement optimization.
 
@@ -1367,6 +1368,10 @@ def run_optimize_placement(
             route (``--per-net-iterations``), so the verdict is reproducible.
         route_check_timeout: Wall-clock safety backstop per check route in
             seconds (Python-API only; ``None`` = the module default).
+        silk_fix: Run the shared silk legalisation pass (``legalize_silk``,
+            #9795 phase 1) on the written board and the snap reference
+            repair it augments (Issue #9799). ``False`` (the
+            ``--no-silk-fix`` CLI flag) leaves authored silk byte-identical.
 
     Returns:
         Exit code:
@@ -2095,6 +2100,7 @@ def run_optimize_placement(
         print(f"\nWriting result to: {output_path}")
 
     silk_repair: SnapSilkRepair | None = None
+    silk_fix_doc: dict | None = None
     try:
         if route_check_report is not None and route_check_report.accepted_stage == "incumbent":
             # Route check kept the board as read: write it untouched (the
@@ -2105,8 +2111,11 @@ def run_optimize_placement(
                 pcb_path, output_path, best_vector, components, board_origin
             )
             # The snap moved caps by their footprint origin only: re-anchor
-            # the reference text it disturbed (issue #6256).
-            silk_repair = repair_snapped_silk_refs(output_path, snap_moves)
+            # the reference text it disturbed (issue #6256).  Issue #9799:
+            # --no-silk-fix bypasses this reference repair too -- it moves
+            # silk text, so the opt-out leaves authored silk byte-identical.
+            if silk_fix:
+                silk_repair = repair_snapped_silk_refs(output_path, snap_moves)
     except Exception as e:
         rc = _placement_error(
             pcb_path,
@@ -2128,6 +2137,18 @@ def run_optimize_placement(
             for warning in silk_repair.warnings():
                 print(f"WARNING: {warning}", file=sys.stderr)
 
+    # Issue #9799 (#9795 phase 3): legalise silk on the finished board.
+    if silk_fix:
+        from kicad_tools.manufacturers.resolve import resolve_cli_manufacturer
+
+        from .silk_default_pass import run_default_silk_pass
+
+        silk_fix_doc = run_default_silk_pass(
+            output_path,
+            mfr=resolve_cli_manufacturer(None, output_path),
+            quiet=quiet,
+        )
+
     if not quiet:
         print("Done.")
 
@@ -2147,6 +2168,7 @@ def run_optimize_placement(
                     "snap_silk_repair": (
                         silk_repair.as_dict() if silk_repair is not None else None
                     ),
+                    "silk_fix": silk_fix_doc,
                     "scores": {
                         "initial": _score_document(seed_score),
                         "final": _score_document(final_score),

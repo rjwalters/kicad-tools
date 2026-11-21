@@ -1152,6 +1152,8 @@ def _run_export_command(args) -> int:
         sub_argv.append("--no-project-zip")
     if getattr(args, "export_no_ampacity_rules", False):
         sub_argv.append("--no-ampacity-rules")
+    if getattr(args, "export_no_silk_fix", False):
+        sub_argv.append("--no-silk-fix")
     if getattr(args, "export_no_auto_lcsc", False):
         sub_argv.append("--no-auto-lcsc")
     if getattr(args, "export_no_spec", False):

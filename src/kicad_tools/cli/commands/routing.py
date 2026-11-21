@@ -533,6 +533,17 @@ def _parse_route_auto_targets(args, *, as_json: bool = False) -> tuple[list[str]
     return ordered, 0
 
 
+def _resolve_route_auto_mfr(board: str) -> str:
+    """The fab tier the default silk pass targets (#9799).
+
+    Same precedence as an unflagged ``kct export`` / ``kct check``: the
+    board's ``project.kct`` ``target_fab`` if present, else ``jlcpcb``.
+    """
+    from kicad_tools.manufacturers.resolve import resolve_cli_manufacturer
+
+    return resolve_cli_manufacturer(None, board)
+
+
 def run_route_auto_command(args) -> int:
     """Handle route-auto command using RoutingOrchestrator.
 
@@ -553,7 +564,12 @@ def run_route_auto_command(args) -> int:
         return rc
     assert net_list is not None  # rc == 0 guarantees a list
 
-    def _emit(nets: list[dict], overall_rc: int, lint_gate: dict | None = None) -> None:
+    def _emit(
+        nets: list[dict],
+        overall_rc: int,
+        lint_gate: dict | None = None,
+        silk_fix: dict | None = None,
+    ) -> None:
         doc = {
             "command": "route-auto",
             "pcb": args.pcb,
@@ -568,6 +584,9 @@ def run_route_auto_command(args) -> int:
         if lint_gate is not None:
             # Issue #6054: present only under --lint-gate.
             doc["lint_gate"] = lint_gate
+        if silk_fix is not None:
+            # Issue #9799: the default silk pass outcome on the published board.
+            doc["silk_fix"] = silk_fix
         emit_json(doc)
 
     # Dry-run: preview strategy selection without routing (per net).
@@ -663,6 +682,20 @@ def run_route_auto_command(args) -> int:
             gate.abort()
             _unstage_args()
         raise
+    # Issue #9799 (#9795 phase 3): the shared silk legalisation pass runs
+    # once on the surviving output -- after per-net rollback has settled
+    # what ships and before gate.finish() judges it.  With a lint gate the
+    # staged board is judged and promoted with these same bytes; with no
+    # --output nothing was published, so the input stays untouched.
+    silk_fix_doc = None
+    if args.output and not getattr(args, "no_silk_fix", False):
+        from ..silk_default_pass import run_default_silk_pass
+
+        quiet = bool(getattr(args, "quiet", False) or getattr(args, "global_quiet", False))
+        with stdout_to_stderr_when(as_json):
+            silk_fix_doc = run_default_silk_pass(
+                args.output, mfr=_resolve_route_auto_mfr(args.output), quiet=quiet or as_json
+            )
     gate_doc = None
     if gate is not None:
         try:
@@ -679,7 +712,7 @@ def run_route_auto_command(args) -> int:
                     entry["success"] = False
                     entry["lint_gate_rolled_back"] = True
     if as_json:
-        _emit(net_docs, overall_rc, gate_doc)
+        _emit(net_docs, overall_rc, gate_doc, silk_fix_doc)
     return overall_rc
 
 

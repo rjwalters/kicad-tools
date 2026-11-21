@@ -4945,6 +4945,18 @@ def _add_route_auto_parser(subparsers) -> None:
         action="store_true",
         help="Preview strategy selection without routing",
     )
+    # Issue #9799 (#9795 phase 3): the shared silk legalisation pass runs on
+    # the published output by default; this is the opt-out.
+    route_auto_parser.add_argument(
+        "--no-silk-fix",
+        dest="no_silk_fix",
+        action="store_true",
+        help=(
+            "Skip the default silk legalisation pass (legalize_silk) that "
+            "otherwise runs on the accumulated output after per-net rollback "
+            "and before the lint gate judges it (Issue #9799)."
+        ),
+    )
     route_auto_parser.add_argument(
         "-v",
         "--verbose",
@@ -6625,6 +6637,18 @@ def _add_optimize_placement_parser(subparsers) -> None:
             "production cap: enough to rank two placements of the same board."
         ),
     )
+    # Issue #9799 (#9795 phase 3): the shared silk legalisation pass runs on
+    # the written board by default; this is the opt-out.
+    op_parser.add_argument(
+        "--no-silk-fix",
+        dest="no_silk_fix",
+        action="store_true",
+        help=(
+            "Skip the default silk legalisation pass (legalize_silk) on the "
+            "written board, and the snap reference repair it supersedes "
+            "(Issue #9799). With this flag authored silk is byte-identical."
+        ),
+    )
     op_parser.add_argument("-v", "--verbose", action="store_true")
     op_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
     add_format_flag(op_parser)
@@ -7753,6 +7777,16 @@ def _add_readiness_parser(subparsers) -> None:
         dest="readiness_no_archive",
         action="store_true",
         help="Skip building output/manufacturing.zip",
+    )
+    rd_parser.add_argument(
+        "--no-silk-fix",
+        dest="readiness_no_silk_fix",
+        action="store_true",
+        help=(
+            "Skip the default silk legalisation pass (legalize_silk) that "
+            "--generate otherwise runs on the staged board before the checks, "
+            "plots and hashes consume it (Issue #9799). Verify never mutates."
+        ),
     )
     rd_parser.add_argument(
         "--hv-net-class",
@@ -10460,6 +10494,16 @@ def _add_export_parser(subparsers) -> None:
         dest="export_no_ampacity_rules",
         action="store_true",
         help="Do not emit ampacity track_width floors into the sibling .kicad_dru",
+    )
+    export_parser.add_argument(
+        "--no-silk-fix",
+        dest="export_no_silk_fix",
+        action="store_true",
+        help=(
+            "Skip the default silk legalisation pass (legalize_silk) that "
+            "otherwise runs on the board before preflight and plotting judge "
+            "silk (Issue #9799). With this flag authored silk is byte-identical."
+        ),
     )
     export_parser.add_argument(
         "--auto-lcsc",

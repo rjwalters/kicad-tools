@@ -75,6 +75,9 @@ def run_readiness_command(args) -> int:
     if getattr(args, "readiness_no_archive", False):
         sub_argv.append("--no-archive")
 
+    if getattr(args, "readiness_no_silk_fix", False):
+        sub_argv.append("--no-silk-fix")
+
     hv_net_class = getattr(args, "readiness_hv_net_class", None)
     if hv_net_class and hv_net_class != "HV":
         sub_argv.extend(["--hv-net-class", hv_net_class])
