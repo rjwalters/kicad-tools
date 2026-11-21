@@ -648,9 +648,9 @@ class TestApplicableMinimumVerdicts:
 
     #: Inside KiCad's probed band (accepted by pinned kicad-cli), beyond
     #: the plain epsilon: separates a band verdict from an epsilon verdict.
-    SHORTFALL_INSIDE_BAND_NM = 0.0004
+    SHORTFALL_INSIDE_BAND_MM = 0.0004
     #: Beyond the 500 nm band: must flag on every branch.
-    SHORTFALL_BEYOND_BAND_NM = 0.0006
+    SHORTFALL_BEYOND_BAND_MM = 0.0006
 
     def _check_segment(self, results, shortfall):
 
@@ -743,14 +743,14 @@ class TestApplicableMinimumVerdicts:
         from kicad_tools.validate.violations import DRCResults
 
         results = DRCResults()
-        self._check_segment(results, self.SHORTFALL_INSIDE_BAND_NM)
+        self._check_segment(results, self.SHORTFALL_INSIDE_BAND_MM)
         assert results.errors == []
 
     def test_trace_600nm_shortfall_beyond_band_flags(self):
         from kicad_tools.validate.violations import DRCResults
 
         results = DRCResults()
-        self._check_segment(results, self.SHORTFALL_BEYOND_BAND_NM)
+        self._check_segment(results, self.SHORTFALL_BEYOND_BAND_MM)
         assert self._rule_ids(results) == {"edge_clearance_trace"}
 
     # -- vias: hole minimum, plain epsilon verdict ---------------------------
@@ -762,14 +762,14 @@ class TestApplicableMinimumVerdicts:
         from kicad_tools.validate.violations import DRCResults
 
         results = DRCResults()
-        self._check_via(results, self.SHORTFALL_INSIDE_BAND_NM)
+        self._check_via(results, self.SHORTFALL_INSIDE_BAND_MM)
         assert self._rule_ids(results) == {"edge_clearance_via"}
 
     def test_via_600nm_shortfall_flags(self):
         from kicad_tools.validate.violations import DRCResults
 
         results = DRCResults()
-        self._check_via(results, self.SHORTFALL_BEYOND_BAND_NM)
+        self._check_via(results, self.SHORTFALL_BEYOND_BAND_MM)
         assert self._rule_ids(results) == {"edge_clearance_via"}
 
     # -- SMD pads: copper minimum, band verdict ------------------------------
@@ -778,14 +778,14 @@ class TestApplicableMinimumVerdicts:
         from kicad_tools.validate.violations import DRCResults
 
         results = DRCResults()
-        self._check_pad(results, self.SHORTFALL_INSIDE_BAND_NM, "smd")
+        self._check_pad(results, self.SHORTFALL_INSIDE_BAND_MM, "smd")
         assert results.errors == []
 
     def test_smd_pad_600nm_shortfall_beyond_band_flags(self):
         from kicad_tools.validate.violations import DRCResults
 
         results = DRCResults()
-        self._check_pad(results, self.SHORTFALL_BEYOND_BAND_NM, "smd")
+        self._check_pad(results, self.SHORTFALL_BEYOND_BAND_MM, "smd")
         assert self._rule_ids(results) == {"edge_clearance_pad"}
 
     # -- through-hole pads: hole minimum, plain epsilon verdict --------------
@@ -794,14 +794,14 @@ class TestApplicableMinimumVerdicts:
         from kicad_tools.validate.violations import DRCResults
 
         results = DRCResults()
-        self._check_pad(results, self.SHORTFALL_INSIDE_BAND_NM, "thru_hole")
+        self._check_pad(results, self.SHORTFALL_INSIDE_BAND_MM, "thru_hole")
         assert self._rule_ids(results) == {"edge_clearance_pad_hole"}
 
     def test_thru_hole_pad_600nm_shortfall_flags(self):
         from kicad_tools.validate.violations import DRCResults
 
         results = DRCResults()
-        self._check_pad(results, self.SHORTFALL_BEYOND_BAND_NM, "thru_hole")
+        self._check_pad(results, self.SHORTFALL_BEYOND_BAND_MM, "thru_hole")
         assert self._rule_ids(results) == {"edge_clearance_pad_hole"}
 
     # -- zones: copper minimum, band verdict ---------------------------------
@@ -810,14 +810,14 @@ class TestApplicableMinimumVerdicts:
         from kicad_tools.validate.violations import DRCResults
 
         results = DRCResults()
-        self._check_zone(results, self.SHORTFALL_INSIDE_BAND_NM)
+        self._check_zone(results, self.SHORTFALL_INSIDE_BAND_MM)
         assert results.errors == []
 
     def test_zone_600nm_shortfall_beyond_band_flags(self):
         from kicad_tools.validate.violations import DRCResults
 
         results = DRCResults()
-        self._check_zone(results, self.SHORTFALL_BEYOND_BAND_NM)
+        self._check_zone(results, self.SHORTFALL_BEYOND_BAND_MM)
         assert self._rule_ids(results) == {"edge_clearance_zone"}
 
 

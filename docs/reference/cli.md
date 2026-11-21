@@ -376,7 +376,10 @@ Two placement modes:
   A refused end anchor is nudged inward along the leg only, by at most
   2 mm, and never past the other anchor; otherwise it is listed under
   `refused` with the rule that refused it (including `hole_to_hole` /
-  `anchor_spacing` against another leg's anchor) and the leg is
+  `anchor_spacing` against another leg's anchor, and `anchor_courtyard`
+  when the end hole plus fillet clearance would sit in a courtyard on
+  either side -- the `wire_run_courtyard_overlap` end-hole test, naming the
+  footprint in `obstacle_footprint`) and the leg is
   `partial` (one anchor, the other rule-refused) or `unanchored`. One
   anchor can't hold a two-ended wire, so treat `partial` as a placement to
   fix.

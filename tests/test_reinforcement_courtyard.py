@@ -289,3 +289,116 @@ def test_ambiguous_net_wire_across_a_courtyard_is_reported():
     _body(pcb, "R1", 80.0, 50.0, side="B")
     runs = [v for v in _run(pcb) if "[run]" in v.message]
     assert runs and "R1" in runs[0].message
+
+
+# --- reinforce vets end holes against courtyards (Issue #9815) --------------
+
+
+def _natural_start() -> tuple[float, float]:
+    """Where reinforce puts the start anchor on the unobstructed board."""
+    res = reinforce_net(_bare_board(), NET, design_rules=_rules(), dry_run=True)
+    a = res.legs[0].anchors[0]
+    return (a.x, a.y)
+
+
+def test_hole_courtyard_overlaps_is_the_checks_test():
+    from kicad_tools.validate.rules.reinforcement_courtyard import hole_courtyard_overlaps
+
+    pcb = _bare_board()
+    fp = _body(pcb, "U9", 40.0, 50.0, side="B", half=0.5)
+    net = pcb.get_net_by_name(NET).number
+    assert hole_courtyard_overlaps((40.0, 50.0), 0.6, pcb.footprints, net) == [(fp, "B")]
+    # Envelope = radius + HOLE_FILLET_MM: 0.6 + 0.75 reaches 1.35 mm past the hole.
+    assert hole_courtyard_overlaps((41.8, 50.0), 0.6, pcb.footprints, net) == [(fp, "B")]
+    assert not hole_courtyard_overlaps((41.9, 50.0), 0.6, pcb.footprints, net)
+
+
+def test_hole_courtyard_overlaps_keeps_terminating_pad_exemption():
+    from kicad_tools.validate.rules.reinforcement_courtyard import hole_courtyard_overlaps
+
+    pcb = _bare_board()
+    other = pcb.add_net("OTHER")
+
+    def pad(net_number: int, net_name: str) -> Pad:
+        return Pad(
+            number="1",
+            type="thru_hole",
+            shape="circle",
+            position=(0.0, 0.0),
+            size=(2.0, 2.0),
+            layers=["*.Cu"],
+            net_number=net_number,
+            net_name=net_name,
+            drill=1.0,
+        )
+
+    net = pcb.get_net_by_name(NET).number
+    _body(pcb, "J5", 40.0, 30.0, half=2.0, pads=[pad(net, NET)])
+    assert not hole_courtyard_overlaps((40.0, 30.0), 0.6, pcb.footprints, net)
+    fp = _body(pcb, "J6", 60.0, 30.0, half=2.0, pads=[pad(other.number, "OTHER")])
+    assert hole_courtyard_overlaps((60.0, 30.0), 0.6, pcb.footprints, net) == [(fp, "F")]
+
+
+def test_reinforce_slides_end_anchor_out_of_opposite_side_courtyard():
+    x, y = _natural_start()
+    pcb = _bare_board()
+    _body(pcb, "U9", x, y, side="B", half=0.5)
+    dry = reinforce_net(pcb, NET, design_rules=_rules(), dry_run=True)
+    leg = dry.legs[0]
+    assert leg.status == "full"
+    start = leg.anchors[0]
+    assert start.shift_mm > 0
+    # First clear position: just past the courtyard edge + hole envelope.
+    assert start.x > x + 0.5
+    assert "U9" in leg.reason and "back-side courtyard" in leg.reason
+
+    res = reinforce_net(pcb, NET, design_rules=_rules())
+    assert res.legs[0].status == "full"
+    assert not [v for v in _run(pcb) if "[end hole]" in v.message]
+    assert not [v for v in _run(pcb) if v.rule_id == "wire_run_courtyard_overlap"]
+
+
+def test_reinforce_courtyard_over_whole_shift_leaves_leg_partial():
+    pcb = _bare_board()
+    # Back-side body covering x = 20..50: beyond the 25 mm end-shift bound.
+    _body(pcb, "U9", 35.0, 50.0, side="B", half=15.0)
+    res = reinforce_net(pcb, NET, design_rules=_rules(), dry_run=True)
+    leg = res.legs[0]
+    assert leg.status == "partial"
+    assert len(leg.anchors) == 1 and leg.anchors[0].x > 50.0
+    assert res.refused
+    r = res.refused[0]
+    assert r.rule == "anchor_courtyard"
+    assert r.obstacle_footprint == "U9" and r.obstacle_side == "B"
+    assert "U9" in r.reason and "courtyard" in r.reason
+
+    res = reinforce_net(pcb, NET, design_rules=_rules())
+    assert not [v for v in _run(pcb) if "[end hole]" in v.message]
+
+
+def test_reinforce_cli_dry_run_lists_courtyard_refusal(tmp_path, capsys, monkeypatch):
+    import json
+
+    from kicad_tools.cli.commands.pcb import run_pcb_command
+    from tests.test_pcb_reinforce import _reinforce_args
+
+    def board() -> PCB:
+        pcb = _bare_board()
+        _body(pcb, "U9", 35.0, 50.0, side="B", half=15.0)
+        return pcb
+
+    path = tmp_path / "b.kicad_pcb"
+    _bare_board().save(path)
+    # In-memory test footprints do not serialize: hand the CLI the board itself.
+    monkeypatch.setattr(PCB, "load", classmethod(lambda cls, *a, **k: board()))
+
+    assert run_pcb_command(_reinforce_args(path, dry_run=True, format="json")) == 0
+    out = json.loads(capsys.readouterr().out)
+    refused = [r for r in out["refused"] if r["rule"] == "anchor_courtyard"]
+    assert refused and refused[0]["obstacle_footprint"] == "U9"
+    assert refused[0]["obstacle_side"] == "B"
+    assert "U9" in refused[0]["reason"]
+
+    assert run_pcb_command(_reinforce_args(path, dry_run=True)) == 0
+    text = capsys.readouterr().out
+    assert "refused at" in text and "courtyard of U9" in text and "in U9" in text

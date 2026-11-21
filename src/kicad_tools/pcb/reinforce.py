@@ -273,6 +273,10 @@ RULE_HOLE_CLEARANCE = "hole_clearance"
 #: A parallel copy has no room: too short between its end ties, or its leg is
 #: on an inner layer (no opposite outer layer to copy onto) (#8916).
 RULE_COPY_GEOMETRY = "copy_geometry"
+#: ``ends`` mode: the end hole (anchor pad + fillet clearance) would sit in a
+#: footprint courtyard on either side -- the ``wire_run_courtyard_overlap``
+#: end-hole test, shared with that check (Issue #9815).
+RULE_ANCHOR_COURTYARD = "anchor_courtyard"
 
 #: Copper layer -> the solder-mask layer on the same side (#8743).
 MASK_LAYER_FOR_COPPER = {"F.Cu": "F.Mask", "B.Cu": "B.Mask"}
@@ -305,6 +309,10 @@ class RefusedAnchor:
     actual_mm: float = 0.0
     #: Name of the obstacle net (empty for hole-to-hole against same-net holes).
     obstacle_net: str = ""
+    #: ``anchor_courtyard`` (Issue #9815): reference of the footprint whose
+    #: courtyard the end hole would sit in, and its side (``F`` / ``B``).
+    obstacle_footprint: str = ""
+    obstacle_side: str = ""
 
 
 @dataclass
@@ -1201,6 +1209,9 @@ class _Violation:
     #: Board-relative point on the blocking obstacle itself -- same feature
     #: the measured gap comes from (#9649, #9657).
     obstacle_at: tuple[float, float] | None = None
+    #: ``anchor_courtyard`` (Issue #9815): blocking footprint and its side.
+    obstacle_footprint: str = ""
+    obstacle_side: str = ""
 
 
 @dataclass
@@ -2761,6 +2772,70 @@ def _courtyard_overlaps(
     ]
 
 
+def _courtyard_body_cache():
+    """A cached ``body(fp, side)`` courtyard lookup for one reinforce pass."""
+    from shapely.geometry import Polygon, box  # type: ignore[import-untyped]
+
+    from kicad_tools.validate.rules.reinforcement_courtyard import _body_polygon
+
+    cache: dict[tuple[int, str], Any] = {}
+
+    def body(fp: Any, side: str) -> Any | None:
+        key = (id(fp), side)
+        if key not in cache:
+            cache[key] = _body_polygon(fp, side, Polygon, box)
+        return cache[key]
+
+    return body
+
+
+def _anchor_courtyard_violation(
+    pcb: PCB,
+    p: tuple[float, float],
+    anchor_pad: float,
+    net_number: int,
+    body: Any,
+) -> _Violation | None:
+    """``anchor_courtyard`` when an end hole at ``p`` sits in a courtyard (#9815).
+
+    Reuses the ``wire_run_courtyard_overlap`` end-hole test (no second
+    implementation), so reinforce never anchors a wire where the check then
+    reports ``[end hole]``. ``required_mm`` is the hole envelope radius (pad
+    annulus + fillet clearance), ``actual_mm`` the hole centre's distance to
+    the courtyard (``0`` inside it).
+    """
+    from shapely.geometry import Point
+
+    from kicad_tools.validate.rules.reinforcement_courtyard import (
+        HOLE_FILLET_MM,
+        hole_courtyard_overlaps,
+    )
+
+    radius = anchor_pad / 2.0
+    hits = hole_courtyard_overlaps(p, radius, pcb.footprints, net_number, body)
+    if not hits:
+        return None
+    fp, side = hits[0]
+    poly = body(fp, side)
+    gap = float(poly.distance(Point(p))) if poly is not None else 0.0
+    return _Violation(
+        RULE_ANCHOR_COURTYARD,
+        radius + HOLE_FILLET_MM,
+        gap,
+        obstacle_footprint=str(fp.reference),
+        obstacle_side=side,
+    )
+
+
+def _courtyard_refusal_text(violation: _Violation) -> str:
+    """Refusal reason for an ``anchor_courtyard`` violation, naming the part."""
+    where = "front" if violation.obstacle_side == "F" else "back"
+    return (
+        f"end hole (pad annulus + fillet clearance) would sit in the {where}-side "
+        f"courtyard of {violation.obstacle_footprint} (wire_run_courtyard_overlap)"
+    )
+
+
 # --------------------------------------------------------------------------
 # ``--strategy parallel`` (Issue #8916): copy a leg onto the opposite outer layer
 # --------------------------------------------------------------------------
@@ -3162,6 +3237,7 @@ def _reinforce_ends(
     dedup_floor = max(anchor_pad, anchor_drill + rules.min_hole_to_hole_mm)
     placed_positions: list[tuple[float, float]] = []
     arc_of: dict[tuple[float, float], float] = {}
+    courtyard_body = _courtyard_body_cache()
 
     def violation_at(p: tuple[float, float]) -> _Violation | None:
         """Rule check of one anchor candidate; ``None`` when it may be placed.
@@ -3183,7 +3259,10 @@ def _reinforce_ends(
             gap = math.hypot(p[0] - hx, p[1] - hy) - anchor_drill / 2.0 - hd / 2.0
             if gap < rules.min_hole_to_hole_mm - 1e-9:
                 return _Violation(RULE_HOLE_TO_HOLE, rules.min_hole_to_hole_mm, max(0.0, gap))
-        return _position_violation(p[0], p[1], anchor_pad, anchor_drill, rules, other, policy)
+        found = _position_violation(p[0], p[1], anchor_pad, anchor_drill, rules, other, policy)
+        if found is not None:
+            return found
+        return _anchor_courtyard_violation(pcb, p, anchor_pad, target_net_number, courtyard_body)
 
     # ---- parallel copies (Issue #8916) ----------------------------------
     via_size, via_drill = stitch_via_geometry(rules)
@@ -3589,6 +3668,10 @@ def _reinforce_ends(
             f"{len(planned)} stitching via(s) of {via_size:.2f} mm pad / {via_drill:.2f} mm drill"
         )
 
+    #: Courtyard violations of the first end positions the last clean pair
+    #: slid past, by end (``start`` / ``far``; Issue #9815).
+    slid_past: dict[str, _Violation] = {}
+
     def plan_pair(points, cum, t0: float, t1: float, clear):
         """Decide BOTH end anchors before either is written (PR #8751 review).
 
@@ -3648,6 +3731,14 @@ def _reinforce_ends(
 
         for i, j in pairs:
             if v("s", i) is None and v("e", j) is None:
+                # Issue #9815: name the courtyard an anchor slid past, so the
+                # report says why it moved (other rules keep the plain note).
+                slid_past.clear()
+                for which, key, k in (("start", "s", i), ("far", "e", j)):
+                    if k > 0:
+                        first = v(key, 0)
+                        if first is not None and first.rule == RULE_ANCHOR_COURTYARD:
+                            slid_past[which] = first
                 return (starts[i][1], ends[j][1]), []
         # No clean pair. One anchor stands only when every counterpart that
         # could pair with it is refused by a rule.
@@ -3663,19 +3754,23 @@ def _reinforce_ends(
         return (None, None), [(starts[i][1], v("s", i)), (ends[j][1], v("e", j))]
 
     def refuse(pos: tuple[float, float], violation: _Violation) -> None:
+        if violation.rule == RULE_ANCHOR_SPACING:
+            reason = "anchor pad overlaps another leg's anchor"
+        elif violation.rule == RULE_ANCHOR_COURTYARD:
+            reason = _courtyard_refusal_text(violation)
+        else:
+            reason = "other-net clearance/hole-to-hole violation"
         result.refused.append(
             RefusedAnchor(
                 x=pos[0],
                 y=pos[1],
-                reason=(
-                    "anchor pad overlaps another leg's anchor"
-                    if violation.rule == RULE_ANCHOR_SPACING
-                    else "other-net clearance/hole-to-hole violation"
-                ),
+                reason=reason,
                 rule=violation.rule,
                 required_mm=violation.required_mm,
                 actual_mm=violation.actual_mm,
                 obstacle_net=violation.obstacle_net,
+                obstacle_footprint=violation.obstacle_footprint,
+                obstacle_side=violation.obstacle_side,
             )
         )
 
@@ -3851,6 +3946,11 @@ def _reinforce_ends(
                                 "; ".join(
                                     f"{name} anchor slid {d:.2f} mm inward past a refused "
                                     "end position"
+                                    + (
+                                        f" -- {_courtyard_refusal_text(slid_past[name])}"
+                                        if name in slid_past
+                                        else ""
+                                    )
                                     for name, d in slid
                                 )
                             )
@@ -3867,7 +3967,8 @@ def _reinforce_ends(
                         leg.status = LEG_PARTIAL
                         bound = end_shift_bound(total, result.max_end_shift_mm)
                         leg.reason = (
-                            "1 of 2 end anchors refused by a clearance/hole-to-hole rule "
+                            "1 of 2 end anchors refused by a clearance/hole-to-hole/"
+                            "courtyard rule "
                             f"at every position within {bound:.1f} mm of the end "
                             "(see refused; raise --max-end-shift to search further)"
                         )

@@ -193,8 +193,11 @@ Eight evaluation notes sat in `docs/research/` unlinked from anywhere before
 issue #5839; grepping `docs/` is no longer the way to find them. The registry
 is `src/kicad_tools/ecosystem/data/projects.toml` and each entry carries the
 paths of our own notes, plus a `license_compat` field that says whether that
-project's code may be reused here at all (**AGPL and unlicensed neighbours are
-ideas-only, in both directions** -- never copy). Agents can reach the same data
+project's code may be reused here at all (**AGPL neighbours' code is never
+copied, but their behaviour may be reimplemented via the two-party clean-room
+protocol**, [`docs/clean-room.md`](docs/clean-room.md); **unlicensed and other
+`copyleft-ideas-only` neighbours are ideas-only, in both directions** -- never
+copy). Agents can reach the same data
 through the `ecosystem_list` / `ecosystem_show` MCP tools.
 
 Adding or editing an entry means re-rendering the README block:

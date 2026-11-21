@@ -396,6 +396,33 @@ double band_segment_box_gap(double ax, double ay, double bx, double by, double h
     return std::max(0.0, best - half);
 }
 
+// Issue #9461: twin of Python ``primitives.pad_half_extents`` (#4910), in
+// double and in the same operation order, so both engines build the same
+// band box for a non-cardinally rotated pad.  A circle is its bounding
+// square; ``rotation == 0`` keeps the plain ``width/2, height/2`` box with no
+// trig (byte-identical to the pre-#9461 gate); any other angle projects the
+// rectangle onto the board axes (the angle's sign is immaterial).
+void band_pad_half_extents(const PadInfo& p, double& half_w, double& half_h) {
+    const double w = static_cast<double>(p.width);
+    const double h = static_cast<double>(p.height);
+    if (p.is_circular) {
+        half_w = half_h = std::max(w, h) / 2.0;
+        return;
+    }
+    if (p.rotation == 0.0f) {
+        half_w = w / 2.0;
+        half_h = h / 2.0;
+        return;
+    }
+    // ``math.radians`` multiplies by the folded constant pi/180.
+    constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
+    const double theta = static_cast<double>(p.rotation) * kDegToRad;
+    const double cos_t = std::fabs(std::cos(theta));
+    const double sin_t = std::fabs(std::sin(theta));
+    half_w = cos_t * w / 2.0 + sin_t * h / 2.0;
+    half_h = sin_t * w / 2.0 + cos_t * h / 2.0;
+}
+
 }  // namespace
 
 bool Pathfinder::own_net_band_step_ok(int x1, int y1, int x2, int y2, int layer, int net,
@@ -410,10 +437,14 @@ bool Pathfinder::own_net_band_step_ok(int x1, int y1, int x2, int y2, int layer,
         for (const auto& p : pads) {
             // SMD pads only (layer_idx -1 = through-hole), as the #9012 predicate.
             if (p.net != net || p.layer_idx < 0) continue;
-            band_pads_.push_back({static_cast<double>(p.x) - p.width / 2.0,
-                                  static_cast<double>(p.y) - p.height / 2.0,
-                                  static_cast<double>(p.x) + p.width / 2.0,
-                                  static_cast<double>(p.y) + p.height / 2.0,
+            // Issue #9461: the rotation-aware board-space AABB, the same box
+            // ``Router._own_net_band_bboxes`` builds via ``pad_half_extents``.
+            double hw = 0.0, hh = 0.0;
+            band_pad_half_extents(p, hw, hh);
+            band_pads_.push_back({static_cast<double>(p.x) - hw,
+                                  static_cast<double>(p.y) - hh,
+                                  static_cast<double>(p.x) + hw,
+                                  static_cast<double>(p.y) + hh,
                                   p.layer_idx});
         }
         band_pads_net_ = net;

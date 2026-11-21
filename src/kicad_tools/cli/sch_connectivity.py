@@ -74,6 +74,23 @@ def _point_on_segment(point: Coord, seg_start: Coord, seg_end: Coord) -> bool:
     return min_x <= point[0] <= max_x and min_y <= point[1] <= max_y
 
 
+def _collinear(segment: tuple[Coord, Coord], seg_start: Coord, seg_end: Coord) -> bool:
+    """Return True if both ends of *segment* lie on the line through a wire.
+
+    Uses the same one-unit cross-product tolerance as :func:`_point_on_segment`.
+    A zero-length wire defines no line and is never collinear.
+    """
+    dx1 = seg_end[0] - seg_start[0]
+    dy1 = seg_end[1] - seg_start[1]
+    if dx1 == 0 and dy1 == 0:
+        return False
+    for px, py in segment:
+        cross = dx1 * (py - seg_start[1]) - dy1 * (px - seg_start[0])
+        if abs(cross) > 1:
+            return False
+    return True
+
+
 def build_wire_graph(
     schematic: Schematic,
     extra_points: set[Coord] | None = None,
@@ -109,6 +126,11 @@ def build_wire_graph(
     for junc in schematic.junctions:
         special_points.add(to_coord(*junc.position))
 
+    # Labels and junction dots connect to a wire anywhere along it, including
+    # its interior; kicad-cli joins them there.  Pins and power symbols are
+    # added below and are not in this set.
+    mid_wire_connectors = set(special_points)
+
     for sym_sexp in schematic.sexp.find_children("symbol"):
         ps = PowerSymbol.from_symbol_sexp(sym_sexp)
         if ps:
@@ -127,17 +149,34 @@ def build_wire_graph(
     if extra_points:
         special_points.update(extra_points)
 
-    for wire in schematic.wires:
-        special_points.add(to_coord(*wire.start))
-        special_points.add(to_coord(*wire.end))
-
-    adjacency: dict[Coord, set[Coord]] = defaultdict(set)
-
+    segments: list[tuple[Coord, Coord]] = []
     for wire in schematic.wires:
         start = to_coord(*wire.start)
         end = to_coord(*wire.end)
+        segments.append((start, end))
+        special_points.add(start)
+        special_points.add(end)
 
-        on_wire = [p for p in special_points if _point_on_segment(p, start, end)]
+    adjacency: dict[Coord, set[Coord]] = defaultdict(set)
+
+    for start, end in segments:
+        # Collinear overlapping wires do not connect where one wire's end
+        # lies inside the other (Issue #9827).  kicad-cli keeps two such
+        # wires on separate nets unless they share an endpoint or a junction
+        # sits on the overlap.  Do not split this wire at those ends, nor at
+        # a pin or power symbol at the same point: that point belongs to the
+        # overlapping wire.  A label or junction there still connects.
+        overlap_ends = {
+            p
+            for other in segments
+            if other != (start, end) and _collinear(other, start, end)
+            for p in other
+            if p not in mid_wire_connectors
+        }
+
+        on_wire = [
+            p for p in special_points if p not in overlap_ends and _point_on_segment(p, start, end)
+        ]
 
         if not on_wire:
             adjacency[start].add(end)

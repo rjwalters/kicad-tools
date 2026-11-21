@@ -192,14 +192,16 @@ def _run_show(args: Namespace, registry: EcosystemRegistry, fmt: str) -> int:
     print(f"  verdict         {project.verdict}")
     print(f"  language        {project.language or 'n/a'}")
     print(f"  license         {project.license} [{project.license_compat}]")
-    print(
-        "  code reuse      "
-        + (
-            "permitted, with attribution"
-            if project.code_reuse_allowed
-            else "NOT permitted -- ideas only, in both directions"
+    if project.code_reuse_allowed:
+        reuse_line = "permitted, with attribution"
+    elif project.license.startswith("AGPL"):
+        reuse_line = (
+            "code never copied -- behaviour may be reimplemented via the "
+            "two-party clean-room protocol (docs/clean-room.md)"
         )
-    )
+    else:
+        reuse_line = "NOT permitted -- ideas only, in both directions"
+    print(f"  code reuse      {reuse_line}")
     stars = project.stars if project.stars is not None else "n/a"
     print(f"  stars           {stars}")
     print(f"  last push       {project.last_push or 'n/a'}")

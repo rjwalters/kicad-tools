@@ -44,8 +44,10 @@ HV_VOLTS = 300.0
 # post-route pairwise gate audits the board edge at the mapped voltage
 # (#9685), so the outline must keep >= 3.2 mm + trace half-width (0.1 mm,
 # i.e. 3.3 mm from trace centreline) / pad half-size (0.2 mm) around all
-# HV pads and corridors -- hence the 4 mm margin the (96, 96) .. (134, 120)
-# rect gives the y = 103 / 113 pads.
+# HV pads and corridors.  The (96, 96) .. (134, 120) rect puts every
+# R1-R4 pad (x = 103 / 127, y = 103 / 113) 7.0 mm from its nearest edge at
+# the pad centre -- 6.8 mm of copper-to-edge clearance -- against the
+# 3.4 mm the pads need.
 A_LIMIT = 105.8
 B_LIMIT = 110.2
 
