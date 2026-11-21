@@ -163,6 +163,11 @@ class OptimizationStats:
     output_verify_rolled_back: dict[str, list[str]] = field(default_factory=dict)
     # Issue #8632: verifier name -> "ran" | "unchanged" | "unavailable".
     output_checks: dict[str, str] = field(default_factory=dict)
+    # Issue #9748: how the --drc-aware referee evaluated ``mask_to_copper``:
+    # "off" (no cited policy / not drc-aware), "screened" (the conservative
+    # geometric screen ran and its count is inside the error totals), or
+    # "not_evaluated" (the pure snapshot could not model the board).
+    drc_mask_screen: str = "off"
     # Issue #7065: one row per optimized net, built after any DRC rollback.
     per_net: list[NetOptimizationStats] = field(default_factory=list)
 

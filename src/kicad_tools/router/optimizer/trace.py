@@ -502,6 +502,9 @@ class TraceOptimizer:
         # Issue #9524: pad mask-opening zones (all nets), set by
         # ``set_pad_zones``; a rewrite may not break a pad's mask-clean escape.
         self._pad_zones: list[PadMaskZone] = []
+        # Issue #9748: the fab mask-to-copper clearance carried with the
+        # zones (0 guards the openings only).
+        self._pad_zone_clearance: float = 0.0
         # True only inside :meth:`defer_pad_guard`: the Kelvin board gate
         # (#6889) vets a branch rewrite before the pad guard re-applies to
         # what it accepts, so its report still fires when both would refuse.
@@ -547,7 +550,7 @@ class TraceOptimizer:
         """
         self._pad_points = points_by_net_name
 
-    def set_pad_zones(self, zones: list[PadMaskZone]) -> None:
+    def set_pad_zones(self, zones: list[PadMaskZone], danger_clearance: float = 0.0) -> None:
         """Register every pad's mask-opening zone (Issue #9524).
 
         While zones are set, each pass's rewrite of a chain is vetoed when it
@@ -555,8 +558,14 @@ class TraceOptimizer:
         new copper (a bend, a crossing) into any pad's opening -- the cleanup
         equivalent of ``mask_to_copper``.  Callers that do not set zones get
         the pre-#9524 behaviour.
+
+        ``danger_clearance`` (Issue #9748) is the fab's mask-to-copper
+        clearance (0 when no cited policy exists): new copper may not enter
+        the clearance band beside an opening either, unless it terminates on
+        that pad with one clean, steep crossing.
         """
         self._pad_zones = zones
+        self._pad_zone_clearance = danger_clearance
 
     def optimize_segments(self, segments: list[Segment]) -> list[Segment]:
         """Optimize a list of segments for a single net/layer.
@@ -699,7 +708,9 @@ class TraceOptimizer:
             return True
         if not self._pad_zones or not old or old == new:
             return True
-        return rewrite_keeps_pad_escapes(old, new, self._pad_zones, self.config.tolerance)
+        return rewrite_keeps_pad_escapes(
+            old, new, self._pad_zones, self.config.tolerance, self._pad_zone_clearance
+        )
 
     def _lays_copper_twice(self, old: list[Segment], new: list[Segment]) -> bool:
         """True if a leg *new* adds lies on the net's own copper (Issue #8603).
