@@ -212,7 +212,7 @@ def test_probe_case_matches_kicad_cli_finding(
 
 @pytest.mark.parametrize(("rotation", "side"), PLACEMENTS)
 def test_silk_over_tab_is_reported(tmp_path, capsys, rotation, side):
-    """A silk item over the tab: ``silk_over_copper`` warning naming the pad."""
+    """A silk item over the tab: ``silk_over_copper`` error naming the pad (jlcpcb grades silk on copper as an error, #9798)."""
     report = _run(
         _board(tmp_path, rotation=rotation, side=side, silk_local=(2.2, 0.0)),
         capsys,
@@ -221,7 +221,7 @@ def test_silk_over_tab_is_reported(tmp_path, capsys, rotation, side):
     )
     found = [v for v in _violations(report, "silk_over_copper") if "Q1 pad 2" in v["message"]]
     assert found, "silk over the tab must be reported, not silently cleared"
-    assert all(v["severity"] == "warning" for v in found)
+    assert all(v["severity"] == "error" for v in found)
 
 
 @pytest.mark.parametrize(("rotation", "side"), PLACEMENTS)

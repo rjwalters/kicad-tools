@@ -53,7 +53,7 @@ def board(
             out.append(
                 f'  (footprint "R" (layer "F.Cu") (uuid "00000000-0000-0000-0000-{k:012d}") '
                 f"(at {x} {y}) "
-                f'(property "Reference" "{side}{ids[n]}" (at 0 0 0) (layer "F.SilkS")) '
+                f'(property "Reference" "{side}{ids[n]}" (at 0 -2 0) (layer "F.SilkS")) '
                 f'(property "Value" "x" (at 0 0 0) (layer "F.Fab")) '
                 f'(pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu" "F.Paste" "F.Mask") '
                 f'(net {ids[n]} "{n}")))'

@@ -184,6 +184,25 @@ BOARD_07_FIXTURE_M2C_IDENTITIES: tuple[str, ...] = (
     "TMDS_D2_P",
 )
 
+# Issue #9798: jlcpcb now grades silk on exposed copper, below-minimum silk
+# and silk under a body as errors.  The committed board 07 fixture carries 14
+# such findings (designators 0.80 mm tall, sitting on pads); they belong to
+# the #9795 silk-legalisation epic, so the pin excludes them by IDENTITY the
+# same way it excludes the m2c population, tracked against that open epic.
+BOARD_07_FIXTURE_SILK_IDENTITIES: tuple[tuple[str, str], ...] = (
+    ("silk_over_copper", "U3 (reference)/U3 pad 10"),
+    ("silk_over_copper", "U3 (reference)/U3 pad 9"),
+    ("silk_over_copper", "U4 (reference)/U4 pad A4"),
+    ("silk_over_copper", "U5 (reference)/U5 pad 18"),
+    ("silk_over_copper", "U5 (reference)/U5 pad 19"),
+    ("silkscreen_over_pad", "U4/pad A4"),
+    *(
+        (rule, f"{ref} (reference)")
+        for rule in ("silkscreen_text_height", "silkscreen_text_thickness")
+        for ref in ("J1", "J2", "J3", "U3")
+    ),
+)
+
 
 def _load_resolver_module():
     """Import ``scripts/ci/net_class_map_resolver.py`` as a module."""
@@ -508,6 +527,7 @@ class TestCiGateCountsGatedFamilies:
             pytest.skip("board 07 regression fixture not present")
         gate = self._load_gate()
         allowance = {("mask_to_copper", ident): 8858 for ident in BOARD_07_FIXTURE_M2C_IDENTITIES}
+        allowance.update(dict.fromkeys(BOARD_07_FIXTURE_SILK_IDENTITIES, 9795))
         blocking, advisory, outcome = gate.count_errors(BOARD_07_PCB, allowance=allowance)
         assert outcome.applied, "allowance was not applied (violations missing from payload?)"
         assert not outcome.stale, (
