@@ -88,7 +88,7 @@ class MSTRouter:
     def route_net(
         self,
         pad_objs: list[Pad],
-        mark_route_callback: Callable[[Route], None],
+        mark_route_callback: Callable[[Route], bool | None],
         failure_callback: Callable[[Pad, Pad], None] | None = None,
         use_steiner: bool = True,
         per_net_timeout: float | None = None,
@@ -219,7 +219,14 @@ class MSTRouter:
                     route = self.router.route(source_pad, target_pad, per_net_timeout=edge_timeout)
 
                 if route:
-                    mark_route_callback(route)
+                    # Issue #9597 (#5891 refusal protocol): a ``False``
+                    # return means the commit was refused (e.g. the
+                    # --protect-plane-zones gate); treat the edge as failed
+                    # and never count the copper as routed.
+                    if mark_route_callback(route) is False:
+                        if failure_callback:
+                            failure_callback(source_pad, target_pad)
+                        continue
                     routes.append(route)
                     if use_steiner and kelvin is None:
                         from .steiner import pin_steiner_arrival_layers
@@ -231,8 +238,10 @@ class MSTRouter:
             # Simple 2-pin net: the whole budget bounds the single A* search.
             route = self.router.route(pad_objs[0], pad_objs[1], per_net_timeout=per_net_timeout)
             if route:
-                mark_route_callback(route)
-                routes.append(route)
+                if mark_route_callback(route) is not False:
+                    routes.append(route)
+                elif failure_callback:
+                    failure_callback(pad_objs[0], pad_objs[1])
             elif failure_callback:
                 failure_callback(pad_objs[0], pad_objs[1])
 
@@ -241,7 +250,7 @@ class MSTRouter:
     def route_net_star(
         self,
         pad_objs: list[Pad],
-        mark_route_callback: Callable[[Route], None],
+        mark_route_callback: Callable[[Route], bool | None],
         failure_callback: Callable[[Pad, Pad], None] | None = None,
         per_net_timeout: float | None = None,
     ) -> list[Route]:
@@ -285,8 +294,10 @@ class MSTRouter:
             route = self.router.route(first_pad, target_pad, per_net_timeout=edge_timeout)
 
             if route:
-                mark_route_callback(route)
-                routes.append(route)
+                if mark_route_callback(route) is not False:
+                    routes.append(route)
+                elif failure_callback:
+                    failure_callback(first_pad, target_pad)
             elif failure_callback:
                 failure_callback(first_pad, target_pad)
 

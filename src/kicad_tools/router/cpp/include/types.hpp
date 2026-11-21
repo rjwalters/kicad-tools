@@ -374,7 +374,28 @@ namespace router {
 // v70 (Issues #9124 + #9208, merged): the first build carrying BOTH fixes --
 // a v69 .so still seats the tangent wedge (no #9124 fix) and a v68 .so lacks
 // the trace-slit refusal, so both older builds must be rejected.
-constexpr int ROUTER_CPP_BUILD_VERSION = 70;
+// v71 (Issue #9019): ``Pathfinder::set_search_own_net_band`` /
+// ``own_net_band_step_ok`` are new -- the A* refuses a planar step whose swept
+// copper parks in the fab ``pad_spacing`` slit band beside an own-net SMD pad.
+// A v70 .so has no such gate, so Python and native searches would route
+// divergent bytes on a board that resolves a band edge.
+// v72 (Issue #9019 review): the band gate exempts the search's own start/end
+// pads (the leg is unioned with them through the path) and counts refusals
+// (``own_net_band_rejects``) so the caller retries only gate-caused failures.
+// A v71 .so refused every planar pad exit and pushed routes through pad-edge
+// via pairs.
+// v73 (Issue #9597, rebased over v71/v72 of #9019): ``DesignRules::cost_zone_foreign_plane`` plus
+// ``Grid3D::mark_zone_cells`` / ``clear_zone_cells`` -- the soft foreign
+// plane-zone crossing cost both A* step-cost loops now charge.  A v70 .so
+// has neither the rules field nor the verbs, so the Python grid's zone
+// marks would be invisible to the native search (cost parity breaks
+// silently); it must be rejected.
+// v74 (Issue #9826): ``Grid3D::set_plane_layers`` (per-layer PLANE mask) so the
+// A* charges ``cost_zone_foreign_plane`` only on plane layers and blocks a
+// foreign zone elsewhere (Python parity), and a layer-scoped
+// ``clear_zone_cells(layer)`` that resets ``net`` on former zone cells.  A v73
+// .so charges every foreign zone and its clear leaves stale zone nets.
+constexpr int ROUTER_CPP_BUILD_VERSION = 74;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -808,6 +829,12 @@ struct DesignRules {
     // querying net, clamped at 0 so g_scores stay non-negative (A*
     // admissibility preserved).  ``0.0`` disables the attractor.
     float cost_corridor_attractor = 3.0f;
+    // Issue #9597: per-cell added cost for entering a foreign net's zone on
+    // a plane layer the routing net may use (Python
+    // ``DesignRules.cost_zone_foreign_plane``).  Soft cost, never a block --
+    // both backends charge it from the same zone-cell marks
+    // (``Grid3D::mark_zone_cells`` mirrors ``RoutingGrid.add_zone_cells``).
+    float cost_zone_foreign_plane = 10.0f;
 };
 
 // Issue #6272: the trace-vs-via copper floor, ``max(trace, via)``.  Native

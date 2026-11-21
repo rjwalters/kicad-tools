@@ -537,6 +537,50 @@ void Grid3D::clear_avoidance_costs() {
     }
 }
 
+// Issue #9597: zone (copper pour) marking verbs.  ``mark_zone_cells`` bulk-
+// writes the ``is_zone`` bit plus the zone's net for cells the Python side
+// already filtered (unblocked cells of a plane-layer pour outline); the
+// A* step-cost loops charge ``cost_zone_foreign_plane`` on foreign ones.
+// ``clear_zone_cells`` is the (optionally layer-scoped, #9826) twin of
+// ``RoutingGrid.clear_zones``.  Both mirror the #8999 airwire verbs' shape.
+void Grid3D::mark_zone_cells(const std::vector<int>& xs, const std::vector<int>& ys,
+                             const std::vector<int>& layers, const std::vector<int>& nets) {
+    const size_t n = std::min({xs.size(), ys.size(), layers.size(), nets.size()});
+    for (size_t i = 0; i < n; ++i) {
+        if (!is_valid(xs[i], ys[i], layers[i])) continue;
+        auto& cell = at(xs[i], ys[i], layers[i]);
+        cell.is_zone = true;
+        cell.net = nets[i];
+    }
+}
+
+void Grid3D::clear_zone_cells(int layer) {
+    // Issue #9826: layer-scoped like ``RoutingGrid.clear_zones``, and the
+    // zone's net is dropped from former zone cells that carry no blocking
+    // copper (a blocked / obstacle cell keeps its authoritative net).
+    size_t lo = 0;
+    size_t hi = cells_.size();
+    if (layer >= 0) {
+        if (layer >= layers_) return;
+        const size_t plane = static_cast<size_t>(rows_) * cols_;
+        lo = static_cast<size_t>(layer) * plane;
+        hi = lo + plane;
+    }
+    for (size_t i = lo; i < hi; ++i) {
+        auto& cell = cells_[i];
+        if (!cell.is_zone) continue;
+        if (!cell.blocked && !cell.is_obstacle) cell.net = 0;
+        cell.is_zone = false;
+    }
+}
+
+void Grid3D::set_plane_layers(const std::vector<int>& layers) {
+    plane_layer_.assign(static_cast<size_t>(std::max(layers_, 0)), 0);
+    for (int layer : layers) {
+        if (layer >= 0 && layer < layers_) plane_layer_[static_cast<size_t>(layer)] = 1;
+    }
+}
+
 // Issue #8999: airwire-separation plane verbs.  See the declarations in
 // grid.hpp for the refresh contract (full clear + sparse rewrite, all
 // layers per column).

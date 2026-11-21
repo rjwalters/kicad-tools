@@ -20,6 +20,7 @@ different routing strategies. See heuristics.py for available options.
 import contextlib
 import heapq
 import itertools
+import logging
 import math
 import os
 import sys
@@ -41,13 +42,18 @@ from .clearance_resolver import trace_via_clearance_mm
 from .geometry import segments_intersect as _geom_segments_intersect
 from .grid import RoutingGrid, SetupDeadlineExpired
 from .heuristics import DEFAULT_HEURISTIC, Heuristic, HeuristicContext
-from .layers import Layer
+from .layers import Layer, LayerType
 from .pad_landing import landing_cost, pad_landing_geometry
 from .primitives import Pad, Route, Segment, Via
 from .quantize import dogleg_points, is_45_aligned
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting, layer_permitted
 from .search_radius import search_radius_cells
-from .via_clearance import point_clear_of_copper, segment_clears_foreign_via
+from .via_clearance import (
+    OWN_NET_BAND_STEP_TOL_MM,
+    _segment_box_gap_mm,
+    point_clear_of_copper,
+    segment_clears_foreign_via,
+)
 
 # Issue #9622: the Python under-body mirror packs one bit per surcharge
 # region into per-cell int64 bitmasks, one plane per
@@ -66,6 +72,8 @@ _UNDER_BODY_REGIONS_PER_PLANE = 64
 # is performed once at module load; the resulting bool is cached in
 # ``_ASTAR_TRACE_ENABLED`` for branch-predictable use in the hot loop.
 _ASTAR_TRACE_ENABLED = os.environ.get("KICAD_ROUTER_TRACE_ASTAR", "").strip() not in ("", "0")
+
+logger = logging.getLogger(__name__)
 
 
 def _astar_trace(message: str) -> None:
@@ -456,6 +464,13 @@ class Router:
         self.last_route_deadline_hit: bool = False
         self.last_route_deadline_iterations: int = 0
 
+        # Issue #9019 (review): the own-net slit-band gate's telemetry.  A
+        # refusal is one step the gate turned away; a fallback is one search
+        # re-run with the gate suspended (the #6761-escape-fence analogue),
+        # so a silent gate-off retry is visible in the routing stats.
+        self._own_net_band_refusals: int = 0
+        self._own_net_band_fallbacks: int = 0
+
         # Neighbor offsets: (dx, dy, dlayer, cost_multiplier)
         # Same layer moves - orthogonal directions
         self.neighbors_2d = [
@@ -618,6 +633,10 @@ class Router:
         # #6315).  Same invalidation contract as ``_non_th_pad_cache``: the
         # pad count, plus ``invalidate_pad_geometry_cache`` for in-place moves.
         self._pad_bucket_cache: tuple[int, dict[tuple[int, int], list[Pad]]] | None = None
+        # Issue #9019: own-net SMD pad boxes per (net, layer) for the slit-band gate.
+        self._own_band_cache: (
+            tuple[int, dict[tuple[int, int], list[tuple[float, float, float, float]]]] | None
+        ) = None
         # Issue #6389: memo of ``_pad_step_clear`` verdicts.  The disc, the
         # centre cell and both diagonal corners of one step all ask the same
         # question.  Dropped with the pad-geometry caches (every route start)
@@ -2137,6 +2156,101 @@ class Router:
                     width, self.rules.get_neck_down_width(0.0, pitch, base_width=base_width)
                 )
         return refs, width
+
+    def _own_net_band_bboxes(self, net: int, layer: int) -> list[tuple[float, float, float, float]]:
+        """Own-net SMD pad boxes on grid ``layer`` for the slit-band gate (#9019).
+
+        ``(min_x, min_y, max_x, max_y)`` per pad, the shape
+        :func:`~kicad_tools.router.via_clearance.same_net_segment_pad_gap_acceptable`
+        takes.  Through-hole pads are skipped (the #9012 predicate's SMD
+        scope).  Cached per ``(net, layer)`` and dropped with the pad-geometry
+        caches.
+        """
+        pads = self.grid._pads
+        cache = self._own_band_cache
+        if cache is None or cache[0] != len(pads):
+            cache = (len(pads), {})
+            self._own_band_cache = cache
+        key = (net, layer)
+        hit = cache[1].get(key)
+        if hit is None:
+            hit = []
+            for pad in pads:
+                if pad.net != net or pad.through_hole or getattr(pad, "drill", 0.0) > 0:
+                    continue
+                if self.grid.layer_to_index(pad.layer.value) != layer:
+                    continue
+                hit.append(
+                    (
+                        pad.x - pad.width / 2.0,
+                        pad.y - pad.height / 2.0,
+                        pad.x + pad.width / 2.0,
+                        pad.y + pad.height / 2.0,
+                    )
+                )
+            cache[1][key] = hit
+        return hit
+
+    def _own_net_band_step_ok(
+        self,
+        fx: int,
+        fy: int,
+        gx: int,
+        gy: int,
+        layer: int,
+        net: int,
+        width: float,
+        edge_mm: float,
+        exclude_pts: tuple[tuple[float, float], ...] = (),
+    ) -> bool:
+        """Is the step ``(fx,fy)->(gx,gy)`` out of the own-net pad slit band? (#9019).
+
+        Python twin of ``Pathfinder::own_net_band_step_ok``.  The step's swept
+        copper must UNION an own-net SMD pad (gap <= 0) or keep the fab
+        detection edge ``edge_mm`` from it -- the two acceptable regions of
+        :func:`~kicad_tools.router.via_clearance.same_net_segment_pad_gap_acceptable`
+        (#9012); the open band between is refused.  The same exact gap, with
+        the float32-noise slack ``OWN_NET_BAND_STEP_TOL_MM`` both backends
+        share.  ``edge_mm <= 0`` keeps the gate off.
+
+        ``exclude_pts`` are world points (the search's start/end pad centres).
+        A pad whose metal box contains one is skipped: the leg is UNIONED with
+        that pad through the path itself, so its isolated gap goes positive
+        (inside the band) as soon as a step leaves the pad's half-trace halo
+        even though no slit exists -- measuring every step against the pad
+        being left or approached refused every planar exit and pushed each
+        route through a pair of pad-edge vias (9019 review).  Every OTHER
+        own-net pad of the net is still gated, so a trace skirting a
+        third pad in the band is still refused.  Each refusal increments
+        ``_own_net_band_refusals`` (the fallback retry's evidence).
+        """
+        if edge_mm <= 0:
+            return True
+        bboxes = self._own_net_band_bboxes(net, layer)
+        if not bboxes:
+            return True
+        ax, ay = self.grid.grid_to_world(fx, fy)
+        bx, by = self.grid.grid_to_world(gx, gy)
+        half = width / 2
+        reach = half + edge_mm
+        lo_x, hi_x = min(ax, bx) - reach, max(ax, bx) + reach
+        lo_y, hi_y = min(ay, by) - reach, max(ay, by) + reach
+        near = [
+            bb
+            for bb in bboxes
+            if bb[2] >= lo_x and bb[0] <= hi_x and bb[3] >= lo_y and bb[1] <= hi_y
+        ]
+        if not near:
+            return True
+        tol = OWN_NET_BAND_STEP_TOL_MM
+        for bb in near:
+            if any(bb[0] <= px <= bb[2] and bb[1] <= py <= bb[3] for px, py in exclude_pts):
+                continue
+            gap = _segment_box_gap_mm(ax, ay, bx, by, half, bb)
+            if tol < gap < edge_mm - tol:
+                self._own_net_band_refusals += 1
+                return False
+        return True
 
     def _own_pad_step_clear(
         self,
@@ -4310,6 +4424,7 @@ class Router:
         """
         self._non_th_pad_cache = None
         self._pad_bucket_cache = None  # Issue #6389
+        self._own_band_cache = None  # Issue #9019
         self._pad_step_memo.clear()
         self._pad_step_memo_token = None
         # Issue #5617: the two site-level via memos read exactly the state
@@ -4422,6 +4537,28 @@ class Router:
             for dx, dy, _dlayer, _cost_mult in self.neighbors_2d
         ]
 
+    def _plane_layer_indices(self) -> frozenset[int]:
+        """Grid-layer indices the resolved stack types as ``PLANE`` (Issue #9597).
+
+        Cached per router; the stack never changes within a run.  Empty for
+        a plane-free stack, which keeps every plane-zone behaviour below a
+        strict no-op (byte-identical costs and blocking).
+        """
+        cached = self.__dict__.get("_plane_layer_idx_cache")
+        if cached is None:
+            stack = getattr(self.grid, "layer_stack", None)
+            cached = (
+                frozenset(
+                    layer.index
+                    for layer in getattr(stack, "layers", [])
+                    if getattr(layer, "layer_type", None) == LayerType.PLANE
+                )
+                if stack is not None
+                else frozenset()
+            )
+            self.__dict__["_plane_layer_idx_cache"] = cached
+        return cached
+
     def _is_zone_cell(self, gx: int, gy: int, layer: int) -> bool:
         """Check if a cell is part of a zone (copper pour)."""
         if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
@@ -4443,6 +4580,14 @@ class Router:
         Zone cells allow routing through same-net zones but block
         routing through other-net zones.
 
+        Issue #9597: a foreign zone on a ``PLANE`` layer is *costed*, not
+        blocked -- a net may route across a plane it opted in to
+        (``allow_plane_layers`` / ``--no-reserve-plane-layers``) paying
+        ``cost_zone_foreign_plane`` per cell, because KiCad pours legally
+        flow around such a trace.  A reserved plane layer is unreachable
+        for the net anyway (``allowed_layers``), so the carve-out only
+        ever softens cells a route may legitimately use.
+
         Args:
             gx, gy: Grid coordinates
             layer: Grid layer index
@@ -4453,6 +4598,9 @@ class Router:
         """
         if not self._is_zone_cell(gx, gy, layer):
             return False  # Not a zone, use normal blocking logic
+
+        if layer in self._plane_layer_indices():
+            return False  # Foreign plane zone: cost, never a block (#9597)
 
         zone_net = self._get_zone_net(gx, gy, layer)
 
@@ -4467,7 +4615,9 @@ class Router:
         """Get routing cost adjustment for zone cells.
 
         Same-net zones have reduced cost (encourage using zone copper).
-        Different-net zones are blocked (handled elsewhere).
+        Different-net zones on plane layers pay ``cost_zone_foreign_plane``
+        (Issue #9597); elsewhere they are blocked (handled elsewhere) and
+        carry the historical high-cost fallback.
 
         Args:
             gx, gy: Grid coordinates
@@ -4485,6 +4635,9 @@ class Router:
         if zone_net == net:
             # Same net - encourage using zone copper with reduced cost
             return self.rules.cost_zone_same_net - 1.0  # Net reduction
+        elif zone_net != 0 and layer in self._plane_layer_indices():
+            # Foreign plane zone - soft crossing cost (#9597), never a block
+            return self.rules.cost_zone_foreign_plane
         else:
             # Different net - should be blocked, but return high cost as fallback
             return 100.0
@@ -4574,6 +4727,11 @@ class Router:
         - All zones are same-net (via connects through same-net zones), OR
         - Via is placed where there's no zone copper
 
+        Issue #9597: zones on ``PLANE`` layers are excluded from the scan --
+        a via piercing a plane pour is the normal antipad case (the pour
+        clears around the drill); blocking it would refuse nearly every via
+        on a 4-layer board the moment its planes carry zone outlines.
+
         Args:
             gx, gy: Grid coordinates
             net: Net number of the route being planned
@@ -4581,13 +4739,58 @@ class Router:
         Returns:
             True if via can be placed, False if blocked by other-net zone
         """
+        plane_layers = self._plane_layer_indices()
         for layer_idx in range(self.grid.num_layers):
+            if layer_idx in plane_layers:
+                continue
             if self._is_zone_cell(gx, gy, layer_idx):
                 zone_net = self._get_zone_net(gx, gy, layer_idx)
                 if zone_net != net:
                     # Via would pierce an other-net zone
                     return False
         return True
+
+    def _route_impl_band_relaxed(self, *args, **kwargs) -> Route | None:
+        """``_route_impl`` with a one-shot retry off the own-net slit-band gate (#9019).
+
+        The band gate is a hard step refusal; on a pad whose every escape
+        step lands in the band it would turn a routable net into an unrouted
+        one.  Like the #6761 escape fence, it must reshape a route, never
+        lose a connection: when the gated search finds nothing AND the gate
+        actually refused at least one step of that search, retry once with
+        the gate suspended and count the fallback.  A failure the gate never
+        influenced (a drained budget, an unrelated blockage -- the refusal
+        counter did not move) is not retried: the second search would only
+        pay the gate's cost again and fail the same way.  The suspension is
+        one search, never the router: the counter and the log line are the
+        visible trace of every net routed gate-off.
+        """
+        band_gate_armed = (
+            not self.relief_mode
+            and not getattr(self, "_own_net_band_suspended", False)
+            and float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0) > 0.0
+        )
+        refusals_before = self._own_net_band_refusals
+        result = self._route_impl(*args, **kwargs)
+        if result is not None or not band_gate_armed:
+            return result
+        if getattr(self, "last_route_deadline_hit", False):
+            return result
+        if self._own_net_band_refusals <= refusals_before:
+            return result
+        self._own_net_band_fallbacks += 1
+        start_pad = args[0] if args else None
+        logger.info(
+            "own-net pad slit-band gate suspended for one retry (fallback #%d, "
+            "net=%s): gated search found no path",
+            self._own_net_band_fallbacks,
+            getattr(start_pad, "net_name", "?"),
+        )
+        self._own_net_band_suspended = True
+        try:
+            return self._route_impl(*args, **kwargs)
+        finally:
+            self._own_net_band_suspended = False
 
     def route(
         self,
@@ -4615,7 +4818,7 @@ class Router:
         if weight == 1.0 and net_weights:
             weight = net_weights.get(start.net, weight)
         if not self._per_call_timing_enabled:
-            return self._route_impl(
+            return self._route_impl_band_relaxed(
                 start,
                 end,
                 net_class=net_class,
@@ -4629,7 +4832,7 @@ class Router:
         t0 = time.monotonic()
         succeeded = False
         try:
-            result = self._route_impl(
+            result = self._route_impl_band_relaxed(
                 start,
                 end,
                 net_class=net_class,
@@ -4831,6 +5034,17 @@ class Router:
         own_gate_memo: dict[tuple[int, int, int, int, int], bool] = {}
         # The validator does not run on relief probes (#3438); neither does the gate.
         own_gate_active = not self.relief_mode
+        # Issue #9019: own-net pad slit-band gate inputs.  Off (edge 0) when the
+        # caller resolved no stackup edge; the validator-style relief probes skip it.
+        band_edge_mm = (
+            0.0
+            if self.relief_mode or getattr(self, "_own_net_band_suspended", False)
+            else float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
+        )
+        band_width = self._get_trace_width_for_net(start.net_name)
+        # The pads this leg is unioned with (its own start/end) are exempt
+        # from the band measure -- see ``_own_net_band_step_ok``.
+        band_exclude_pts = ((start.x, start.y), (end.x, end.y))
 
         start_approach_gx1 = start_metal_gx1 - pad_escape_margin
         start_approach_gy1 = start_metal_gy1 - pad_escape_margin
@@ -4979,18 +5193,41 @@ class Router:
         # Zone cells with a different net are blocked; same-net zones get
         # a cost discount.  This replaces per-neighbor Python object access
         # with direct NumPy lookups.
+        # Issue #9597: foreign zones on PLANE layers are soft-costed
+        # (``cost_zone_foreign_plane``), not blocked -- both A* backends
+        # agree; a plane-free stack keeps the arrays byte-identical.
+        plane_layers = self._plane_layer_indices()
         zone_blocked_arr = (
             self.grid._is_zone & (self.grid._net != start.net) & (self.grid._net != 0)
         )
-        zone_cost_arr = np.where(
-            self.grid._is_zone & (self.grid._net == start.net),
-            self.rules.cost_zone_same_net - 1.0,
-            np.where(
-                zone_blocked_arr,
-                100.0,
-                0.0,
-            ),
-        )
+        if plane_layers:
+            plane_mask = np.zeros(self.grid.num_layers, dtype=bool)
+            plane_mask[sorted(plane_layers)] = True
+            plane_zone_arr = zone_blocked_arr & plane_mask[:, None, None]
+            zone_blocked_arr = zone_blocked_arr & ~plane_mask[:, None, None]
+            zone_cost_arr = np.where(
+                self.grid._is_zone & (self.grid._net == start.net),
+                self.rules.cost_zone_same_net - 1.0,
+                np.where(
+                    plane_zone_arr,
+                    self.rules.cost_zone_foreign_plane,
+                    np.where(
+                        zone_blocked_arr,
+                        100.0,
+                        0.0,
+                    ),
+                ),
+            )
+        else:
+            zone_cost_arr = np.where(
+                self.grid._is_zone & (self.grid._net == start.net),
+                self.rules.cost_zone_same_net - 1.0,
+                np.where(
+                    zone_blocked_arr,
+                    100.0,
+                    0.0,
+                ),
+            )
 
         # Issue #9622: soft under-body surcharge state.  ``None`` mask
         # array (boards without a qualifying fine-pitch component, or the
@@ -5500,6 +5737,34 @@ class Router:
                             f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
                             f"nbr=({nx},{ny},L{nlayer}) REJECT "
                             f"reason=own_pad_step_foreign_pad_too_close"
+                        )
+                    continue
+
+                # Issue #9019: own-net pad slit-band gate.  A planar step whose
+                # swept copper parks in the fab ``pad_spacing`` band beside an
+                # own-net SMD pad (neither unioned with it nor clear of the
+                # detection edge) is a slit the fab sees regardless of nets.
+                # Python twin of ``Pathfinder::own_net_band_step_ok``.
+                if (
+                    band_edge_mm > 0.0
+                    and nlayer == current.layer
+                    and not self._own_net_band_step_ok(
+                        current.x,
+                        current.y,
+                        nx,
+                        ny,
+                        nlayer,
+                        start.net,
+                        band_width,
+                        band_edge_mm,
+                        exclude_pts=band_exclude_pts,
+                    )
+                ):
+                    if _ASTAR_TRACE_ENABLED:
+                        _astar_trace(
+                            f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
+                            f"nbr=({nx},{ny},L{nlayer}) REJECT "
+                            f"reason=own_net_pad_slit_band"
                         )
                     continue
 
@@ -6124,6 +6389,8 @@ class Router:
         # Look up the net class for this net and use its trace_width if defined,
         # falling back to the global rules.trace_width for unclassified nets.
         base_trace_width = self._get_trace_width_for_net(start_pad.net_name)
+        # Issue #9019: the own-net pad slit-band edge (0 = guard off).
+        band_edge_mm = float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
 
         # Issue #1692: Use per-net-class via size when creating vias.
         _nc = self._get_net_class(start_pad.net_name)
@@ -6208,7 +6475,7 @@ class Router:
             """
             if abs(x2 - x1) > 0.01 or abs(y2 - y1) > 0.01:
                 # Issue #1018: Calculate width with neck-down support
-                from .neck_down import taper_points
+                from .neck_down import band_safe_width, taper_points
 
                 centers = []
                 if start_needs_neckdown:
@@ -6227,8 +6494,19 @@ class Router:
                             self.rules.grid_resolution,
                         )[1:]
                     )
+                # Issue #9019: a taper that only narrows must not open an air
+                # gap beside the net's own pad (the slit band).
+                band_bboxes = (
+                    self._own_net_band_bboxes(start_pad.net, layer_idx)
+                    if band_edge_mm > 0.0 and (start_needs_neckdown or end_needs_neckdown)
+                    else None
+                )
                 for (sx, sy), (ex, ey) in zip(points, points[1:], strict=False):
                     width = _calculate_segment_width(sx, sy, ex, ey)
+                    if band_bboxes:
+                        width = band_safe_width(
+                            (sx, sy), (ex, ey), width, base_trace_width, band_bboxes, band_edge_mm
+                        )
                     if sx == ex and sy == ey:
                         continue
                     seg = Segment(
@@ -6953,6 +7231,10 @@ class Router:
         own_gate: tuple[set[str] | None, float, dict[tuple[int, int, int, int, int], bool]] | None
         own_gate = None if self.relief_mode else (*self._own_pad_gate_inputs(start, end), {})
 
+        # Issue #9019: the pads both frontiers are unioned with -- exempt from
+        # the band measure, as in ``_route_impl`` (see ``_own_net_band_step_ok``).
+        band_exclude_pts = ((start.x, start.y), (end.x, end.y))
+
         # Issue #9622: soft under-body surcharge state for BOTH frontiers,
         # the same tuple ``_route_impl`` prepares for the one-way search
         # (first plane, its non-local mask, the extra planes, the per-region
@@ -7043,6 +7325,7 @@ class Router:
                         partner_active=partner_active_flag,
                         seq_counter=forward_seq_counter,
                         own_gate=own_gate,
+                        band_exclude_pts=band_exclude_pts,
                         under_body_state=under_body_state,
                     )
 
@@ -7085,6 +7368,7 @@ class Router:
                         partner_active=partner_active_flag,
                         seq_counter=backward_seq_counter,
                         own_gate=own_gate,
+                        band_exclude_pts=band_exclude_pts,
                         under_body_state=under_body_state,
                     )
 
@@ -7150,6 +7434,7 @@ class Router:
         own_gate: (
             tuple[set[str] | None, float, dict[tuple[int, int, int, int, int], bool]] | None
         ) = None,
+        band_exclude_pts: tuple[tuple[float, float], ...] = (),
         under_body_state: (
             tuple[np.ndarray, int, tuple[tuple[np.ndarray, int], ...], float] | None
         ) = None,
@@ -7211,6 +7496,15 @@ class Router:
         tgt_approach_gy1 = tgt_gy1 - pad_escape_margin
         tgt_approach_gx2 = tgt_gx2 + pad_escape_margin
         tgt_approach_gy2 = tgt_gy2 + pad_escape_margin
+
+        # Issue #9019: own-net pad slit-band gate inputs (off on relief probes
+        # and when the caller resolved no stackup edge).
+        band_edge_mm = (
+            0.0
+            if self.relief_mode or getattr(self, "_own_net_band_suspended", False)
+            else float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
+        )
+        band_width = self._get_trace_width_for_net(source_pad.net_name)
 
         # Explore 2D neighbors (same layer moves)
         for dx, dy, _dlayer, neighbor_cost_mult in self.neighbors_2d:
@@ -7395,6 +7689,30 @@ class Router:
                         f"[A*/py-bidi] cur=({current.x},{current.y},L{current.layer}) "
                         f"nbr=({nx},{ny},L{nlayer}) REJECT "
                         f"reason=own_pad_step_foreign_pad_too_close"
+                    )
+                continue
+
+            # Issue #9019: own-net pad slit-band gate, as in ``_route_impl``.
+            if (
+                band_edge_mm > 0.0
+                and nlayer == current.layer
+                and not self._own_net_band_step_ok(
+                    current.x,
+                    current.y,
+                    nx,
+                    ny,
+                    nlayer,
+                    source_pad.net,
+                    band_width,
+                    band_edge_mm,
+                    exclude_pts=band_exclude_pts,
+                )
+            ):
+                if _ASTAR_TRACE_ENABLED:
+                    _astar_trace(
+                        f"[A*/py-bidi] cur=({current.x},{current.y},L{current.layer}) "
+                        f"nbr=({nx},{ny},L{nlayer}) REJECT "
+                        f"reason=own_net_pad_slit_band"
                     )
                 continue
 
