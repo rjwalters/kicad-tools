@@ -444,7 +444,9 @@ def _opt_in_diffpair_class_map(net_names: list[str]) -> dict[str, NetClassRoutin
     return dict.fromkeys(net_names, nc)
 
 
-def _two_pad_diffpair_router(diffpair_spacing: float = 0.8) -> Autorouter:
+def _two_pad_diffpair_router(
+    diffpair_spacing: float = 0.8, *, force_python: bool = False
+) -> Autorouter:
     """30x10mm board with one straight two-pad diff pair (see
     ``test_diffpair_routing_integration.py`` for the geometry rationale)."""
     rules = DesignRules(trace_width=0.2, trace_clearance=0.15, grid_resolution=0.1)
@@ -453,6 +455,7 @@ def _two_pad_diffpair_router(diffpair_spacing: float = 0.8) -> Autorouter:
         height=10.0,
         rules=rules,
         net_class_map=_opt_in_diffpair_class_map(["USB_D+", "USB_D-"]),
+        force_python=force_python,
     )
     p_y = 5.0 - diffpair_spacing / 2
     n_y = 5.0 + diffpair_spacing / 2
@@ -741,7 +744,7 @@ def test_failed_probe_clears_avoidance_costs():
         def __init__(self):
             self.cleared = 0
 
-        def route(self, start, end, per_net_timeout=None):
+        def route(self, start, end, per_net_timeout=None, weight=1.0):
             raise RuntimeError("probe failure")
 
         def clear_avoidance_costs(self):
@@ -756,6 +759,128 @@ def test_failed_probe_clears_avoidance_costs():
     result = router._diffpair._single_ended_guide_route(start, end)
     assert result is None
     assert stub.cleared == 1, "clear_avoidance_costs must run even when the probe raises"
+
+
+# ---------------------------------------------------------------------------
+# Issue #9852: bounded pure-Python guide probes
+# ---------------------------------------------------------------------------
+
+
+def test_python_guide_probe_uses_bounded_suboptimal_weight(monkeypatch):
+    """The pure-Python probe must hand its router a bounded-suboptimal weight.
+
+    Issue #9852: on board 06's USB3 pairs the pure-Python OPTIMAL guide
+    search needed ~350k node expansions (~77 s) against the 15 s
+    eighth-of-per-pair-budget probe deadline, so every probe expired and
+    the pairs fell through as ``guide-missing`` while the C++ engine's
+    optimal search finished the identical grid state in 1.5-3.2 s.  The
+    probe only feeds the corridor dilation, so it runs
+    bounded-suboptimal on the Python backend (w=2 converges on the
+    captured USB3_RX1 state in ~1 s / ~4k expansions with an 8-segment
+    guide whose endpoints connect).
+    """
+    from kicad_tools.router.diffpair_routing import _GUIDE_PROBE_PYTHON_ASTAR_WEIGHT
+    from kicad_tools.router.pathfinder import Router as PythonRouter
+
+    router = _two_pad_diffpair_router(force_python=True)
+    assert isinstance(router.router, PythonRouter), "test premise: Python backend forced"
+
+    seen: dict = {}
+
+    def spying_route(start, end, **kwargs):
+        seen.update(kwargs)
+        return None
+
+    monkeypatch.setattr(router.router, "route", spying_route)
+
+    pads = [p for p in router.pads.values() if p.net == 1]
+    result = router._diffpair._single_ended_guide_route(pads[0], pads[1], per_net_timeout=2.0)
+
+    assert result is None  # spying stub returns None -> missing guide
+    assert seen.get("per_net_timeout") == 2.0, "probe deadline must still be forwarded"
+    assert seen.get("weight") == _GUIDE_PROBE_PYTHON_ASTAR_WEIGHT, (
+        "the pure-Python guide probe must run bounded-suboptimal, not optimal"
+    )
+
+
+@pytest.mark.requires_router_cpp
+def test_native_guide_probe_keeps_optimal_weight(monkeypatch):
+    """The native probe stays byte-identical: weight 1.0, deadline forwarded.
+
+    The #9852 bounded-suboptimal weight is a Python-backend measure; the
+    C++ engine's optimal search fits the probe budget on the measured
+    board-06 reference run (guides in 1.47-3.24 s), so its guides must not
+    change.
+    """
+    from kicad_tools.router.cpp_backend import CppPathfinder
+
+    router = _two_pad_diffpair_router()
+    assert isinstance(router.router, CppPathfinder), "test premise: native backend active"
+
+    seen: dict = {}
+
+    def spying_route(start, end, **kwargs):
+        seen.update(kwargs)
+        return None
+
+    monkeypatch.setattr(router.router, "route", spying_route)
+
+    pads = [p for p in router.pads.values() if p.net == 1]
+    router._diffpair._single_ended_guide_route(pads[0], pads[1], per_net_timeout=2.0)
+
+    assert seen.get("per_net_timeout") == 2.0
+    assert seen.get("weight", 1.0) == 1.0, "native probe must keep the optimal weight"
+
+
+def test_python_guide_probe_real_search_route_is_legal():
+    """The weighted probe's recovered guide is a real, legal route.
+
+    Exercises the real pure-Python search (no stubs): the guide must be
+    non-empty, connect both endpoint pads, and keep geometric clearance
+    against foreign obstacles on the board.
+    """
+    from kicad_tools.router.observability import validate_net_connectivity
+
+    router = _two_pad_diffpair_router(force_python=True)
+    pads = [p for p in router.pads.values() if p.net == 1]
+
+    guide = router._diffpair._single_ended_guide_route(pads[0], pads[1], per_net_timeout=30.0)
+
+    assert guide is not None, "weighted probe must find the straight guide"
+    assert guide.segments, "guide route must be non-empty"
+    conn = validate_net_connectivity([guide], {1: pads})
+    assert conn.get(1, {}).get("connected") is True, (
+        f"guide endpoints must connect: {conn.get(1, {})}"
+    )
+    for seg in guide.segments:
+        ok, _gap, _point = router.grid.validate_segment_clearance(seg, exclude_net=1)
+        assert ok, f"guide segment {seg} violates clearance"
+
+
+def test_python_guide_probe_obstructed_control_falls_back():
+    """An obstructed guide still maps to ``None`` (fallback preserved).
+
+    Issue #9852 keeps the bounded probe's missing-guide contract: when the
+    P side cannot be routed single-ended (a full-height wall on every
+    layer), the probe returns ``None`` and the caller falls back to the
+    unconstrained coupled search.
+    """
+    router = _two_pad_diffpair_router(force_python=True)
+    grid = router.grid
+
+    # Seal a full-height wall between the pads on every routable layer
+    # (the direct-array idiom used by the #5720 via-raster tests).
+    gx1 = int((14.0 - grid.origin_x) / grid.resolution)
+    gx2 = int((16.0 - grid.origin_x) / grid.resolution)
+    for gz in range(grid.num_layers):
+        for gx in range(gx1, gx2 + 1):
+            for gy in range(grid.rows):
+                grid._blocked[gz, gy, gx] = True
+
+    pads = [p for p in router.pads.values() if p.net == 1]
+    guide = router._diffpair._single_ended_guide_route(pads[0], pads[1], per_net_timeout=5.0)
+
+    assert guide is None, "obstructed guide control must return None (missing guide)"
 
 
 # ---------------------------------------------------------------------------
