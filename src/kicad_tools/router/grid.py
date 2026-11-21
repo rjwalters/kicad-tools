@@ -483,6 +483,7 @@ def _sync_pad_to_cpp_grid(
     )
     ref_hash = router_cpp.fnv1a_hash(pad.component_key) if pad.component_key else 0
     is_plane_net = _is_plane_net_pad(pad)
+    from .via_clearance import cpp_pad_copper_corner_radius
 
     try:
         cpp_grid._impl.add_pad(
@@ -497,6 +498,7 @@ def _sync_pad_to_cpp_grid(
             is_plane_net,
             pad.rotation,
             pad.shape == "circle",
+            cpp_pad_copper_corner_radius(pad),
         )
     except (AttributeError, TypeError):
         # Older C++ binding without is_plane_net argument; ignore -- the

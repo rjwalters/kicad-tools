@@ -51,6 +51,64 @@ signal nets and leaves VCP open; the chained `--complete` pass closes it.
 
 Linux (the pinned `kicad/kicad` image, amd64): see "CI / Linux" below.
 
+### Re-measured 2026-11-20 (Issue #9424)
+
+Same flags and host, pinned kicad-cli 10.0.6 (`KCT_KICAD_DOCKER=1`), the
+gate's #8532 fiducial + board-ID prep, three seeds run in parallel (load
+average 10-20). No `[deterministic-budget] per-net wall clock bound` or
+`stage deadline fired` line appeared in any route log. All three seeds were
+byte-identical again in both columns, so the figures below hold for each of
+42, 7 and 1337.
+
+| | `origin/main` @ `e56ea23dd` | + #9424 via union depth |
+|---|---|---|
+| `kct route` exit / nets | 0 / 37 of 37 | 0 / 37 of 37 |
+| copper / label LVS | clean / clean | clean / clean |
+| kicad-cli DRC err / warn / unconnected, ERC | 0 / 0 / 0, 0 | 0 / 0 / 0, 0 |
+| `kct check` errors (`--skip mask_to_copper`) | 8 `physical_copper_gap` | 1 `physical_copper_gap` |
+| `kct check` warnings | 74 (48 `pour_slot`, 13 `silk_hole_overlap`, 13 `redundant_copper_*`) | 85 (62 `pour_slot`, 9 `silk_hole_overlap`, 14 `redundant_copper_*`) |
+| `mask_to_copper` err / warn / info (pass on) | 33 / 18 / 224 | 22 / 19 / 218 |
+| `kct check` wall time, pass off / on | 5.2 s / 24.4 s | 5.2 s / 24.0 s |
+| vias / route wall time | 117 / 315 s | 115 / 283 s |
+
+The route itself is green: VCP, the net #9517 and #9734 left open, connects. Five of
+the eight errors were vias the C++ A* seated beside their own SMD pad as a
+"union": three overlapped only the bounding box's square corner of a
+`roundrect` pad (air beside the rounded copper), and one overlapped a flat face
+by 5 um, too shallow for the checker's shoulder exemption. #9424 requires the
+union to reach `same_net_pad_union_depth_mm` into the box's inscribed stadium
+(0.0218 mm for the 0.6 mm via at the 0.15 mm edge). The one remaining error is
+a different class: a trace that leaves its own via in a 0.46 mm stub and then
+turns 90 degrees back past the via (RESET, B.Cu). The warning count rose
+because the moved vias re-shaped neighbouring routes (`pour_slot` 48 -> 62). The gate's
+0-error / 0-warning bar is still not met, and `--skip mask_to_copper` stays.
+
+#### Re-measured after the rect-corner fix (Doctor, PR #9845)
+
+The first #9424 rule measured every pad's union against the stadium inscribed
+in its box. That also refused real overlap with a `rect` pad's square corner,
+and on board 06 it re-routed USB3_TX1- around U2.C2 and broke the +3V3 pour
+(the CI post-legalize gate failed). The union now uses the pad's true corner
+radius when the shape is known. Same flags, pinned kicad-cli 10.0.6, seeds run
+one at a time (an earlier parallel attempt had kicad-cli SIGKILLed, exit 137,
+and is discarded). The routed boards of seeds 42, 7 and 1337 are
+byte-identical:
+
+| | + #9424, stadium only | + #9424, true corner radius |
+|---|---|---|
+| `kct route` exit / nets | 0 / 37 of 37 | 0 / 37 of 37 |
+| copper / label LVS | clean / clean | clean / clean |
+| kicad-cli DRC err / warn / unconnected, ERC | 0 / 0 / 0, 0 | 0 / 0 / 0, 0 |
+| `kct check` errors (`--skip mask_to_copper`) | 1 `physical_copper_gap` (RESET, B.Cu) | 1 `physical_copper_gap` (nTRIP, F.Cu) |
+| `kct check` warnings | 85 | 80 (61 `pour_slot`, 9 `_covered`, 4 `_detour`, 4 `_staircase`, 2 `silk_hole_overlap`) |
+| vias / route wall time | 115 / 283 s | 115 / 213-228 s |
+
+The remaining error moved. It is now a same-net trace-to-trace slit: two
+parallel nTRIP traces 0.15 mm wide with a 0.021 mm gap at (146.05, 101.71),
+graded on the 0.1016 mm trace edge. It is not a via seat. The #9844 RESET
+stub-turnback does not occur on this route. `mask_to_copper` was not
+re-measured.
+
 ### Negative run
 
 The gate was checked against a known-bad board. The seed-42 board had all 20

@@ -305,7 +305,7 @@ public:
                  int net, int layer_idx, uint32_t ref_hash,
                  float clearance_override,
                  bool is_plane_net = false, float rotation = 0.0f,
-                 bool is_circular = false);
+                 bool is_circular = false, float copper_corner_radius = -1.0f);
 
     // Issue #6008: board-file keepout rule areas the occupancy planes cannot
     // hold -- net-filtered track rules (``spatial_keepouts``) and every via

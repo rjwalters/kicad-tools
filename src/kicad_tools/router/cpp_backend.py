@@ -174,7 +174,12 @@ STAGE_FALLBACK_BUDGET_FRACTION: float = 0.15
 # ``primitives.pad_half_extents``) instead of raw ``width/2``/``height/2``.  A
 # v74 .so under-sizes a non-cardinally rotated pad and silently accepts a leg
 # in the band the Python gate refuses (parity break on such boards).
-_REQUIRED_CPP_BUILD_VERSION = 75
+# v76 (Issue #9424): ``same_net_pad_gap_in_band`` takes a via annulus as a
+# union with its own SMD pad only at the union depth into the AABB's inscribed
+# stadium (``via_clearance.same_net_pad_union_depth_mm``).  A v75 .so seats
+# vias in a roundrect pad's corner air and in shallow overlap wedges that the
+# fab-view checker grades as ``physical_copper_gap``; reject it.
+_REQUIRED_CPP_BUILD_VERSION = 76
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -1246,6 +1251,7 @@ class CppGrid:
         # the same carve-out as the Python ``_is_plane_net_pad`` helper.
         from .fine_pitch_escape import resolve_clearance_with_escape_region
         from .grid import _is_plane_net_pad
+        from .via_clearance import cpp_pad_copper_corner_radius
 
         component_pitches = grid.compute_component_pitches()
         grid._component_pitch_cache = component_pitches
@@ -1317,6 +1323,7 @@ class CppGrid:
                 is_plane_net,
                 pad.rotation,
                 pad.shape == "circle",
+                cpp_pad_copper_corner_radius(pad),
             )
 
         cpp_grid._impl.set_component_holes_known(grid._component_hole_index.known)
