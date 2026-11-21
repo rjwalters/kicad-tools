@@ -35,6 +35,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+from kicad_tools.cli.sch_connectivity import find_open_mid_wire_attachments
 from kicad_tools.cli.sch_pin_map import (
     _build_wire_graph,
     _flood_fill_net,
@@ -58,6 +59,16 @@ class PinStatus:
     connected: bool
     connection_type: str = ""  # "wire", "label", "power", "no_connect"
     sheet: str = ""  # sheet path for hierarchical schematics
+
+
+@dataclass
+class ConnectivityWarning:
+    """A wiring pattern KiCad's netlist treats as open (Issue #9833)."""
+
+    kind: str  # "undotted_t" | "pin_mid_wire" | "power_mid_wire"
+    position: tuple[float, float]
+    description: str
+    sheet: str = ""
 
 
 Coord = tuple[int, int]
@@ -251,6 +262,43 @@ def check_symbol_connections(
     return results
 
 
+def check_mid_wire_attachments(
+    schematic: Schematic,
+    lib_manager: LibraryManager | None = None,
+    sheet_path: str = "",
+) -> list[ConnectivityWarning]:
+    """Warn about wiring KiCad's netlist treats as open (Issue #9833).
+
+    Detects T-connections without a junction dot, pins and power symbols
+    on a wire's middle: kicad-cli leaves all of them unconnected, so the
+    connectivity tools report them as warnings rather than silently
+    treating them as connected.
+    """
+    pin_coords: set[Coord] = set()
+    for symbol in schematic.symbols:
+        if symbol.lib_id.startswith("power:"):
+            continue
+        lib_sym = _resolve_lib_symbol(schematic, symbol.lib_id, lib_manager)
+        if not lib_sym:
+            continue
+        pin_positions = lib_sym.get_all_pin_positions(
+            instance_pos=symbol.position,
+            instance_rot=symbol.rotation,
+            mirror=symbol.mirror,
+        )
+        pin_coords.update(_to_coord(*pos) for pos in pin_positions.values())
+
+    return [
+        ConnectivityWarning(
+            kind=att.kind,
+            position=(att.coord[0] / 10, att.coord[1] / 10),
+            description=att.description,
+            sheet=sheet_path,
+        )
+        for att in find_open_mid_wire_attachments(schematic, extra_points=pin_coords)
+    ]
+
+
 def _collect_all_schematics(
     root_path: Path,
 ) -> list[tuple[Schematic, str]]:
@@ -344,26 +392,34 @@ def main(argv=None):
 
     # Check connections across all sheets
     results: list[PinStatus] = []
+    warnings: list[ConnectivityWarning] = []
     for sch, sheet_path in all_schematics:
         results.extend(check_symbol_connections(sch, lib_manager, args.pattern, sheet_path))
+        warnings.extend(check_mid_wire_attachments(sch, lib_manager, sheet_path))
 
     # Filter if not verbose
     if not args.verbose:
         results = [r for r in results if not r.connected]
 
     if args.format == "json":
-        output_json(results, args.verbose)
+        output_json(results, args.verbose, warnings)
     else:
-        output_table(results, args.verbose)
+        output_table(results, args.verbose, warnings)
 
 
-def output_table(results: list[PinStatus], show_all: bool):
+def output_table(
+    results: list[PinStatus],
+    show_all: bool,
+    warnings: list[ConnectivityWarning] | None = None,
+):
     """Output as formatted table."""
+    warnings = warnings or []
     if not results:
         if show_all:
             print("No pins found to check.")
         else:
             print("All pins connected!")
+        _print_warnings(warnings)
         return
 
     # Group by symbol
@@ -414,9 +470,26 @@ def output_table(results: list[PinStatus], show_all: bool):
     else:
         print(f"  Unconnected: {unconnected}")
 
+    _print_warnings(warnings)
 
-def output_json(results: list[PinStatus], show_all: bool):
+
+def _print_warnings(warnings: list[ConnectivityWarning]) -> None:
+    """Print mid-wire attachment warnings (Issue #9833)."""
+    if not warnings:
+        return
+    print(f"\nWarnings: {len(warnings)}")
+    for w in warnings:
+        loc = f"{w.sheet}: " if w.sheet else ""
+        print(f"  [{w.kind}] {loc}({w.position[0]:.1f}, {w.position[1]:.1f}) {w.description}")
+
+
+def output_json(
+    results: list[PinStatus],
+    show_all: bool,
+    warnings: list[ConnectivityWarning] | None = None,
+):
     """Output as JSON."""
+    warnings = warnings or []
     data = {
         "pins": [
             {
@@ -430,6 +503,15 @@ def output_json(results: list[PinStatus], show_all: bool):
                 **({"sheet": p.sheet} if p.sheet else {}),
             }
             for p in results
+        ],
+        "warnings": [
+            {
+                "kind": w.kind,
+                "position": list(w.position),
+                "description": w.description,
+                **({"sheet": w.sheet} if w.sheet else {}),
+            }
+            for w in warnings
         ],
         "summary": {
             "total_pins": len(results),

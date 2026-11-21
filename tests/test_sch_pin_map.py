@@ -1119,11 +1119,14 @@ class TestPullupBarrierNetPropagation:
 
 # RC filter chain: R1 and C1 connected via a shared horizontal bus wire.
 # Label "AUDIO_L" at one end of a long wire. R1 pin 1 and C1 pin 1 both
-# connect to points on that wire (their pin coordinates land on the wire interior).
+# reach the bus through vertical wires that END on the bus interior, so
+# the fixture carries junction dots at the two T-points: kicad-cli joins
+# a wire's interior only at a junction dot (Issue #9833).
 #
 # Layout:
 #   AUDIO_L label at (80, 40)
 #   Wire from (80, 40) to (140, 40)  -- long horizontal bus
+#   Junction dots at (100, 40) and (120, 40)
 #   R1 at (100, 50): pin 1 at (100, 46.19), wire down to (100, 40) on bus
 #   C1 at (120, 50): pin 1 at (120, 46.19), wire down to (120, 40) on bus
 #   R1 pin 2 at (100, 53.81), C1 pin 2 at (120, 53.81) -- both floating
@@ -1175,14 +1178,27 @@ RC_FILTER_CHAIN_SCHEMATIC = """\
     (stroke (width 0) (type default)) (uuid "w-r1"))
   (wire (pts (xy 120 46.19) (xy 120 40))
     (stroke (width 0) (type default)) (uuid "w-c1"))
+  (junction (at 100 40) (diameter 0) (color 0 0 0 0) (uuid "j-r1"))
+  (junction (at 120 40) (diameter 0) (color 0 0 0 0) (uuid "j-c1"))
   (label "AUDIO_L" (at 80 40 0)
     (effects (font (size 1.27 1.27)) (justify left bottom))
     (uuid "lbl-audio"))
 )
 """
 
+# Same geometry without the junction dots: the vertical wires end on the
+# bus interior, so kicad-cli leaves the T-connections open and each
+# vertical wire is its own unnamed net (Issue #9833 probe table).
+RC_FILTER_CHAIN_NO_JUNCTION_SCHEMATIC = RC_FILTER_CHAIN_SCHEMATIC.replace(
+    """  (junction (at 100 40) (diameter 0) (color 0 0 0 0) (uuid "j-r1"))
+  (junction (at 120 40) (diameter 0) (color 0 0 0 0) (uuid "j-c1"))
+""",
+    "",
+)
+
 # Pin on wire interior: R1 pin 1 at (100, 46.19) sits on a long wire from (100, 30) to (100, 60).
-# Label "NET1" at (100, 30). The pin coordinate is in the interior of the wire, not at an endpoint.
+# Label "NET1" at (100, 30). The pin coordinate is in the interior of the wire, not at an endpoint,
+# and there is no junction dot at the pin: kicad-cli leaves the pin unconnected (Issue #9833).
 PIN_ON_WIRE_INTERIOR_SCHEMATIC = """\
 (kicad_sch
   (version 20231120)
@@ -1216,12 +1232,84 @@ PIN_ON_WIRE_INTERIOR_SCHEMATIC = """\
 )
 """
 
+# Same geometry with a junction dot at the pin: kicad-cli joins a wire's
+# interior at a junction dot, so the pin connects (Issue #9833 probe table).
+PIN_ON_WIRE_INTERIOR_JUNCTION_SCHEMATIC = PIN_ON_WIRE_INTERIOR_SCHEMATIC.replace(
+    """  (label "NET1" (at 100 30 0)""",
+    """  (junction (at 100 46.19) (diameter 0) (color 0 0 0 0) (uuid "j-pin1"))
+  (label "NET1" (at 100 30 0)""",
+)
+
+# Power symbol on a wire's interior: GND at (120, 40) sits on the bus wire
+# (80, 40)-(140, 40), away from any endpoint, and R1 pin 1's vertical wire
+# ends on the bus interior at (100, 40) -- an undotted T.  Without dots
+# kicad-cli leaves both open (Issue #9833 probe table: "power:GND symbol on
+# a wire's interior -- not connected").
+POWER_MID_WIRE_SCHEMATIC = """\
+(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000000031")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (symbol "R_1_1"
+        (pin passive line
+          (at 0 3.81 270) (length 1.27) (name "~") (number "1"))
+        (pin passive line
+          (at 0 -3.81 90) (length 1.27) (name "~") (number "2"))
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:R") (at 100 50 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "pmw-r1")
+    (property "Reference" "R1" (at 102 48 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "1k" (at 102 50 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (pin "1" (uuid "p1")) (pin "2" (uuid "p2"))
+  )
+  (symbol
+    (lib_id "power:GND") (at 120 40 0) (unit 1)
+    (in_bom no) (on_board no) (dnp no) (uuid "pmw-gnd")
+    (property "Reference" "#PWR01" (at 120 46.04 0)
+      (effects (font (size 1.27 1.27)) hide))
+    (property "Value" "GND" (at 120 43.5 0)
+      (effects (font (size 1.27 1.27))))
+    (pin "1" (uuid "pg1"))
+  )
+  (wire (pts (xy 80 40) (xy 140 40))
+    (stroke (width 0) (type default)) (uuid "w-bus"))
+  (wire (pts (xy 100 46.19) (xy 100 40))
+    (stroke (width 0) (type default)) (uuid "w-r1"))
+)
+"""
+
+# Same geometry with junction dots at both mid-wire points: the T and the
+# GND symbol now connect, and R1 pin 1 resolves to GND.
+POWER_MID_WIRE_JUNCTION_SCHEMATIC = POWER_MID_WIRE_SCHEMATIC.replace(
+    """  (wire (pts (xy 100 46.19) (xy 100 40))
+    (stroke (width 0) (type default)) (uuid "w-r1"))
+)
+""",
+    """  (wire (pts (xy 100 46.19) (xy 100 40))
+    (stroke (width 0) (type default)) (uuid "w-r1"))
+  (junction (at 100 40) (diameter 0) (color 0 0 0 0) (uuid "j-r1"))
+  (junction (at 120 40) (diameter 0) (color 0 0 0 0) (uuid "j-gnd"))
+)
+""",
+)
+
 
 class TestRCFilterChain:
-    """Pins connected through a passive filter chain must all resolve to the net label."""
+    """Pins connected through a passive filter chain must all resolve to the net label.
+
+    The chain taps the bus through T-connections, so the fixture carries
+    junction dots: without them KiCad's netlist leaves the Ts open."""
 
     def test_all_chain_pins_resolve(self, tmp_path):
-        """R1 and C1 pin 1 both connect to a horizontal bus wire with label AUDIO_L."""
+        """With junction dots, R1 and C1 pin 1 both resolve to AUDIO_L."""
         sch = Schematic.load(_write_sch(tmp_path, RC_FILTER_CHAIN_SCHEMATIC))
         pin_map = resolve_pin_map(sch)
 
@@ -1235,6 +1323,20 @@ class TestRCFilterChain:
         assert pin_map["R1"]["pins"]["2"]["connected"] is False
         assert pin_map["C1"]["pins"]["2"]["connected"] is False
 
+    def test_undotted_t_connections_stay_open(self, tmp_path):
+        """Without junction dots the T-taps are open nets (Issue #9833)."""
+        sch = Schematic.load(_write_sch(tmp_path, RC_FILTER_CHAIN_NO_JUNCTION_SCHEMATIC))
+        pin_map = resolve_pin_map(sch)
+
+        r1_net = pin_map["R1"]["pins"]["1"]["net"]
+        c1_net = pin_map["C1"]["pins"]["1"]["net"]
+        assert r1_net != "AUDIO_L", "undotted T must not resolve to the bus label"
+        assert c1_net != "AUDIO_L", "undotted T must not resolve to the bus label"
+        # Each vertical wire is its own unnamed local net, distinct per tap
+        assert r1_net is not None and r1_net.startswith("_local_")
+        assert c1_net is not None and c1_net.startswith("_local_")
+        assert r1_net != c1_net
+
     def test_ref_filter_with_chain(self, tmp_path):
         """Filtering by ref still resolves nets correctly in a chain."""
         sch = Schematic.load(_write_sch(tmp_path, RC_FILTER_CHAIN_SCHEMATIC))
@@ -1246,22 +1348,80 @@ class TestRCFilterChain:
 
 
 class TestPinOnWireInterior:
-    """A pin whose coordinate lands on the interior of a wire segment (not at an endpoint)."""
+    """A pin whose coordinate lands on the interior of a wire (not at an endpoint).
 
-    def test_pin_interior_resolves(self, tmp_path):
+    Issue #9833: without a junction dot at the pin, kicad-cli leaves the
+    pin unconnected; a junction dot on the wire interior joins it."""
+
+    def test_pin_interior_without_junction_is_open(self, tmp_path):
         """R1 pin 1 at (100, 46.19) is in the interior of wire (100,30)-(100,60)."""
         sch = Schematic.load(_write_sch(tmp_path, PIN_ON_WIRE_INTERIOR_SCHEMATIC))
         pin_map = resolve_pin_map(sch)
 
-        assert pin_map["R1"]["pins"]["1"]["net"] == "NET1"
+        assert pin_map["R1"]["pins"]["1"]["net"] is None
+        assert pin_map["R1"]["pins"]["1"]["connected"] is False
 
-    def test_pin_interior_both_pins(self, tmp_path):
-        """Both R1 pins land on the interior of the same long wire."""
-        sch = Schematic.load(_write_sch(tmp_path, PIN_ON_WIRE_INTERIOR_SCHEMATIC))
+    def test_pin_interior_with_junction_connects(self, tmp_path):
+        """A junction dot at the pin joins it to the wire's net."""
+        sch = Schematic.load(_write_sch(tmp_path, PIN_ON_WIRE_INTERIOR_JUNCTION_SCHEMATIC))
         pin_map = resolve_pin_map(sch)
 
         assert pin_map["R1"]["pins"]["1"]["net"] == "NET1"
+        assert pin_map["R1"]["pins"]["1"]["connected"] is True
+
+    def test_pin_interior_both_pins_need_junctions(self, tmp_path):
+        """Both R1 pins land on the interior; only junction-dotted pins join.
+
+        With a dot at pin 1 only, pin 2 (no dot) stays open; with dots at
+        both pins, both resolve to NET1."""
+        sch_content = PIN_ON_WIRE_INTERIOR_JUNCTION_SCHEMATIC.replace(
+            """  (junction (at 100 46.19) (diameter 0) (color 0 0 0 0) (uuid "j-pin1"))""",
+            """  (junction (at 100 46.19) (diameter 0) (color 0 0 0 0) (uuid "j-pin1"))
+  (junction (at 100 53.81) (diameter 0) (color 0 0 0 0) (uuid "j-pin2"))""",
+        )
+        pin_map = resolve_pin_map(Schematic.load(_write_sch(tmp_path, sch_content)))
+        assert pin_map["R1"]["pins"]["1"]["net"] == "NET1"
         assert pin_map["R1"]["pins"]["2"]["net"] == "NET1"
+
+        pin_map_one = resolve_pin_map(
+            Schematic.load(_write_sch(tmp_path, PIN_ON_WIRE_INTERIOR_JUNCTION_SCHEMATIC))
+        )
+        assert pin_map_one["R1"]["pins"]["2"]["net"] is None
+        assert pin_map_one["R1"]["pins"]["2"]["connected"] is False
+
+
+class TestPowerSymbolMidWire:
+    """Issue #9833: a power symbol on a wire's interior does not connect.
+
+    Only the wire touching the power symbol's pin at an endpoint (or a
+    junction dot) picks up the net name.  (A label mid-wire still
+    connects -- see TestLabelOnWireMidpoint.)"""
+
+    def test_power_mid_wire_stays_open(self, tmp_path):
+        """GND on the bus interior without a dot: R1 pin 1 gets a local net, not GND."""
+        sch = Schematic.load(_write_sch(tmp_path, POWER_MID_WIRE_SCHEMATIC))
+        pin_map = resolve_pin_map(sch)
+
+        r1_net = pin_map["R1"]["pins"]["1"]["net"]
+        assert r1_net != "GND", "power symbol mid-wire must not name the net"
+        assert r1_net is not None and r1_net.startswith("_local_")
+
+    def test_power_mid_wire_with_junction_connects(self, tmp_path):
+        """Junction dots at the T and the GND symbol: R1 pin 1 resolves to GND."""
+        sch = Schematic.load(_write_sch(tmp_path, POWER_MID_WIRE_JUNCTION_SCHEMATIC))
+        pin_map = resolve_pin_map(sch)
+
+        assert pin_map["R1"]["pins"]["1"]["net"] == "GND"
+
+    def test_power_at_wire_endpoint_caps_the_rail(self, tmp_path):
+        """GND moved to the bus endpoint: the bus net is GND, but the
+        undotted T at (100, 40) still keeps pin 1 off it."""
+        sch_content = POWER_MID_WIRE_SCHEMATIC.replace("(at 120 40 0)", "(at 140 40 0)")
+        pin_map = resolve_pin_map(Schematic.load(_write_sch(tmp_path, sch_content)))
+
+        r1_net = pin_map["R1"]["pins"]["1"]["net"]
+        assert r1_net != "GND", "the undotted T must stay open even with GND at the bus end"
+        assert r1_net is not None and r1_net.startswith("_local_")
 
 
 # ---------------------------------------------------------------------------
