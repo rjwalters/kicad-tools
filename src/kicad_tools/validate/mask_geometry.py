@@ -109,6 +109,61 @@ def _pad_shape(pad: Any) -> Any:
     raise ValueError(f"unsupported pad shape {pad.shape}")
 
 
+#: Pad features this model does not approximate (custom/chamfered/padstack).
+ADVANCED_PAD_FEATURES = ("primitives", "chamfer", "chamfer_ratio", "padstack", "options", "tenting")
+
+
+def pad_mask_sides(pad: Any) -> list[str]:
+    """``"F"``/``"B"`` for each mask side the pad opens."""
+    return [side for side in ("F", "B") if f"{side}.Mask" in pad.layers or "*.Mask" in pad.layers]
+
+
+def board_mask_margin(pcb: Any) -> tuple[float | None, bool]:
+    """Board ``pad_to_mask_clearance`` (mm) and whether the board declares it.
+
+    ``None`` means the declared value is not a finite number.
+    """
+    sexp = getattr(pcb, "_sexp", None)
+    setup = sexp.find_child("setup") if sexp is not None else None
+    node = setup.find_child("pad_to_mask_clearance") if setup else None
+    margin = node.get_float(0) if node else 0.0
+    if margin is None or not math.isfinite(margin):
+        return None, node is not None
+    return margin, node is not None
+
+
+def pad_mask_margin(
+    pad: Any, fp: Any, board_margin: float, board_declared: bool
+) -> tuple[float | None, str]:
+    """Effective mask expansion of ``pad`` (pad, then footprint, then board) and its source."""
+    margin = pad.solder_mask_margin
+    if margin is not None:
+        return margin, "pad"
+    fp_node = getattr(fp, "_sexp_node", None)
+    fp_margin_node = fp_node.find_child("solder_mask_margin") if fp_node else None
+    if fp_margin_node:
+        return fp_margin_node.get_float(0), "footprint"
+    return board_margin, "board" if board_declared else "native-default-zero"
+
+
+def pad_mask_shapes(pad: Any, fp: Any, margin: float) -> tuple[Any, Any]:
+    """``(copper, opening)`` of a standard pad in board coordinates.
+
+    Raises ``ValueError`` for a shape this model does not support.
+    """
+    from shapely.affinity import rotate, translate  # type: ignore[import-untyped]
+
+    copper = _pad_shape(pad)
+    opening = _buffer(copper, margin)
+    local_x, local_y = pad.position[0], pad.position[1]
+    dx, dy = rotate_pad_offset(local_x, local_y, fp.rotation)
+    x, y = fp.position[0] + dx, fp.position[1] + dy
+    # KiCad pad angles are board-frame; y-down coordinates negate rotation.
+    copper = translate(rotate(copper, -pad.rotation, origin=(0, 0)), x, y)
+    opening = translate(rotate(opening, -pad.rotation, origin=(0, 0)), x, y)
+    return copper, opening
+
+
 def _validate_structure(text: str) -> None:
     """The shared recovery parser tolerates EOF; snapshots require closed input."""
     depth = 0
@@ -210,7 +265,6 @@ def inspect_mask_geometry(pcb_path: str | Path) -> MaskGeometrySnapshot:
     No global/manufacturer mask expansion or copper-clearance floor is invented.
     """
     require_shapely("soldermask geometry")
-    from shapely.affinity import rotate, translate  # type: ignore[import-untyped]
     from shapely.geometry import Point
 
     path = Path(pcb_path)
@@ -261,11 +315,11 @@ def inspect_mask_geometry(pcb_path: str | Path) -> MaskGeometrySnapshot:
             unsupported("", "project-settings", "Cannot establish project mask settings")
 
     setup = pcb._sexp.find_child("setup")
-    margin_node = setup.find_child("pad_to_mask_clearance") if setup else None
-    board_margin = margin_node.get_float(0) if margin_node else 0.0
-    if board_margin is None or not math.isfinite(board_margin):
+    maybe_margin, board_declared = board_mask_margin(pcb)
+    if maybe_margin is None:
         unsupported("", "board-margin", "Invalid board mask expansion")
         return snapshot
+    board_margin = maybe_margin
     if setup:
         minimum = setup.find_child("solder_mask_min_width")
         if minimum and minimum.get_float(0) != 0:
@@ -305,60 +359,28 @@ def inspect_mask_geometry(pcb_path: str | Path) -> MaskGeometrySnapshot:
         unsupported("", "source-parse", warning)
     seen: set[str] = set()
     for fp in pcb.footprints:
-        fp_node = fp._sexp_node
-        fp_margin_node = fp_node.find_child("solder_mask_margin") if fp_node else None
         for pad in fp.pads:
-            sides = [
-                side
-                for side in ("F", "B")
-                if f"{side}.Mask" in pad.layers or "*.Mask" in pad.layers
-            ]
+            sides = pad_mask_sides(pad)
             if not sides:
                 continue
             if not pad.uuid or pad.uuid in seen:
                 unsupported(pad.uuid, "source-identity", "Missing or duplicate pad UUID")
             seen.add(pad.uuid)
             node = pad._sexp_node
-            if node and any(
-                node.find_child(name) is not None
-                for name in (
-                    "primitives",
-                    "chamfer",
-                    "chamfer_ratio",
-                    "padstack",
-                    "options",
-                    "tenting",
-                )
-            ):
+            if node and any(node.find_child(name) is not None for name in ADVANCED_PAD_FEATURES):
                 unsupported(
                     pad.uuid, "advanced-pad", "Custom/chamfered/padstack geometry not implemented"
                 )
                 continue
-            margin = pad.solder_mask_margin
-            source = "pad"
-            if margin is None:
-                margin = fp_margin_node.get_float(0) if fp_margin_node else board_margin
-                source = (
-                    "footprint"
-                    if fp_margin_node
-                    else "board"
-                    if margin_node
-                    else "native-default-zero"
-                )
+            margin, source = pad_mask_margin(pad, fp, board_margin, board_declared)
             if margin is None or not math.isfinite(margin):
                 unsupported(pad.uuid, "mask-margin", "Invalid mask expansion")
                 continue
             try:
-                copper = _pad_shape(pad)
+                copper, opening = pad_mask_shapes(pad, fp, margin)
             except ValueError as exc:
                 unsupported(pad.uuid, "pad-geometry", str(exc))
                 continue
-            opening = _buffer(copper, margin)
-            dx, dy = rotate_pad_offset(*pad.position, fp.rotation)
-            x, y = fp.position[0] + dx, fp.position[1] + dy
-            # KiCad pad angles are board-frame; y-down coordinates negate rotation.
-            copper = translate(rotate(copper, -pad.rotation, origin=(0, 0)), x, y)
-            opening = translate(rotate(opening, -pad.rotation, origin=(0, 0)), x, y)
             for side in sides:
                 if f"{side}.Cu" not in pad.layers and "*.Cu" not in pad.layers:
                     unsupported(

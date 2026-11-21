@@ -1101,8 +1101,22 @@ class DRCChecker:
         Warns on exact-duplicate segments, runs of very short segments,
         long detours and track ends off a same-net via centre.  Own CLI
         category (``redundant_copper``) so ``--skip redundant_copper`` works.
+
+        Staircase shortcuts must keep new copper out of pad mask-opening
+        zones grown by the active ``mask_to_copper`` policy's strictest
+        clearance -- the explicit request, else the ``--mfr`` default
+        (Issue #9817).
         """
-        rule = RedundantCopperRule()
+        from .mask_copper import default_request_for_manufacturer
+
+        request = self.mask_copper_request or default_request_for_manufacturer(self.manufacturer)
+        policy = request.policy if request is not None else None
+        mask_clearance = (
+            max(policy.clearance_mm, policy.warning_clearance_mm or 0.0)
+            if policy is not None
+            else 0.0
+        )
+        rule = RedundantCopperRule(mask_clearance_mm=mask_clearance)
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_diffpair_clearance_intra(self) -> DRCResults:

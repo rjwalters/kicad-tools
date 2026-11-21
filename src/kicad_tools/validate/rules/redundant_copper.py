@@ -30,6 +30,17 @@ error), each with a location:
     staircase hugging a diagonal has a length ratio near 1.  Repair with
     ``kct optimize-traces``.
 
+    The fewer-bend path is reported only when it is legal copper (Issue
+    #9817): every leg clears foreign copper at the pair requirement
+    ``netclass_clearance_copper`` enforces (``netclass_pair_requirement``:
+    the fab floor or the larger of the two nets' authored classes), and the
+    copper it adds beyond the existing chain lies in no pad's mask-opening
+    zone (the opening ``mask_geometry`` builds, grown by the mask-to-copper
+    policy clearance) other than on a same-net pad's own copper.  Staircase chains
+    end at same-net pad copper and same-net via centres: a pad or via is a
+    terminal, never a pass-through vertex, so a "shortcut" can never bypass
+    and disconnect it.
+
 ``redundant_copper_via_offcentre``
     A same-net track end that lands ``OFFCENTRE_MIN_MM`` to
     ``OFFCENTRE_MAX_MM`` from a via centre (on a layer the via spans),
@@ -80,6 +91,10 @@ OFFCENTRE_MAX_MM = 0.4
 STAIRCASE_MIN_SEGMENTS = 3
 #: Fallback copper clearance (mm) when no design rules are supplied.
 STAIRCASE_DEFAULT_CLEARANCE_MM = 0.2
+#: New candidate copper (mm^2) in a mask-opening zone above which the
+#: candidate is rejected (geometric noise only; mask_to_copper flags any area).
+STAIRCASE_MASK_AREA_TOL_MM2 = 1e-6
+_MASK_SIDE = {"F.Cu": "F.Mask", "B.Cu": "B.Mask"}
 
 
 _QUANT = 3
@@ -111,6 +126,16 @@ class RedundantCopperRule(DRCRule):
         "long detours and track ends off a via centre (advisory)."
     )
 
+    def __init__(self, mask_clearance_mm: float = 0.0) -> None:
+        """``mask_clearance_mm``: the mask-to-copper policy clearance (mm).
+
+        A staircase shortcut may put no new copper within this distance of a
+        pad's mask opening (Issue #9817).  ``0`` still keeps new copper out of
+        the opening itself.  ``DRCChecker`` passes the active
+        ``mask_to_copper`` policy's (strictest) clearance.
+        """
+        self.mask_clearance_mm = max(0.0, float(mask_clearance_mm))
+
     def check(self, pcb: PCB, design_rules: DesignRules) -> DRCResults:
         results = DRCResults()
         results.rules_checked = 1
@@ -137,8 +162,12 @@ class RedundantCopperRule(DRCRule):
         self._clearance = (
             getattr(design_rules, "min_clearance_mm", None) or STAIRCASE_DEFAULT_CLEARANCE_MM
         )
+        self._requirement = self._pair_requirement(pcb)
         self._foreign_cache: dict[str, list[Any]] = {}
-        for (_net, _layer), segs in groups.items():
+        self._mask_cache: dict[str, list[tuple[Any, Any, int]]] = {}
+        self._terminal_cache: dict[tuple[int, str], list[Any]] = {}
+        for (net, layer), segs in groups.items():
+            self._layer_net = (net, layer)
             self._check_chains(segs, results)
             self._check_covered(segs, results)
 
@@ -235,14 +264,67 @@ class RedundantCopperRule(DRCRule):
             chain = self._walk_chain(start_idx, edges, node_edges, visited)
             self._report_chain(chain, results)
 
+        # Issue #9817: for the staircase shortcut a same-net pad or via is a
+        # chain terminal, never a pass-through vertex -- straightening across
+        # it would bypass and disconnect it.  (Fragment and detour chains are
+        # walked as before.)
+        net, layer = getattr(self, "_layer_net", (None, None))
+        terminals = (
+            {
+                node
+                for node, idxs in node_edges.items()
+                if len(idxs) == 2 and self._is_terminal(node, net, layer)
+            }
+            if net is not None and layer is not None
+            else set()
+        )
+        visited = set()
+        for start_idx in range(len(edges)):
+            if start_idx in visited:
+                continue
+            chain = self._walk_chain(start_idx, edges, node_edges, visited, terminals)
+            if chain:
+                first_seg = chain[0][0]
+                self._report_staircase(chain, self._net_label(first_seg), first_seg.layer, results)
+
+    def _terminal_shapes(self, net: int, layer: str) -> list[Any]:
+        """Same-net pad copper and via discs on ``layer`` (chain terminals)."""
+        key = (net, layer)
+        if key in self._terminal_cache:
+            return self._terminal_cache[key]
+        from shapely.geometry import Point  # type: ignore[import-untyped]
+
+        shapes: list[Any] = []
+        if net:
+            for elem in self._foreign_elements(layer):
+                if elem.net_number != net:
+                    continue
+                if elem.element_type == "pad" and elem.polygon is not None:
+                    shapes.append(elem.polygon)
+                elif elem.element_type in ("pad", "via"):
+                    x, y, w, h = elem.geometry
+                    shapes.append(Point(x, y).buffer(min(w, h) / 2.0))
+        self._terminal_cache[key] = shapes
+        return shapes
+
+    def _is_terminal(self, node: tuple[float, float], net: int, layer: str) -> bool:
+        from shapely.geometry import Point
+
+        shapes = self._terminal_shapes(net, layer)
+        if not shapes:
+            return False
+        pt = Point(node)
+        return any(shape.distance(pt) <= 1e-6 for shape in shapes)
+
     @staticmethod
     def _walk_chain(
         start_idx: int,
         edges: list[Any],
         node_edges: dict[tuple[float, float], list[int]],
         visited: set[int],
+        terminals: set[tuple[float, float]] | frozenset[tuple[float, float]] = frozenset(),
     ) -> list[tuple[Any, tuple[float, float], tuple[float, float]]]:
-        """Maximal path through degree-2 nodes, as (segment, from, to) steps."""
+        """Maximal path through degree-2 non-terminal nodes, as (segment, from, to) steps."""
 
         def extend(idx: int, frm: tuple[float, float]) -> list[Any]:
             out = []
@@ -252,7 +334,12 @@ class RedundantCopperRule(DRCRule):
                 nxt_node = b if node == a else a
                 out.append((seg, node, nxt_node))
                 others = [e for e in node_edges[nxt_node] if e != cur]
-                if len(node_edges[nxt_node]) != 2 or not others or others[0] in visited:
+                if (
+                    len(node_edges[nxt_node]) != 2
+                    or nxt_node in terminals
+                    or not others
+                    or others[0] in visited
+                ):
                     return out
                 visited.add(others[0])
                 cur, node = others[0], nxt_node
@@ -262,7 +349,7 @@ class RedundantCopperRule(DRCRule):
         forward = extend(start_idx, a)
         # Extend backwards from a (through the start edge's other end).
         backward: list[Any] = []
-        if len(node_edges[a]) == 2:
+        if len(node_edges[a]) == 2 and a not in terminals:
             others = [e for e in node_edges[a] if e != start_idx]
             if others and others[0] not in visited:
                 visited.add(others[0])
@@ -301,8 +388,6 @@ class RedundantCopperRule(DRCRule):
                     )
                 )
             run = []
-
-        self._report_staircase(chain, label, layer, results)
 
         # Detour: routed length vs straight distance between chain ends.
         routed = sum(math.dist(s.start, s.end) for s, _f, _t in chain)
@@ -389,8 +474,122 @@ class RedundantCopperRule(DRCRule):
                 if other.net_number == net:
                     continue
                 gap = _calculate_clearance(cand, other)[0]
-                if gap < self._clearance:
+                if gap < self._required_clearance(net, other.net_number):
                     return False
+        return True
+
+    def _pair_requirement(self, pcb: Any) -> Any:
+        """``netclass_clearance_copper``'s pair requirement for this board.
+
+        Issue #9817: a shortcut cleared only at the fab floor can land inside
+        a ``Power`` class's clearance, so it is cleared at exactly the
+        requirement that check enforces.  ``None`` means the project declares
+        classes the resolver cannot model: no shortcut is then provably legal.
+        """
+        from kicad_tools.core.project_clearance import ProjectClearanceError
+
+        from .netclass_clearance_copper import netclass_pair_requirement
+
+        path = getattr(pcb, "path", None)
+        if path is None or not hasattr(pcb, "nets"):
+            return lambda _a, _b: self._clearance
+        try:
+            return netclass_pair_requirement(path, pcb, self._clearance)
+        except ProjectClearanceError:
+            return None
+
+    def _required_clearance(self, net_a: int, net_b: int) -> float:
+        requirement = self._requirement
+        assert requirement is not None
+        return max(float(self._clearance), float(requirement(net_a, net_b)))
+
+    def _mask_zones(self, side: str) -> list[tuple[Any, Any, int]]:
+        """``(zone, pad copper, pad net)`` per pad opening on mask ``side``.
+
+        The opening is ``mask_geometry``'s (the shape ``mask_to_copper``'s
+        source model builds: pad copper grown by its effective expansion),
+        grown by the mask-to-copper policy clearance.  A pad that model does
+        not support (custom/chamfered) uses its clearance-kernel copper outline
+        instead, so it still keeps a zone rather than being skipped.
+        """
+        if side in self._mask_cache:
+            return self._mask_cache[side]
+        from ..mask_geometry import (
+            ADVANCED_PAD_FEATURES,
+            _buffer,
+            board_mask_margin,
+            pad_mask_margin,
+            pad_mask_shapes,
+            pad_mask_sides,
+        )
+        from .clearance import CopperElement
+
+        pcb = self._pcb
+        board_margin, declared = board_mask_margin(pcb)
+        zones: list[tuple[Any, Any, int]] = []
+        for fp in getattr(pcb, "footprints", None) or []:
+            for pad in getattr(fp, "pads", None) or []:
+                if side[0] not in pad_mask_sides(pad):
+                    continue
+                margin, _src = pad_mask_margin(pad, fp, board_margin or 0.0, declared)
+                if margin is None or not math.isfinite(margin):
+                    margin = 0.0
+                node = getattr(pad, "_sexp_node", None)
+                advanced = node is not None and any(
+                    node.find_child(name) is not None for name in ADVANCED_PAD_FEATURES
+                )
+                try:
+                    if advanced:
+                        raise ValueError("advanced pad")
+                    copper, opening = pad_mask_shapes(pad, fp, margin)
+                except ValueError:
+                    copper = CopperElement.from_pad(pad, fp).polygon
+                    if copper is None:
+                        continue
+                    opening = _buffer(copper, margin)
+                zone = _buffer(opening, self.mask_clearance_mm)
+                zones.append((zone, copper, pad.net_number))
+        self._mask_cache[side] = zones
+        return zones
+
+    def _mask_clear(
+        self,
+        cand: list[tuple[float, float]],
+        chain: list[Any],
+        layer: str,
+        width: float,
+        net: int,
+    ) -> bool:
+        """No new copper of ``cand`` in a pad's mask-opening zone (Issue #9817).
+
+        "New" is the candidate's copper beyond the chain it replaces; copper
+        over a same-net pad's own land is that pad's exposed copper, not new
+        exposure.  Inner layers carry no mask.
+        """
+        side = _MASK_SIDE.get(layer)
+        if side is None:
+            return True
+        zones = self._mask_zones(side)
+        if not zones:
+            return True
+        from shapely.geometry import LineString
+        from shapely.ops import unary_union  # type: ignore[import-untyped]
+
+        new = LineString(cand).buffer(width / 2.0)
+        old = unary_union(
+            [LineString([s.start, s.end]).buffer(s.width / 2.0) for s, _f, _t in chain]
+        )
+        new = new.difference(old)
+        if new.area <= STAIRCASE_MASK_AREA_TOL_MM2:
+            return True
+        for zone, copper, pad_net in zones:
+            if not zone.intersects(new):
+                continue
+            exposed = zone.intersection(new)
+            if net and pad_net == net:
+                exposed = exposed.difference(copper)
+            if exposed.area > STAIRCASE_MASK_AREA_TOL_MM2:
+                return False
         return True
 
     @staticmethod
@@ -435,6 +634,8 @@ class RedundantCopperRule(DRCRule):
                 candidates.append([start, end])
             else:
                 candidates.extend([[start, mid_d, end], [start, mid_o, end]])
+        if self._requirement is None:
+            return  # net classes cannot be modelled: no shortcut is provably legal
         net = chain[0][0].net_number
         width = max(s.width for s, _f, _t in chain)
         for cand in candidates:
@@ -443,6 +644,8 @@ class RedundantCopperRule(DRCRule):
                 continue
             legs = list(zip(cand, cand[1:], strict=False))
             if not self._path_clear(legs, net, layer, width):
+                continue
+            if not self._mask_clear(cand, chain, layer, width, net):
                 continue
             ox, oy = getattr(self, "_origin", (0.0, 0.0))
             via_pts = " -> ".join(f"({x + ox:.2f}, {y + oy:.2f})" for x, y in cand)
