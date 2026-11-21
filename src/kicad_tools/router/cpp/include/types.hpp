@@ -395,11 +395,12 @@ namespace router {
 // foreign zone elsewhere (Python parity), and a layer-scoped
 // ``clear_zone_cells(layer)`` that resets ``net`` on former zone cells.  A v73
 // .so charges every foreign zone and its clear leaves stale zone nets.
-// v75: reserved by open PR #9839 (Issue #9461, rotation-aware own-net band
-// pad boxes).
+// v75 (Issue #9461): ``own_net_band_step_ok`` builds each own-net pad box
+// from the rotation-aware AABB (twin of Python ``pad_half_extents``); a v74
+// .so under-sizes a non-cardinally rotated pad and accepts a leg in the band.
 // v76 (Issue #9424): ``same_net_pad_gap_in_band`` accepts a via annulus as a
 // union with its own SMD pad only when it overlaps the AABB's inscribed
-// stadium at least the union depth deep.  A v74 .so accepts any overlap of
+// stadium at least the union depth deep.  A v75 .so accepts any overlap of
 // the box, seating vias in a rounded pad's corner air or a shallow wedge the
 // fab-view checker grades as ``physical_copper_gap``.
 constexpr int ROUTER_CPP_BUILD_VERSION = 76;

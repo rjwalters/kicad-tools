@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -282,6 +283,34 @@ def output_table(pin_map: dict[str, dict]) -> None:
             print(f"  {pin_num:<6} {pin['name']:<20} {pin['type']:<15} {pos_str:<22} {net_str}")
 
 
+_LOCAL_NET_RE = re.compile(r"_local_\d+")
+
+
+def _renumber_local_nets(sheet_map: dict[str, dict], offset: int) -> int:
+    """Shift one sheet's ``_local_N`` names past those already used.
+
+    :func:`resolve_pin_map` numbers unnamed nets from ``_local_1`` on every
+    sheet, so two sheets would otherwise both report a ``_local_1`` for nets
+    that are not connected (Issue #9827).  Renames in place, keeping the
+    order the sheet assigned, and returns the new highest number used.
+    """
+    renames: dict[str, str] = {}
+    for entry in sheet_map.values():
+        for pin in entry["pins"].values():
+            net = pin.get("net")
+            if isinstance(net, str) and _LOCAL_NET_RE.fullmatch(net) and net not in renames:
+                renames[net] = ""
+    ordered = sorted(renames, key=lambda name: int(name[len("_local_") :]))
+    for i, name in enumerate(ordered, start=offset + 1):
+        renames[name] = f"_local_{i}"
+    for entry in sheet_map.values():
+        for pin in entry["pins"].values():
+            net = pin.get("net")
+            if net in renames:
+                pin["net"] = renames[net]
+    return offset + len(ordered)
+
+
 def _sheet_match_path(node_path: str | None, root_dir: Path) -> str:
     """Return the part of a sheet's file path that ``--sheet`` may match.
 
@@ -329,6 +358,7 @@ def main(argv=None):
 
     # Iterate all sheets, merging pin maps
     pin_map: dict[str, dict] = {}
+    local_count = 0
     root_dir = Path(hierarchy.path or args.schematic).resolve().parent
     for node in hierarchy.all_nodes():
         # Apply --sheet filter: skip nodes whose name or path don't match.
@@ -348,6 +378,7 @@ def main(argv=None):
             continue
 
         sheet_map = resolve_pin_map(sch, ref_filter=args.ref)
+        local_count = _renumber_local_nets(sheet_map, local_count)
 
         # Merge results -- multi-unit symbols may span sheets
         for ref, entry in sheet_map.items():
