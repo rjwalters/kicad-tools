@@ -1978,3 +1978,118 @@ class TestRelieveAndAsymmetryWarning:
         ):
             main(["fill", str(tmp_pcb)])
         assert "rose" not in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Test: trailing -q/--quiet on the unified `kct zones` verbs (Issue #9843)
+# ---------------------------------------------------------------------------
+
+_SENTINEL_RC = 7
+
+
+class TestUnifiedZonesTrailingQuiet:
+    """Issue #9843: `kct zones <verb> BOARD -q` matches the leading spelling."""
+
+    #: Required per-verb arguments the forwarding must preserve.
+    VERB_ARGS = {
+        "add": ["--net", "GND", "--layer", "B.Cu"],
+        "batch": ["--power-nets", "GND:B.Cu"],
+        "hv-keepout": ["--clearance", "1"],
+        "fill": [],
+    }
+
+    def test_unified_verbs_advertise_trailing_quiet(self):
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        for sub in ("add", "list", "batch", "hv-keepout", "fill"):
+            flags = {
+                opt
+                for action in _iter_zones_subparser_actions(parser, sub)
+                for opt in action.option_strings
+            }
+            assert {"-q", "--quiet"} <= flags, f"zones {sub} lacks trailing -q/--quiet"
+
+    @pytest.mark.parametrize("verb", ["add", "batch", "hv-keepout", "fill"])
+    @pytest.mark.parametrize(
+        ("leading", "trailing", "forwards_quiet"),
+        [
+            ([], [], False),
+            (["-q"], [], True),
+            (["--quiet"], [], True),
+            ([], ["-q"], True),
+            ([], ["--quiet"], True),
+            (["-q"], ["--quiet"], True),
+        ],
+    )
+    def test_modifying_verb_forwards_one_quiet(
+        self, tmp_pcb, verb, leading, trailing, forwards_quiet
+    ):
+        """Any quiet position forwards exactly one --quiet; none omits it."""
+        from kicad_tools.cli import main as cli_main
+
+        verb_args = self.VERB_ARGS[verb]
+        argv = [*leading, "zones", verb, str(tmp_pcb), *verb_args, *trailing]
+        with patch("kicad_tools.cli.zones_cmd.main", return_value=_SENTINEL_RC) as zones_main:
+            rc = cli_main(argv)
+
+        # The handler's (nonzero) exit status propagates.
+        assert rc == _SENTINEL_RC
+        sub_argv = zones_main.call_args[0][0]
+        assert sub_argv[0] == verb
+        assert sub_argv[1] == str(tmp_pcb)
+        assert sub_argv.count("--quiet") == (1 if forwards_quiet else 0)
+        # Required verb arguments survive the round trip.
+        for flag in verb_args[::2]:
+            assert flag in sub_argv
+
+
+class TestUnifiedZonesListTrailingQuiet:
+    """Issue #9843: `kct zones list BOARD --quiet` still prints the listing."""
+
+    def test_trailing_quiet_preserves_text_listing(self, capsys):
+        from kicad_tools.cli import main as cli_main
+
+        rc_plain = cli_main(["zones", "list", str(FIXTURE_PCB)])
+        out_plain = capsys.readouterr().out
+        rc_quiet = cli_main(["zones", "list", str(FIXTURE_PCB), "--quiet"])
+        out_quiet = capsys.readouterr().out
+
+        assert rc_plain == rc_quiet == 0
+        assert out_quiet == out_plain
+        assert out_quiet.startswith("Found 4 zone(s):")
+
+    def test_trailing_quiet_preserves_json_listing(self, capsys):
+        import json
+
+        from kicad_tools.cli import main as cli_main
+
+        rc_plain = cli_main(["zones", "list", str(FIXTURE_PCB), "--format", "json"])
+        out_plain = capsys.readouterr().out
+        rc_quiet = cli_main(["zones", "list", str(FIXTURE_PCB), "-q", "--format", "json"])
+        out_quiet = capsys.readouterr().out
+
+        assert rc_plain == rc_quiet == 0
+        assert out_quiet == out_plain
+        payload = json.loads(out_quiet)
+        assert payload["count"] == 4
+        assert len(payload["zones"]) == 4
+
+    def test_leading_quiet_still_lists(self, capsys):
+        from kicad_tools.cli import main as cli_main
+
+        rc = cli_main(["-q", "zones", "list", str(FIXTURE_PCB)])
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        assert out.startswith("Found 4 zone(s):")
+
+    def test_missing_board_errors_on_stderr(self, capsys):
+        from kicad_tools.cli import main as cli_main
+
+        rc = cli_main(["zones", "list", "/nonexistent/board.kicad_pcb", "--quiet"])
+        captured = capsys.readouterr()
+
+        assert rc == 1
+        assert "Error: File not found" in captured.err
+        assert captured.out == ""

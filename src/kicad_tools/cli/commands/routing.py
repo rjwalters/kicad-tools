@@ -108,8 +108,8 @@ def run_zones_command(args) -> int:
             sub_argv.append("--verbose")
         if args.dry_run:
             sub_argv.append("--dry-run")
-        # Use global quiet flag
-        if getattr(args, "global_quiet", False):
+        # Use command-level quiet or global quiet
+        if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
             sub_argv.append("--quiet")
         if getattr(args, "format", "text") != "text":
             sub_argv.extend(["--format", args.format])
@@ -132,8 +132,8 @@ def run_zones_command(args) -> int:
             sub_argv.append("--verbose")
         if args.dry_run:
             sub_argv.append("--dry-run")
-        # Use global quiet flag
-        if getattr(args, "global_quiet", False):
+        # Use command-level quiet or global quiet
+        if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
             sub_argv.append("--quiet")
         if getattr(args, "format", "text") != "text":
             sub_argv.extend(["--format", args.format])
@@ -155,7 +155,8 @@ def run_zones_command(args) -> int:
             sub_argv.append("--verbose")
         if args.dry_run:
             sub_argv.append("--dry-run")
-        if getattr(args, "global_quiet", False):
+        # Use command-level quiet or global quiet
+        if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
             sub_argv.append("--quiet")
         if getattr(args, "format", "text") != "text":
             sub_argv.extend(["--format", args.format])
@@ -171,8 +172,8 @@ def run_zones_command(args) -> int:
             sub_argv.append("--verbose")
         if args.dry_run:
             sub_argv.append("--dry-run")
-        # Use global quiet flag
-        if getattr(args, "global_quiet", False):
+        # Use command-level quiet or global quiet
+        if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
             sub_argv.append("--quiet")
         if getattr(args, "format", "text") != "text":
             sub_argv.extend(["--format", args.format])

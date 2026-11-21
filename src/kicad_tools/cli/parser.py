@@ -4339,12 +4339,19 @@ def _add_zones_parser(subparsers) -> None:
     zones_add.add_argument("--min-thickness", type=float, default=0.25, help="Min thickness in mm")
     zones_add.add_argument("-v", "--verbose", action="store_true")
     zones_add.add_argument("--dry-run", action="store_true")
+    zones_add.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
     add_format_flag(zones_add)
 
     # zones list
     zones_list = zones_subparsers.add_parser("list", help="List existing zones")
     zones_list.add_argument("pcb", help="Path to .kicad_pcb file")
     zones_list.add_argument("--format", choices=["text", "json"], default="text")
+    zones_list.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Accepted for consistency; the listing is always printed",
+    )
 
     # zones batch
     zones_batch = zones_subparsers.add_parser("batch", help="Add multiple zones from spec")
@@ -4362,6 +4369,7 @@ def _add_zones_parser(subparsers) -> None:
     zones_batch.add_argument("--clearance", type=float, default=0.3, help="Clearance in mm")
     zones_batch.add_argument("-v", "--verbose", action="store_true")
     zones_batch.add_argument("--dry-run", action="store_true")
+    zones_batch.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
     add_format_flag(zones_batch)
 
     # zones hv-keepout
@@ -4400,6 +4408,7 @@ def _add_zones_parser(subparsers) -> None:
     )
     zones_hv.add_argument("-v", "--verbose", action="store_true")
     zones_hv.add_argument("--dry-run", action="store_true")
+    zones_hv.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
     add_format_flag(zones_hv)
 
     # zones fill
@@ -4411,6 +4420,7 @@ def _add_zones_parser(subparsers) -> None:
     zones_fill.add_argument(
         "--dry-run", action="store_true", help="Show what would be done, no output"
     )
+    zones_fill.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
     add_format_flag(zones_fill)
 
 
