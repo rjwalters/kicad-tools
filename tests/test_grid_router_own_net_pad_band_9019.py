@@ -31,7 +31,7 @@ import pytest
 from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, router_cpp
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerDefinition, LayerStack, LayerType
-from kicad_tools.router.neck_down import band_safe_width
+from kicad_tools.router.neck_down import band_safe_taper, band_safe_width
 from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
@@ -643,3 +643,147 @@ class TestBandFallbackRetry:
         assert getattr(cpp, "_own_net_band_fallbacks", 0) == 1
         assert sum("gate suspended" in r.message for r in caplog.records) == 1
         assert len(fallback_calls) == 1
+
+
+class TestDiagonalCornerFuse:
+    """``band_safe_taper``: a taper piece no width can lift out of the band
+    is fused into one that reaches the pad (board 06 U4.1, #9019).
+
+    The board 06 seed-42 grid route approaches U4.1 (0.7 x 0.3 mm, MIPI_CLK+)
+    on a 45-degree diagonal past the pad's corner.  The #1018 taper cuts that
+    diagonal into 0.025 mm pieces; the one ending at (125.15, 115.15) is
+    0.200 mm from the pad and sits in ``(0, 0.15)`` at the taper width 0.1627
+    AND at the base width 0.225, and since it does not itself touch the pad
+    the fab view grades its end cap as a 0.14229 mm slit.
+    """
+
+    U41 = [(125.15, 115.35, 125.85, 115.65)]
+    # (start, end, width) as the seed-42 C++ conversion emitted them.
+    PIECES = [
+        ((125.1, 115.1), (125.125, 115.125), 0.167),
+        ((125.125, 115.125), (125.15, 115.15), 0.1627),
+        ((125.15, 115.15), (125.175, 115.175), 0.1583),
+        ((125.175, 115.175), (125.2, 115.2), 0.154),
+        ((125.2, 115.2), (125.225, 115.225), 0.1496),
+        ((125.225, 115.225), (125.275, 115.275), 0.225),
+        ((125.275, 115.275), (125.3, 115.3), 0.1365),
+        ((125.3, 115.3), (125.325, 115.325), 0.1321),
+        ((125.325, 115.325), (125.35, 115.35), 0.1278),
+    ]
+
+    def _ok(self, a, b, w) -> bool:
+        return same_net_segment_pad_gap_acceptable(a, b, w / 2, self.U41, EDGE)
+
+    def test_u41_pieces_are_fused_out_of_the_band(self) -> None:
+        a, b, w = self.PIECES[1]
+        assert not self._ok(a, b, w), "taper width must sit in the band"
+        assert not self._ok(a, b, 0.225), "base width must sit in the band too"
+        out = band_safe_taper(list(self.PIECES), self.U41, EDGE)
+        assert all(self._ok(s, e, w) for s, e, w in out)
+        # Contiguous and covering the same centerline.
+        assert out[0][0] == self.PIECES[0][0] and out[-1][1] == self.PIECES[-1][1]
+        assert all(x[1] == y[0] for x, y in zip(out, out[1:], strict=False))
+        # The fused piece is never wider than the pieces it replaced.
+        assert out[0] == ((125.1, 115.1), (125.3, 115.3), 0.1365)
+
+    def test_clean_taper_is_unchanged(self) -> None:
+        pieces = [((0.0, 3.0), (0.05, 3.0), 0.2), ((0.05, 3.0), (0.1, 3.0), 0.15)]
+        assert band_safe_taper(pieces, self.U41, EDGE) == pieces
+        assert band_safe_taper(pieces, None, EDGE) == pieces
+        assert band_safe_taper(pieces, self.U41, 0.0) == pieces
+
+    def test_fuse_never_crosses_a_corner(self) -> None:
+        # The in-band piece's only touching neighbour is round a corner:
+        # fusing across it would change the centerline, so it stands.
+        bent = [self.PIECES[1], ((125.15, 115.15), (125.15, 115.4), 0.1583)]
+        assert band_safe_taper(bent, self.U41, EDGE) == bent
+
+    # A conversion-level copy of the U4.1 shape, so a call site that drops
+    # the fuse fails here on both backends.
+    def _conv_rules(self) -> DesignRules:
+        return DesignRules(
+            trace_width=0.225,
+            trace_clearance=0.15,
+            min_trace_width=0.1016,
+            grid_resolution=0.05,
+            same_net_pad_gap_band_edge_mm=EDGE,
+        )
+
+    def _conv_pads(self) -> tuple[Pad, Pad, Pad]:
+        # End pad B: 0.7 x 0.3 like U4.1, with a fine-pitch neighbour B2.
+        a = _pad(1.0, 3.1, 0.3, 0.3)
+        b = _pad(5.5, 3.5, 0.7, 0.3)
+        b2 = Pad(
+            x=5.5, y=4.1, width=0.7, height=0.3, net=NET + 1, net_name="N2",
+            layer=Layer.F_CU, ref="U1", pin="2",
+        )  # fmt: skip
+        return a, b, b2
+
+    def _conv_path(self) -> list[tuple[float, float, int, bool]]:
+        row = [(round(1.0 + 0.05 * i, 2), 3.1, 0, False) for i in range(83)]  # to x=5.1
+        diag = [(round(5.1 + 0.05 * i, 2), round(3.1 + 0.05 * i, 2), 0, False) for i in range(1, 9)]
+        return row + diag
+
+    def _assert_fused(self, route, b: Pad) -> None:
+        box = [(b.x - b.width / 2, b.y - b.height / 2, b.x + b.width / 2, b.y + b.height / 2)]
+        diagonal = [s for s in route.segments if s.x1 != s.x2 and s.y1 != s.y2]
+        assert any(s.width < 0.225 for s in diagonal), "fixture must exercise the taper"
+        for s in route.segments:
+            assert same_net_segment_pad_gap_acceptable(
+                (s.x1, s.y1), (s.x2, s.y2), s.width / 2, box, EDGE
+            ), f"segment {s.x1},{s.y1}->{s.x2},{s.y2} w{s.width} sits in the band"
+
+    def _python_route(self):
+        rules = self._conv_rules()
+        grid = RoutingGrid(width=8.0, height=6.0, rules=rules, layer_stack=LayerStack.two_layer())
+        a, b, b2 = self._conv_pads()
+        for p in (a, b, b2):
+            grid.add_pad(p)
+        router = Router(grid, rules, diagonal_routing=True)
+        assert router.rules.should_apply_neck_down(b.ref, 0.6), "fixture must be fine-pitch"
+        route = _new_route(a)
+        router._convert_path_to_route(self._conv_path(), route, a, b)
+        return route, b
+
+    def test_python_conversion_fuses_the_corner_piece(self) -> None:
+        route, b = self._python_route()
+        self._assert_fused(route, b)
+
+    @pytest.mark.requires_router_cpp
+    def test_cpp_conversion_fuses_across_cells(self) -> None:
+        py_route, b = self._python_route()
+        self._assert_fused(py_route, b)
+        rules = self._conv_rules()
+        a, b, b2 = self._conv_pads()
+        pitches = {"U1": 0.6}
+        finder = SimpleNamespace(
+            _rules=rules,
+            _grid=SimpleNamespace(
+                num_layers=1,
+                index_to_layer=lambda i: (Layer.F_CU.value, Layer.B_CU.value)[i],
+                resolution=0.05,
+                _py_grid=SimpleNamespace(_pads=[a, b, b2]),
+            ),
+            _get_component_pitches=lambda: pitches,
+        )
+        # The native adapter passes one segment per grid cell (the Python
+        # router merges collinear steps first): the fuse must span cells.
+        cells = [(x, y) for x, y, _layer, _via in self._conv_path()]
+        result = SimpleNamespace(
+            segments=[
+                SimpleNamespace(x1=p[0], y1=p[1], x2=q[0], y2=q[1], layer=0, net=NET)
+                for p, q in zip(cells, cells[1:], strict=False)
+            ],
+            vias=[],
+        )
+        cpp_route = CppPathfinder._convert_result_to_route(finder, result, a, b, None)
+        self._assert_fused(cpp_route, b)
+        # The fuse spans grid cells: one diagonal piece longer than a cell.
+        cell = math.hypot(0.05, 0.05)
+        assert any(
+            s.x1 != s.x2 and s.y1 != s.y2 and math.hypot(s.x2 - s.x1, s.y2 - s.y1) > cell + 1e-6
+            for s in cpp_route.segments
+        ), "the in-band piece must be fused across cells"
+        # Byte parity is not asserted: the native adapter tapers per cell and
+        # Python per merged run, so the taper cut positions differ (#9851).
+        # Both must clear the band, checked above.
