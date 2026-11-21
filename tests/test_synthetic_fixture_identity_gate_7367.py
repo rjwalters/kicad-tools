@@ -159,7 +159,10 @@ BOARD07_MASK_NETS = (
 # #9124 drained the PCIE_RX+ face-aligned corner wedge (a tangent via seat)
 # alongside board 07's six; #9208 drained the USB2_D- annulus-vs-own-net-TRACE
 # slit (via re-seated 0.1 mm further out, C++ own-net-trace band check).
-BOARD06_GAP_NETS = ("GND", "MIPI_CLK+")
+# #9846 drained the GND half (the stitcher refuses/relocates stub legs in
+# the band: board 06's U2.B4 / U3.48 GND tracks); the MIPI_CLK+ taper stays
+# with #9019.
+BOARD06_GAP_NETS = ("MIPI_CLK+",)
 
 # Issue #8858 (measured 2026-11-18, pinned image, seed-42 regen at main
 # 304c70e2c): every ``mask_to_copper`` error net signature the regeneration

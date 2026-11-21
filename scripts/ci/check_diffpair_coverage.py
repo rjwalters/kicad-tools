@@ -287,8 +287,13 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # In run 44811568469 boards 00/01 passed and board 07 had only its 54 allowed
 # mask errors. Boards 02-05 remained red (THT/SMD spacing, mask exposure,
 # reviewed drill validation and manufacturer checks, respectively).
+# Issue #9846 drained the GND half: the stitcher's ordinary ``run_stitch``
+# path now runs the #9012 two-region segment predicate over every emitted
+# stub leg (layer-aware, at the strategy ladder and the commit chokepoint),
+# so the U2.B4 0.125 mm and U3.48 0.100 mm GND tracks are refused or
+# relocated and the GND entry is deleted. The MIPI_CLK+ half (U4.1 grid
+# taper) stays with #9019.
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
-    ("physical_copper_gap", "GND"): 8962,
     ("physical_copper_gap", "MIPI_CLK+"): 8962,
     # Issue #8858 (measured 2026-11-18 at main 304c70e2c, pinned image
     # kicad/kicad@sha256:18693567 -- the digest CI's KICAD_IMAGE pins): the

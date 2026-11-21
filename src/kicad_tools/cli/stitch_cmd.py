@@ -64,6 +64,7 @@ from kicad_tools.router.via_clearance import (
     HOLE_TO_HOLE_TOLERANCE,
     drill_hole_to_hole_clear,
     same_net_pad_gap_acceptable,
+    same_net_segment_pad_gap_acceptable,
 )
 from kicad_tools.schema.pcb import _is_footprint_tag
 from kicad_tools.sexp import SExp
@@ -1090,37 +1091,40 @@ def find_pads_on_nets(sexp: SExp, net_names: set[str]) -> list[PadInfo]:
     return pads
 
 
-def find_smd_pad_bboxes_on_nets(
+def _pad_copper_layer(pad: SExp, fp_layer: str) -> str:
+    """The copper layer an SMD pad lives on (Issue #9846).
+
+    Reads the pad's own ``(layers ...)`` node and returns its first
+    concrete copper spec (``F.Cu`` / ``B.Cu`` / ``In*.Cu``); falls back to
+    the footprint's layer for wildcard or missing specs (an SMD pad sits
+    on its footprint's side).
+    """
+    layers_node = pad.find_child("layers")
+    if layers_node:
+        for child in layers_node.children:
+            spec = child.value if child.name is None else None
+            if (
+                isinstance(spec, str)
+                and spec.endswith(".Cu")
+                and "*" not in spec
+                and "&" not in spec
+            ):
+                return spec
+    return fp_layer
+
+
+def _iter_smd_pad_bbox_records(
     sexp: SExp,
     net_numbers: set[int],
-) -> list[tuple[int, float, float, float, float]]:
-    """Return axis-aligned bounding boxes for SMD pads on the given nets.
+) -> list[tuple[int, float, float, float, float, str]]:
+    """Per-pad ``(net, min_x, min_y, max_x, max_y, layer)`` SMD records.
 
-    Issue #3271: the stitch ``--avoid-pad-overlap`` post-filter (see
-    ``run_stitch``) drops via placements whose drill circle would be fully
-    contained inside an SMD pad on the same net.  This mirrors the
-    geometry used by
-    :class:`kicad_tools.validate.rules.via_in_pad.ViaInPadRule` so the
-    stitch tool can pre-empt the same DRC violations that rule would later
-    flag under manufacturer profiles that forbid via-in-pad processing
-    (e.g. ``jlcpcb`` standard tier).
-
-    Through-hole pads are excluded because they have their own plated hole
-    -- a via inside them is not a manufacturability concern.
-
-    Args:
-        sexp: PCB S-expression.
-        net_numbers: Net numbers to include (typically the same set the
-            stitcher targets).
-
-    Returns:
-        List of ``(net_num, min_x, min_y, max_x, max_y)`` tuples in board
-        coordinates (mm).  Bbox is the AABB of the rotated rectangle
-        matching ``via_in_pad._pad_absolute_bbox`` for cardinal rotations
-        (and the conservative AABB-of-rotated-rect for non-cardinal
-        angles).
+    The shared scan behind :func:`find_smd_pad_bboxes_on_nets` and (Issue
+    #9846) :func:`find_smd_pad_bboxes_with_layer_on_nets`; geometry mirrors
+    ``via_in_pad._pad_absolute_bbox`` (cardinal rotations swap dimensions,
+    other rotations use the conservative AABB of the rotated rect).
     """
-    bboxes: list[tuple[int, float, float, float, float]] = []
+    records: list[tuple[int, float, float, float, float, str]] = []
     name_to_num = get_name_to_net_map(sexp)
 
     for fp in sexp.iter_children():
@@ -1133,6 +1137,8 @@ def find_smd_pad_bboxes_on_nets(
         fp_x = at_node.get_float(0) or 0.0
         fp_y = at_node.get_float(1) or 0.0
         fp_rotation_deg = at_node.get_float(2) or 0.0
+        layer_node = fp.find_child("layer")
+        fp_layer = (layer_node.get_string(0) if layer_node else None) or "F.Cu"
         # KiCad applies the footprint orientation as a NEGATED angle vs
         # standard CCW math (verified vs pcbnew, issue #3739).
         rad = math.radians(-fp_rotation_deg)
@@ -1184,17 +1190,71 @@ def find_smd_pad_bboxes_on_nets(
 
             half_w = bbox_w / 2
             half_h = bbox_h / 2
-            bboxes.append(
+            records.append(
                 (
                     net_num,
                     board_x - half_w,
                     board_y - half_h,
                     board_x + half_w,
                     board_y + half_h,
+                    _pad_copper_layer(pad, fp_layer),
                 )
             )
 
-    return bboxes
+    return records
+
+
+def find_smd_pad_bboxes_on_nets(
+    sexp: SExp,
+    net_numbers: set[int],
+) -> list[tuple[int, float, float, float, float]]:
+    """Return axis-aligned bounding boxes for SMD pads on the given nets.
+
+    Issue #3271: the stitch ``--avoid-pad-overlap`` post-filter (see
+    ``run_stitch``) drops via placements whose drill circle would be fully
+    contained inside an SMD pad on the same net.  This mirrors the
+    geometry used by
+    :class:`kicad_tools.validate.rules.via_in_pad.ViaInPadRule` so the
+    stitch tool can pre-empt the same DRC violations that rule would later
+    flag under manufacturer profiles that forbid via-in-pad processing
+    (e.g. ``jlcpcb`` standard tier).
+
+    Through-hole pads are excluded because they have their own plated hole
+    -- a via inside them is not a manufacturability concern.
+
+    Args:
+        sexp: PCB S-expression.
+        net_numbers: Net numbers to include (typically the same set the
+            stitcher targets).
+
+    Returns:
+        List of ``(net_num, min_x, min_y, max_x, max_y)`` tuples in board
+        coordinates (mm).  Bbox is the AABB of the rotated rectangle
+        matching ``via_in_pad._pad_absolute_bbox`` for cardinal rotations
+        (and the conservative AABB-of-rotated-rect for non-cardinal
+        angles).
+    """
+    return [
+        (net_num, min_x, min_y, max_x, max_y)
+        for net_num, min_x, min_y, max_x, max_y, _layer in _iter_smd_pad_bbox_records(
+            sexp, net_numbers
+        )
+    ]
+
+
+def find_smd_pad_bboxes_with_layer_on_nets(
+    sexp: SExp,
+    net_numbers: set[int],
+) -> list[tuple[int, float, float, float, float, str]]:
+    """Per-layer SMD pad bboxes on the given nets (Issue #9846).
+
+    Same records as :func:`find_smd_pad_bboxes_on_nets` but each entry
+    keeps the pad's copper layer as its sixth element, so the stitcher's
+    STUB-track slit-band check can see only the same-net SMD pads that
+    share copper with the emitted trace -- a pad on the opposite outer
+    layer never shares copper with an F.Cu track and must not reject it.
+    """
+    return _iter_smd_pad_bbox_records(sexp, net_numbers)
 
 
 def find_all_pad_bboxes(
@@ -2488,6 +2548,7 @@ def calculate_via_stub(
     pad_edge_guard: PadEdgeGuard | None = None,
     same_net_pad_bboxes: list[tuple[float, float, float, float]] | None = None,
     same_net_pad_gap_mm: float = 0.0,
+    same_net_stub_pad_bboxes: list[tuple[float, float, float, float]] | None = None,
 ) -> tuple[float, float, tuple[float, float] | None] | None:
     """Calculate a valid via placement position near the pad.
 
@@ -2566,6 +2627,17 @@ def calculate_via_stub(
             of a mm off-axis), the :func:`legalize_stub_path` variants
             (``axis_first`` values) tried, in order.  The first whose legs
             clear wins and its vertex is returned as ``corner``.
+        same_net_stub_pad_bboxes: Issue #9846 -- same-net SMD pad bboxes
+            that share copper with the EMITTED STUB (the trace's layer;
+            see ``find_smd_pad_bboxes_with_layer_on_nets``), for the
+            per-leg slit-band check of the stub track itself.  The
+            ``same_net_pad_bboxes`` annulus band above seats the VIA only;
+            this one keeps the 0.2 mm pad-to-via TRACK out of the
+            ``(0, same_net_pad_gap_mm)`` band beside a same-net pad (the
+            board 06 U2.B4 / U3.48 0.2 mm GND stubs).  A leg touching its
+            own pad is a copper union; a gap at/beyond the edge is not a
+            finding.  ``None``/empty (or ``same_net_pad_gap_mm <= 0``)
+            disables the check.
     """
     if other_net_tracks is None:
         other_net_tracks = []
@@ -2794,6 +2866,15 @@ def calculate_via_stub(
             for stub_path in stub_paths:
                 if trace_width > 0 and not _stub_path_clear(stub_path):
                     continue
+                # Issue #9846: the emitted stub TRACK must keep each leg out
+                # of the same-net slit band, exactly as the annulus check
+                # above seats the via -- a 0.2 mm leg skirting a same-net pad
+                # inside the detection edge is a fab physical_copper_gap
+                # finding the annulus check never sees.
+                if trace_width > 0 and not _stub_legs_same_net_band_ok(
+                    stub_path, trace_half_width, same_net_stub_pad_bboxes, same_net_pad_gap_mm
+                ):
+                    continue
                 corner = stub_path[1] if len(stub_path) == 3 else None
                 return (via_x, via_y, corner)
 
@@ -2939,6 +3020,46 @@ def _check_stub_path_clearance(
     return True
 
 
+def _stub_legs_same_net_band_ok(
+    points: Sequence[tuple[float, float]],
+    half_width: float,
+    same_net_pad_bboxes: list[tuple[float, float, float, float]] | None,
+    min_gap_mm: float,
+) -> bool:
+    """True iff every leg of a stub polyline keeps its copper gap to the
+    same-net SMD pads out of the fab-view slit band (Issue #9846).
+
+    The #8957 annulus guard seats the VIA; nothing constrained the emitted
+    TRACK beside it.  A 0.2 mm pad-to-via stub whose centerline skirts a
+    same-net pad at 0.100 / 0.125 mm (board 06 U3.48 / U2.B4) leaves a slit
+    the fab-view ``physical_copper_gap`` grading reports regardless of
+    nets -- the fab sees copper, not nets, and the signal router skips GND
+    so no later gate sees the track either.
+
+    Each leg goes through
+    :func:`~kicad_tools.router.via_clearance.same_net_segment_pad_gap_acceptable`
+    with the EMITTED half width: a leg touching / overlapping its own pad
+    is one copper union (the stub starts at the pad centre, so ``gap == 0``
+    there means the centerline reaches the rectangle -- a union), and a
+    gap at or beyond ``min_gap_mm`` (the ``pad_spacing`` dfm entry's
+    ``GapBand.detection_edge_mm``) is not a fab finding.  ``points`` must
+    be the WRITTEN vertices (:func:`legalize_stub_path` /
+    :func:`trace_points`), and ``same_net_pad_bboxes`` only pads that share
+    copper with the stub's layer -- the caller filters (see
+    ``run_stitch``'s ``vip_bboxes_by_net_layer``).
+
+    ``min_gap_mm <= 0`` or an empty pad list disables the test.
+    """
+    if min_gap_mm <= 0 or not same_net_pad_bboxes:
+        return True
+    for a, b in zip(points, points[1:], strict=False):
+        if not same_net_segment_pad_gap_acceptable(
+            a, b, half_width, same_net_pad_bboxes, min_gap_mm
+        ):
+            return False
+    return True
+
+
 def calculate_dogleg_via_position(
     pad: PadInfo,
     offset: float,
@@ -2960,6 +3081,7 @@ def calculate_dogleg_via_position(
     pad_edge_guard: PadEdgeGuard | None = None,
     same_net_pad_bboxes: list[tuple[float, float, float, float]] | None = None,
     same_net_pad_gap_mm: float = 0.0,
+    same_net_stub_pad_bboxes: list[tuple[float, float, float, float]] | None = None,
 ) -> tuple[float, float, float, float] | None:
     """Calculate a dog-leg (L-shaped) via placement for fine-pitch components.
 
@@ -3001,6 +3123,10 @@ def calculate_dogleg_via_position(
             point and every leg are cleared against them (rect pads by
             their box, circle pads exactly) instead of the circle model in
             ``other_net_pads``, which under-sizes a rect pad's corner.
+        same_net_stub_pad_bboxes: Issue #9846 -- same-net SMD pad bboxes on
+            the emitted stub's layer, for the per-leg slit-band check of the
+            stub track (see ``calculate_via_stub``; the ``same_net_pad_bboxes``
+            annulus band seats the via only).
 
     Returns:
         Tuple of (via_x, via_y, intermediate_x, intermediate_y) for an L-shaped
@@ -3270,6 +3396,16 @@ def calculate_dogleg_via_position(
                             other_net_pad_bboxes=other_net_pad_bboxes,
                         ):
                             continue
+                        # Issue #9846: the dog-leg stub TRACK keeps each leg
+                        # out of the same-net slit band (annulus band above
+                        # seats the via only).
+                        if not _stub_legs_same_net_band_ok(
+                            stub_path,
+                            trace_half_width,
+                            same_net_stub_pad_bboxes,
+                            same_net_pad_gap_mm,
+                        ):
+                            continue
 
                     return (via_x, via_y, stub_path[1][0], stub_path[1][1])
 
@@ -3470,6 +3606,7 @@ def calculate_extended_escape_position(
     keepouts: Sequence[KeepoutPolygon] = (),
     same_net_pad_bboxes: list[tuple[float, float, float, float]] | None = None,
     same_net_pad_gap_mm: float = 0.0,
+    same_net_stub_pad_bboxes: list[tuple[float, float, float, float]] | None = None,
 ) -> tuple[float, float, list[tuple[float, float]]] | None:
     """Calculate an extended escape route for pads in dense IC pin fields.
 
@@ -3516,6 +3653,10 @@ def calculate_extended_escape_position(
             point and every leg are cleared against them (rect pads by
             their box, circle pads exactly) instead of the circle model in
             ``other_net_pads``, which under-sizes a rect pad's corner.
+        same_net_stub_pad_bboxes: Issue #9846 -- same-net SMD pad bboxes on
+            the emitted escape's layer, for the per-leg slit-band check of
+            the stub track (see ``calculate_via_stub``; the
+            ``same_net_pad_bboxes`` annulus band seats the via only).
 
     Returns:
         Tuple of (via_x, via_y, waypoints) where waypoints is a list of
@@ -3733,6 +3874,16 @@ def calculate_extended_escape_position(
                             keepouts=keepouts,
                         ):
                             continue
+                        # Issue #9846: keep every emitted leg out of the
+                        # same-net slit band (the annulus check in
+                        # ``_check_via_position`` seats the via only).
+                        if not _stub_legs_same_net_band_ok(
+                            path_points,
+                            trace_half_width,
+                            same_net_stub_pad_bboxes,
+                            same_net_pad_gap_mm,
+                        ):
+                            continue
 
                     waypoints = [(waypoint_x, waypoint_y)]
                     return (via_x, via_y, waypoints)
@@ -3780,6 +3931,16 @@ def calculate_extended_escape_position(
                             stub_layer=_stub_layer(pad),
                             other_net_pad_bboxes=other_net_pad_bboxes,
                             keepouts=keepouts,
+                        ):
+                            continue
+                        # Issue #9846: keep every emitted leg out of the
+                        # same-net slit band (the annulus check in
+                        # ``_check_via_position`` seats the via only).
+                        if not _stub_legs_same_net_band_ok(
+                            path_points,
+                            trace_half_width,
+                            same_net_stub_pad_bboxes,
+                            same_net_pad_gap_mm,
                         ):
                             continue
 
@@ -3839,6 +4000,16 @@ def calculate_extended_escape_position(
                                 stub_layer=_stub_layer(pad),
                                 other_net_pad_bboxes=other_net_pad_bboxes,
                                 keepouts=keepouts,
+                            ):
+                                continue
+                            # Issue #9846: keep every emitted leg out of the
+                            # same-net slit band (the annulus check in
+                            # ``_check_via_position`` seats the via only).
+                            if not _stub_legs_same_net_band_ok(
+                                path_points,
+                                trace_half_width,
+                                same_net_stub_pad_bboxes,
+                                same_net_pad_gap_mm,
                             ):
                                 continue
 
@@ -3963,6 +4134,16 @@ def calculate_extended_escape_position(
 
             for path_points in path_options:
                 if not _check_path_layer_aware(path_points):
+                    continue
+                # Issue #9846: keep every emitted leg out of the same-net
+                # slit band (the annulus check in ``_check_via_position``
+                # seats the via only).
+                if not _stub_legs_same_net_band_ok(
+                    path_points,
+                    trace_half_width,
+                    same_net_stub_pad_bboxes,
+                    same_net_pad_gap_mm,
+                ):
                     continue
                 return (via_x, via_y, path_points[1:-1])
 
@@ -6190,7 +6371,11 @@ def run_stitch(
             union) and gaps at/beyond the edge stay acceptable.  The CLI
             resolves it from the ``--mfr`` profile's ``pad_spacing`` dfm
             entry (``GapBand.detection_edge_mm``); ``0.0`` (default) disables
-            the guard.  A placement no acceptable strategy can seat is
+            the guard.  Issue #9846 extends the same band to the emitted
+            pad-to-via STUB: every leg of the written trace is held to the
+            two-region predicate against same-net SMD pads on the trace's
+            layer, at the strategy level (the ladder relocates) and at the
+            commit chokepoint.  A placement no acceptable strategy can seat is
             dropped with an explicit ``same_net_pad_gap`` skip reason and
             counted in ``StitchResult.same_net_pad_gap_filtered``.
 
@@ -6440,6 +6625,12 @@ def run_stitch(
         # Per-pad obstacle pools including SIBLING stitch-net pads (see
         # ``_sibling_pools`` above -- board 07 +1V2 via on +1V8 pad short).
         eff_pads, eff_pad_bboxes, eff_drills = _sibling_pools(pad)
+        # Issue #9846: same-net SMD pads sharing copper with the emitted
+        # stub TRACK (the trace is written on ``pad.layer``), for the
+        # per-leg slit-band check -- the annulus ``same_net_pad_bboxes``
+        # pool below seats the via only and never sees the 0.2 mm legs
+        # (board 06 U2.B4 / U3.48 GND stubs).
+        stub_band_bboxes = vip_bboxes_by_net_layer.get((pad.net_number, pad.layer), [])
         # Issue #6400: own-net fill gate + sibling fills as foreign copper.
         own_net_fill, eff_other_fill = _fill_pools(pad)
 
@@ -6477,6 +6668,7 @@ def run_stitch(
             # Issue #8957: same-net SMD pad slit band (annulus vs pad edge).
             same_net_pad_bboxes=vip_bboxes_by_net.get(pad.net_number),
             same_net_pad_gap_mm=pad_band_edge_mm,
+            same_net_stub_pad_bboxes=stub_band_bboxes,
             # Issue #6401: the site ``kct route`` reserved for this pad.
             preferred_positions=(preferred_sites or {}).get(
                 f"{pad.reference}.{pad.pad_number}", ()
@@ -6516,6 +6708,7 @@ def run_stitch(
                 pad_edge_guard=pad_edge_guard,
                 same_net_pad_bboxes=vip_bboxes_by_net.get(pad.net_number),
                 same_net_pad_gap_mm=pad_band_edge_mm,
+                same_net_stub_pad_bboxes=stub_band_bboxes,
             )
 
             if dogleg_pos is None:
@@ -6544,6 +6737,7 @@ def run_stitch(
                     keepouts=[k for k in eff_other_fill if isinstance(k, KeepoutPolygon)],
                     same_net_pad_bboxes=vip_bboxes_by_net.get(pad.net_number),
                     same_net_pad_gap_mm=pad_band_edge_mm,
+                    same_net_stub_pad_bboxes=stub_band_bboxes,
                 )
 
                 if extended_pos is None:
@@ -6571,6 +6765,7 @@ def run_stitch(
                             pad_edge_guard=pad_edge_guard,
                             same_net_pad_bboxes=vip_bboxes_by_net.get(pad.net_number),
                             same_net_pad_gap_mm=pad_band_edge_mm,
+                            same_net_stub_pad_bboxes=stub_band_bboxes,
                         )
                         micro_pos, micro_corner_pos = _split_via_stub(micro_stub)
                         if micro_corner_pos is not None:
@@ -6598,6 +6793,7 @@ def run_stitch(
                                 pad_edge_guard=pad_edge_guard,
                                 same_net_pad_bboxes=vip_bboxes_by_net.get(pad.net_number),
                                 same_net_pad_gap_mm=pad_band_edge_mm,
+                                same_net_stub_pad_bboxes=stub_band_bboxes,
                             )
                             if micro_dogleg is not None:
                                 # Use micro dogleg
@@ -6627,6 +6823,7 @@ def run_stitch(
                                 ],
                                 same_net_pad_bboxes=vip_bboxes_by_net.get(pad.net_number),
                                 same_net_pad_gap_mm=pad_band_edge_mm,
+                                same_net_stub_pad_bboxes=stub_band_bboxes,
                             )
                             if micro_extended is not None:
                                 return (None, None, micro_extended, True)
@@ -6662,14 +6859,22 @@ def run_stitch(
     # placements the rule would flag.  Through-hole pads are excluded: they
     # already have a plated hole.
     vip_bboxes_by_net: dict[int, list[tuple[float, float, float, float]]] = {}
+    # Issue #9846: the same records keyed by (net, layer) for the STUB-track
+    # slit-band check -- the emitted pad-to-via trace lives on one layer, so
+    # only the same-net SMD pads on THAT layer share copper with it (a pad
+    # on the opposite outer layer is not a fab finding against this track).
+    vip_bboxes_by_net_layer: dict[tuple[int, str], list[tuple[float, float, float, float]]] = {}
     if avoid_pad_overlap:
         net_numbers_local = {
             num for num, name in get_net_map(sexp).items() if name in set(net_names)
         }
-        for net_num, min_x, min_y, max_x, max_y in find_smd_pad_bboxes_on_nets(
+        for net_num, min_x, min_y, max_x, max_y, layer in find_smd_pad_bboxes_with_layer_on_nets(
             sexp, net_numbers_local
         ):
             vip_bboxes_by_net.setdefault(net_num, []).append((min_x, min_y, max_x, max_y))
+            vip_bboxes_by_net_layer.setdefault((net_num, layer), []).append(
+                (min_x, min_y, max_x, max_y)
+            )
 
     # Issue #8957: the same-net pad slit band is a property of the
     # avoid_pad_overlap mode -- that mode is what pushes vias just outside
@@ -6701,7 +6906,9 @@ def run_stitch(
     # Drills of the stitch vias KEPT so far, in loop order.
     kept_stitch_drills: list[tuple[float, float, float]] = []
 
-    def _commit_drop_reason(placement: ViaPlacement) -> str | None:
+    def _commit_drop_reason(
+        placement: ViaPlacement, trace: TraceSegment | None = None
+    ) -> str | None:
         """Return the skip reason if a filter drops ``placement``, else ``None``.
 
         Issue #6684: also bumps the matching filter counter on a drop.  The
@@ -6779,6 +6986,28 @@ def run_stitch(
                     "same_net_pad_gap: stitch via annulus sits within the "
                     f"{pad_band_edge_mm:.2f}mm fab-view slit band of a "
                     "same-net SMD pad (#8957); pad relies on the plane pour "
+                    "for connectivity"
+                )
+
+        # Issue #9846: emitted-track backstop.  The per-strategy checks reject
+        # band candidates so the ladder can walk to a legal alternative; this
+        # chokepoint guarantees no committed stub TRACK (micro /
+        # connectivity-fallback paths included) leaves a leg inside the band
+        # beside a same-net SMD pad on the trace's layer -- the legs are the
+        # exact vertices the writer emits (``trace_points``).  The placement
+        # is dropped and the pad REPORTED (pour fallback), not silently lost.
+        if pad_band_edge_mm > 0 and trace is not None:
+            leg_bboxes = vip_bboxes_by_net_layer.get(
+                (placement.pad.net_number, placement.pad.layer), []
+            )
+            if not _stub_legs_same_net_band_ok(
+                trace_points(trace), trace.width / 2, leg_bboxes, pad_band_edge_mm
+            ):
+                result.same_net_pad_gap_filtered += 1
+                return (
+                    "same_net_pad_gap: stitch stub track passes within the "
+                    f"{pad_band_edge_mm:.2f}mm fab-view slit band of a "
+                    "same-net SMD pad (#9846); pad relies on the plane pour "
                     "for connectivity"
                 )
         return None
@@ -7149,7 +7378,7 @@ def run_stitch(
         # dropped via never counts as connectivity for a later same-net pad,
         # never sits in the cross-net obstacle pool and is never counted.
         # The dropped pad is skipped and falls back to the pour.
-        drop_reason = _commit_drop_reason(placement)
+        drop_reason = _commit_drop_reason(placement, trace)
         if drop_reason is not None:
             result.pads_skipped.append((pad, drop_reason))
             continue
