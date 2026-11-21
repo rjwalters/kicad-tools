@@ -402,7 +402,9 @@ namespace router {
 // union with its own SMD pad only when it overlaps the AABB's inscribed
 // stadium at least the union depth deep.  A v75 .so accepts any overlap of
 // the box, seating vias in a rounded pad's corner air or a shallow wedge the
-// fab-view checker grades as ``physical_copper_gap``.
+// fab-view checker grades as ``physical_copper_gap``.  The pad copper's
+// corner radius rides on ``PadInfo::copper_corner_radius`` (``add_pad``'s
+// ``copper_corner_radius``; a ``rect`` pad's square corner is real copper).
 constexpr int ROUTER_CPP_BUILD_VERSION = 76;
 
 
@@ -902,6 +904,12 @@ struct PadInfo {
     // the exact pad test (``pad_geometry_clear``) holds a step to this value
     // instead of the board-wide largest class.
     float class_clearance = 0.0f;
+    // Issue #9424: the pad copper's corner radius for the same-net via union
+    // test (``same_net_pad_gap_in_band``), from Python
+    // ``via_clearance.pad_union_corner_radius``: 0 for a ``rect`` pad, half
+    // the short side for circle/oval, ``rratio * min(w, h)`` for a known
+    // roundrect.  Negative = unknown: the inscribed stadium (conservative).
+    float copper_corner_radius = -1.0f;
 };
 
 // Issue #8994: half extents of the AABB the Python pad model gives a pad --
@@ -964,31 +972,45 @@ inline bool same_net_pad_gap_in_band(double wx, double wy, double annulus_half_m
     if (!(gap < edge_mm - 1e-9)) return false;  // clear of the detection edge
     // Issue #9424 (supersedes the #9124 tangent epsilon): inside the edge the
     // seat is a union only when the annulus overlaps REAL copper by at least
-    // the union depth.  Overlap is measured against the stadium inscribed in
-    // the AABB (corner radius min(half_w, half_h)), which every rect,
-    // roundrect, oval and circle pad of that box contains -- a seat that only
-    // overlaps the box's square corner of a rounded pad is air beside the
-    // copper.  A shallow overlap is not a union either: the lens leaves a
-    // wedge the checker still grades.  Mirror of Python
-    // ``via_clearance.same_net_pad_union_depth_mm`` (keep the two in step):
+    // the union depth at every point where the two outlines cross.  Mirror
+    // of Python ``via_clearance._pad_union_ok`` /
+    // ``same_net_pad_union_depth_mm`` (keep the two in step):
     //   d = r - sqrt(r^2 - c^2), c = max(0, r * sin(60 deg) - edge), + slack,
     // where 60 deg is the checker's ``FACING_COS_SECOND`` (cosine 0.5).
     // The slack (1e-3 mm) also absorbs the float32 pad edges (ulp ~1.5e-5 mm).
+    // The pad is its AABB with corner radius ``pad.copper_corner_radius``
+    // (negative = unknown: the inscribed stadium, radius min(half_w, half_h),
+    // which every rect/roundrect/oval/circle pad of that box contains -- so a
+    // seat overlapping only a rounded pad's square box corner, air beside the
+    // copper, is refused).  Rounded: the signed gap to the rounded box must be
+    // at most -depth.  Sharp (a ``rect`` pad, radius 0): the annulus must
+    // overlap the box, and the centre may sit at most ``r - depth`` beyond
+    // either face line -- an annulus that swallows a square corner crosses
+    // the two faces, whose depth is what the derivation measures.
     const double r = std::max(annulus_half_mm, 0.0);
     constexpr double kSin60 = 0.86602540378443864676;  // sqrt(1 - 0.5^2)
     constexpr double kUnionDepthSlackMm = 1e-3;
     const double lens = std::max(0.0, r * kSin60 - std::max(edge_mm, 0.0));
     const double depth =
         (lens < r ? r - std::sqrt(std::max(0.0, r * r - lens * lens)) : r) + kUnionDepthSlackMm;
-    const double corner = std::min(static_cast<double>(half_w), static_cast<double>(half_h));
+    const double full = std::max(
+        0.0, std::min(static_cast<double>(half_w), static_cast<double>(half_h)));
+    const double corner = pad.copper_corner_radius < 0.0f
+        ? full
+        : std::min(static_cast<double>(pad.copper_corner_radius), full);
     const double core_hw = static_cast<double>(half_w) - corner;
     const double core_hh = static_cast<double>(half_h) - corner;
     const double cdx = std::max({static_cast<double>(pad.x) - core_hw - wx,
                                  wx - (static_cast<double>(pad.x) + core_hw), 0.0});
     const double cdy = std::max({static_cast<double>(pad.y) - core_hh - wy,
                                  wy - (static_cast<double>(pad.y) + core_hh), 0.0});
-    const double stadium_gap = std::hypot(cdx, cdy) - corner - annulus_half_mm;
-    return stadium_gap > -depth;
+    if (corner > 1e-9) {
+        return std::hypot(cdx, cdy) - corner - r > -depth;
+    }
+    const double reach = r - depth;
+    const bool union_ok = std::hypot(cdx, cdy) - r <= -kUnionDepthSlackMm &&
+                          cdx <= reach && cdy <= reach;
+    return !union_ok;
 }
 
 // Stored segment for validation (Issue #2439)

@@ -34,6 +34,7 @@ from __future__ import annotations
 import functools
 import logging
 import math
+from collections.abc import Sequence
 from typing import Any, Protocol
 
 from kicad_tools.core.geometry import point_in_polygon as _core_point_in_polygon
@@ -499,27 +500,127 @@ def same_net_pad_union_depth_mm(annulus_half_mm: float, edge_mm: float) -> float
     return depth + SAME_NET_PAD_UNION_DEPTH_SLACK_MM
 
 
-def _stadium_signed_gap_mm(x: float, y: float, half: float, bbox: tuple[float, ...]) -> float:
-    """Signed annulus gap to the stadium inscribed in a pad's bounding box.
+def pad_union_corner_radius(
+    shape: str | None,
+    width: float,
+    height: float,
+    rotation: float = 0.0,
+    roundrect_rratio: float | None = None,
+) -> float | None:
+    """The pad copper's corner radius for the via union test, or ``None``.
 
-    The stadium is the box with corner radius ``min(half_w, half_h)``: every
-    ``rect``, ``roundrect``, ``oval`` and ``circle`` pad whose (unrotated)
-    bounding box this is contains it, so overlap with it is overlap with real
-    copper (issue #9424).  A roundrect's bounding box does not have that
-    property: a seat that overlaps only the box's square corner is an air gap
-    beside the rounded copper.  Negative values are overlap depth.  Inside the
-    stadium's core the value is ``-(radius + half)`` or less -- deep union, not an
-    exact signed distance, which is all the union test needs.
+    Issue #9424 (Doctor follow-up): the union side of the slit band needs to
+    know how much of the pad's bounding box is real copper.  ``None`` means
+    "unknown", and :func:`_pad_union_ok` then assumes the fully rounded
+    stadium inscribed in the box (contained by every rect, roundrect, oval and
+    circle pad of that box).  Known shapes give their exact radius: ``rect``
+    0 (the box IS the copper, so a via overlapping a square corner is a real
+    union -- board 06's ``U2.B3`` escape via), ``circle``/``oval`` half the
+    short side, ``roundrect`` ``rratio * min(w, h)`` when the file's ratio is
+    known.  A non-cardinal rotation returns ``None``: the AABB then encloses
+    air the pad does not cover, so only the conservative stadium is safe.
+    """
+    w, h = float(width), float(height)
+    short = max(0.0, min(w, h))
+    rot = math.fmod(abs(float(rotation or 0.0)), 90.0)
+    if min(rot, 90.0 - rot) > 1e-3:
+        return None
+    if shape == "rect":
+        return 0.0
+    if shape in ("circle", "oval"):
+        return short / 2.0
+    if shape == "roundrect" and roundrect_rratio is not None:
+        return min(max(0.0, float(roundrect_rratio)) * short, short / 2.0)
+    return None
 
-    Rotation: the box is the same rotated-AABB model as the clearance side,
-    so for a pad at a non-cardinal angle the stadium may extend past the copper;
-    the AABB model is no more exact there for either side.
+
+class SameNetPadBox(tuple[float, float, float, float]):
+    """A same-net pad bbox ``(min_x, min_y, max_x, max_y)`` that also carries
+    the pad copper's corner radius (Issue #9424).
+
+    Behaves exactly like the plain 4-tuple every slit-band caller already
+    passes (indexing, unpacking, equality); the union side of
+    :func:`same_net_segment_pad_gap_acceptable` /
+    :func:`same_net_pad_gap_band_ring` reads ``corner_radius`` from it when no
+    explicit radii are given.  ``None`` keeps the conservative stadium.
+    """
+
+    corner_radius: float | None
+
+    def __new__(
+        cls,
+        min_x: float,
+        min_y: float,
+        max_x: float,
+        max_y: float,
+        corner_radius: float | None = None,
+    ) -> SameNetPadBox:
+        obj = super().__new__(cls, (min_x, min_y, max_x, max_y))
+        obj.corner_radius = corner_radius
+        return obj
+
+
+def cpp_pad_copper_corner_radius(pad: Any) -> float:
+    """``add_pad``'s ``copper_corner_radius`` for a router ``Pad`` (#9424).
+
+    :func:`pad_union_corner_radius` of the pad's shape, size, residual
+    rotation and roundrect ratio, with "unknown" encoded as ``-1.0`` (the C++
+    side then uses the inscribed stadium).
+    """
+    radius = pad_union_corner_radius(
+        getattr(pad, "shape", None),
+        getattr(pad, "width", 0.0),
+        getattr(pad, "height", 0.0),
+        getattr(pad, "rotation", 0.0),
+        getattr(pad, "roundrect_rratio", None),
+    )
+    return -1.0 if radius is None else float(radius)
+
+
+def _pad_union_ok(
+    x: float,
+    y: float,
+    half: float,
+    bbox: tuple[float, ...],
+    depth: float,
+    corner_radius: float | None = None,
+) -> bool:
+    """Is a via annulus at ``(x, y)`` one copper union with this pad? (#9424).
+
+    The pad is modelled as its box with corner radius ``corner_radius``
+    (``None``/negative: the inscribed stadium, radius ``min(half_w, half_h)``;
+    see :func:`pad_union_corner_radius`).  Every point where the annulus
+    outline crosses the pad outline must be at least ``depth`` deep, the
+    straight-face depth :func:`same_net_pad_union_depth_mm` derives:
+
+    * rounded pad (radius > 0): the signed gap to the rounded box is at most
+      ``-depth`` -- along a face that is the face depth, at a corner the
+      overlap along the line of centres, which is the conservative measure
+      for a convex arc;
+    * sharp box (radius 0, a ``rect`` pad): the annulus must overlap the box
+      (signed gap at most ``-SAME_NET_PAD_UNION_DEPTH_SLACK_MM``), and each
+      face it crosses must be ``depth`` deep: the centre may sit at most
+      ``half - depth`` beyond either face line.  When the annulus swallows a
+      square corner it crosses the two FACES, not the corner, so the corner
+      overlap itself is not the measure; requiring the face depth there is
+      what the straight-face derivation asks.
     """
     min_x, min_y, max_x, max_y = bbox[0], bbox[1], bbox[2], bbox[3]
-    radius = max(0.0, min(max_x - min_x, max_y - min_y) / 2.0)
+    full = max(0.0, min(max_x - min_x, max_y - min_y) / 2.0)
+    if corner_radius is None or corner_radius < 0.0:
+        radius = full
+    else:
+        radius = min(float(corner_radius), full)
     core_dx = max(0.0, (min_x + radius) - x, x - (max_x - radius))
     core_dy = max(0.0, (min_y + radius) - y, y - (max_y - radius))
-    return math.hypot(core_dx, core_dy) - radius - half
+    if radius > 1e-9:
+        return math.hypot(core_dx, core_dy) - radius - half <= -depth
+    reach = half - depth
+    return (
+        math.hypot(core_dx, core_dy) - half <= -SAME_NET_PAD_UNION_DEPTH_SLACK_MM
+        and core_dx <= reach
+        and core_dy <= reach
+    )
 
 
 def same_net_segment_pad_gap_acceptable(
@@ -530,6 +631,7 @@ def same_net_segment_pad_gap_acceptable(
     min_gap_mm: float,
     *,
     tangent_is_union: bool = False,
+    same_net_pad_corner_radii: Sequence[float | None] | None = None,
 ) -> bool:
     """True iff a trace segment from ``a`` to ``b`` keeps the fab-view copper
     gap to every same-net SMD pad out of the slit band.
@@ -587,6 +689,12 @@ def same_net_segment_pad_gap_acceptable(
             copper piece.  Only the degenerate-point branch is affected: a
             segment's ``gap == 0`` is a centerline-reaches-rectangle
             overlap, a union for both populations.
+        same_net_pad_corner_radii: Optional per-bbox copper corner radius
+            (aligned with ``same_net_pad_bboxes``; see
+            :func:`pad_union_corner_radius`) for the point branch's union
+            test.  ``None`` -- the list or an entry -- keeps the conservative
+            inscribed stadium (Issue #9424).  Without the list, a
+            :class:`SameNetPadBox` entry supplies its own ``corner_radius``.
 
     Returns:
         True when the segment's gap is acceptable for every pad (union or
@@ -620,7 +728,7 @@ def same_net_segment_pad_gap_acceptable(
         if (is_point and not tangent_is_union)
         else 0.0
     )
-    for bbox in same_net_pad_bboxes:
+    for index, bbox in enumerate(same_net_pad_bboxes):
         if is_point:
             # Point primitive: the annulus form's arithmetic exactly.
             dx = max(0.0, bbox[0] - ax, ax - bbox[2])
@@ -628,8 +736,14 @@ def same_net_segment_pad_gap_acceptable(
             gap = math.hypot(dx, dy) - half_width
             if union_depth > 0.0 and gap < min_gap_mm - 1e-9:
                 # Clearance stays measured against the (outer) box; the union
-                # side against the inscribed stadium, at the union depth.
-                if _stadium_signed_gap_mm(ax, ay, half_width, bbox) > -union_depth:
+                # side against the pad's copper outline (its corner radius,
+                # the inscribed stadium when unknown), at the union depth.
+                corner = (
+                    same_net_pad_corner_radii[index]
+                    if same_net_pad_corner_radii is not None
+                    else getattr(bbox, "corner_radius", None)
+                )
+                if not _pad_union_ok(ax, ay, half_width, bbox, union_depth, corner):
                     return False
                 continue
         else:
@@ -745,6 +859,7 @@ def same_net_pad_gap_acceptable(
     via_size: float,
     same_net_pad_bboxes: list[tuple[float, float, float, float]] | None,
     min_gap_mm: float,
+    same_net_pad_corner_radii: Sequence[float | None] | None = None,
 ) -> bool:
     """True iff a via annulus at (x, y) keeps the fab-view copper gap to every
     same-net SMD pad out of the slit band.
@@ -795,6 +910,8 @@ def same_net_pad_gap_acceptable(
             a stackup whose warning tier sits below the danger tier cannot
             leave ``[error_edge, detection_edge)`` gaps behind as warnings.
             ``<= 0`` disables the test (every position acceptable).
+        same_net_pad_corner_radii: Optional per-bbox copper corner radius
+            (see :func:`same_net_segment_pad_gap_acceptable`).
 
     Returns:
         True when the annulus gap is acceptable for every pad (union or
@@ -810,6 +927,7 @@ def same_net_pad_gap_acceptable(
         via_size / 2,
         same_net_pad_bboxes,
         min_gap_mm,
+        same_net_pad_corner_radii=same_net_pad_corner_radii,
     )
 
 
@@ -817,6 +935,7 @@ def same_net_pad_gap_band_ring(
     bbox: tuple[float, float, float, float],
     via_size: float,
     min_gap_mm: float,
+    corner_radius: float | None = None,
 ) -> Any:
     """The region of via seats :func:`same_net_pad_gap_acceptable` rejects.
 
@@ -825,7 +944,7 @@ def same_net_pad_gap_band_ring(
     via mask) that pre-ban the band instead of testing seats one point at
     a time.  The outer edge is measured to ``bbox`` exactly as the point
     predicate measures it -- axis-aligned, ``hypot(dx, dy) - radius`` -- and
-    the inner edge to the box's inscribed stadium at
+    the inner edge is the union region of :func:`_pad_union_ok` at
     :func:`same_net_pad_union_depth_mm` (Issue #9424), so ONE band
     definition feeds both forms: a seat this ring covers is exactly a seat
     the predicate rejects.  The predicate's 1e-9 float-noise epsilon is
@@ -836,6 +955,10 @@ def same_net_pad_gap_band_ring(
         via_size: Via pad (annulus) diameter in mm.
         min_gap_mm: The fab-view pad-population error edge in mm.
             ``<= 0`` yields an empty geometry (guard off).
+        corner_radius: The pad copper's corner radius
+            (:func:`pad_union_corner_radius`); ``None`` falls back to a
+            :class:`SameNetPadBox`'s own, else the conservative inscribed
+            stadium.
 
     Returns:
         The shapely geometry of the rejected seat region.
@@ -846,31 +969,44 @@ def same_net_pad_gap_band_ring(
         return Polygon()
     radius = via_size / 2
     pad = box(*bbox[:4])
-    # Issue #9424: the accepted inner region is the inscribed stadium grown by
-    # ``radius - union_depth`` (a seat at least ``union_depth`` deep into real
-    # copper), not the box grown by ``radius``.  The stadium is its core box
-    # (the bbox shrunk by its corner radius) buffered by that radius, so the
-    # grown stadium is the core buffered by ``corner + radius - depth``.
+    if corner_radius is None:
+        corner_radius = getattr(bbox, "corner_radius", None)
     union_depth = same_net_pad_union_depth_mm(radius, min_gap_mm)
     min_x, min_y, max_x, max_y = bbox[0], bbox[1], bbox[2], bbox[3]
-    corner = max(0.0, min(max_x - min_x, max_y - min_y) / 2.0)
-    core = box(min_x + corner, min_y + corner, max_x - corner, max_y - corner)
-    if core.is_empty or core.area == 0.0:
-        from shapely.geometry import LineString, Point
-
-        cx0, cy0, cx1, cy1 = min_x + corner, min_y + corner, max_x - corner, max_y - corner
-        core = (
-            Point(cx0, cy0)
-            if (abs(cx1 - cx0) < 1e-12 and abs(cy1 - cy0) < 1e-12)
-            else LineString([(cx0, cy0), (cx1, cy1)])
-        )
+    full = max(0.0, min(max_x - min_x, max_y - min_y) / 2.0)
+    corner = full if corner_radius is None or corner_radius < 0.0 else min(corner_radius, full)
     # ``quad_segs=64`` keeps GEOS's arc approximation ~1e-5 mm inside the
     # true disk, so the ring agrees with the point predicate finer than any
     # rasterised mask can resolve (the default 8 segments sag ~1.5e-3 mm at
     # the corners, which IS visible at mask resolution).  The union depth is
     # always > 0, so the tangent locus (Issue #9124) stays inside the ring.
-    inner_reach = corner + radius - union_depth
-    inner = core.buffer(inner_reach, quad_segs=64) if inner_reach > 0 else Polygon()
+    if corner > 1e-9:
+        # Rounded pad: the accepted inner region is the rounded box grown by
+        # ``radius - union_depth`` -- its core box (the bbox shrunk by the
+        # corner radius) buffered by ``corner + radius - depth``.
+        core = box(min_x + corner, min_y + corner, max_x - corner, max_y - corner)
+        if core.is_empty or core.area == 0.0:
+            from shapely.geometry import LineString, Point
+
+            cx0, cy0, cx1, cy1 = min_x + corner, min_y + corner, max_x - corner, max_y - corner
+            core = (
+                Point(cx0, cy0)
+                if (abs(cx1 - cx0) < 1e-12 and abs(cy1 - cy0) < 1e-12)
+                else LineString([(cx0, cy0), (cx1, cy1)])
+            )
+        inner_reach = corner + radius - union_depth
+        inner = core.buffer(inner_reach, quad_segs=64) if inner_reach > 0 else Polygon()
+    else:
+        # Sharp box (``rect``): overlap the box at all, and keep the centre
+        # within ``radius - depth`` of each face line it crosses -- the round
+        # buffer intersected with the box grown square by ``radius - depth``.
+        reach = radius - union_depth
+        overlap = pad.buffer(radius - SAME_NET_PAD_UNION_DEPTH_SLACK_MM, quad_segs=64)
+        inner = (
+            overlap.intersection(box(min_x - reach, min_y - reach, max_x + reach, max_y + reach))
+            if reach > 0
+            else Polygon()
+        )
     return pad.buffer(radius + min_gap_mm, quad_segs=64).difference(inner)
 
 

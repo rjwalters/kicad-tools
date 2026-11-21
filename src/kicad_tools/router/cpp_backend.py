@@ -1251,6 +1251,7 @@ class CppGrid:
         # the same carve-out as the Python ``_is_plane_net_pad`` helper.
         from .fine_pitch_escape import resolve_clearance_with_escape_region
         from .grid import _is_plane_net_pad
+        from .via_clearance import cpp_pad_copper_corner_radius
 
         component_pitches = grid.compute_component_pitches()
         grid._component_pitch_cache = component_pitches
@@ -1322,6 +1323,7 @@ class CppGrid:
                 is_plane_net,
                 pad.rotation,
                 pad.shape == "circle",
+                cpp_pad_copper_corner_radius(pad),
             )
 
         cpp_grid._impl.set_component_holes_known(grid._component_hole_index.known)

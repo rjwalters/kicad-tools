@@ -225,3 +225,163 @@ def test_cpp_mirror_matches_python(pw, ph, shape, circular):
     if shape == "roundrect":
         # The sweep must exercise the new union rule, not only the old band.
         assert flipped_vs_old > 0
+
+
+# ---------------------------------------------------------------------------
+# Known corner radius (Doctor follow-up on PR #9845, board 06 regression)
+# ---------------------------------------------------------------------------
+#
+# The inscribed stadium is the conservative model for a pad of UNKNOWN shape.
+# For a ``rect`` pad the box IS the copper: board 06's USB3_TX1- escape via
+# beside U2.B3 (0.45 mm square BGA land, 0.6 mm via, 0.15 mm edge) overlaps
+# the square corner by ~0.020 mm.  The checker does not grade it, but the
+# stadium model refused it, so the C++ A* re-routed USB3_TX1- on F.Cu around
+# U2.C2 and the +3V3 pour repair could no longer reach that pad (post-legalize
+# gate: pours BROKEN).  The union test now takes the pad copper's corner
+# radius (``pad_union_corner_radius``), and the C++ grid carries it per pad.
+
+from kicad_tools.router.via_clearance import (  # noqa: E402
+    cpp_pad_copper_corner_radius,
+    pad_union_corner_radius,
+)
+
+BOARD06_U2B3_SEAT = (0.45, 0.45, -0.48, 0.34)  # pad w, h; via dx, dy from pad centre
+
+
+def test_pad_union_corner_radius_shapes():
+    assert pad_union_corner_radius("rect", 0.45, 0.45) == 0.0
+    assert pad_union_corner_radius("rect", 1.2, 0.8, 90.0) == 0.0
+    assert pad_union_corner_radius("circle", 1.0, 1.0) == pytest.approx(0.5)
+    assert pad_union_corner_radius("oval", 1.5, 0.6) == pytest.approx(0.3)
+    assert pad_union_corner_radius("roundrect", 1.025, 1.4, 0.0, 0.25) == pytest.approx(0.25625)
+    assert pad_union_corner_radius("roundrect", 0.4, 0.4, 0.0, 0.9) == pytest.approx(0.2)
+    # Unknown: no ratio, unmodelled shapes, non-cardinal rotation.
+    assert pad_union_corner_radius("roundrect", 1.0, 1.0) is None
+    assert pad_union_corner_radius("trapezoid", 1.0, 1.0) is None
+    assert pad_union_corner_radius("rect", 1.2, 0.8, 30.0) is None
+
+    class _P:
+        shape, width, height, rotation, roundrect_rratio = "roundrect", 1.0, 1.0, 0.0, None
+
+    assert cpp_pad_copper_corner_radius(_P()) == -1.0
+
+
+def test_board06_rect_corner_seat_is_a_union():
+    pw, ph, dx, dy = BOARD06_U2B3_SEAT
+    bboxes = _bboxes(pw, ph, "rect", 0.0)
+    x, y = 10.0 + dx, 10.0 + dy
+    assert not _graded(pw, ph, "rect", 0.0, x, y), "the checker does not grade it"
+    # Unknown shape keeps the conservative stadium (refused) ...
+    assert not same_net_pad_gap_acceptable(x, y, VIA, bboxes, EDGE)
+    # ... a known rect pad accepts its real corner copper.
+    assert same_net_pad_gap_acceptable(x, y, VIA, bboxes, EDGE, [0.0])
+
+
+@pytest.mark.parametrize(("label", "pw", "ph", "shape", "rr", "dx", "dy"), BOARD05_SEATS)
+def test_board05_seats_rejected_with_true_corner_radius(label, pw, ph, shape, rr, dx, dy):
+    bboxes = _bboxes(pw, ph, shape, rr)
+    corner = pad_union_corner_radius(shape, pw, ph, 0.0, rr)
+    assert corner is not None and corner > 0
+    assert not same_net_pad_gap_acceptable(10.0 + dx, 10.0 + dy, VIA, bboxes, EDGE, [corner]), label
+
+
+KNOWN_SHAPES = [
+    (0.45, 0.45, "rect", 0.0),
+    (1.2, 0.8, "rect", 0.0),
+    (1.025, 1.4, "roundrect", 0.25),
+    (0.8, 0.8, "roundrect", 0.1),
+]
+
+
+@pytest.mark.parametrize(("via", "edge"), [(0.6, 0.15), (0.45, 0.15), (0.5, 0.1016)])
+@pytest.mark.parametrize(("pw", "ph", "shape", "rr"), KNOWN_SHAPES)
+def test_known_corner_radius_seats_are_clean_under_the_checker(pw, ph, shape, rr, via, edge):
+    """Oracle sweep: the seats a known corner radius newly accepts are clean."""
+    half = via / 2
+    bboxes = _bboxes(pw, ph, shape, rr)
+    corner = pad_union_corner_radius(shape, pw, ph, 0.0, rr if shape == "roundrect" else None)
+    newly = 0
+    for angle_deg in (0, 15, 30, 40, 45, 50, 60, 75, 90):
+        a = math.radians(angle_deg)
+        ux, uy = math.cos(a), math.sin(a)
+        to_box = min(pw / 2 / ux if ux > 1e-9 else 1e9, ph / 2 / uy if uy > 1e-9 else 1e9)
+        for k in range(24):
+            d = to_box + half - 0.12 + k * 0.005
+            x, y = 10.0 + d * ux, 10.0 + d * uy
+            if not same_net_pad_gap_acceptable(x, y, via, bboxes, edge, [corner]):
+                continue
+            if same_net_pad_gap_acceptable(x, y, via, bboxes, edge):
+                continue  # already covered by the stadium sweep above
+            newly += 1
+            found = _graded(pw, ph, shape, rr, x, y, edge, via)
+            assert not found, (shape, pw, ph, angle_deg, round(d, 4), found[0].actual_value)
+    assert newly > 10
+
+
+@pytest.mark.parametrize(("pw", "ph", "shape", "rr"), KNOWN_SHAPES)
+def test_ring_matches_point_predicate_with_corner_radius(pw, ph, shape, rr):
+    from shapely.geometry import Point
+
+    bboxes = _bboxes(pw, ph, shape, rr)
+    corner = pad_union_corner_radius(shape, pw, ph, 0.0, rr if shape == "roundrect" else None)
+    ring = same_net_pad_gap_band_ring(bboxes[0], VIA, EDGE, corner)
+    for ix in range(-40, 41, 3):
+        for iy in range(-40, 41, 3):
+            p = Point(10.0 + ix * 0.033, 10.0 + iy * 0.033)
+            if ring.boundary.distance(p) < 1e-4:
+                continue
+            ok = same_net_pad_gap_acceptable(p.x, p.y, VIA, bboxes, EDGE, [corner])
+            assert ok is (not ring.contains(p)), (p.x, p.y)
+
+
+@pytest.mark.requires_router_cpp
+@pytest.mark.parametrize(("pw", "ph", "shape", "rr"), KNOWN_SHAPES)
+def test_cpp_mirror_matches_python_with_corner_radius(pw, ph, shape, rr):
+    from kicad_tools.router import router_cpp
+
+    cx = cy = 10.0
+    corner = pad_union_corner_radius(shape, pw, ph, 0.0, rr if shape == "roundrect" else None)
+
+    def _pf(edge_mm):
+        grid = router_cpp.Grid3D(COLS, ROWS, 2, RES, 0.0, 0.0)
+        grid.add_pad(cx, cy, pw, ph, NET, 0, 0, 0.0, False, 0.0, False, corner)
+        rules = router_cpp.DesignRules()
+        rules.trace_width = 0.2
+        rules.trace_clearance = 0.15
+        rules.via_clearance = 0.15
+        rules.via_drill = 0.3
+        rules.via_diameter = VIA
+        rules.allow_smd_vias = True
+        rules.same_net_pad_gap_band_edge_mm = edge_mm
+        return router_cpp.Pathfinder(grid, rules, False)
+
+    pf_on, pf_off = _pf(EDGE), _pf(0.0)
+    bboxes = _bboxes(pw, ph, shape, rr)
+    b = bboxes[0]
+    depth = same_net_pad_union_depth_mm(R, EDGE)
+    reach = R - depth
+    compared = flipped = 0
+    for gx in range(int((cx - 1.6) / RES), int((cx + 1.6) / RES) + 1):
+        for gy in range(int((cy - 1.6) / RES), int((cy + 1.6) / RES) + 1):
+            x, y = gx * RES, gy * RES
+            if pf_off.is_via_blocked(gx, gy, NET, True):
+                continue
+            dx = max(0.0, b[0] - x, x - b[2])
+            dy = max(0.0, b[1] - y, y - b[3])
+            gap = math.hypot(dx, dy) - R
+            cdx = max(0.0, b[0] + corner - x, x - (b[2] - corner))
+            cdy = max(0.0, b[1] + corner - y, y - (b[3] - corner))
+            st = math.hypot(cdx, cdy) - corner - R
+            # float32 pad edges on the C++ side: skip seats within 1e-4 of an edge.
+            near = [abs(gap - EDGE), abs(st + depth)]
+            if corner == 0.0:
+                near += [abs(st + 1e-3), abs(cdx - reach), abs(cdy - reach)]
+            if min(near) < 1e-4:
+                continue
+            py_ok = same_net_pad_gap_acceptable(x, y, VIA, bboxes, EDGE, [corner])
+            assert pf_on.is_via_blocked(gx, gy, NET, True) is (not py_ok), (x, y, gap, st)
+            compared += 1
+            if py_ok != same_net_pad_gap_acceptable(x, y, VIA, bboxes, EDGE):
+                flipped += 1
+    assert compared > 500
+    assert flipped > 0, "the sweep must exercise seats the corner radius changes"

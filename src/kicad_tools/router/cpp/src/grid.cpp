@@ -688,9 +688,10 @@ float Grid3D::memory_mb() const {
 void Grid3D::add_pad(float x, float y, float width, float height,
                      int net, int layer_idx, uint32_t ref_hash,
                      float clearance_override, bool is_plane_net, float rotation,
-                     bool is_circular) {
+                     bool is_circular, float copper_corner_radius) {
     pads_.push_back({x, y, width, height, net, layer_idx, ref_hash,
                      clearance_override, is_plane_net, rotation, clearance_override, false, is_circular});
+    pads_.back().copper_corner_radius = copper_corner_radius;  // Issue #9424
     if (authored_index_) authored_index_pad(pads_.size() - 1);  // Issue #6243
     index_pad_bucket(pads_.size() - 1);  // Issue #6315
 }

@@ -392,7 +392,7 @@ NB_MODULE(router_cpp, m) {
              "x"_a, "y"_a, "width"_a, "height"_a,
              "net"_a, "layer_idx"_a, "ref_hash"_a, "clearance_override"_a,
              "is_plane_net"_a = false, "rotation"_a = 0.0f,
-             "is_circular"_a = false)
+             "is_circular"_a = false, "copper_corner_radius"_a = -1.0f)
         .def("set_pad_class_clearances", &Grid3D::set_pad_class_clearances,
              "clearances"_a)
         .def("set_pad_via_policy", &Grid3D::set_pad_via_policy,
