@@ -969,6 +969,11 @@ class ReadinessOptions:
     # The ORIGINAL board directory the spec lookup started from (#8764); the
     # staged candidate's ``board_dir`` is a temp dir deleted when the run ends.
     bom_spec_searched: Path | None = None
+    # Issue #9799 (#9795 phase 3): run the shared silk legalisation pass on
+    # the staged candidate during ``generate``, after the pour refill and
+    # before Gate 1 judges silk; the repaired bytes are what the checks,
+    # plots and hashes then consume.  ``--no-silk-fix`` sets this False.
+    silk_fix: bool = True
 
     @property
     def root(self) -> Path:
@@ -1198,6 +1203,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             skip_cleanup=bool(getattr(args, "skip_cleanup", False)),
             skip_fiducials=bool(getattr(args, "skip_fiducials", False)),
             skip_board_info=bool(getattr(args, "skip_board_info", False)),
+            silk_fix=not bool(getattr(args, "no_silk_fix", False)),
             ack_trace_quality=ack_trace,
             merge_lcsc_from=merge_lcsc_from,
             quantity=quantity,
@@ -4427,6 +4433,20 @@ def _run_readiness_candidate(
     fill = _gate_refill(options, engines)
     checks.append(fill)
 
+    # Issue #9799 (#9795 phase 3): the default silk legalisation pass runs on
+    # the staged candidate after the pour refill and BEFORE Gate 1 -- the
+    # first check that judges silk -- so the checks, plots and hashed bundle
+    # below all consume these same repaired bytes.  A repair first attempted
+    # after a failed pre-gate would be too late for the tapeout flow that
+    # delegates here.  Verify never mutates the board.
+    metrics["silk_fix"] = None
+    if options.operation == "generate" and options.silk_fix:
+        from .silk_default_pass import run_default_silk_pass
+
+        metrics["silk_fix"] = run_default_silk_pass(
+            options.pcb, mfr=options.manufacturer, quiet=True
+        )
+
     checked_sources = {
         path: _sha256_file(path)
         for path in [
@@ -4895,6 +4915,16 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Skip adding the board-ID silkscreen text (pcb add-board-info) during "
             "--generate; the skip is recorded in the report and README.txt"
+        ),
+    )
+    parser.add_argument(
+        "--no-silk-fix",
+        dest="no_silk_fix",
+        action="store_true",
+        help=(
+            "Skip the default silk legalisation pass (legalize_silk) that "
+            "--generate otherwise runs on the staged board before the checks, "
+            "plots and hashes consume it (Issue #9799). Verify never mutates."
         ),
     )
     parser.add_argument(

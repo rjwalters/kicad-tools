@@ -145,6 +145,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not emit ampacity track_width floors into the sibling .kicad_dru",
     )
     parser.add_argument(
+        "--no-silk-fix",
+        dest="no_silk_fix",
+        action="store_true",
+        help=(
+            "Skip the default silk legalisation pass (legalize_silk) that "
+            "otherwise runs on the board before preflight and plotting judge "
+            "silk (Issue #9799). With this flag authored silk is byte-identical."
+        ),
+    )
+    parser.add_argument(
         "--keep-versions",
         action="store_true",
         help="Preserve versioned vN/ report directories (default: flat report/ directory)",
@@ -354,6 +364,7 @@ def build_manufacturing_config(
     vscore_layers: list[str] | None = None,
     keep_versions: bool = False,
     keep_build_artifacts: bool = False,
+    silk_fix: bool = True,
 ) -> ManufacturingConfig:
     """Build the ``PreflightConfig`` + ``ManufacturingConfig`` ``kct export`` uses.
 
@@ -416,6 +427,7 @@ def build_manufacturing_config(
         gerber_config=gerber_config,
         latest_report_only=not keep_versions,
         keep_build_artifacts=keep_build_artifacts,
+        silk_fix=silk_fix,
     )
 
 
@@ -500,6 +512,7 @@ def run_export(args: argparse.Namespace) -> int:
         vscore_layers=list(getattr(args, "vscore_layer", None) or []),
         keep_versions=getattr(args, "keep_versions", False),
         keep_build_artifacts=getattr(args, "keep_build_artifacts", False),
+        silk_fix=not getattr(args, "no_silk_fix", False),
     )
 
     pkg = ManufacturingPackage(
@@ -551,6 +564,13 @@ def run_export(args: argparse.Namespace) -> int:
             print(f"  - {warn}")
         print()
 
+    # Issue #9799: name the default silk pass's result and unresolved items.
+    if result.silk_fix and output_format == "text" and not quiet:
+        from .silk_default_pass import print_silk_pass_result
+
+        print_silk_pass_result(result.silk_fix)
+        print()
+
     # JSON output mode
     if output_format == "json":
         json_result: dict = {
@@ -563,6 +583,9 @@ def run_export(args: argparse.Namespace) -> int:
             json_result["warnings"] = result.warnings
         if result.preflight_results:
             json_result["preflight"] = [pr.to_dict() for pr in result.preflight_results]
+        if result.silk_fix is not None:
+            # Issue #9799: the default silk legalisation pass outcome.
+            json_result["silk_fix"] = result.silk_fix
         print(json.dumps(json_result, indent=2))
         return 0 if result.success else 1
 

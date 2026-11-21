@@ -103,6 +103,13 @@ class ManufacturingConfig(AssemblyConfig):
     # profile rules.
     report_design_rules: Any | None = None
 
+    # When True (default), run the shared silk legalisation pass
+    # (``legalize_silk``, #9795 phase 1) on the board before preflight and
+    # plotting judge silk, so checks, gerbers and hashes all read the same
+    # repaired bytes (Issue #9799).  ``False`` (``--no-silk-fix``) leaves
+    # authored silk byte-identical.
+    silk_fix: bool = True
+
 
 @dataclass
 class ManufacturingResult:
@@ -134,6 +141,9 @@ class ManufacturingResult:
     # human-readable ordering instructions travel with the bundle rather
     # than requiring per-board hand-typed prose.
     fabrication_process: dict | None = None
+    # Issue #9799: the default silk legalisation pass outcome (or ``None``
+    # when it did not run / no profile resolved).
+    silk_fix: dict | None = None
     # Issue #7209: outer/inner copper weight the order requests, derived from the
     # board stackup (see ``preflight.resolve_ordered_copper``).
     ordered_copper: dict | None = None
@@ -659,6 +669,25 @@ class ManufacturingPackage:
         # steps below can bind it into the bundle.
         self._resolve_fabrication_process(result)
         self._resolve_ordered_copper(result)
+
+        # Step 0c (issue #9799): the default silk legalisation pass.  Runs
+        # BEFORE the first check that judges silk, and the checks, plots and
+        # hashes below all read these same repaired bytes (the pass edits
+        # the board in place; a zero-edit board is not re-saved, so an
+        # already-legal board is untouched and idempotent across the
+        # route -> export pipeline).  ``--no-silk-fix`` skips it entirely.
+        # The ``generic`` pseudo-tier has no profile, so it skips too.
+        if self.config.silk_fix and self.manufacturer != "generic":
+            from kicad_tools.cli.silk_default_pass import run_default_silk_pass
+
+            result.silk_fix = run_default_silk_pass(
+                self.pcb_path, mfr=self.manufacturer, quiet=True
+            )
+            if result.silk_fix is not None and not result.silk_fix.get("applied"):
+                result.warnings.append(
+                    "Silk legalisation pass could not run: "
+                    + str(result.silk_fix.get("error", "unknown reason"))
+                )
 
         # Step 0: Pre-flight validation
         preflight_cfg = self.config.preflight

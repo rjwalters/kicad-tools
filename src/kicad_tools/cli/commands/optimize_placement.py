@@ -44,4 +44,6 @@ def run_optimize_placement_command(args) -> int:
         as_json=getattr(args, "format", "text") == FORMAT_JSON,
         route_check=getattr(args, "route_check", False),
         route_check_budget=getattr(args, "route_check_budget", DEFAULT_ROUTE_CHECK_BUDGET),
+        # Issue #9799: the default silk legalisation pass and its opt-out.
+        silk_fix=not getattr(args, "no_silk_fix", False),
     )

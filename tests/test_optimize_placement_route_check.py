@@ -318,8 +318,17 @@ class TestCliRouteCheck:
 
         monkeypatch.setattr(rc, "bounded_route", fake_route)
         out = tmp_path / "out.kicad_pcb"
+        # silk_fix=False (#9799): this test pins the route-check incumbent
+        # write itself; the default silk pass would additionally re-save the
+        # board (covered by tests/test_silk_default_pass_wiring.py).
         code, doc = _run_json(
-            capsys, board01, out, route_check=True, route_check_budget=321, seed_method="random"
+            capsys,
+            board01,
+            out,
+            route_check=True,
+            route_check_budget=321,
+            seed_method="random",
+            silk_fix=False,
         )
         report = doc["route_check"]
         assert report["accepted_stage"] == "incumbent"
