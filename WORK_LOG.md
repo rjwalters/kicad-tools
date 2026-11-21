@@ -16,6 +16,41 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-20
 
+- **Issue #9597** (closed): Router: cost and report for routes crossing another net's zone on opted-in plane layers
+- **PR #9669**: feat: charge, report and optionally refuse plane-zone crossings in kct route
+- **Issue #9746** (closed): Creepage cross-face paths ignore (general (thickness)): thin boards get an optimistic bore depth
+- **PR #9810**: fix(creepage): use (general (thickness X)) for cross-face paths without a stackup
+- **Issue #9035** (closed): Ecosystem registry drift: upstream license/rename/archive change
+- **PR #9809**: fix(ecosystem): mark kicad-mcp-pro AGPL-3.0, ideas only
+- **Issue #9692** (closed): Footprint-local filled Edge.Cuts shapes (fp_circle/fp_poly/fp_rect) are cut-outs natively but kct checks only their stroke
+- **PR #9721**: fix: treat filled footprint-local Edge.Cuts shapes as cut-out regions
+- **Issue #9726** (closed): Harden _warn_off_path_copper integration: unguarded cross-boundary call and warn-before-skip ordering
+- **PR #9739**: fix(validate): report match-group off-path copper only for eligible groups
+- **Issue #9822** (closed): main is red: forbidden C++-router skip guard in tests/test_grid_router_own_net_pad_band_9019.py fails the #9705 scanner (blocks every PR)
+- **Issue #9804** (closed): C++ router skip-guard scanner misses get_backend_info() conditions and unconditional pytest.mark.skip
+- **PR #9820**: test: catch get_backend_info skipifs, unconditional skip marks, and router-reasoned runtime skips
+- **Issue #9734** (closed): router: board 05 VCP unrouted again at main - finalize safety net demotes the net after negotiation connects it
+- **PR #9785**: fix: snap C++ router coordinates onto the 0.1um lattice at the backend boundary
+- **Issue #9636** (closed): route --complete: pad-escape refusals on a net that already has copper (fine-pitch pin re-escape; own part's other pad counted as a wall)
+- **PR #9645**: fix(route): start completion links from kept copper and stop sibling pads walling a pad in
+- **Issue #9767** (closed): diffpair_skew: apply the #9304 defect-copper classifier to intra-pair skew
+- **PR #9787**: fix(validate): shed defect copper from the diff-pair skew figures
+- **Issue #9716** (closed): route-auto emits board-default track width for a wide-class net (row 3's 'limit the neck' half)
+- **PR #9782**: fix: route-auto corridor emits at the net's class width
+- **Issue #9788** (closed): Fixture comment in tests/test_lattice_keepout_areas.py states trace half-width 0.05 mm; measured routed width is 0.2 mm (half-width 0.1 mm)
+- **PR #9791**: test: align lattice keepout corridor assertions and edge-margin comment with 0.1 mm trace half-width
+- **Issue #9724** (closed): Probe copper-to-edge clearance against pinned KiCad and move edge.py onto the measured band
+- **PR #9793**: fix: ride KiCad's probed 500nm band for copper-to-edge verdicts
+- **Issue #9294** (closed): Pour-weld / link-router via seats have the same-net PAD band guard but no TRACE band guard
+- **Issue #9773** (closed): Padstack front/back primitive exchange is skipped when only one side has a primitives block (probe first)
+- **PR #9790**: fix: exchange whole front/back padstack definition for one-sided custom pads
+- **PR #9141**: feat: hold grid A* legs and the neck-down taper out of the own-net pad slit band
+- **Issue #9789** (closed): docs/reference/cli.md: pcb prune is absent, and the --current-paths consumer list omits it
+- **PR #9792**: docs: add kct pcb prune section and fix --current-paths consumer count in cli.md
+- **Issue #9781** (closed): test docstring: test_one_ruler_across_mixed_members states the summed-ruler skew as "42 - 26 = 5"; measured 22.0
+- **PR #9783**: docs: correct summed-ruler arithmetic in one_ruler test docstring
+- **Issue #9775** (closed): pcb prune: --no-current-paths also disables the post-plan current-path audit gate, which the pre-#9747 default kept
+- **PR #9777**: docs: say pcb prune --no-current-paths also disables the audit gate
 - **Issue #9779** (closed): CI red in Test (extended): test_two_domain_keepout_segregation fails on an HV_A-vs-board-edge pairwise finding (2.900 vs 3.200 mm)
 - **PR #9780**: test: widen lattice keepout fixture outline to clear board-edge creepage gate
 - **PR #9776**: test: give the remaining _route() verdict tests the 180s timeout cap
