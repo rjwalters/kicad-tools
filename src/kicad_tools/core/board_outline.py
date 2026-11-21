@@ -495,7 +495,7 @@ def _footprint_outline_nodes(node: SExp, anchor: Point, angle_deg: float) -> lis
             # Straight side to the next corner's arc; absent when the radius
             # is clamped to half that side (the arcs then meet directly).
             next_start = arcs[(i + 1) % 4][0]
-            if next_start != end:
+            if not _coincident(next_start, end):
                 nodes.append(
                     SExp.list(
                         "gr_line",
@@ -622,6 +622,18 @@ def _fp_poly_chain(node: SExp) -> list[Point]:
     return chain
 
 
+#: Two derived footprint points closer than this (mm) on both axes are the
+#: same point: one nanometre, KiCad's storage resolution.  Exact float
+#: equality on derived coordinates (``left + r`` vs ``right - r``) misses by an
+#: ulp and used to emit sub-nanometre sliver sides (Issue #9759).
+_COINCIDENT_MM = 1e-6
+
+
+def _coincident(a: Point, b: Point) -> bool:
+    """Whether two footprint-local points are the same within :data:`_COINCIDENT_MM`."""
+    return abs(a[0] - b[0]) <= _COINCIDENT_MM and abs(a[1] - b[1]) <= _COINCIDENT_MM
+
+
 def _fp_poly_boundary_nodes(pieces: list[_FpPiece], board: Callable[[Point], Point]) -> list[SExp]:
     """Board-frame ``gr_line``/``gr_arc`` boundary of an arc-bearing ``fp_poly``.
 
@@ -630,29 +642,49 @@ def _fp_poly_boundary_nodes(pieces: list[_FpPiece], board: Callable[[Point], Poi
     previous point by a straight edge, each arc runs start -> mid -> end, and
     the polygon closes back to its first point.  Zero-length edges (an arc
     whose start repeats the previous vertex, a closing edge onto a shared
-    point) carry no boundary and are omitted.
+    point) carry no boundary and are omitted.  "Zero-length" means within
+    :data:`_COINCIDENT_MM`, and the omitted edge's two ends are snapped to one
+    point, so the emitted primitives still join exactly (a ring with an
+    ulp-wide gap does not polygonize into a cut-out).
     """
-    nodes: list[SExp] = []
+    # Footprint-local boundary primitives: ("line", [a, b]) / ("arc", [s, m, e]).
+    edges: list[tuple[str, list[Point]]] = []
     first: Point | None = None
     current: Point | None = None
 
-    def line_to(point: Point) -> None:
-        if current is not None and current != point:
+    for kind, points in pieces:
+        head = points[0]
+        if current is None:
+            first = head
+        elif _coincident(current, head):
+            head = current  # no edge: join the previous primitive exactly
+        else:
+            edges.append(("line", [current, head]))
+        if kind == "arc":
+            _start, mid, end = points
+            edges.append(("arc", [head, mid, end]))
+            current = end
+        else:
+            current = head
+    if first is not None and current is not None:
+        if not _coincident(current, first):
+            edges.append(("line", [current, first]))
+        elif edges:
+            edges[-1][1][-1] = first  # closing edge omitted: close exactly
+
+    nodes: list[SExp] = []
+    for edge_kind, edge_points in edges:
+        if edge_kind == "line":
             nodes.append(
                 SExp.list(
                     "gr_line",
-                    SExp.list("start", *board(current)),
-                    SExp.list("end", *board(point)),
+                    SExp.list("start", *board(edge_points[0])),
+                    SExp.list("end", *board(edge_points[1])),
                     _layer_node(),
                 )
             )
-
-    for kind, points in pieces:
-        if first is None:
-            first = points[0]
-        line_to(points[0])
-        if kind == "arc":
-            start, mid, end = points
+        else:
+            start, mid, end = edge_points
             nodes.append(
                 SExp.list(
                     "gr_arc",
@@ -662,9 +694,6 @@ def _fp_poly_boundary_nodes(pieces: list[_FpPiece], board: Callable[[Point], Poi
                     _layer_node(),
                 )
             )
-        current = points[-1]
-    if first is not None:
-        line_to(first)
     return nodes
 
 
@@ -688,11 +717,21 @@ def _fp_rect_corner_arcs(
     if not math.isfinite(radius) or radius <= 0.0:
         return None
     k = radius * (1.0 - math.sqrt(0.5))  # offset of the arc midpoint from the corner
+    # Where each straight side starts and ends.  A side the clamp shrank to
+    # nothing (a stadium: radius = half that side) has its two corner arcs
+    # meet at the side's midpoint -- computed once, so they meet *exactly*;
+    # ``left + r`` and ``right - r`` can differ by an ulp (Issue #9759).
+    x_lo, x_hi = left + radius, right - radius
+    if x_hi - x_lo <= _COINCIDENT_MM:
+        x_lo = x_hi = (left + right) / 2.0
+    y_lo, y_hi = top + radius, bottom - radius
+    if y_hi - y_lo <= _COINCIDENT_MM:
+        y_lo = y_hi = (top + bottom) / 2.0
     return [
-        ((left, top + radius), (left + k, top + k), (left + radius, top)),
-        ((right - radius, top), (right - k, top + k), (right, top + radius)),
-        ((right, bottom - radius), (right - k, bottom - k), (right - radius, bottom)),
-        ((left + radius, bottom), (left + k, bottom - k), (left, bottom - radius)),
+        ((left, y_lo), (left + k, top + k), (x_lo, top)),
+        ((x_hi, top), (right - k, top + k), (right, y_lo)),
+        ((right, y_hi), (right - k, bottom - k), (x_hi, bottom)),
+        ((x_lo, bottom), (left + k, bottom - k), (left, y_hi)),
     ]
 
 

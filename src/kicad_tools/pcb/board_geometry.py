@@ -75,7 +75,8 @@ def _linearize_arc(
     We recover the circumscribed circle centre and radius, then emit
     evenly-spaced points along the arc.
 
-    Returns a list of (x, y) points *including* start and end.
+    Returns a list of (x, y) points whose first and last entries are exactly
+    the authored start and end.
     """
     # Circumscribed-circle of three points
     ax, ay = sx, sy
@@ -128,6 +129,12 @@ def _linearize_arc(
         a = angle_start + sweep * t
         points.append((ux + radius * math.cos(a), uy + radius * math.sin(a)))
 
+    # The ends are the authored points, not their centre/angle reconstruction:
+    # that lands a few ulps off, and ``polygonize`` needs exact closure, so a
+    # cut-out ring whose arcs meet neighbouring lines would otherwise not close
+    # and its hole would silently vanish (Issue #9759).
+    points[0] = (sx, sy)
+    points[-1] = (ex, ey)
     return points
 
 

@@ -290,3 +290,111 @@ def _top_level_tracks(shape: str, probes: dict) -> PCB:
                )"""
         )
     )
+
+
+# ------------------------ arc-bearing cut-outs inside a board outline (#9759)
+#
+# A cut-out polygonizes into a hole only when its ring closes exactly, so
+# every linearized arc must end on the authored endpoints its neighbouring
+# ``gr_line`` sides share.  A standalone shape (above) reaches a tolerant
+# fallback and cannot catch an arc that misses them by a few ulps.
+
+_OUTER_AREA = 100.0 * 100.0
+_RRECT_HOLE = 20.0 * 20.0 - (4.0 - math.pi) * 4.0**2
+# 40 x 30 rectangle plus a semicircular bulge of radius 15.
+_ARC_OUT_HOLE = 40.0 * 30.0 + math.pi * 15.0**2 / 2.0
+
+_CUTOUT_PLACEMENTS = [
+    ("60 50 0", "F.Cu"),
+    ("60 50 37", "F.Cu"),
+    ("60 50 0", "B.Cu"),
+    ("60 50 37", "B.Cu"),
+]
+_CUTOUT_IDS = ["front_rot0", "front_rot37", "back_rot0", "back_rot37"]
+
+
+def _cutout_geometry(shape: str, at: str, layer: str):
+    from kicad_tools.pcb.board_geometry import BoardGeometry
+
+    return BoardGeometry.from_pcb(_board(shape, at=at, layer=layer, outer=True)).polygon
+
+
+@pytest.mark.parametrize("fill", ["yes", "no"])
+@pytest.mark.parametrize("at,layer", _CUTOUT_PLACEMENTS, ids=_CUTOUT_IDS)
+def test_rounded_fp_rect_cutout_subtracts_its_true_area(at: str, layer: str, fill: str) -> None:
+    polygon = _cutout_geometry(_rect("-10 -10", "10 10", 4, fill), at, layer)
+    assert len(polygon.interiors) == 1
+    assert polygon.area == pytest.approx(_OUTER_AREA - _RRECT_HOLE, abs=0.1)
+
+
+@pytest.mark.parametrize("fill", ["yes", "no"])
+@pytest.mark.parametrize("at,layer", _CUTOUT_PLACEMENTS, ids=_CUTOUT_IDS)
+def test_arc_fp_poly_cutout_subtracts_its_true_area(at: str, layer: str, fill: str) -> None:
+    polygon = _cutout_geometry(_poly(_ARC_OUT, fill), at, layer)
+    assert len(polygon.interiors) == 1
+    # 32-chord semicircle loses ~0.57 mm^2; the dropped-arc reading is
+    # 353 mm^2 off and the lost hole 1553 mm^2.
+    assert polygon.area == pytest.approx(_OUTER_AREA - _ARC_OUT_HOLE, abs=1.0)
+
+
+def test_linearized_arc_ends_exactly_on_its_authored_endpoints() -> None:
+    from kicad_tools.pcb.board_geometry import _linearize_arc
+
+    start, mid, end = (51.3, 47.7), (50.1, 46.4), (48.9, 47.7)
+    points = _linearize_arc(*start, *mid, *end)
+    assert points[0] == start
+    assert points[-1] == end
+
+
+# ------------------- clamped-radius (stadium) fp_rect: no sliver sides (#9759)
+#
+# With the radius clamped to half a side, the two corner arcs on that side
+# meet; ``left + r`` and ``right - r`` can still differ by an ulp, which used
+# to emit a sub-nanometre ``gr_line`` and break the one-mate-per-endpoint
+# outline walk.
+
+_STADIUM_CASES = [
+    (x1, width, radius, vertical)
+    for x1 in (-3.3, -1.1, 0.0, 0.7)
+    for width in (0.3, 1.1, 2.9, 3.7, 4.0, 7.3)
+    for radius in ("half", "huge")
+    for vertical in (True, False)
+]
+
+
+def _stadium(x1: float, width: float, radius: str, vertical: bool) -> str:
+    x2 = round(x1 + width, 6)
+    r = round(width / 2.0, 6) if radius == "half" else 100.0
+    if vertical:
+        return _rect(f"{x1} 0", f"{x2} 30", r, "no")
+    return _rect(f"0 {x1}", f"30 {x2}", r, "no")
+
+
+@pytest.mark.parametrize("at", ["60 50 0", "60 50 37"])
+@pytest.mark.parametrize("x1,width,radius,vertical", _STADIUM_CASES)
+def test_clamped_stadium_fp_rect_keeps_its_outline(
+    x1: float, width: float, radius: str, vertical: bool, at: str
+) -> None:
+    pcb = _board(_stadium(x1, width, radius, vertical), at=at)
+    for node in footprint_outline_graphics(pcb._sexp):
+        if node.tag == "gr_line":
+            start = (node.find_child("start").get_float(0), node.find_child("start").get_float(1))
+            end = (node.find_child("end").get_float(0), node.find_child("end").get_float(1))
+            assert math.dist(start, end) > 1e-6, f"degenerate side {start} -> {end}"
+    outline = pcb.get_board_outline()
+    assert outline, "stadium fp_rect lost the board outline"
+    xs = [p[0] for p in outline]
+    ys = [p[1] for p in outline]
+    short, long_ = sorted((max(xs) - min(xs), max(ys) - min(ys)))
+    if at.endswith(" 0"):
+        assert short == pytest.approx(width, abs=1e-3)
+        assert long_ == pytest.approx(30.0, abs=1e-3)
+
+
+@pytest.mark.parametrize("x1,width", [(-3.3, 3.7), (0.7, 2.9), (-1.1, 7.3)])
+def test_clamped_stadium_cutout_subtracts_its_true_area(x1: float, width: float) -> None:
+    polygon = _cutout_geometry(_stadium(x1, width, "half", True), "50 30 0", "F.Cu")
+    r = width / 2.0
+    hole = width * (30.0 - width) + math.pi * r * r
+    assert len(polygon.interiors) == 1
+    assert polygon.area == pytest.approx(_OUTER_AREA - hole, abs=0.05)
