@@ -1,14 +1,20 @@
-"""Thermal-asymmetry DFM rule (issue #7220).
+"""Thermal-asymmetry DFM rule (issues #7220 and #9796).
 
-Two soldering-yield risks pass both DRC engines because they are not
+Three soldering-yield risks pass both DRC engines because they are not
 clearance or connectivity defects -- they are *thermal* defects:
 
-* **Asymmetric 2-pad passive.**  A 2-terminal SMD resistor, capacitor or
-  inductor whose one terminal is tied **solid** to a zone fill on its own
-  copper layer while the other terminal reaches copper only through a
-  thermal relief or a trace.  The solid terminal sinks heat into the pour
-  and reaches reflow temperature later than the other one; the uneven
-  wetting force is the textbook tombstoning set-up.
+* **Asymmetric 2-pad passive** (case 2, #7220).  A 2-terminal SMD resistor,
+  capacitor or inductor whose one terminal is tied **solid** to a zone fill
+  on its own copper layer while the other terminal reaches copper only
+  through a thermal relief or a trace.  The solid terminal sinks heat into
+  the pour and reaches reflow temperature later than the other one; the
+  uneven wetting force is the textbook tombstoning set-up.
+* **Both-solid small passive** (case 1, #9796).  A small 2-pad passive
+  (0402-class and smaller, gated by :data:`SMALL_PASSIVE_COPPER_SPAN_MM`)
+  whose **both** terminals are solid to own-net fills.  Each pad acts as a
+  heatsink, so the joints are hard to fully reflow -- cold or incomplete
+  joints and rework difficulty -- and any residual asymmetry between the
+  two solid pours still tombstones the part.
 * **Solid-connected PTH pin.**  A plated through-hole pin whose fill
   connection is solid on two or more copper layers.  Tying a barrel solidly
   to several planes is the classic way to fail IPC-A-610 barrel fill when
@@ -16,16 +22,17 @@ clearance or connectivity defects -- they are *thermal* defects:
   pads (same pad number as the footprint's exposed pad and inside its
   outline) are the intended exception and are exempt.
 
-kct's own starved-thermal repair (``zones/fill_clearance.py``) creates both
-shapes by forcing ``(zone_connect 2)`` per pad, so the rule exists to make
-that side effect visible.
+kct's own starved-thermal repair (``zones/fill_clearance.py``) creates the
+one-solid-terminal shape by forcing ``(zone_connect 2)`` per pad, so the
+rule exists to make that side effect visible.
 
 The rule is geometric.  A pad counts as connected to a pour on a layer only
 when a same-net zone's committed ``filled_polygon`` on that copper layer
 actually touches the pad's copper outline (:func:`clearance._pad_polygon`).
 A same-net plane on an inner layer an SMD pad never reaches does not count.
 The connection *mode* is the effective one: the pad's own
-``(zone_connect N)`` override first, then the zone's ``connect_pads``.
+``(zone_connect N)`` override first, then the footprint's, then the zone's
+``connect_pads``.
 
 Severity ``warning``; the rule id is classified advisory-quality, so plain
 ``kct check`` exit codes and readiness gating are unchanged.  Individual
@@ -66,6 +73,16 @@ PASSIVE_REFERENCE = re.compile(r"^[RCL]\d", re.IGNORECASE)
 #: A PTH pin is reported when it is solid-connected on at least this many layers.
 MIN_SOLID_PTH_LAYERS = 2
 
+#: Size gate for the both-solid (case 1) finding: the largest footprint-local
+#: copper span, in mm, across the passive's two pads.  Committed-fleet land
+#: patterns measure 1.56 mm for an 0402 (``R_0402_1005Metric``) and 2.45 mm
+#: for an 0603 (``C_0603_1608Metric``); assembler guidance places the
+#: tombstoning/cold-joint risk band below the 0603 size, so the threshold
+#: sits between the two spans.  A conservative default, not a standard:
+#: no located published guidance sets a numeric size threshold
+#: (``docs/research/thermal-relief-small-passives.md``, issue #9796).
+SMALL_PASSIVE_COPPER_SPAN_MM = 1.75
+
 # KiCad ``(zone_connect N)`` values (ZONE_CONNECTION).
 _PAD_ZONE_CONNECT = {0: NONE, 1: THERMAL, 2: SOLID}
 _ZONE_CONNECT_PADS = {"solid": SOLID, "thermal_reliefs": THERMAL, "none": NONE}
@@ -91,6 +108,18 @@ class PassiveAsymmetry:
     other_contacts: tuple[PadZoneContact, ...]
 
 
+@dataclass(frozen=True)
+class SmallPassiveBothSolid:
+    """A small 2-pad passive (case 1) whose both terminals are solid to fills."""
+
+    footprint: Footprint
+    pad_a: Pad
+    pad_b: Pad
+    contacts_a: tuple[PadZoneContact, ...]
+    contacts_b: tuple[PadZoneContact, ...]
+    span_mm: float
+
+
 @dataclass
 class _Fill:
     net_number: int
@@ -99,14 +128,18 @@ class _Fill:
     polygon: Any  # prepared shapely geometry
 
 
-def effective_mode(pad: Pad, zone_connect_pads: str) -> str:
+def effective_mode(pad: Pad, zone_connect_pads: str, footprint_default: int | None = None) -> str:
     """Return the effective connection mode of ``pad`` to a zone.
 
     The pad's ``(zone_connect N)`` override wins; ``3`` (thermal reliefs for
     THT only) is thermal for a plated hole and solid for an SMD pad, as in
-    KiCad.  Otherwise the zone's ``connect_pads`` setting applies.
+    KiCad.  A pad without its own override inherits ``footprint_default``
+    (the footprint's ``(zone_connect N)``, #9796); with neither override the
+    zone's ``connect_pads`` setting applies.
     """
     override = getattr(pad, "zone_connect", None)
+    if override is None:
+        override = footprint_default
     if override is not None:
         if override == 3:
             return THERMAL if pad.type == "thru_hole" else SOLID
@@ -198,7 +231,7 @@ class ZoneFillIndex:
                 )
                 if not same_net or not fill.polygon.intersects(outline):
                     continue
-                mode = effective_mode(pad, fill.mode)
+                mode = effective_mode(pad, fill.mode, getattr(footprint, "zone_connect", None))
                 if mode == NONE:
                     continue
                 contact = PadZoneContact(layer=layer, mode=mode, zone_net=fill.net_name)
@@ -233,6 +266,23 @@ def _is_solid(contacts: Iterable[PadZoneContact]) -> bool:
     return any(c.mode == SOLID for c in contacts)
 
 
+def passive_copper_span_mm(footprint: Footprint) -> float:
+    """Return the outer copper extent (mm) of a 2-pad passive's pads.
+
+    The bounding box of the two pads in the footprint-local frame, taking
+    the larger of its width and height so the measure is insensitive to a
+    90-degree part rotation.  KiCad's 0402 (1005Metric) land patterns span
+    ~1.56 mm, 0603 (1608Metric) ~2.45 mm (committed-fleet measurements).
+    """
+    xs: list[float] = []
+    ys: list[float] = []
+    for pad in _smd_copper_pads(footprint):
+        (px, py), (w, h) = pad.position, pad.size
+        xs += [px - w / 2, px + w / 2]
+        ys += [py - h / 2, py + h / 2]
+    return max(max(xs) - min(xs), max(ys) - min(ys))
+
+
 def asymmetric_passives(pcb: PCB, index: ZoneFillIndex | None = None) -> list[PassiveAsymmetry]:
     """Return every 2-pad passive with one solid and one non-solid terminal."""
     index = index if index is not None else ZoneFillIndex(pcb)
@@ -255,6 +305,39 @@ def asymmetric_passives(pcb: PCB, index: ZoneFillIndex | None = None) -> list[Pa
         else:
             found.append(
                 PassiveAsymmetry(footprint, pad_b, pad_a, tuple(contacts_b), tuple(contacts_a))
+            )
+    return found
+
+
+def both_solid_small_passives(
+    pcb: PCB, index: ZoneFillIndex | None = None
+) -> list[SmallPassiveBothSolid]:
+    """Return every small 2-pad passive with both terminals solid to fills (case 1).
+
+    Case 1 of issue #9796: a passive at or below
+    :data:`SMALL_PASSIVE_COPPER_SPAN_MM` whose both pads' effective
+    connection to an own-net fill is solid.  A part with one solid and one
+    non-solid terminal is case 2 (:func:`asymmetric_passives`) and never
+    appears here.
+    """
+    index = index if index is not None else ZoneFillIndex(pcb)
+    if index.empty:
+        return []
+    found: list[SmallPassiveBothSolid] = []
+    for footprint in pcb.footprints:
+        if not is_two_pad_passive(footprint):
+            continue
+        span = passive_copper_span_mm(footprint)
+        if span > SMALL_PASSIVE_COPPER_SPAN_MM:
+            continue
+        pad_a, pad_b = _smd_copper_pads(footprint)
+        contacts_a = index.contacts(pad_a, footprint)
+        contacts_b = index.contacts(pad_b, footprint)
+        if _is_solid(contacts_a) and _is_solid(contacts_b):
+            found.append(
+                SmallPassiveBothSolid(
+                    footprint, pad_a, pad_b, tuple(contacts_a), tuple(contacts_b), span
+                )
             )
     return found
 
@@ -285,18 +368,20 @@ def _ep_thermal_via_pad(footprint: Footprint, pad: Pad) -> bool:
 
 
 class ThermalAsymmetryRule(DRCRule):
-    """Flag thermally asymmetric passives and solid multi-plane PTH pins.
+    """Flag thermally asymmetric passives, both-solid small passives and solid PTH pins.
 
     Rule IDs generated:
-        - thermal_asymmetry: one finding per asymmetric 2-pad passive and
-          one per PTH pin solid-connected on two or more fill layers.
+        - thermal_asymmetry: one finding per asymmetric 2-pad passive, one
+          per both-solid small 2-pad passive (case 1, #9796), and one per
+          PTH pin solid-connected on two or more fill layers.
     """
 
     rule_id = THERMAL_ASYMMETRY_RULE_ID
     name = "Thermal Asymmetry"
     description = (
         "Detects 2-pad passives with one solid-to-pour and one trace/thermal terminal "
-        "(tombstoning risk) and PTH pins tied solid to two or more pour layers "
+        "(tombstoning risk), small 2-pad passives with both terminals solid to pours "
+        "(cold-joint and rework risk) and PTH pins tied solid to two or more pour layers "
         "(barrel-fill risk)"
     )
 
@@ -318,6 +403,9 @@ class ThermalAsymmetryRule(DRCRule):
 
         for asym in asymmetric_passives(pcb, index):
             results.add(self._passive_violation(asym))
+
+        for item in both_solid_small_passives(pcb, index):
+            results.add(self._both_solid_violation(item))
 
         for footprint in pcb.footprints:
             for pad in footprint.pads:
@@ -354,6 +442,33 @@ class ThermalAsymmetryRule(DRCRule):
             location=(round(x, 3), round(y, 3)),
             layer=layers[0] if layers else None,
             items=(fp.reference, solid_label, other_label),
+            nets=nets,
+        )
+
+    def _both_solid_violation(self, item: SmallPassiveBothSolid) -> DRCViolation:
+        from .clearance import _transform_pad_position
+
+        fp = item.footprint
+        x, y = _transform_pad_position(item.pad_a, fp)
+        layers = sorted({c.layer for c in item.contacts_a + item.contacts_b if c.mode == SOLID})
+        nets = tuple(dict.fromkeys(n for n in (item.pad_a.net_name, item.pad_b.net_name) if n))
+        return DRCViolation(
+            rule_id=THERMAL_ASYMMETRY_RULE_ID,
+            severity=self.severity,
+            message=(
+                f"{fp.reference} case 1: both pads solid to pour (cold-joint and rework "
+                f"risk) on a {item.span_mm:.2f} mm part: pad {item.pad_a.number} "
+                f"(net '{item.pad_a.net_name}') is {_connection_text(item.contacts_a)}; "
+                f"pad {item.pad_b.number} (net '{item.pad_b.net_name}') is "
+                f"{_connection_text(item.contacts_b)} -- give both pads thermal reliefs"
+            ),
+            location=(round(x, 3), round(y, 3)),
+            layer=layers[0] if layers else None,
+            items=(
+                fp.reference,
+                f"{fp.reference}-{item.pad_a.number}",
+                f"{fp.reference}-{item.pad_b.number}",
+            ),
             nets=nets,
         )
 

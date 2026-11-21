@@ -150,7 +150,7 @@ The distinction is load-bearing: **matcher-broken → refuse the whole tapeout**
    - `silk_edge_clearance`
    - `silk_overlap`
    - `silk_ref_obscured` — mirrors `ASSEMBLY_AFFECTING_RULES` (`kct readiness` refuses it without an ack); a hidden reference replaced by a visible same-side `gr_text` centred in the courtyard (a function label) is not reported (Issue #9435)
-   - `thermal_asymmetry` — a 2-pad passive with one solid and one relieved terminal (tombstoning) or a PTH pin solid on 2+ layers (barrel fill) is an assembly defect; `kct zones relieve` is the fixer (Issue #8659)
+   - `thermal_asymmetry` — a 2-pad passive with one solid and one relieved terminal (tombstoning), a small (≤0402-class) 2-pad passive with both terminals solid to pours (cold joints, rework), or a PTH pin solid on 2+ layers (barrel fill) is an assembly defect; `kct zones relieve` is the fixer (Issues #8659, #9796)
 
 3. **Require explicit acknowledgement of any nonzero count in that set.** A nonzero assembly-affecting warning count is acceptable **only** when explicitly acknowledged: the caller passed `--ack-warnings` naming that exact rule, or a human-authored accepted-risk decision exists and you record it as one accepted-risk line **per rule** in `README.txt` (Gate 7). Silence is not acknowledgement, and a passing Gate 1 exit code is not acknowledgement. **Unacknowledged assembly-affecting warnings ⇒ TAPEOUT REFUSED** — never exit 0, never write the final manifest. Warnings outside the assembly-affecting set appear in the table but do not require acknowledgement.
 

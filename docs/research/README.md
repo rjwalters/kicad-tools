@@ -102,6 +102,7 @@ Measured experiments on `kct route`; several record negative results.
 | [Copper LVS zone suppression](copper-lvs-zone-suppression.md) | Independent Board05 evidence |
 | [Mask-to-copper own-pad findings](mask-to-copper-own-pad-8858.md) | Boards 00-07 `mask_to_copper` errors classified against the pinned KiCad 10.0.6 plot: 963 of 1,542 are a clean entry into their own pad (now `within_own_pad` info); same-net copper beside a pad stays an error at the fab's danger band (Issue #8858); a pad joined to its own pour by thermal spokes is `own_pour_thermal` info per JLCDFM's board 01 result, solid connections stay errors (Issue #9284); a single-pad opening over same-net pads of its own footprint is `within_own_footprint` info, presentation-only, with the fab's located rows at those pads recorded (Issues #9420, #9450) |
 | [Via current capacity](via-current-capacity.md) | Screening model for via-barrel current capacity behind the `path_ampacity` layer-change check: annulus formula and its caveat, plating classes, 10 C rise (Issue #8745) |
+| [Thermal relief on small passives](thermal-relief-small-passives.md) | Sourced size threshold and severity for `thermal_asymmetry`'s both-solid case-1 finding: no standard sets an SMD threshold, so 1.75 mm pad-span (0402-class) is a conservative default from assembler guidance (Issue #9796) |
 | [3D model coverage](3d-model-coverage.md) | Per-board 3D body coverage, model licensing and gate interactions, plus the plan for the JLCPCB catalog |
 
 ## Adding a note
