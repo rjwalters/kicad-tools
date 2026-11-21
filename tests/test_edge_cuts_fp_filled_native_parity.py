@@ -139,6 +139,98 @@ CASES: dict[str, tuple[str, str, dict, bool]] = {
         },
         True,
     ),
+    # --- Near-boundary probes on the arc / rounded constructs (#9759) ---
+    # These sit just outside (or just inside) the arc bulge / rounded corner,
+    # where the *stroke* boundary (``outline_segments``) is the only thing
+    # that can flag them: the filled region's interior test does not.
+    #
+    # Outward arc, filled: circle centre board (60, 65), r 15, bulge bottom
+    # (60, 80).  ``near_bulge`` runs 0.125 mm below it.
+    "fp_poly_arc_outward_near_filled": (
+        "60 50 0",
+        "(fp_poly (pts (xy -20 -15) (xy 20 -15) (xy 20 15) "
+        "(arc (start 15 15) (mid 0 30) (end -15 15)) (xy -20 15)) "
+        '(stroke (width 0.05) (type solid)) (fill yes) (layer "Edge.Cuts"))',
+        {
+            "near_bulge": ((59.0, 80.125), (61.0, 80.125)),
+            "in_arc": ((60.0, 72.0), (61.0, 72.0)),
+            "exterior": ((20.0, 10.0), (22.0, 10.0)),
+        },
+        True,
+    ),
+    # Same outward arc, (fill no), footprint rotated 180 deg: board =
+    # (60 - x, 50 - y), so the bulge bottom lands at (60, 20).  Inside the
+    # bulge (7 mm from every edge) is clear when unfilled.
+    "fp_poly_arc_outward_fill_no_rot180": (
+        "60 50 180",
+        "(fp_poly (pts (xy -20 -15) (xy 20 -15) (xy 20 15) "
+        "(arc (start 15 15) (mid 0 30) (end -15 15)) (xy -20 15)) "
+        '(stroke (width 0.05) (type solid)) (fill no) (layer "Edge.Cuts"))',
+        {
+            "near_bulge": ((59.0, 19.875), (61.0, 19.875)),
+            "in_arc": ((60.0, 28.0), (61.0, 28.0)),
+            "exterior": ((20.0, 10.0), (22.0, 10.0)),
+        },
+        False,
+    ),
+    # Inward arc (notch): circle centre board (60, 65), r 15, notch apex
+    # (60, 50).  ``notch_near`` runs 0.125 mm inside the notch, below the
+    # apex -- clear of the filled material but within clearance of its edge.
+    "fp_poly_arc_inward_near_filled": (
+        "60 50 0",
+        "(fp_poly (pts (xy -20 -15) (xy 20 -15) (xy 20 15) "
+        "(arc (start 15 15) (mid 0 0) (end -15 15)) (xy -20 15)) "
+        '(stroke (width 0.05) (type solid)) (fill yes) (layer "Edge.Cuts"))',
+        {
+            "notch_near": ((59.0, 50.125), (61.0, 50.125)),
+            "exterior": ((20.0, 10.0), (22.0, 10.0)),
+        },
+        True,
+    ),
+    "fp_poly_arc_inward_fill_no": (
+        "60 50 0",
+        "(fp_poly (pts (xy -20 -15) (xy 20 -15) (xy 20 15) "
+        "(arc (start 15 15) (mid 0 0) (end -15 15)) (xy -20 15)) "
+        '(stroke (width 0.05) (type solid)) (fill no) (layer "Edge.Cuts"))',
+        {
+            "notch_near": ((59.0, 50.125), (61.0, 50.125)),
+            "exterior": ((20.0, 10.0), (22.0, 10.0)),
+        },
+        False,
+    ),
+    # Rounded rect: board 40..80 x 30..70, top-left corner arc centre
+    # (52, 42), r 12.  ``near_round`` is a tangential track centred 12.125 mm
+    # from the arc centre on the diagonal (0.125 mm outside the rounded
+    # corner); ``square_corner`` hugs the *square* corner (0.25 mm from the
+    # x = 40 / y = 30 lines) but is ~4.4 mm outside the rounded edge.
+    "fp_rect_rounded_near_filled": (
+        "60 50 0",
+        "(fp_rect (start -20 -20) (end 20 20) (radius 12) "
+        '(stroke (width 0.05) (type solid)) (fill yes) (layer "Edge.Cuts"))',
+        {
+            "near_round": ((43.0728, 33.7799), (43.7799, 33.0728)),
+            "square_corner": ((40.25, 30.6), (40.6, 30.25)),
+            "interior": ((60.0, 50.0), (62.0, 50.0)),
+            "exterior": ((20.0, 10.0), (22.0, 10.0)),
+        },
+        True,
+    ),
+    # Same rounded rect (fill no), rotated 90 deg (a square maps its corners
+    # onto corners, so the probes stay put).  ``inside_round`` is centred
+    # 11.875 mm from the arc centre: 0.125 mm inside the rounded edge.
+    "fp_rect_rounded_fill_no_rot90": (
+        "60 50 90",
+        "(fp_rect (start -20 -20) (end 20 20) (radius 12) "
+        '(stroke (width 0.05) (type solid)) (fill no) (layer "Edge.Cuts"))',
+        {
+            "near_round": ((43.0728, 33.7799), (43.7799, 33.0728)),
+            "inside_round": ((43.2494, 33.9565), (43.9565, 33.2494)),
+            "square_corner": ((40.25, 30.6), (40.6, 30.25)),
+            "interior": ((60.0, 50.0), (62.0, 50.0)),
+            "exterior": ((20.0, 10.0), (22.0, 10.0)),
+        },
+        False,
+    ),
 }
 
 #: Exact flagged-probe sets for the cases whose probes do not follow the
@@ -151,6 +243,15 @@ _EXPLICIT_FLAGGED: dict[str, set[str]] = {
     "fp_poly_arc_outward_filled": {"in_arc"},
     "fp_poly_arc_inward_filled": set(),
     "fp_rect_rounded_filled": {"interior"},
+    # #9759: the authored arc / rounded corner is board edge, so copper just
+    # outside (or inside) it is flagged, and copper hugging the *square*
+    # corner a rounded rect does not have is not.
+    "fp_poly_arc_outward_near_filled": {"near_bulge", "in_arc"},
+    "fp_poly_arc_outward_fill_no_rot180": {"near_bulge"},
+    "fp_poly_arc_inward_near_filled": {"notch_near"},
+    "fp_poly_arc_inward_fill_no": {"notch_near"},
+    "fp_rect_rounded_near_filled": {"near_round", "interior"},
+    "fp_rect_rounded_fill_no_rot90": {"near_round", "inside_round"},
 }
 
 _BOARD_TMPL = """(kicad_pcb (version 20241229) (generator pcbnew)
