@@ -395,7 +395,10 @@ namespace router {
 // foreign zone elsewhere (Python parity), and a layer-scoped
 // ``clear_zone_cells(layer)`` that resets ``net`` on former zone cells.  A v73
 // .so charges every foreign zone and its clear leaves stale zone nets.
-constexpr int ROUTER_CPP_BUILD_VERSION = 74;
+// v75 (Issue #9461): ``own_net_band_step_ok`` builds each own-net pad box
+// from the rotation-aware AABB (twin of Python ``pad_half_extents``); a v74
+// .so under-sizes a non-cardinally rotated pad and accepts a leg in the band.
+constexpr int ROUTER_CPP_BUILD_VERSION = 75;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
