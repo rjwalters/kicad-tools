@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterator
+from dataclasses import dataclass
 
 from kicad_tools.core.arcs import arc_sweep
 from kicad_tools.core.outline_tessellation import (
@@ -485,6 +486,166 @@ def footprint_outline_graphics(root: SExp) -> Iterator[SExp]:
                 layer = node.find_child("layer")
                 if layer is not None and layer.get_string(0) == "Edge.Cuts":
                     yield from _footprint_outline_nodes(node, anchor, angle)
+
+
+@dataclass(frozen=True)
+class FootprintClosedShape:
+    """One footprint-local closed Edge.Cuts shape, in board coordinates.
+
+    The filled-cut-out sibling of the ``gr_*`` re-emission: the stroke
+    reader (:func:`footprint_outline_graphics`) drops fill state and a
+    rect's closed-shape identity, while KiCad resolves a filled
+    ``fp_circle``/``fp_poly``/``fp_rect`` on Edge.Cuts as a cut-out region
+    (Issue #9692).  Geometry is already pushed through the footprint's
+    placement frame -- a circle carries its transformed ``center`` and the
+    rotation-invariant ``radius``; a rect carries its transformed
+    four-corner ``ring`` (a rotated rect is not axis-aligned); a poly
+    carries its transformed vertex chain.  The authored fill state rides
+    along as the raw ``(fill ...)`` token plus the effective stroke width
+    for the caller's fill resolution.
+    """
+
+    shape_type: str  # "circle" | "poly" | "rect"
+    center: Point | None = None  # circle
+    radius: float | None = None  # circle, in mm
+    ring: tuple[Point, ...] = ()  # poly / rect vertices
+    fill: str = ""  # raw (fill ...) token, "" when absent
+    stroke_width: float = 0.0  # (stroke (width N)) else legacy (width N), else 0
+
+
+def _closed_shape_fill_and_stroke(node: SExp) -> tuple[str, float]:
+    """Raw ``(fill ...)`` token and effective stroke width of an fp_* node.
+
+    Mirrors the board-level ``BoardGraphic`` reading: ``(stroke (width N))``
+    wins, a pre-KiCad-6 top-level ``(width N)`` stands in when no stroke
+    node is authored, and neither node means a zero stroke width -- the
+    value KiCad's legacy fill default keys on (Issue #9690 probe matrix).
+    """
+    fill_node = node.find_child("fill")
+    fill = (fill_node.get_string(0) or "") if fill_node is not None else ""
+    stroke = node.find_child("stroke")
+    width_node = stroke.find_child("width") if stroke is not None else None
+    if width_node is None:
+        width_node = node.find_child("width")
+    width = (width_node.get_float(0) or 0.0) if width_node is not None else 0.0
+    return fill, width
+
+
+def _fp_poly_chain(node: SExp) -> list[Point]:
+    """Ordered vertex chain of an ``fp_poly``, arcs tessellated in place.
+
+    ``(pts ...)`` may interleave ``(xy x y)`` vertices with
+    ``(arc (start) (mid) (end))`` segments (KiCad 9+).  The arc's start joins
+    the previous vertex by a straight edge, then the arc is followed through
+    its authored midpoint to its end, preserving authored order and sweep.
+    """
+    pts = node.find_child("pts")
+    chain: list[Point] = []
+    if pts is None:
+        return chain
+    for child in pts.iter_children():
+        tag = child.tag or ""
+        if tag == "xy":
+            chain.append(_coordinate(child, "fp_poly xy"))
+        elif tag == "arc":
+            start, mid, end = (_point(child, name) for name in ("start", "mid", "end"))
+            chain.extend(tessellate_arc(start, mid, end))
+    return chain
+
+
+def _fp_rect_ring(node: SExp, p1: Point, p2: Point) -> list[Point]:
+    """Four corners of an ``fp_rect``, or its rounded outline when ``(radius r)``.
+
+    The radius is clamped to half the shorter side; each corner becomes a
+    quarter-circle arc, so the removed corner material is not part of the
+    filled region.
+    """
+    (x1, y1), (x2, y2) = p1, p2
+    radius_node = node.find_child("radius")
+    radius = (radius_node.get_float(0) or 0.0) if radius_node is not None else 0.0
+    left, right = min(x1, x2), max(x1, x2)
+    top, bottom = min(y1, y2), max(y1, y2)
+    radius = min(radius, (right - left) / 2.0, (bottom - top) / 2.0)
+    if not math.isfinite(radius) or radius <= 0.0:
+        return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+    k = radius * (1.0 - math.sqrt(0.5))  # offset of the arc midpoint from the corner
+    corners = [
+        # (arc start, arc mid, arc end) walking the outline clockwise on screen
+        ((left, top + radius), (left + k, top + k), (left + radius, top)),
+        ((right - radius, top), (right - k, top + k), (right, top + radius)),
+        ((right, bottom - radius), (right - k, bottom - k), (right - radius, bottom)),
+        ((left + radius, bottom), (left + k, bottom - k), (left, bottom - radius)),
+    ]
+    ring: list[Point] = []
+    for start, mid, end in corners:
+        ring.extend(tessellate_arc(start, mid, end))
+    return ring
+
+
+def footprint_outline_closed_shapes(root: SExp) -> Iterator[FootprintClosedShape]:
+    """Yield footprint-local closed Edge.Cuts shapes with fill state.
+
+    Only the three closed shapes with a fillable interior are yielded
+    (``fp_circle``/``fp_poly``/``fp_rect``); ``fp_line``/``fp_arc``/
+    ``fp_curve`` have no interior and stay stroke-only.  Coordinates are
+    sheet-absolute board coordinates, transformed by the same placement
+    frame as :func:`footprint_outline_graphics` (``_to_board_frame``; no
+    extra mirror for a back-side footprint, whose local geometry the file
+    already stores mirrored).  Malformed geometry raises ``ValueError``
+    like the stroke reader.
+    """
+    for fp in root.iter_children():
+        if (fp.tag or "") not in _FOOTPRINT_BLOCK_TAGS:
+            continue
+        if not any(
+            (child.tag or "") in ("fp_circle", "fp_poly", "fp_rect")
+            and (layer := child.find_child("layer")) is not None
+            and layer.get_string(0) == "Edge.Cuts"
+            for child in fp.iter_children()
+        ):
+            continue
+        anchor, angle = _footprint_frame(fp)
+        for node in fp.iter_children():
+            tag = node.tag or ""
+            if tag not in ("fp_circle", "fp_poly", "fp_rect"):
+                continue
+            layer = node.find_child("layer")
+            if layer is None or layer.get_string(0) != "Edge.Cuts":
+                continue
+            fill, stroke_width = _closed_shape_fill_and_stroke(node)
+
+            if tag == "fp_circle":
+                center, end = _point(node, "center"), _point(node, "end")
+                board_center = _to_board_frame(center, anchor, angle)
+                board_end = _to_board_frame(end, anchor, angle)
+                yield FootprintClosedShape(
+                    shape_type="circle",
+                    center=board_center,
+                    radius=math.hypot(
+                        board_end[0] - board_center[0], board_end[1] - board_center[1]
+                    ),
+                    fill=fill,
+                    stroke_width=stroke_width,
+                )
+            elif tag == "fp_rect":
+                (x1, y1), (x2, y2) = _point(node, "start"), _point(node, "end")
+                corners = _fp_rect_ring(node, (x1, y1), (x2, y2))
+                yield FootprintClosedShape(
+                    shape_type="rect",
+                    ring=tuple(_to_board_frame(corner, anchor, angle) for corner in corners),
+                    fill=fill,
+                    stroke_width=stroke_width,
+                )
+            else:  # fp_poly
+                chain = _fp_poly_chain(node)
+                if len(chain) < 3:
+                    raise ValueError("Malformed Edge.Cuts fp_poly: missing points")
+                yield FootprintClosedShape(
+                    shape_type="poly",
+                    ring=tuple(_to_board_frame(point, anchor, angle) for point in chain),
+                    fill=fill,
+                    stroke_width=stroke_width,
+                )
 
 
 def outline_node_points(node: SExp) -> list[Point]:

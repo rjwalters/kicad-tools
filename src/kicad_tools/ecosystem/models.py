@@ -105,7 +105,11 @@ VERDICTS: frozenset[str] = frozenset(
 #:                              is ideas-only, to avoid mixed-license files
 #:                              in an otherwise uniformly-MIT tree
 #: ``copyleft-ideas-only``   -- GPL/AGPL; capability-level engagement only,
-#:                              no code in *either* direction
+#:                              no code in *either* direction, except that
+#:                              AGPL neighbours' behaviour may be
+#:                              reimplemented via the two-party clean-room
+#:                              protocol (docs/clean-room.md); their code
+#:                              still moves in neither direction
 #: ``unlicensed``            -- no LICENSE committed; treat as
 #:                              all-rights-reserved, whatever a README claims
 #: ``cloud-service``         -- open client in front of a closed service; the

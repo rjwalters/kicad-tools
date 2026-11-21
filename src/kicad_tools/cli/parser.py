@@ -5357,7 +5357,16 @@ def _add_fix_silkscreen_parser(subparsers) -> None:
         type=float,
         default=None,
         metavar="MM",
-        help="Silk-to-hole clearance for --clip-to-holes (default: the silk_hole_overlap rule's, 0)",
+        help="Silk-to-hole clearance for --clip-to-holes/--all (default: the silk_hole_overlap rule's, 0)",
+    )
+    fix_silk_parser.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "One shared legalisation pass (legalize_silk, #9795 phase 1): widen, "
+            "rescale, thicken, clip off pads and PTH/NPTH holes (vias untouched) "
+            "and relocate obscured references"
+        ),
     )
     fix_silk_parser.add_argument(
         "--min-width",

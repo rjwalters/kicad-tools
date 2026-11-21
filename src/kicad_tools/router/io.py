@@ -5471,12 +5471,17 @@ def load_pcb_for_routing(
     project_path: str | Path | None = None,
     router_class_floors: bool = True,
     record_decisions: bool = False,
+    mark_plane_zones: bool = True,
 ) -> tuple[Autorouter, dict[str, int]]:
     """
     Load a KiCad PCB file and create an Autorouter with all components.
 
     Args:
         pcb_path: Path to .kicad_pcb file
+        mark_plane_zones: Issue #9597: parse plane-layer zone outlines and mark
+            them on the grid so A* charges for foreign plane zones. A tool
+            that never runs A* (``kct optimize-traces``) passes ``False`` to
+            skip the second PCB parse and the per-cell marking.
         project_path: The ``.kicad_pro`` whose netclasses the route must honour
             (Issue #6243).  Defaults to ``pcb_path``'s sibling; pass the
             ORIGINAL board's project when ``pcb_path`` is a staged copy.  A
@@ -6443,6 +6448,49 @@ def load_pcb_for_routing(
                 total_segs,
                 total_vias,
             )
+
+    # Issue #9597: pour zones on declared PLANE layers become zone cells on
+    # the routing grid (both backends), so A* charges a soft cost for
+    # entering a foreign plane zone instead of routing through it blind.
+    # The parsed outlines are retained on the router for the post-route
+    # crossing report and the --protect-plane-zones hard refusal.  A strict
+    # no-op (no outlines, no marks) on a stack with no PLANE layers or a
+    # board with no plane-layer zones.
+    # The second parse is only paid when the stack declares a PLANE layer AND
+    # the file text actually contains a zone (cheap substring check on the
+    # already-read ``pcb_text``).
+    from .layers import LayerType as _ZoneLayerType
+
+    _zone_stack = router.layer_stack
+    if (
+        mark_plane_zones
+        and _zone_stack is not None
+        and "(zone" in pcb_text
+        and any(layer.layer_type == _ZoneLayerType.PLANE for layer in _zone_stack.layers)
+    ):
+        try:
+            from kicad_tools.schema.pcb import PCB as _ZoneSchemaPCB
+
+            from .layer_advisories import mark_plane_zones_on_grid, plane_zone_outlines
+
+            _zone_pcb = _ZoneSchemaPCB.load(pcb_path)
+            router.plane_zones = plane_zone_outlines(_zone_pcb, _zone_stack, (origin_x, origin_y))
+            router._plane_zone_source_pcb = str(pcb_path)
+            if router.plane_zones:
+                _marked = mark_plane_zones_on_grid(router.grid, router.plane_zones)
+                if _marked:
+                    logger.info(
+                        "Plane-layer zone cost: %d outline(s), %d grid cells marked "
+                        "(foreign zones costed, not blocked)",
+                        len(router.plane_zones),
+                        _marked,
+                    )
+        except Exception as exc:
+            # The advisory cost/report stays best-effort, but the failure is
+            # recorded: --protect-plane-zones (hard) must refuse rather than
+            # run with protection silently off.
+            router._plane_zone_load_error = f"{type(exc).__name__}: {exc}"
+            logger.warning("plane-zone outline parsing failed: %s", exc)
 
     # Region-bounded routing (Issue #4148, Phase 2a): confine all new routing
     # to an axis-aligned box by marking every cell OUTSIDE it as a fixed

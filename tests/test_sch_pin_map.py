@@ -15,6 +15,7 @@ from kicad_tools.cli.sch_pin_map import (
     _build_wire_graph,
     _flood_fill_net,
     _point_on_segment,
+    _renumber_local_nets,
     _to_coord,
     resolve_pin_map,
 )
@@ -1924,3 +1925,207 @@ class TestSheetFilterIgnoresParentFolders:
         data = json.loads(capsys.readouterr().out)
         assert "R3" in data and "R4" in data
         assert "R1" not in data and "R2" not in data and "C2" not in data
+
+
+# ---------------------------------------------------------------------------
+# Issue #9827: collinear overlapping wires, and _local_N names across sheets
+# ---------------------------------------------------------------------------
+#
+# Behaviour pinned by black-box probes of ``kicad-cli sch export netlist``
+# (KiCad 10.0.6, CI's pinned image, and 10.0.8 agree), using schematics with
+# the same geometry as the fixtures below:
+#
+# * Two collinear wires that overlap, where neither shares an endpoint with
+#   the other and no junction sits on the overlap, are separate nets.  A pin
+#   at one wire's end does not join the other wire it lies inside.
+# * A junction dot on the overlap joins them.
+# * A wire lying wholly inside another collinear wire stays separate too.
+
+_Y = 50.8
+
+
+def _r_sym(ref: str, x: float, y: float) -> str:
+    """A Device:R at (x, y): pin 1 at (x, y - 3.81), pin 2 at (x, y + 3.81)."""
+    return f"""  (symbol
+    (lib_id "Device:R") (at {x} {y} 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no) (uuid "sym-{ref}")
+    (property "Reference" "{ref}" (at {x + 2} {y} 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (property "Value" "10k" (at {x + 4} {y} 0)
+      (effects (font (size 1.27 1.27)) (justify left)))
+    (pin "1" (uuid "{ref}-p1")) (pin "2" (uuid "{ref}-p2"))
+  )
+"""
+
+
+def _overlap_sch(items: list[str]) -> str:
+    return (
+        """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000009827")
+  (paper "A4")
+  (lib_symbols
+    (symbol "Device:R"
+      (symbol "R_1_1"
+        (pin passive line
+          (at 0 3.81 270) (length 1.27) (name "~") (number "1"))
+        (pin passive line
+          (at 0 -3.81 90) (length 1.27) (name "~") (number "2"))
+      )
+    )
+  )
+"""
+        + "".join(items)
+        + ")\n"
+    )
+
+
+def _wire(x1: float, y1: float, x2: float, y2: float) -> str:
+    return (
+        f"  (wire (pts (xy {x1} {y1}) (xy {x2} {y2}))\n"
+        f'    (stroke (width 0) (type default)) (uuid "w-{x1}-{x2}"))\n'
+    )
+
+
+def _label(text: str, x: float, y: float) -> str:
+    return (
+        f'  (label "{text}" (at {x} {y} 0)\n'
+        f"    (effects (font (size 1.27 1.27)) (justify left bottom))\n"
+        f'    (uuid "lbl-{text}"))\n'
+    )
+
+
+def _junction(x: float, y: float) -> str:
+    return f'  (junction (at {x} {y}) (diameter 0) (color 0 0 0 0) (uuid "j-{x}"))\n'
+
+
+# Wire A runs x 50.8 -> 68.58, wire B runs x 76.2 -> 60.96, both at y = 50.8.
+# They overlap over x 60.96-68.58 with no shared endpoint.  R1 pin 2 sits at
+# A's right end (inside B); R2 pin 2 sits at B's left end (inside A).
+_OVERLAP_WIRES = [_wire(50.8, _Y, 68.58, _Y), _wire(76.2, _Y, 60.96, _Y)]
+_OVERLAP_PINS = [_r_sym("R1", 68.58, _Y - 3.81), _r_sym("R2", 60.96, _Y - 3.81)]
+_OVERLAP_LABELS = [_label("NET_A", 50.8, _Y), _label("NET_B", 76.2, _Y)]
+
+
+class TestCollinearOverlappingWires:
+    """Issue #9827: overlapping collinear wires are not joined."""
+
+    def test_overlapping_wires_keep_their_labels(self, tmp_path):
+        sch = Schematic.load(
+            _write_sch(tmp_path, _overlap_sch(_OVERLAP_PINS + _OVERLAP_WIRES + _OVERLAP_LABELS))
+        )
+        pin_map = resolve_pin_map(sch)
+
+        assert pin_map["R1"]["pins"]["2"]["net"] == "NET_A"
+        assert pin_map["R2"]["pins"]["2"]["net"] == "NET_B"
+
+    def test_overlapping_wires_are_not_graph_neighbours(self, tmp_path):
+        sch = Schematic.load(_write_sch(tmp_path, _overlap_sch(_OVERLAP_WIRES + _OVERLAP_LABELS)))
+        adjacency, net_names = _build_wire_graph(sch)
+
+        # Wire A is one edge, wire B is one edge: neither is split at the
+        # other's end.
+        assert adjacency[_to_coord(50.8, _Y)] == {_to_coord(68.58, _Y)}
+        assert adjacency[_to_coord(76.2, _Y)] == {_to_coord(60.96, _Y)}
+
+    def test_junction_on_overlap_joins_the_wires(self, tmp_path):
+        sch = Schematic.load(
+            _write_sch(
+                tmp_path,
+                _overlap_sch(_OVERLAP_PINS + _OVERLAP_WIRES + [_junction(60.96, _Y)]),
+            )
+        )
+        pin_map = resolve_pin_map(sch)
+
+        r1 = pin_map["R1"]["pins"]["2"]["net"]
+        assert r1 is not None
+        assert r1 == pin_map["R2"]["pins"]["2"]["net"]
+
+    def test_wire_inside_another_stays_separate(self, tmp_path):
+        # Wire A x 50.8 -> 76.2 (NET_A), unlabelled wire B x 58.42 -> 68.58
+        # lies wholly inside it.  R1 and R2 pin 2 sit at B's two ends.  (A
+        # label on B would also lie on A, and a label joins any wire it sits
+        # on, so B is left unlabelled.)
+        items = [
+            _r_sym("R1", 58.42, _Y - 3.81),
+            _r_sym("R2", 68.58, _Y - 3.81),
+            _wire(50.8, _Y, 76.2, _Y),
+            _wire(58.42, _Y, 68.58, _Y),
+            _label("NET_A", 50.8, _Y),
+        ]
+        pin_map = resolve_pin_map(Schematic.load(_write_sch(tmp_path, _overlap_sch(items))))
+
+        r1 = pin_map["R1"]["pins"]["2"]["net"]
+        assert r1 is not None and r1.startswith("_local_")
+        assert pin_map["R2"]["pins"]["2"]["net"] == r1
+
+    def test_two_unlabelled_chains_get_distinct_local_names(self, tmp_path):
+        """The LED-cathode case from the issue: two chains, one overlap."""
+        items = _OVERLAP_WIRES + [
+            _r_sym("R1", 50.8, _Y - 3.81),  # pin 2 at A's left end
+            _r_sym("R3", 68.58, _Y - 3.81),  # pin 2 at A's right end (inside B)
+            _r_sym("R2", 76.2, _Y - 3.81),  # pin 2 at B's right end
+            _r_sym("R4", 60.96, _Y - 3.81),  # pin 2 at B's left end (inside A)
+        ]
+        pin_map = resolve_pin_map(Schematic.load(_write_sch(tmp_path, _overlap_sch(items))))
+        net = {ref: pin_map[ref]["pins"]["2"]["net"] for ref in ("R1", "R2", "R3", "R4")}
+
+        assert net["R1"] is not None and net["R1"].startswith("_local_")
+        assert net["R2"] is not None and net["R2"].startswith("_local_")
+        assert net["R1"] == net["R3"]
+        assert net["R2"] == net["R4"]
+        assert net["R1"] != net["R2"]
+
+
+class TestLocalNetNamesAcrossSheets:
+    """Issue #9827: each sheet numbered its unnamed nets from _local_1."""
+
+    def test_renumber_shifts_past_offset(self):
+        sheet = {
+            "R1": {"pins": {"1": {"net": "_local_2"}, "2": {"net": "GND"}}},
+            "R2": {"pins": {"1": {"net": "_local_1"}, "2": {"net": None}}},
+        }
+        assert _renumber_local_nets(sheet, 5) == 7
+        assert sheet["R2"]["pins"]["1"]["net"] == "_local_6"
+        assert sheet["R1"]["pins"]["1"]["net"] == "_local_7"
+        assert sheet["R1"]["pins"]["2"]["net"] == "GND"
+        assert sheet["R2"]["pins"]["2"]["net"] is None
+
+    def test_two_sheets_get_distinct_local_names(self, tmp_path, capsys):
+        sheet_a = UNNAMED_LOCAL_NET_SCHEMATIC
+        sheet_b = (
+            UNNAMED_LOCAL_NET_SCHEMATIC.replace('"R1"', '"R3"')
+            .replace('"R2"', '"R4"')
+            .replace("000000002219", "000000002220")
+        )
+        (tmp_path / "a.kicad_sch").write_text(sheet_a)
+        (tmp_path / "b.kicad_sch").write_text(sheet_b)
+        sheets = ""
+        for i, (name, fname) in enumerate((("A", "a.kicad_sch"), ("B", "b.kicad_sch"))):
+            sheets += f"""  (sheet
+    (at {50 + 60 * i} 30) (size 40 30)
+    (uuid "sheet-{name}")
+    (property "Sheetname" "{name}" (at 50 29 0)
+      (effects (font (size 1.27 1.27))))
+    (property "Sheetfile" "{fname}" (at 50 61 0)
+      (effects (font (size 1.27 1.27)) hide))
+  )
+"""
+        root = tmp_path / "root.kicad_sch"
+        root.write_text(
+            '(kicad_sch\n  (version 20231120)\n  (generator "test")\n'
+            '  (uuid "00000000-0000-0000-0000-000000009828")\n  (paper "A4")\n'
+            f"  (lib_symbols)\n{sheets})\n"
+        )
+
+        rc = pin_map_main([str(root), "--format", "json"])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+
+        net_a = data["R1"]["pins"]["1"]["net"]
+        net_b = data["R3"]["pins"]["1"]["net"]
+        assert net_a == data["R2"]["pins"]["1"]["net"]
+        assert net_b == data["R4"]["pins"]["1"]["net"]
+        assert net_a.startswith("_local_") and net_b.startswith("_local_")
+        assert net_a != net_b

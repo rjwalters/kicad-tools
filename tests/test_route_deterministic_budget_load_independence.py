@@ -27,8 +27,8 @@ byte-identical routed copper, which is the load-independence guarantee in
 practice.
 
 These tests are ``slow``/``integration`` (they invoke the real ``kct route``
-CLI on a committed board fixture) and are skipped when the C++ backend is not
-built.
+CLI on a committed board fixture) and carry the ``requires_router_cpp`` marker,
+so they fail with the build hint when the C++ backend is not built (Issue #9705).
 """
 
 from __future__ import annotations
@@ -75,16 +75,6 @@ def _load_normalize_copper_module():
 
 
 _normalize_copper_module = _load_normalize_copper_module()
-
-
-def _cpp_available() -> bool:
-    """True when the C++ router extension is importable in this worktree."""
-    try:
-        import kicad_tools.router.router_cpp  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
 
 
 def _normalized_copper(pcb_path: Path) -> list[str]:
@@ -197,10 +187,7 @@ def _route(board: Path, output: Path) -> subprocess.CompletedProcess[str]:
 
 @pytest.mark.slow
 @pytest.mark.integration
-@pytest.mark.skipif(
-    not _cpp_available(),
-    reason="C++ router backend not built (run `uv run kct build-native`)",
-)
+@pytest.mark.requires_router_cpp
 class TestDeterministicBudgetLoadIndependence:
     """A real route is reproducible run-to-run under ``--deterministic-budget``."""
 

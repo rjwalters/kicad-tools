@@ -24,6 +24,7 @@ from ..core.board_outline import (
     OutlineSegments,
     board_outline_bounds,
     circle_sagitta,
+    footprint_outline_closed_shapes,
     footprint_outline_graphics,
     is_degenerate_closed_curve,
     legacy_arc_points,
@@ -1525,6 +1526,24 @@ def _fill_token_is_filled(token: str) -> bool:
     return token.strip().lower() in _FILLED_FILL_TOKENS
 
 
+def _resolves_filled_cutout(graphic_type: str, fill: str, stroke_width: float) -> bool:
+    """KiCad's Edge.Cuts fill resolution for one closed shape.
+
+    The matrix black-box probed on the pinned kicad-cli image (Issue
+    #9690, board-level shapes; Issue #9692 pins it for footprint-local
+    ones): an explicit filled token wins in both directions, and with the
+    token absent only a circle/rect follows the legacy zero-stroke-width
+    default -- a poly is never implicitly filled.  ``stroke_width`` is the
+    shape's *effective* width (``(stroke (width N))`` else the legacy
+    top-level ``(width N)``, 0.0 when neither is authored).
+    """
+    if fill.strip():
+        return _fill_token_is_filled(fill)
+    if graphic_type == "poly":
+        return False
+    return not stroke_width
+
+
 @dataclass
 class FootprintGraphic:
     """Graphic element within a footprint (fp_line, fp_rect, fp_circle, fp_arc, fp_poly).
@@ -1734,13 +1753,13 @@ class BoardGraphic:
 
         Only the Edge.Cuts consumers may read this: the silkscreen default
         for an absent token stays "not filled" (:pyattr:`is_filled`,
-        Issue #5811).
+        Issue #5811).  The resolution itself is shared with the
+        footprint-local closed shapes (Issue #9692) through
+        :func:`_resolves_filled_cutout`.
         """
-        if self.fill.strip():
-            return _fill_token_is_filled(self.fill)
-        if self.graphic_type == "poly":
-            return False
-        return not (self.stroke_width or (self.legacy_width or 0.0))
+        return _resolves_filled_cutout(
+            self.graphic_type, self.fill, self.stroke_width or (self.legacy_width or 0.0)
+        )
 
     @classmethod
     def from_sexp(cls, sexp: SExp, graphic_type: str) -> BoardGraphic:
@@ -3298,6 +3317,9 @@ class PCB:
         self._texts: list[GraphicText] = []
         self._graphics: list[BoardGraphic] = []
         self._setup: Setup | None = None
+        # Issue #9746: board-level ``(general (thickness X))`` in mm, or
+        # ``None`` when the file carries no positive header thickness.
+        self._general_thickness: float | None = None
         # Issue #4875: board-declared legacy top-level ``(net_class …)``
         # design rules, keyed by class name.  A dict (not a list) so a
         # re-``_parse()`` -- which appends rather than replaces -- overwrites
@@ -3736,6 +3758,8 @@ class PCB:
                 arc = GraphicArc.from_sexp(child)
                 self._graphic_arcs.append(arc)
                 self._graphics.append(BoardGraphic.from_sexp(child, "arc"))
+            elif tag == "general":
+                self._parse_general(child)
             elif tag == "setup":
                 self._parse_setup(child)
             elif tag == "title_block":
@@ -4151,6 +4175,19 @@ class PCB:
                 pass  # Store globally if needed
 
         return layers
+
+    def _parse_general(self, sexp: SExp) -> None:
+        """Parse the board-level ``(general (thickness X) ...)`` header (#9746).
+
+        Only the thickness is kept; a missing, unparseable or non-positive
+        value leaves :attr:`general_thickness` as ``None``.
+        """
+        node = sexp.find("thickness")
+        if node is None:
+            return
+        value = node.get_float(0)
+        if value is not None and value > 0.0:
+            self._general_thickness = float(value)
 
     def _parse_title_block(self, sexp: SExp):
         """Parse title block."""
@@ -4679,6 +4716,7 @@ class PCB:
         self._texts = []
         self._graphics = []
         self._setup = None
+        self._general_thickness = None
         self._net_classes = {}
         self._title_block = {}
         self._parse()
@@ -5864,12 +5902,14 @@ class PCB:
         return segments
 
     def get_board_outline_filled_regions(self) -> list[FilledOutlineRegion]:
-        """Filled Edge.Cuts shapes as cut-out regions (Issue #9690).
+        """Filled Edge.Cuts shapes as cut-out regions (Issues #9690, #9692).
 
         KiCad treats a filled ``gr_circle`` / ``gr_poly`` / ``gr_rect`` on
         Edge.Cuts as a cut-out region rather than a stroke: copper inside it
-        violates ``copper_edge_clearance`` with actual 0.0 mm.  Whether a
-        shape is filled follows KiCad's own resolution -- see
+        violates ``copper_edge_clearance`` with actual 0.0 mm.  A
+        footprint-local ``fp_circle`` / ``fp_poly`` / ``fp_rect`` is equally
+        a cut-out, in the footprint's (rotated, translated) board frame.
+        Whether a shape is filled follows KiCad's own resolution -- see
         :pyattr:`BoardGraphic.is_filled_cutout` for the probed matrix (in
         short: an explicit filled token always fills; with the token absent
         only a zero-stroke-width circle/rect fills, never a poly).
@@ -5918,6 +5958,27 @@ class PCB:
                 if len(graphic.points) < 3:
                     continue
                 regions.append(FilledOutlineRegion(shape_type="poly", ring=tuple(graphic.points)))
+
+        # Footprint-local closed shapes (Issue #9692): same fill resolution,
+        # geometry already transformed into the sheet-absolute board frame
+        # by the shared core reader.
+        for shape in footprint_outline_closed_shapes(self._sexp):
+            if not _resolves_filled_cutout(shape.shape_type, shape.fill, shape.stroke_width):
+                continue
+            if shape.shape_type == "circle":
+                if shape.center is None or shape.radius is None or shape.radius <= 0.0:
+                    continue
+                regions.append(
+                    FilledOutlineRegion(
+                        shape_type="circle", center=shape.center, radius=shape.radius
+                    )
+                )
+            elif shape.shape_type == "rect":
+                regions.append(FilledOutlineRegion(shape_type="rect", ring=shape.ring))
+            else:  # poly
+                if len(shape.ring) < 3:
+                    continue
+                regions.append(FilledOutlineRegion(shape_type="poly", ring=shape.ring))
 
         # Transform from sheet-absolute to board-relative coordinates, the
         # same shift get_board_outline_segments applies so that regions,
@@ -6212,6 +6273,17 @@ class PCB:
     def setup(self) -> Setup | None:
         """Board setup/design rules."""
         return self._setup
+
+    @property
+    def general_thickness(self) -> float | None:
+        """Board thickness in mm from ``(general (thickness X))`` (#9746).
+
+        ``None`` when the file has no ``general`` header, no ``thickness``
+        in it, or a non-positive value.  Read-only: it reflects the parsed
+        file, and the stackup strata sum (when declared) takes precedence
+        for consumers that need a physical thickness.
+        """
+        return self._general_thickness
 
     @property
     def net_classes(self) -> dict[str, BoardNetClass]:

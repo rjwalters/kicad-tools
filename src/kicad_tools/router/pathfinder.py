@@ -42,7 +42,7 @@ from .clearance_resolver import trace_via_clearance_mm
 from .geometry import segments_intersect as _geom_segments_intersect
 from .grid import RoutingGrid, SetupDeadlineExpired
 from .heuristics import DEFAULT_HEURISTIC, Heuristic, HeuristicContext
-from .layers import Layer
+from .layers import Layer, LayerType
 from .pad_landing import landing_cost, pad_landing_geometry
 from .primitives import Pad, Route, Segment, Via
 from .quantize import dogleg_points, is_45_aligned
@@ -4537,6 +4537,28 @@ class Router:
             for dx, dy, _dlayer, _cost_mult in self.neighbors_2d
         ]
 
+    def _plane_layer_indices(self) -> frozenset[int]:
+        """Grid-layer indices the resolved stack types as ``PLANE`` (Issue #9597).
+
+        Cached per router; the stack never changes within a run.  Empty for
+        a plane-free stack, which keeps every plane-zone behaviour below a
+        strict no-op (byte-identical costs and blocking).
+        """
+        cached = self.__dict__.get("_plane_layer_idx_cache")
+        if cached is None:
+            stack = getattr(self.grid, "layer_stack", None)
+            cached = (
+                frozenset(
+                    layer.index
+                    for layer in getattr(stack, "layers", [])
+                    if getattr(layer, "layer_type", None) == LayerType.PLANE
+                )
+                if stack is not None
+                else frozenset()
+            )
+            self.__dict__["_plane_layer_idx_cache"] = cached
+        return cached
+
     def _is_zone_cell(self, gx: int, gy: int, layer: int) -> bool:
         """Check if a cell is part of a zone (copper pour)."""
         if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
@@ -4558,6 +4580,14 @@ class Router:
         Zone cells allow routing through same-net zones but block
         routing through other-net zones.
 
+        Issue #9597: a foreign zone on a ``PLANE`` layer is *costed*, not
+        blocked -- a net may route across a plane it opted in to
+        (``allow_plane_layers`` / ``--no-reserve-plane-layers``) paying
+        ``cost_zone_foreign_plane`` per cell, because KiCad pours legally
+        flow around such a trace.  A reserved plane layer is unreachable
+        for the net anyway (``allowed_layers``), so the carve-out only
+        ever softens cells a route may legitimately use.
+
         Args:
             gx, gy: Grid coordinates
             layer: Grid layer index
@@ -4568,6 +4598,9 @@ class Router:
         """
         if not self._is_zone_cell(gx, gy, layer):
             return False  # Not a zone, use normal blocking logic
+
+        if layer in self._plane_layer_indices():
+            return False  # Foreign plane zone: cost, never a block (#9597)
 
         zone_net = self._get_zone_net(gx, gy, layer)
 
@@ -4582,7 +4615,9 @@ class Router:
         """Get routing cost adjustment for zone cells.
 
         Same-net zones have reduced cost (encourage using zone copper).
-        Different-net zones are blocked (handled elsewhere).
+        Different-net zones on plane layers pay ``cost_zone_foreign_plane``
+        (Issue #9597); elsewhere they are blocked (handled elsewhere) and
+        carry the historical high-cost fallback.
 
         Args:
             gx, gy: Grid coordinates
@@ -4600,6 +4635,9 @@ class Router:
         if zone_net == net:
             # Same net - encourage using zone copper with reduced cost
             return self.rules.cost_zone_same_net - 1.0  # Net reduction
+        elif zone_net != 0 and layer in self._plane_layer_indices():
+            # Foreign plane zone - soft crossing cost (#9597), never a block
+            return self.rules.cost_zone_foreign_plane
         else:
             # Different net - should be blocked, but return high cost as fallback
             return 100.0
@@ -4689,6 +4727,11 @@ class Router:
         - All zones are same-net (via connects through same-net zones), OR
         - Via is placed where there's no zone copper
 
+        Issue #9597: zones on ``PLANE`` layers are excluded from the scan --
+        a via piercing a plane pour is the normal antipad case (the pour
+        clears around the drill); blocking it would refuse nearly every via
+        on a 4-layer board the moment its planes carry zone outlines.
+
         Args:
             gx, gy: Grid coordinates
             net: Net number of the route being planned
@@ -4696,7 +4739,10 @@ class Router:
         Returns:
             True if via can be placed, False if blocked by other-net zone
         """
+        plane_layers = self._plane_layer_indices()
         for layer_idx in range(self.grid.num_layers):
+            if layer_idx in plane_layers:
+                continue
             if self._is_zone_cell(gx, gy, layer_idx):
                 zone_net = self._get_zone_net(gx, gy, layer_idx)
                 if zone_net != net:
@@ -5147,18 +5193,41 @@ class Router:
         # Zone cells with a different net are blocked; same-net zones get
         # a cost discount.  This replaces per-neighbor Python object access
         # with direct NumPy lookups.
+        # Issue #9597: foreign zones on PLANE layers are soft-costed
+        # (``cost_zone_foreign_plane``), not blocked -- both A* backends
+        # agree; a plane-free stack keeps the arrays byte-identical.
+        plane_layers = self._plane_layer_indices()
         zone_blocked_arr = (
             self.grid._is_zone & (self.grid._net != start.net) & (self.grid._net != 0)
         )
-        zone_cost_arr = np.where(
-            self.grid._is_zone & (self.grid._net == start.net),
-            self.rules.cost_zone_same_net - 1.0,
-            np.where(
-                zone_blocked_arr,
-                100.0,
-                0.0,
-            ),
-        )
+        if plane_layers:
+            plane_mask = np.zeros(self.grid.num_layers, dtype=bool)
+            plane_mask[sorted(plane_layers)] = True
+            plane_zone_arr = zone_blocked_arr & plane_mask[:, None, None]
+            zone_blocked_arr = zone_blocked_arr & ~plane_mask[:, None, None]
+            zone_cost_arr = np.where(
+                self.grid._is_zone & (self.grid._net == start.net),
+                self.rules.cost_zone_same_net - 1.0,
+                np.where(
+                    plane_zone_arr,
+                    self.rules.cost_zone_foreign_plane,
+                    np.where(
+                        zone_blocked_arr,
+                        100.0,
+                        0.0,
+                    ),
+                ),
+            )
+        else:
+            zone_cost_arr = np.where(
+                self.grid._is_zone & (self.grid._net == start.net),
+                self.rules.cost_zone_same_net - 1.0,
+                np.where(
+                    zone_blocked_arr,
+                    100.0,
+                    0.0,
+                ),
+            )
 
         # Issue #9622: soft under-body surcharge state.  ``None`` mask
         # array (boards without a qualifying fine-pitch component, or the

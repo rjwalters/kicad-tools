@@ -462,6 +462,41 @@ class TestCli:
             assert result.returncode == 0, result.stderr
             assert result.stdout.strip()
 
+    def test_show_agpl_entry_mentions_clean_room(self) -> None:
+        """Issue #9801: AGPL neighbours get the clean-room wording, not the
+        blanket ideas-only line."""
+        for project_id in ("konnect", "zeo"):
+            result = self._run("show", project_id)
+            assert result.returncode == 0, result.stderr
+            assert "clean-room" in result.stdout
+            assert "ideas only, in both directions" not in result.stdout
+
+    def test_show_non_agpl_entries_keep_existing_reuse_line(self) -> None:
+        """Issue #9801: MIT, unlicensed and non-AGPL copyleft entries are
+        unchanged by the AGPL branch."""
+        for project_id, expected in (
+            ("atopile", "permitted, with attribution"),
+            ("seeed-kicad-mcp", "NOT permitted -- ideas only, in both directions"),
+            ("freerouting", "NOT permitted -- ideas only, in both directions"),
+        ):
+            result = self._run("show", project_id)
+            assert result.returncode == 0, result.stderr
+            assert expected in result.stdout
+            assert "clean-room" not in result.stdout
+
+    def test_claude_md_ecosystem_section_states_agpl_clean_room_split(self) -> None:
+        """Issue #9801: CLAUDE.md must not carry the blanket "AGPL and
+        unlicensed neighbours are ideas-only" ruling that contradicts the
+        clean-room scope."""
+        text = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        start = text.index('"Have we already evaluated X?"')
+        end = text.index("## Changelog:")
+        section = text[start:end]
+        assert "AGPL and unlicensed neighbours" not in section
+        assert "AGPL" in section
+        assert "clean-room" in section
+        assert "ideas-only" in section
+
     def test_no_subcommand_prints_usage(self) -> None:
         result = self._run()
         assert result.returncode == 1

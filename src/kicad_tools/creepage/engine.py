@@ -818,7 +818,8 @@ class CreepageReport:
     # are not counted or used.
     netless_items: int = 0
     # Board thickness used by cross-face bore/edge paths (#9704) and where it
-    # came from (``"stackup"`` strata sum | ``"default"`` 1.6 mm).  ``None``
+    # came from (``"stackup"`` strata sum | ``"general"`` header
+    # ``(general (thickness X))``, #9746 | ``"default"`` 1.6 mm).  ``None``
     # (and omitted from JSON) when the census evaluated no cross-face candidate
     # -- e.g. every conductor sits on one face -- so such boards serialise
     # exactly as before #9704.
@@ -1749,13 +1750,18 @@ def _board_thickness_mm(pcb: PCB) -> tuple[float, str]:
 
     The stackup strata sum (copper + dielectric + mask, every ``StackupLayer``
     carries its mm) is the board's total thickness when the file declares one;
-    otherwise the 1.6 mm two-layer default is assumed and reported as such.
+    otherwise the board header's ``(general (thickness X))`` is used (#9746);
+    only when neither is present is the 1.6 mm two-layer default assumed and
+    reported as such.
     """
     setup = getattr(pcb, "setup", None)
     stackup = getattr(setup, "stackup", None) or []
     total = sum(float(getattr(stratum, "thickness", 0.0) or 0.0) for stratum in stackup)
     if total > 0.0:
         return total, "stackup"
+    general = getattr(pcb, "general_thickness", None)
+    if general is not None and float(general) > 0.0:
+        return float(general), "general"
     return _DEFAULT_BOARD_THICKNESS_MM, "default"
 
 

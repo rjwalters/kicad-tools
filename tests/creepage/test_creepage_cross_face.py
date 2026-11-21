@@ -219,8 +219,17 @@ def test_same_face_pair_with_bore_between_unchanged(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+_GENERAL_1_6 = "(general (thickness 1.6))"
+
+
 def test_thickness_defaults_to_1_6_without_stackup(tmp_path):
-    pcb = _load(tmp_path, board_cross_face_bore_source())
+    # Neither a stackup nor a ``(general (thickness X))`` header: the 1.6 mm
+    # default is the only source left (#9746 made the header a source).
+    source = board_cross_face_bore_source()
+    assert _GENERAL_1_6 in source
+    source = source.replace(_GENERAL_1_6 + "\n", "")
+    pcb = _load(tmp_path, source)
+    assert pcb.general_thickness is None
     hv = resolve_hv_nets(pcb, "HV", _hv_map())
     report = _census(pcb, hv)
 
@@ -251,6 +260,57 @@ def test_thickness_from_stackup_when_present(tmp_path):
     # 1.4 + 1.57 + 0.75 = 3.72 mm through the bore.
     pair = _conductor_pair(report, "GND")
     assert pair.creepage_mm == pytest.approx(3.72, abs=0.01)
+
+
+def test_thickness_from_general_when_no_stackup(tmp_path):
+    # #9746: a 0.8 mm board with no stackup must use its header thickness,
+    # not the 1.6 mm default -- the default made the bore path 0.8 mm longer
+    # than the real one (the optimistic direction).
+    source = board_cross_face_bore_source().replace(_GENERAL_1_6, "(general (thickness 0.8))")
+    pcb = _load(tmp_path, source)
+    assert pcb.general_thickness == pytest.approx(0.8)
+    hv = resolve_hv_nets(pcb, "HV", _hv_map())
+    report = _census(pcb, hv)
+
+    assert report.board_thickness_mm == pytest.approx(0.8)
+    assert report.board_thickness_source == "general"
+    d = report.to_dict()
+    assert d["board_thickness_mm"] == pytest.approx(0.8)
+    assert d["board_thickness_source"] == "general"
+    # 1.4 + 0.8 + 0.75 = 2.95 mm through the bore (was 3.75 on the default).
+    pair = _conductor_pair(report, "GND")
+    assert pair.creepage_mm == pytest.approx(2.95, abs=0.01)
+    assert pair.via_bore == "MH1.1"
+    assert not pair.passed
+
+    # A bound between the true (2.95) and the old default (3.75) path must
+    # FAIL now -- it read as passing before #9746.
+    report3 = compute_creepage_census(pcb, hv, min_mm=3.3, board="board.kicad_pcb")
+    assert not report3.passed
+
+
+def test_stackup_wins_over_general_thickness(tmp_path):
+    stackup = (
+        "(setup (pad_to_mask_clearance 0)\n"
+        "  (stackup\n"
+        '    (layer "F.Cu" (type "copper") (thickness 0.035))\n'
+        '    (layer "dielectric 1" (type "core") (thickness 1.5))\n'
+        '    (layer "B.Cu" (type "copper") (thickness 0.035))\n'
+        "  )\n"
+        ")\n"
+    )
+    source = (
+        board_cross_face_bore_source()
+        .replace("(setup (pad_to_mask_clearance 0))\n", stackup)
+        .replace(_GENERAL_1_6, "(general (thickness 0.8))")
+    )
+    pcb = _load(tmp_path, source)
+    assert pcb.general_thickness == pytest.approx(0.8)
+    hv = resolve_hv_nets(pcb, "HV", _hv_map())
+    report = _census(pcb, hv)
+
+    assert report.board_thickness_mm == pytest.approx(1.57)
+    assert report.board_thickness_source == "stackup"
 
 
 @pytest.mark.parametrize("short_first", [True, False])
